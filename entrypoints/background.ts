@@ -19,6 +19,7 @@ interface NativeStartPayload {
 let nativePort: chrome.runtime.Port | undefined
 let nativeUrl: string | undefined
 let startPromise: Promise<string> | undefined
+const boundBrowserTargets = new Map<string, BrowserTarget>()
 
 function asError(value: unknown): string {
   return value instanceof Error ? value.message : String(value)
@@ -49,14 +50,48 @@ function isConnectorRequest(message: NativeMessage): message is ConnectorRequest
     && message.tool === 'office_get_context'
     && typeof target === 'object' && target !== null
     && (target as BrowserTarget).browser === 'chrome'
+    && Number.isInteger((target as BrowserTarget).windowId) && (target as BrowserTarget).windowId >= 0
+    && Number.isInteger((target as BrowserTarget).tabId) && (target as BrowserTarget).tabId >= 0
+    && typeof (target as BrowserTarget).url === 'string'
+}
+
+function sameBrowserTarget(left: BrowserTarget, right: BrowserTarget): boolean {
+  return left.browser === right.browser
+    && left.windowId === right.windowId
+    && left.tabId === right.tabId
+    && left.url === right.url
+}
+
+function isBrowserTargetBinding(value: unknown): value is { runId: string, browserTarget: BrowserTarget } {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as { runId?: unknown, browserTarget?: unknown }
+  const target = candidate.browserTarget
+  return typeof candidate.runId === 'string' && candidate.runId.length > 0
+    && typeof target === 'object' && target !== null
+    && (target as BrowserTarget).browser === 'chrome'
     && Number.isInteger((target as BrowserTarget).windowId)
     && Number.isInteger((target as BrowserTarget).tabId)
     && typeof (target as BrowserTarget).url === 'string'
 }
 
+async function bindBrowserTarget(binding: { runId: string, browserTarget: BrowserTarget }): Promise<void> {
+  const tab = await chrome.tabs.get(binding.browserTarget.tabId)
+  if (tab.windowId !== binding.browserTarget.windowId || tab.url !== binding.browserTarget.url) {
+    throw new Error('Browser Target changed before it could be bound to the Run.')
+  }
+  const target = { ...binding.browserTarget }
+  boundBrowserTargets.set(binding.runId, target)
+  connectNativePort().postMessage({ type: 'bind_browser_target', runId: binding.runId, browserTarget: target })
+}
+
 async function readOfficeContext(request: ConnectorRequest): Promise<Record<string, unknown>> {
-  const tab = await chrome.tabs.get(request.browserTarget.tabId)
-  if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
+  const target = boundBrowserTargets.get(request.runId)
+  if (target === undefined) throw new Error('No Browser Target is bound to this Run by the Extension.')
+  if (!sameBrowserTarget(request.browserTarget, target)) {
+    throw new Error('Connector Browser Target does not match the Extension binding.')
+  }
+  const tab = await chrome.tabs.get(target.tabId)
+  if (tab.windowId !== target.windowId || tab.url !== target.url) {
     throw new Error('Browser Target changed before Office context could be read.')
   }
   // Office DOM/range adapters deliberately begin in Issue #3. This tracer
@@ -64,7 +99,7 @@ async function readOfficeContext(request: ConnectorRequest): Promise<Record<stri
   return {
     status: 'browser_target_verified',
     title: tab.title ?? '',
-    url: request.browserTarget.url,
+    url: target.url,
   }
 }
 
@@ -99,6 +134,7 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   console.error('[deepseek-harness] Native Messaging disconnected:', error)
   nativeUrl = undefined
   nativePort = undefined
+  boundBrowserTargets.clear()
   void chrome.runtime.sendMessage({
     type: 'harness-disconnected',
     error,
@@ -199,6 +235,12 @@ export default defineBackground(() => {
   })
 
   chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    if (isBrowserTargetBinding(message) && (message as { type?: unknown }).type === 'bind-browser-target') {
+      void bindBrowserTarget(message)
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
     if (!message || typeof message !== 'object' || (message as { type?: unknown }).type !== 'ensure-harness') {
       return false
     }

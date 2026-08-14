@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
+import { redactSensitiveDiagnostic } from './redact.mjs'
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -74,13 +75,6 @@ function connectorPatch(url, token) {
     reconnect:
       enabled: false
 `
-}
-
-function redactHarnessDiagnostic(value) {
-  return String(value)
-    .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/gi, '$1[REDACTED]')
-    .replace(/(cookie\s*[:=]\s*)([^\r\n]+)/gi, '$1[REDACTED]')
-    .replace(/(bearer\s+)([^\s,;]+)/gi, '$1[REDACTED]')
 }
 
 /**
@@ -155,7 +149,7 @@ export class HarnessWebProcess {
     this.child = child
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk) => {
-      process.stderr.write(`[deepseek-harness] ${redactHarnessDiagnostic(chunk)}`)
+      process.stderr.write(`[deepseek-harness] ${redactSensitiveDiagnostic(chunk)}`)
     })
     child.once('exit', () => {
       if (this.child !== child) return

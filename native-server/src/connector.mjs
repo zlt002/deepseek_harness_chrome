@@ -4,6 +4,29 @@ import { createServer } from 'node:http'
 const REQUEST_TIMEOUT_MS = 15_000
 const MCP_PATH = '/mcp'
 
+const browserTargetSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['browser', 'windowId', 'tabId', 'url'],
+  properties: {
+    browser: { const: 'chrome' },
+    windowId: { type: 'integer', minimum: 0 },
+    tabId: { type: 'integer', minimum: 0 },
+    url: { type: 'string', format: 'uri' },
+  },
+}
+
+const officeContextSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['status', 'title', 'url'],
+  properties: {
+    status: { const: 'browser_target_verified' },
+    title: { type: 'string' },
+    url: { type: 'string', format: 'uri' },
+  },
+}
+
 const officeGetContextTool = {
   name: 'office_get_context',
   title: 'Get Office context',
@@ -14,17 +37,19 @@ const officeGetContextTool = {
     required: ['runId', 'browserTarget'],
     properties: {
       runId: { type: 'string', minLength: 1 },
-      browserTarget: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['browser', 'windowId', 'tabId', 'url'],
-        properties: {
-          browser: { const: 'chrome' },
-          windowId: { type: 'integer', minimum: 0 },
-          tabId: { type: 'integer', minimum: 0 },
-          url: { type: 'string', format: 'uri' },
-        },
-      },
+      browserTarget: browserTargetSchema,
+    },
+  },
+  outputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['runId', 'requestId', 'generation', 'browserTarget', 'officeContext'],
+    properties: {
+      runId: { type: 'string', minLength: 1 },
+      requestId: { type: 'string', minLength: 1 },
+      generation: { type: 'string', minLength: 1 },
+      browserTarget: browserTargetSchema,
+      officeContext: officeContextSchema,
     },
   },
 }
@@ -36,10 +61,38 @@ function errorResponse(id, code, message) {
 function validBrowserTarget(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const target = value
-  return target.browser === 'chrome'
+  return Object.keys(target).length === 4
+    && target.browser === 'chrome'
     && Number.isInteger(target.windowId) && target.windowId >= 0
     && Number.isInteger(target.tabId) && target.tabId >= 0
     && typeof target.url === 'string' && target.url.length > 0
+}
+
+function sameBrowserTarget(left, right) {
+  return validBrowserTarget(left)
+    && validBrowserTarget(right)
+    && left.browser === right.browser
+    && left.windowId === right.windowId
+    && left.tabId === right.tabId
+    && left.url === right.url
+}
+
+function validOfficeContext(value, browserTarget) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.keys(value).length === 3
+    && value.status === 'browser_target_verified'
+    && typeof value.title === 'string'
+    && value.url === browserTarget.url
+}
+
+function validOfficeGetContextOutput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.keys(value).length === 5
+    && typeof value.runId === 'string' && value.runId.length > 0
+    && typeof value.requestId === 'string' && value.requestId.length > 0
+    && typeof value.generation === 'string' && value.generation.length > 0
+    && validBrowserTarget(value.browserTarget)
+    && validOfficeContext(value.officeContext, value.browserTarget)
 }
 
 function validOfficeGetContextArguments(value) {
@@ -51,7 +104,7 @@ function sameIdentity(request, response) {
   return response.requestId === request.requestId
     && response.runId === request.runId
     && response.generation === request.generation
-    && JSON.stringify(response.browserTarget) === JSON.stringify(request.browserTarget)
+    && sameBrowserTarget(response.browserTarget, request.browserTarget)
 }
 
 async function readJson(request) {
@@ -78,6 +131,7 @@ export class BrowserConnector {
     this.url = undefined
     this.token = undefined
     this.generation = undefined
+    this.browserTargets = new Map()
     this.pending = new Map()
   }
 
@@ -113,6 +167,7 @@ export class BrowserConnector {
       pending.reject(new Error('Browser Connector stopped'))
     }
     this.pending.clear()
+    this.browserTargets.clear()
     const server = this.server
     this.server = undefined
     this.url = undefined
@@ -120,6 +175,13 @@ export class BrowserConnector {
     this.generation = undefined
     if (!server) return
     await new Promise((resolve) => server.close(() => resolve()))
+  }
+
+  /** Store one Browser Target that the trusted Extension confirmed for a Run. */
+  bindBrowserTarget(runId, browserTarget) {
+    if (typeof runId !== 'string' || runId.length === 0 || !validBrowserTarget(browserTarget)) return false
+    this.browserTargets.set(runId, Object.freeze({ ...browserTarget }))
+    return true
   }
 
   /** Accept one correlated response received from the Extension peer. */
@@ -132,6 +194,10 @@ export class BrowserConnector {
     this.pending.delete(response.requestId)
     if (!Object.hasOwn(response, 'result')) {
       pending.reject(new Error('Extension peer returned no Office context'))
+      return true
+    }
+    if (!validOfficeContext(response.result, pending.request.browserTarget)) {
+      pending.reject(new Error('Extension peer returned an invalid canonical Office context schema'))
       return true
     }
     pending.resolve(response.result)
@@ -197,13 +263,23 @@ export class BrowserConnector {
       return
     }
 
+    const boundTarget = this.browserTargets.get(message.params.arguments.runId)
+    if (!validBrowserTarget(boundTarget)) {
+      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
+      return
+    }
+    if (!sameBrowserTarget(message.params.arguments.browserTarget, boundTarget)) {
+      this.#toolError(response, message.id, 'The requested Browser Target does not match the Browser Target bound by the Extension.')
+      return
+    }
+
     const requestId = randomUUID()
     const correlation = {
       type: 'connector_request',
       requestId,
       runId: message.params.arguments.runId,
       generation: this.generation,
-      browserTarget: message.params.arguments.browserTarget,
+      browserTarget: boundTarget,
       tool: 'office_get_context',
     }
     try {
@@ -214,6 +290,9 @@ export class BrowserConnector {
         generation: correlation.generation,
         browserTarget: correlation.browserTarget,
         officeContext,
+      }
+      if (!validOfficeGetContextOutput(structuredContent)) {
+        throw new Error('Browser Connector produced an invalid canonical Office context schema')
       }
       this.#reply(response, {
         jsonrpc: '2.0',
@@ -255,5 +334,13 @@ export class BrowserConnector {
   #reply(response, body) {
     response.writeHead(200, { 'content-type': 'application/json' })
     response.end(JSON.stringify(body))
+  }
+
+  #toolError(response, id, message) {
+    this.#reply(response, {
+      jsonrpc: '2.0',
+      id,
+      result: { content: [{ type: 'text', text: message }], isError: true },
+    })
   }
 }

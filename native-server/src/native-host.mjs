@@ -3,20 +3,14 @@ import { stdin, stdout } from 'node:process'
 import { decodeNativeFrames, encodeNativeFrame } from './protocol.mjs'
 import { BrowserConnector } from './connector.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
+import { redactSensitiveDiagnostic } from './redact.mjs'
 
 const nativeLogPath = process.env.DSH_NATIVE_LOG?.trim()
-
-function redactDiagnostic(value) {
-  return String(value)
-    .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/gi, '$1[REDACTED]')
-    .replace(/(cookie\s*[:=]\s*)([^\r\n]+)/gi, '$1[REDACTED]')
-    .replace(/(bearer\s+)([^\s,;]+)/gi, '$1[REDACTED]')
-}
 
 function nativeLog(message) {
   if (!nativeLogPath) return
   try {
-    appendFileSync(nativeLogPath, `${new Date().toISOString()} ${redactDiagnostic(message)}\n`)
+    appendFileSync(nativeLogPath, `${new Date().toISOString()} ${redactSensitiveDiagnostic(message)}\n`)
   } catch {
     // Diagnostics must never interfere with the Native Messaging protocol.
   }
@@ -35,6 +29,15 @@ function harnessWebUrl(value) {
     throw new Error('Harness Web URL must be an http 127.0.0.1 loopback URL with a port')
   }
   return url.toString().replace(/\/$/, '')
+}
+
+function validBrowserTarget(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.keys(value).length === 4
+    && value.browser === 'chrome'
+    && Number.isInteger(value.windowId) && value.windowId >= 0
+    && Number.isInteger(value.tabId) && value.tabId >= 0
+    && typeof value.url === 'string' && value.url.length > 0
 }
 
 process.on('uncaughtException', (error) => {
@@ -56,6 +59,7 @@ export class NativeHost {
     this.exit = options.exit ?? ((code) => process.exit(code))
     this.harness = undefined
     this.connector = undefined
+    this.browserTargets = new Map()
     this.serverUrl = undefined
     this.startPromise = undefined
     this.closePromise = undefined
@@ -116,6 +120,18 @@ export class NativeHost {
       }
       return
     }
+    if (type === 'bind_browser_target') {
+      const runId = message.runId
+      const browserTarget = message.browserTarget
+      if (typeof runId !== 'string' || runId.length === 0 || !validBrowserTarget(browserTarget)) {
+        this.send({ type: 'error', error: 'Invalid Browser Target binding.' })
+        return
+      }
+      this.browserTargets.set(runId, { ...browserTarget })
+      this.connector?.bindBrowserTarget(runId, browserTarget)
+      this.send({ type: 'browser_target_bound', runId })
+      return
+    }
     if (type === 'stop') {
       await this.close('stop requested')
       return
@@ -152,6 +168,7 @@ export class NativeHost {
       this.harness = undefined
       await this.connector?.stop()
       this.connector = undefined
+      this.browserTargets.clear()
       this.serverUrl = undefined
       this.exit(0)
     })()
@@ -161,7 +178,12 @@ export class NativeHost {
   async #startHarness() {
     try {
       if (this.connector === undefined) {
-        this.connector = this.connectorFactory({ requestExtension: (request) => this.send(request) })
+        this.connector = this.connectorFactory({
+          requestExtension: (request) => this.send(request),
+        })
+        for (const [runId, browserTarget] of this.browserTargets) {
+          this.connector.bindBrowserTarget(runId, browserTarget)
+        }
       }
       const connector = await this.connector.start()
       if (this.harness === undefined) {
@@ -177,6 +199,7 @@ export class NativeHost {
       this.harness = undefined
       await this.connector?.stop()
       this.connector = undefined
+      this.browserTargets.clear()
       this.serverUrl = undefined
       throw error
     }

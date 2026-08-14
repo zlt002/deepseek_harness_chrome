@@ -74,11 +74,14 @@ test('owns the authenticated Connector and forwards correlated Extension replies
   })
   const messages = []
   host.send = (message) => messages.push(message)
+  const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://docs.example.test/' }
 
   try {
     await host.startHarness()
     assert.match(harnessOptions.mcpConnector.url, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
     assert.match(harnessOptions.mcpConnector.token, /^[A-Za-z0-9_-]{32,}$/)
+    await host.handle({ type: 'bind_browser_target', runId: 'run-native-host', browserTarget: target })
+    assert.deepEqual(messages.at(-1), { type: 'browser_target_bound', runId: 'run-native-host' })
 
     let pendingCall
     const request = await new Promise((resolve, reject) => {
@@ -111,7 +114,7 @@ test('owns the authenticated Connector and forwards correlated Extension replies
             name: 'office_get_context',
             arguments: {
               runId: 'run-native-host',
-              browserTarget: { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://docs.example.test/' },
+              browserTarget: target,
             },
           },
         }),
@@ -125,11 +128,11 @@ test('owns the authenticated Connector and forwards correlated Extension replies
       runId: request.runId,
       generation: request.generation,
       browserTarget: request.browserTarget,
-      result: { workbookName: 'Native.xlsx' },
+      result: { status: 'browser_target_verified', title: 'Native.xlsx', url: target.url },
     })
     const response = await pendingCall
     const body = await response.json()
-    assert.equal(body.result.structuredContent.officeContext.workbookName, 'Native.xlsx')
+    assert.equal(body.result.structuredContent.officeContext.title, 'Native.xlsx')
   } finally {
     await host.close('stop requested')
   }
