@@ -85,6 +85,11 @@ test('creates a trusted Run from the explicit Browser Target supplied at Native 
     const started = messages.find((message) => message.type === 'server_started')
     assert.equal(typeof started.payload.runId, 'string')
 
+    const secondTarget = { browser: 'chrome', windowId: 1, tabId: 3, url: 'https://docs.example.test/other' }
+    await host.handle({ type: 'start', browserTarget: secondTarget })
+    assert.equal(messages.at(-1).type, 'error')
+    assert.match(messages.at(-1).error, /already bound to a different Browser Target/i)
+
     let pendingCall
     const request = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('connector request timeout')), 2_000)

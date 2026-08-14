@@ -41,6 +41,15 @@ function validBrowserTarget(value) {
     && typeof value.url === 'string' && value.url.length > 0
 }
 
+function sameBrowserTarget(left, right) {
+  return validBrowserTarget(left)
+    && validBrowserTarget(right)
+    && left.browser === right.browser
+    && left.windowId === right.windowId
+    && left.tabId === right.tabId
+    && left.url === right.url
+}
+
 process.on('uncaughtException', (error) => {
   nativeLog(`uncaughtException ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
 })
@@ -135,7 +144,12 @@ export class NativeHost {
       this.send({ type: 'error', error: 'Native start requires an explicit Chrome Browser Target.' })
       return
     }
-    if (validBrowserTarget(browserTarget)) this.#bindBrowserTarget(browserTarget)
+    const boundTarget = this.currentRunId === undefined ? undefined : this.browserTargets.get(this.currentRunId)
+    if (validBrowserTarget(browserTarget) && validBrowserTarget(boundTarget) && !sameBrowserTarget(browserTarget, boundTarget)) {
+      this.send({ type: 'error', error: 'Harness Run is already bound to a different Browser Target.' })
+      return
+    }
+    if (validBrowserTarget(browserTarget) && boundTarget === undefined) this.#bindBrowserTarget(browserTarget)
     if (this.serverUrl !== undefined) {
       this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId } })
       return

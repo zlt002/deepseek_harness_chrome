@@ -1,5 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { BrowserConnector } from '../native-server/src/connector.mjs'
 import { HarnessWebProcess } from '../native-server/src/harness-process.mjs'
 import { Context } from '../../deepseek-harness/vendor/cordis/lib/index.js'
@@ -67,15 +72,35 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
   }
 })
 
-test('a real DSH Web profile loads its generated MCP patch and discovers the Connector tool', { timeout: 60_000 }, async () => {
+test('a real DSH Web profile loads, discovers, and executes its generated Connector patch', { timeout: 60_000 }, async () => {
   const browserTarget = target('https://docs.example.test/profile')
   const listed = Promise.withResolvers()
+  const executed = Promise.withResolvers()
+  const reporter = createServer(async (request, response) => {
+    if (request.method !== 'POST') {
+      response.writeHead(405)
+      response.end()
+      return
+    }
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    executed.resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    response.writeHead(204)
+    response.end()
+  })
+  await new Promise((resolveListen) => reporter.listen(0, '127.0.0.1', resolveListen))
+  const reporterAddress = reporter.address()
+  assert.notEqual(typeof reporterAddress, 'string')
+  const patchDir = await mkdtemp(`${tmpdir()}/deepseek-harness-profile-probe-`)
+  const patchPath = resolve(patchDir, 'profile-probe.cordis.yml')
+  await writeFile(patchPath, `- insert:\n    - id: profile-tool-probe\n      name: '${pathToFileURL(resolve('test/fixtures/profile-tool-probe.mjs')).href}'\n      config:\n        toolName: mcp__chrome__office_get_context\n        resultUrl: 'http://127.0.0.1:${String(reporterAddress.port)}'\n`)
   const connector = respondingConnector(browserTarget, {
     onToolsListed: () => listed.resolve(),
   })
   const endpoint = await connector.start()
   const harness = new HarnessWebProcess({
     mcpConnector: { url: `${endpoint.url}/mcp`, token: endpoint.token },
+    extraPatchPaths: [patchPath],
   })
 
   try {
@@ -87,8 +112,19 @@ test('a real DSH Web profile loads its generated MCP patch and discovers the Con
     } finally {
       clearTimeout(timeout)
     }
+    const executionTimeout = setTimeout(() => executed.reject(new Error('DSH Web profile never executed the loaded Connector tool')), 5_000)
+    try {
+      const result = await executed.promise
+      assert.equal(result.isError, false)
+      assert.equal(result.value.structuredContent.browserTarget.url, browserTarget.url)
+      assert.equal(result.value.structuredContent.officeContext.documentIdentity, null)
+    } finally {
+      clearTimeout(executionTimeout)
+    }
   } finally {
     await harness.stop()
     await connector.stop()
+    await new Promise((resolveClose) => reporter.close(resolveClose))
+    await rm(patchDir, { recursive: true, force: true })
   }
 })

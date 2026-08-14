@@ -42,9 +42,10 @@ export function resolveHarnessCwd(env = process.env) {
 }
 
 /** Arguments owned by this integration, kept separate from the Harness CLI. */
-export function harnessArgs(port, connectorPatchPath) {
+export function harnessArgs(port, connectorPatchPath, extraPatchPaths = []) {
   return [
     ...connectorPatchPath === undefined ? [] : ['--patch', connectorPatchPath],
+    ...extraPatchPaths.flatMap((path) => ['--patch', path]),
     '--profile', 'web',
     '--host', '127.0.0.1',
     '--port', String(port),
@@ -82,13 +83,14 @@ function connectorPatch(url, token) {
  * Spawn and supervise one `dsh --profile web` process.
  */
 export class HarnessWebProcess {
-  /** @param {{ cliPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string, mcpConnector?: { url: string, token: string } }} [options] */
+  /** @param {{ cliPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string, mcpConnector?: { url: string, token: string }, extraPatchPaths?: string[] }} [options] */
   constructor(options = {}) {
     this.env = options.env ?? process.env
     this.cliPath = options.cliPath ?? resolveHarnessCli(this.env)
     this.port = options.port ?? 0
     this.cwd = options.cwd ?? resolveHarnessCwd(this.env)
     this.mcpConnector = options.mcpConnector
+    this.extraPatchPaths = options.extraPatchPaths ?? []
     this.connectorPatchDir = undefined
     this.connectorPatchPath = undefined
     this.child = undefined
@@ -137,7 +139,7 @@ export class HarnessWebProcess {
     }
     this.stopping = false
     const patchPath = await this.#createConnectorPatch()
-    const child = spawn(process.execPath, [this.cliPath, ...harnessArgs(this.port, patchPath)], {
+    const child = spawn(process.execPath, [this.cliPath, ...harnessArgs(this.port, patchPath, this.extraPatchPaths)], {
       cwd: this.cwd,
       env: {
         ...this.env,
