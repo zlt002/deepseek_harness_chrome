@@ -14,6 +14,7 @@ interface NativeMessage {
 
 interface NativeStartPayload {
   url?: unknown
+  runId?: unknown
 }
 
 let nativePort: chrome.runtime.Port | undefined
@@ -62,26 +63,9 @@ function sameBrowserTarget(left: BrowserTarget, right: BrowserTarget): boolean {
     && left.url === right.url
 }
 
-function isBrowserTargetBinding(value: unknown): value is { runId: string, browserTarget: BrowserTarget } {
-  if (!value || typeof value !== 'object') return false
-  const candidate = value as { runId?: unknown, browserTarget?: unknown }
-  const target = candidate.browserTarget
-  return typeof candidate.runId === 'string' && candidate.runId.length > 0
-    && typeof target === 'object' && target !== null
-    && (target as BrowserTarget).browser === 'chrome'
-    && Number.isInteger((target as BrowserTarget).windowId)
-    && Number.isInteger((target as BrowserTarget).tabId)
-    && typeof (target as BrowserTarget).url === 'string'
-}
-
-async function bindBrowserTarget(binding: { runId: string, browserTarget: BrowserTarget }): Promise<void> {
-  const tab = await chrome.tabs.get(binding.browserTarget.tabId)
-  if (tab.windowId !== binding.browserTarget.windowId || tab.url !== binding.browserTarget.url) {
-    throw new Error('Browser Target changed before it could be bound to the Run.')
-  }
-  const target = { ...binding.browserTarget }
-  boundBrowserTargets.set(binding.runId, target)
-  connectNativePort().postMessage({ type: 'bind_browser_target', runId: binding.runId, browserTarget: target })
+function targetFromActionTab(tab: chrome.tabs.Tab): BrowserTarget | undefined {
+  if (tab.id === undefined || tab.windowId === undefined || typeof tab.url !== 'string' || tab.url.length === 0) return undefined
+  return { browser: 'chrome', windowId: tab.windowId, tabId: tab.id, url: tab.url }
 }
 
 async function readOfficeContext(request: ConnectorRequest): Promise<Record<string, unknown>> {
@@ -98,8 +82,8 @@ async function readOfficeContext(request: ConnectorRequest): Promise<Record<stri
   // bullet proves the trusted target identity path without exposing cookies.
   return {
     status: 'browser_target_verified',
-    title: tab.title ?? '',
-    url: target.url,
+    pageIdentity: { title: tab.title ?? '', url: target.url },
+    documentIdentity: null,
   }
 }
 
@@ -160,9 +144,10 @@ function connectNativePort(): chrome.runtime.Port {
   return port
 }
 
-function startHarness(): Promise<string> {
-  if (nativeUrl !== undefined) return Promise.resolve(nativeUrl)
+function startHarness(browserTarget?: BrowserTarget): Promise<string> {
+  if (nativeUrl !== undefined && browserTarget === undefined) return Promise.resolve(nativeUrl)
   if (startPromise !== undefined) return startPromise
+  if (browserTarget === undefined) return Promise.reject(new Error('Open the Harness Workspace from a Chrome tab to bind its Browser Target.'))
   startPromise = new Promise<string>((resolve, reject) => {
     let settled = false
     let timeout: ReturnType<typeof setTimeout> | undefined
@@ -183,7 +168,14 @@ function startHarness(): Promise<string> {
       if (message.type === 'server_started') {
         const payload = message.payload as NativeStartPayload | undefined
         if (typeof payload?.url === 'string') {
+          if (typeof payload.runId !== 'string' || payload.runId.length === 0) {
+            settled = true
+            cleanup()
+            reject(new Error('Native server did not confirm a trusted Harness Run.'))
+            return
+          }
           nativeUrl = payload.url
+          boundBrowserTargets.set(payload.runId, browserTarget)
           settled = true
           cleanup()
           resolve(payload.url)
@@ -199,7 +191,7 @@ function startHarness(): Promise<string> {
     port.onDisconnect.addListener(onDisconnect)
     port.onMessage.addListener(onMessage)
     try {
-      port.postMessage({ type: 'start' })
+      port.postMessage({ type: 'start', browserTarget })
     } catch (error) {
       settled = true
       cleanup()
@@ -227,20 +219,21 @@ export default defineBackground(() => {
   }
 
   chrome.action?.onClicked.addListener((tab) => {
-    if (tab.windowId === undefined) return
+    const browserTarget = targetFromActionTab(tab)
+    if (browserTarget === undefined) {
+      console.error('[deepseek-harness] Action click had no explicit Browser Target.')
+      return
+    }
     if (sidePanel?.open === undefined) return
-    void sidePanel.open({ windowId: tab.windowId }).catch((error: unknown) => {
+    void startHarness(browserTarget).catch((error: unknown) => {
+      console.error('[deepseek-harness] Failed to bind Browser Target and start Harness:', error)
+    })
+    void sidePanel.open({ windowId: browserTarget.windowId }).catch((error: unknown) => {
       console.error('[deepseek-harness] Failed to open side panel:', error)
     })
   })
 
   chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
-    if (isBrowserTargetBinding(message) && (message as { type?: unknown }).type === 'bind-browser-target') {
-      void bindBrowserTarget(message)
-        .then(() => sendResponse({ ok: true }))
-        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
-      return true
-    }
     if (!message || typeof message !== 'object' || (message as { type?: unknown }).type !== 'ensure-harness') {
       return false
     }

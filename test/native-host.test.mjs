@@ -25,12 +25,14 @@ test('returns the Harness Web URL for repeated start requests and exits on close
   })
   const messages = []
   host.send = (message) => messages.push(message)
+  const target = { browser: 'chrome', windowId: 3, tabId: 4, url: 'https://docs.example.test/first' }
   try {
-    await Promise.all([host.startHarness(), host.startHarness()])
+    await Promise.all([host.startHarness(target), host.startHarness(target)])
     assert.equal(starts, 1)
     assert.equal(messages.length, 2)
     assert.equal(messages[0].type, 'server_started')
     assert.equal(messages[0].payload.url, harnessUrl)
+    assert.equal(typeof messages[0].payload.runId, 'string')
     assert.equal(messages[1].payload.url, harnessUrl)
   } finally {
     await host.close('stop requested')
@@ -52,13 +54,13 @@ test('cleans up a Harness when its Web URL is invalid', async () => {
   const messages = []
   host.send = (message) => messages.push(message)
 
-  await host.startHarness()
+  await host.startHarness({ browser: 'chrome', windowId: 1, tabId: 2, url: 'https://docs.example.test/invalid' })
   assert.equal(stopped, 1)
   assert.equal(messages[0].type, 'error')
   assert.equal(host.harness, undefined)
 })
 
-test('owns the authenticated Connector and forwards correlated Extension replies', async () => {
+test('creates a trusted Run from the explicit Browser Target supplied at Native start and forwards correlated Extension replies', async () => {
   let harnessOptions
   let stopped = 0
   const host = new NativeHost({
@@ -77,11 +79,11 @@ test('owns the authenticated Connector and forwards correlated Extension replies
   const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://docs.example.test/' }
 
   try {
-    await host.startHarness()
+    await host.handle({ type: 'start', browserTarget: target })
     assert.match(harnessOptions.mcpConnector.url, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
     assert.match(harnessOptions.mcpConnector.token, /^[A-Za-z0-9_-]{32,}$/)
-    await host.handle({ type: 'bind_browser_target', runId: 'run-native-host', browserTarget: target })
-    assert.deepEqual(messages.at(-1), { type: 'browser_target_bound', runId: 'run-native-host' })
+    const started = messages.find((message) => message.type === 'server_started')
+    assert.equal(typeof started.payload.runId, 'string')
 
     let pendingCall
     const request = await new Promise((resolve, reject) => {
@@ -112,15 +114,12 @@ test('owns the authenticated Connector and forwards correlated Extension replies
           method: 'tools/call',
           params: {
             name: 'office_get_context',
-            arguments: {
-              runId: 'run-native-host',
-              browserTarget: target,
-            },
+            arguments: {},
           },
         }),
       })
     })
-    assert.equal(request.runId, 'run-native-host')
+    assert.equal(request.runId, started.payload.runId)
     assert.equal(request.browserTarget.tabId, 2)
     await host.handle({
       type: 'connector_response',
@@ -128,11 +127,15 @@ test('owns the authenticated Connector and forwards correlated Extension replies
       runId: request.runId,
       generation: request.generation,
       browserTarget: request.browserTarget,
-      result: { status: 'browser_target_verified', title: 'Native.xlsx', url: target.url },
+      result: {
+        status: 'browser_target_verified',
+        pageIdentity: { title: 'Native.xlsx', url: target.url },
+        documentIdentity: null,
+      },
     })
     const response = await pendingCall
     const body = await response.json()
-    assert.equal(body.result.structuredContent.officeContext.title, 'Native.xlsx')
+    assert.equal(body.result.structuredContent.officeContext.pageIdentity.title, 'Native.xlsx')
   } finally {
     await host.close('stop requested')
   }

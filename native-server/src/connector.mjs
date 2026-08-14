@@ -19,11 +19,21 @@ const browserTargetSchema = {
 const officeContextSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['status', 'title', 'url'],
+  required: ['status', 'pageIdentity', 'documentIdentity'],
   properties: {
     status: { const: 'browser_target_verified' },
-    title: { type: 'string' },
-    url: { type: 'string', format: 'uri' },
+    pageIdentity: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['title', 'url'],
+      properties: {
+        title: { type: 'string' },
+        url: { type: 'string', format: 'uri' },
+      },
+    },
+    // This tracer bullet identifies only the verified page. The document
+    // adapter has not discovered a stable service-issued identity yet.
+    documentIdentity: { type: 'null' },
   },
 }
 
@@ -34,11 +44,7 @@ const officeGetContextTool = {
   inputSchema: {
     type: 'object',
     additionalProperties: false,
-    required: ['runId', 'browserTarget'],
-    properties: {
-      runId: { type: 'string', minLength: 1 },
-      browserTarget: browserTargetSchema,
-    },
+    properties: {},
   },
   outputSchema: {
     type: 'object',
@@ -81,8 +87,11 @@ function validOfficeContext(value, browserTarget) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   return Object.keys(value).length === 3
     && value.status === 'browser_target_verified'
-    && typeof value.title === 'string'
-    && value.url === browserTarget.url
+    && value.documentIdentity === null
+    && value.pageIdentity !== null && typeof value.pageIdentity === 'object' && !Array.isArray(value.pageIdentity)
+    && Object.keys(value.pageIdentity).length === 2
+    && typeof value.pageIdentity.title === 'string'
+    && value.pageIdentity.url === browserTarget.url
 }
 
 function validOfficeGetContextOutput(value) {
@@ -97,7 +106,7 @@ function validOfficeGetContextOutput(value) {
 
 function validOfficeGetContextArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  return typeof value.runId === 'string' && value.runId.length > 0 && validBrowserTarget(value.browserTarget)
+  return Object.keys(value).length === 0
 }
 
 function sameIdentity(request, response) {
@@ -123,15 +132,17 @@ async function readJson(request) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, onToolsListed?: () => void }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
+    this.onToolsListed = options.onToolsListed
     this.server = undefined
     this.url = undefined
     this.token = undefined
     this.generation = undefined
     this.browserTargets = new Map()
+    this.currentRunId = undefined
     this.pending = new Map()
   }
 
@@ -168,6 +179,7 @@ export class BrowserConnector {
     }
     this.pending.clear()
     this.browserTargets.clear()
+    this.currentRunId = undefined
     const server = this.server
     this.server = undefined
     this.url = undefined
@@ -181,6 +193,7 @@ export class BrowserConnector {
   bindBrowserTarget(runId, browserTarget) {
     if (typeof runId !== 'string' || runId.length === 0 || !validBrowserTarget(browserTarget)) return false
     this.browserTargets.set(runId, Object.freeze({ ...browserTarget }))
+    this.currentRunId = runId
     return true
   }
 
@@ -251,6 +264,7 @@ export class BrowserConnector {
       return
     }
     if (message.method === 'tools/list') {
+      this.onToolsListed?.()
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool] } })
       return
     }
@@ -258,18 +272,15 @@ export class BrowserConnector {
       this.#reply(response, errorResponse(message.id, -32601, 'method not found'))
       return
     }
-    if (message.params?.name !== 'office_get_context' || !validOfficeGetContextArguments(message.params.arguments)) {
-      this.#reply(response, errorResponse(message.id, -32602, 'office_get_context requires a Run and Browser Target'))
+    if (message.params?.name !== 'office_get_context' || !validOfficeGetContextArguments(message.params.arguments ?? {})) {
+      this.#reply(response, errorResponse(message.id, -32602, 'office_get_context accepts no model-controlled target arguments'))
       return
     }
 
-    const boundTarget = this.browserTargets.get(message.params.arguments.runId)
+    const runId = this.currentRunId
+    const boundTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
     if (!validBrowserTarget(boundTarget)) {
       this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
-      return
-    }
-    if (!sameBrowserTarget(message.params.arguments.browserTarget, boundTarget)) {
-      this.#toolError(response, message.id, 'The requested Browser Target does not match the Browser Target bound by the Extension.')
       return
     }
 
@@ -277,7 +288,7 @@ export class BrowserConnector {
     const correlation = {
       type: 'connector_request',
       requestId,
-      runId: message.params.arguments.runId,
+      runId,
       generation: this.generation,
       browserTarget: boundTarget,
       tool: 'office_get_context',

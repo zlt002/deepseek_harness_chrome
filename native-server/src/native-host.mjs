@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
+import { randomUUID } from 'node:crypto'
 import { decodeNativeFrames, encodeNativeFrame } from './protocol.mjs'
 import { BrowserConnector } from './connector.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
@@ -60,6 +61,7 @@ export class NativeHost {
     this.harness = undefined
     this.connector = undefined
     this.browserTargets = new Map()
+    this.currentRunId = undefined
     this.serverUrl = undefined
     this.startPromise = undefined
     this.closePromise = undefined
@@ -111,25 +113,13 @@ export class NativeHost {
       return
     }
     if (type === 'start') {
-      await this.startHarness()
+      await this.startHarness(message.browserTarget)
       return
     }
     if (type === 'connector_response') {
       if (this.connector?.acceptExtensionResponse(message) !== true) {
         this.send({ type: 'error', error: 'Unrecognized Connector response.' })
       }
-      return
-    }
-    if (type === 'bind_browser_target') {
-      const runId = message.runId
-      const browserTarget = message.browserTarget
-      if (typeof runId !== 'string' || runId.length === 0 || !validBrowserTarget(browserTarget)) {
-        this.send({ type: 'error', error: 'Invalid Browser Target binding.' })
-        return
-      }
-      this.browserTargets.set(runId, { ...browserTarget })
-      this.connector?.bindBrowserTarget(runId, browserTarget)
-      this.send({ type: 'browser_target_bound', runId })
       return
     }
     if (type === 'stop') {
@@ -139,10 +129,15 @@ export class NativeHost {
     this.send({ type: 'error', error: `Unknown native message type: ${String(type)}` })
   }
 
-  async startHarness() {
+  async startHarness(browserTarget) {
     if (this.closed) return
+    if (this.serverUrl === undefined && !validBrowserTarget(browserTarget)) {
+      this.send({ type: 'error', error: 'Native start requires an explicit Chrome Browser Target.' })
+      return
+    }
+    if (validBrowserTarget(browserTarget)) this.#bindBrowserTarget(browserTarget)
     if (this.serverUrl !== undefined) {
-      this.send({ type: 'server_started', payload: { url: this.serverUrl } })
+      this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId } })
       return
     }
     if (this.startPromise === undefined) {
@@ -152,7 +147,7 @@ export class NativeHost {
     }
     try {
       const url = await this.startPromise
-      this.send({ type: 'server_started', payload: { url } })
+      this.send({ type: 'server_started', payload: { url, runId: this.currentRunId } })
     } catch (error) {
       this.send({ type: 'error', error: error instanceof Error ? error.message : String(error) })
     }
@@ -169,6 +164,7 @@ export class NativeHost {
       await this.connector?.stop()
       this.connector = undefined
       this.browserTargets.clear()
+      this.currentRunId = undefined
       this.serverUrl = undefined
       this.exit(0)
     })()
@@ -181,9 +177,7 @@ export class NativeHost {
         this.connector = this.connectorFactory({
           requestExtension: (request) => this.send(request),
         })
-        for (const [runId, browserTarget] of this.browserTargets) {
-          this.connector.bindBrowserTarget(runId, browserTarget)
-        }
+        for (const [runId, browserTarget] of this.browserTargets) this.connector.bindBrowserTarget(runId, browserTarget)
       }
       const connector = await this.connector.start()
       if (this.harness === undefined) {
@@ -200,9 +194,17 @@ export class NativeHost {
       await this.connector?.stop()
       this.connector = undefined
       this.browserTargets.clear()
+      this.currentRunId = undefined
       this.serverUrl = undefined
       throw error
     }
+  }
+
+  #bindBrowserTarget(browserTarget) {
+    const runId = randomUUID()
+    this.currentRunId = runId
+    this.browserTargets.set(runId, { ...browserTarget })
+    this.connector?.bindBrowserTarget(runId, browserTarget)
   }
 
   /** @param {unknown} message */

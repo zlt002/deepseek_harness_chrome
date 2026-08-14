@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { BrowserConnector } from '../native-server/src/connector.mjs'
 
-async function callOfficeGetContext(endpoint, args, id = 1) {
+async function callOfficeGetContext(endpoint, args = {}, id = 1) {
   const response = await fetch(`${endpoint.url}/mcp`, {
     method: 'POST',
     headers: {
@@ -34,7 +34,11 @@ test('publishes office_get_context and correlates a simulated extension response
         runId: request.runId,
         generation: request.generation,
         browserTarget: request.browserTarget,
-        result: { status: 'browser_target_verified', title: 'Budget.xlsx — Summary', url: target.url },
+        result: {
+          status: 'browser_target_verified',
+          pageIdentity: { title: 'Budget.xlsx — Summary', url: target.url },
+          documentIdentity: null,
+        },
       }))
     },
   })
@@ -54,6 +58,9 @@ test('publishes office_get_context and correlates a simulated extension response
     assert.equal(listed.status, 200)
     const listBody = await listed.json()
     assert.equal(listBody.result.tools[0].name, 'office_get_context')
+    assert.deepEqual(listBody.result.tools[0].inputSchema, {
+      type: 'object', additionalProperties: false, properties: {},
+    })
     assert.deepEqual(listBody.result.tools[0].outputSchema.required, [
       'runId', 'requestId', 'generation', 'browserTarget', 'officeContext',
     ])
@@ -71,10 +78,7 @@ test('publishes office_get_context and correlates a simulated extension response
         method: 'tools/call',
         params: {
           name: 'office_get_context',
-          arguments: {
-            runId: 'run-7',
-            browserTarget: target,
-          },
+          arguments: {},
         },
       }),
     })
@@ -82,7 +86,11 @@ test('publishes office_get_context and correlates a simulated extension response
     const callBody = await called.json()
     assert.equal(callBody.result.structuredContent.runId, 'run-7')
     assert.equal(callBody.result.structuredContent.browserTarget.tabId, 12)
-    assert.equal(callBody.result.structuredContent.officeContext.title, 'Budget.xlsx — Summary')
+    assert.equal(callBody.result.structuredContent.officeContext.pageIdentity.title, 'Budget.xlsx — Summary')
+    assert.equal(callBody.result.structuredContent.officeContext.documentIdentity, null)
+    assert.deepEqual(callBody.result.structuredContent.officeContext.pageIdentity, {
+      title: 'Budget.xlsx — Summary', url: target.url,
+    })
     assert.equal(requests[0].generation, callBody.result.structuredContent.generation)
     assert.equal(requests[0].requestId, callBody.result.structuredContent.requestId)
     assert.doesNotMatch(JSON.stringify(callBody), new RegExp(started.token))
@@ -108,7 +116,11 @@ test('accepts the official MCP client at the public tools/list and tools/call se
         runId: request.runId,
         generation: request.generation,
         browserTarget: request.browserTarget,
-        result: { status: 'browser_target_verified', title: 'Official-client.xlsx — Sheet1', url: target.url },
+        result: {
+          status: 'browser_target_verified',
+          pageIdentity: { title: 'Official-client.xlsx — Sheet1', url: target.url },
+          documentIdentity: null,
+        },
       }))
     },
   })
@@ -126,20 +138,17 @@ test('accepts the official MCP client at the public tools/list and tools/call se
 
     const result = await client.callTool({
       name: 'office_get_context',
-      arguments: {
-        runId: 'run-official-client',
-        browserTarget: target,
-      },
+      arguments: {},
     })
     assert.equal(result.structuredContent.runId, 'run-official-client')
-    assert.equal(result.structuredContent.officeContext.title, 'Official-client.xlsx — Sheet1')
+    assert.equal(result.structuredContent.officeContext.pageIdentity.title, 'Official-client.xlsx — Sheet1')
   } finally {
     await client.close()
     await connector.stop()
   }
 })
 
-test('rejects office_get_context when the Run has no Extension-confirmed Browser Target or the target differs', async () => {
+test('rejects office_get_context before extension execution until the trusted Native Host binding exists', async () => {
   const boundTarget = { browser: 'chrome', windowId: 9, tabId: 6, url: 'https://docs.example.test/bound' }
   let extensionRequests = 0
   const connector = new BrowserConnector({
@@ -151,7 +160,11 @@ test('rejects office_get_context when the Run has no Extension-confirmed Browser
         runId: request.runId,
         generation: request.generation,
         browserTarget: request.browserTarget,
-        result: { status: 'browser_target_verified', title: 'Bound workbook', url: boundTarget.url },
+        result: {
+          status: 'browser_target_verified',
+          pageIdentity: { title: 'Bound workbook', url: boundTarget.url },
+          documentIdentity: null,
+        },
       }))
     },
   })
@@ -159,20 +172,24 @@ test('rejects office_get_context when the Run has no Extension-confirmed Browser
   const endpoint = await connector.start()
 
   try {
-    const unbound = await callOfficeGetContext(endpoint, {
-      runId: 'run-unbound',
-      browserTarget: boundTarget,
-    })
+    const unboundConnector = new BrowserConnector({ requestExtension: () => { extensionRequests += 1 } })
+    const unboundEndpoint = await unboundConnector.start()
+    const unbound = await callOfficeGetContext(unboundEndpoint)
     assert.equal(unbound.result.isError, true)
     assert.match(unbound.result.content[0].text, /no Browser Target is bound/i)
-
-    const mismatch = await callOfficeGetContext(endpoint, {
-      runId: 'run-bound',
-      browserTarget: { ...boundTarget, tabId: 7 },
-    }, 2)
-    assert.equal(mismatch.result.isError, true)
-    assert.match(mismatch.result.content[0].text, /does not match the Browser Target bound/i)
     assert.equal(extensionRequests, 0)
+    await unboundConnector.stop()
+
+    const bound = await callOfficeGetContext(endpoint)
+    assert.equal(bound.result.structuredContent.runId, 'run-bound')
+    assert.equal(extensionRequests, 1)
+
+    const modelSelectedTarget = await callOfficeGetContext(endpoint, {
+      runId: 'run-bound', browserTarget: boundTarget,
+    }, 2)
+    assert.equal(modelSelectedTarget.error.code, -32602)
+    assert.match(modelSelectedTarget.error.message, /no model-controlled target arguments/i)
+    assert.equal(extensionRequests, 1)
   } finally {
     await connector.stop()
   }
@@ -196,7 +213,7 @@ test('rejects an Extension response that does not satisfy the canonical office_g
   const endpoint = await connector.start()
 
   try {
-    const invalid = await callOfficeGetContext(endpoint, { runId: 'run-canonical', browserTarget: target })
+    const invalid = await callOfficeGetContext(endpoint)
     assert.equal(invalid.result.isError, true)
     assert.match(invalid.result.content[0].text, /canonical Office context schema/i)
   } finally {

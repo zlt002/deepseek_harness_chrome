@@ -63,17 +63,18 @@ function validMcpConnector(value) {
 }
 
 function connectorPatch(url, token) {
-  return `- id: deepseek-harness-browser-connector
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: chrome
-    transport: streamable-http
-    url: '${url}'
-    headers:
-      Authorization: 'Bearer ${token}'
-    failOnStartupError: true
-    reconnect:
-      enabled: false
+  return `- insert:
+    - id: deepseek-harness-browser-connector
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: chrome
+        transport: streamable-http
+        url: '${url}'
+        headers:
+          Authorization: 'Bearer ${token}'
+        failOnStartupError: true
+        reconnect:
+          enabled: false
 `
 }
 
