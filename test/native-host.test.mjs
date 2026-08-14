@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { NativeHost } from '../native-server/src/native-host.mjs'
+import { BrowserConnector } from '../native-server/src/connector.mjs'
 
 test('returns the Harness Web URL for repeated start requests and exits on close', async () => {
   const upstream = createServer((_request, response) => response.end('ok'))
@@ -55,4 +56,82 @@ test('cleans up a Harness when its Web URL is invalid', async () => {
   assert.equal(stopped, 1)
   assert.equal(messages[0].type, 'error')
   assert.equal(host.harness, undefined)
+})
+
+test('owns the authenticated Connector and forwards correlated Extension replies', async () => {
+  let harnessOptions
+  let stopped = 0
+  const host = new NativeHost({
+    processFactory: (options) => {
+      harnessOptions = options
+      return {
+        start: async () => 'http://127.0.0.1:48123',
+        stop: async () => { stopped += 1 },
+      }
+    },
+    connectorFactory: (options) => new BrowserConnector(options),
+    exit: () => {},
+  })
+  const messages = []
+  host.send = (message) => messages.push(message)
+
+  try {
+    await host.startHarness()
+    assert.match(harnessOptions.mcpConnector.url, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
+    assert.match(harnessOptions.mcpConnector.token, /^[A-Za-z0-9_-]{32,}$/)
+
+    let pendingCall
+    const request = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('connector request timeout')), 2_000)
+      const connectorRequest = messages.find((message) => message.type === 'connector_request')
+      if (connectorRequest !== undefined) {
+        clearTimeout(timer)
+        resolve(connectorRequest)
+        return
+      }
+      const original = host.send
+      host.send = (message) => {
+        original(message)
+        if (message.type === 'connector_request') {
+          clearTimeout(timer)
+          resolve(message)
+        }
+      }
+      pendingCall = fetch(`${harnessOptions.mcpConnector.url}`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${harnessOptions.mcpConnector.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'office_get_context',
+            arguments: {
+              runId: 'run-native-host',
+              browserTarget: { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://docs.example.test/' },
+            },
+          },
+        }),
+      })
+    })
+    assert.equal(request.runId, 'run-native-host')
+    assert.equal(request.browserTarget.tabId, 2)
+    await host.handle({
+      type: 'connector_response',
+      requestId: request.requestId,
+      runId: request.runId,
+      generation: request.generation,
+      browserTarget: request.browserTarget,
+      result: { workbookName: 'Native.xlsx' },
+    })
+    const response = await pendingCall
+    const body = await response.json()
+    assert.equal(body.result.structuredContent.officeContext.workbookName, 'Native.xlsx')
+  } finally {
+    await host.close('stop requested')
+  }
+  assert.equal(stopped, 1)
 })

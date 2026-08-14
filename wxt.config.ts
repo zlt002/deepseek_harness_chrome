@@ -11,7 +11,7 @@ export default defineConfig({
     name: 'DeepSeek Harness',
     description: 'Use DeepSeek Harness from a Chrome side panel.',
     minimum_chrome_version: '120',
-    permissions: ['sidePanel', 'nativeMessaging', 'storage'],
+    permissions: ['sidePanel', 'nativeMessaging', 'storage', 'tabs'],
     host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'],
     action: {
       default_title: 'Open DeepSeek Harness',

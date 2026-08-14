@@ -6,6 +6,10 @@ interface NativeMessage {
   payload?: unknown
   error?: unknown
   requestId?: unknown
+  runId?: unknown
+  generation?: unknown
+  browserTarget?: unknown
+  tool?: unknown
 }
 
 interface NativeStartPayload {
@@ -18,6 +22,74 @@ let startPromise: Promise<string> | undefined
 
 function asError(value: unknown): string {
   return value instanceof Error ? value.message : String(value)
+}
+
+interface BrowserTarget {
+  browser: 'chrome'
+  windowId: number
+  tabId: number
+  url: string
+}
+
+interface ConnectorRequest {
+  type: 'connector_request'
+  requestId: string
+  runId: string
+  generation: string
+  browserTarget: BrowserTarget
+  tool: 'office_get_context'
+}
+
+function isConnectorRequest(message: NativeMessage): message is ConnectorRequest {
+  const target = message.browserTarget
+  return message.type === 'connector_request'
+    && typeof message.requestId === 'string'
+    && typeof message.runId === 'string'
+    && typeof message.generation === 'string'
+    && message.tool === 'office_get_context'
+    && typeof target === 'object' && target !== null
+    && (target as BrowserTarget).browser === 'chrome'
+    && Number.isInteger((target as BrowserTarget).windowId)
+    && Number.isInteger((target as BrowserTarget).tabId)
+    && typeof (target as BrowserTarget).url === 'string'
+}
+
+async function readOfficeContext(request: ConnectorRequest): Promise<Record<string, unknown>> {
+  const tab = await chrome.tabs.get(request.browserTarget.tabId)
+  if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
+    throw new Error('Browser Target changed before Office context could be read.')
+  }
+  // Office DOM/range adapters deliberately begin in Issue #3. This tracer
+  // bullet proves the trusted target identity path without exposing cookies.
+  return {
+    status: 'browser_target_verified',
+    title: tab.title ?? '',
+    url: request.browserTarget.url,
+  }
+}
+
+function respondToConnector(port: chrome.runtime.Port, request: ConnectorRequest): void {
+  void readOfficeContext(request)
+    .then((result) => {
+      port.postMessage({
+        type: 'connector_response',
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        result,
+      })
+    })
+    .catch((error: unknown) => {
+      port.postMessage({
+        type: 'connector_response',
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        error: asError(error),
+      })
+    })
 }
 
 function disconnectNativePort(port: chrome.runtime.Port): void {
@@ -38,6 +110,10 @@ function connectNativePort(): chrome.runtime.Port {
   const port = chrome.runtime.connectNative(NATIVE_HOST_NAME)
   port.onDisconnect.addListener(() => disconnectNativePort(port))
   port.onMessage.addListener((message: NativeMessage) => {
+    if (isConnectorRequest(message)) {
+      respondToConnector(port, message)
+      return
+    }
     if (message.type !== 'server_started') return
     const payload = message.payload as NativeStartPayload | undefined
     if (typeof payload?.url !== 'string') return

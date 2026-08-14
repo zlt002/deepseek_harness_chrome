@@ -1,14 +1,22 @@
 import { appendFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
 import { decodeNativeFrames, encodeNativeFrame } from './protocol.mjs'
+import { BrowserConnector } from './connector.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
 
 const nativeLogPath = process.env.DSH_NATIVE_LOG?.trim()
 
+function redactDiagnostic(value) {
+  return String(value)
+    .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/gi, '$1[REDACTED]')
+    .replace(/(cookie\s*[:=]\s*)([^\r\n]+)/gi, '$1[REDACTED]')
+    .replace(/(bearer\s+)([^\s,;]+)/gi, '$1[REDACTED]')
+}
+
 function nativeLog(message) {
   if (!nativeLogPath) return
   try {
-    appendFileSync(nativeLogPath, `${new Date().toISOString()} ${message}\n`)
+    appendFileSync(nativeLogPath, `${new Date().toISOString()} ${redactDiagnostic(message)}\n`)
   } catch {
     // Diagnostics must never interfere with the Native Messaging protocol.
   }
@@ -41,11 +49,13 @@ process.on('unhandledRejection', (error) => {
  * to stderr so Chrome never sees an unframed byte.
  */
 export class NativeHost {
-  /** @param {{ processFactory?: () => HarnessWebProcess, exit?: (code: number) => void }} [options] */
+  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string } }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void }} [options] */
   constructor(options = {}) {
-    this.processFactory = options.processFactory ?? (() => new HarnessWebProcess())
+    this.processFactory = options.processFactory ?? ((processOptions) => new HarnessWebProcess(processOptions))
+    this.connectorFactory = options.connectorFactory ?? ((connectorOptions) => new BrowserConnector(connectorOptions))
     this.exit = options.exit ?? ((code) => process.exit(code))
     this.harness = undefined
+    this.connector = undefined
     this.serverUrl = undefined
     this.startPromise = undefined
     this.closePromise = undefined
@@ -100,6 +110,12 @@ export class NativeHost {
       await this.startHarness()
       return
     }
+    if (type === 'connector_response') {
+      if (this.connector?.acceptExtensionResponse(message) !== true) {
+        this.send({ type: 'error', error: 'Unrecognized Connector response.' })
+      }
+      return
+    }
     if (type === 'stop') {
       await this.close('stop requested')
       return
@@ -134,6 +150,8 @@ export class NativeHost {
       if (reason !== 'browser disconnected') process.stderr.write(`[native-server] ${reason}\n`)
       await this.harness?.stop()
       this.harness = undefined
+      await this.connector?.stop()
+      this.connector = undefined
       this.serverUrl = undefined
       this.exit(0)
     })()
@@ -142,13 +160,23 @@ export class NativeHost {
 
   async #startHarness() {
     try {
-      if (this.harness === undefined) this.harness = this.processFactory()
+      if (this.connector === undefined) {
+        this.connector = this.connectorFactory({ requestExtension: (request) => this.send(request) })
+      }
+      const connector = await this.connector.start()
+      if (this.harness === undefined) {
+        this.harness = this.processFactory({
+          mcpConnector: { url: `${connector.url}/mcp`, token: connector.token },
+        })
+      }
       const harnessUrl = await this.harness.start()
       this.serverUrl = harnessWebUrl(harnessUrl)
       return this.serverUrl
     } catch (error) {
       await this.harness?.stop()
       this.harness = undefined
+      await this.connector?.stop()
+      this.connector = undefined
       this.serverUrl = undefined
       throw error
     }

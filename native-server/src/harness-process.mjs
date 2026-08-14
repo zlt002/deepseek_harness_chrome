@@ -1,8 +1,10 @@
 import { existsSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -38,16 +40,62 @@ export function resolveHarnessCwd(env = process.env) {
   return resolve(THIS_DIR, '../..')
 }
 
+/** Arguments owned by this integration, kept separate from the Harness CLI. */
+export function harnessArgs(port, connectorPatchPath) {
+  return [
+    ...connectorPatchPath === undefined ? [] : ['--patch', connectorPatchPath],
+    '--profile', 'web',
+    '--host', '127.0.0.1',
+    '--port', String(port),
+  ]
+}
+
+function validMcpConnector(value) {
+  if (!value || typeof value !== 'object') return false
+  if (typeof value.url !== 'string' || typeof value.token !== 'string' || value.token.length === 0) return false
+  try {
+    const url = new URL(value.url)
+    return url.protocol === 'http:' && url.hostname === '127.0.0.1' && url.port !== '' && url.pathname === '/mcp'
+  } catch {
+    return false
+  }
+}
+
+function connectorPatch(url, token) {
+  return `- id: deepseek-harness-browser-connector
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: chrome
+    transport: streamable-http
+    url: '${url}'
+    headers:
+      Authorization: 'Bearer ${token}'
+    failOnStartupError: true
+    reconnect:
+      enabled: false
+`
+}
+
+function redactHarnessDiagnostic(value) {
+  return String(value)
+    .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/gi, '$1[REDACTED]')
+    .replace(/(cookie\s*[:=]\s*)([^\r\n]+)/gi, '$1[REDACTED]')
+    .replace(/(bearer\s+)([^\s,;]+)/gi, '$1[REDACTED]')
+}
+
 /**
  * Spawn and supervise one `dsh --profile web` process.
  */
 export class HarnessWebProcess {
-  /** @param {{ cliPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string }} [options] */
+  /** @param {{ cliPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string, mcpConnector?: { url: string, token: string } }} [options] */
   constructor(options = {}) {
     this.env = options.env ?? process.env
     this.cliPath = options.cliPath ?? resolveHarnessCli(this.env)
     this.port = options.port ?? 0
     this.cwd = options.cwd ?? resolveHarnessCwd(this.env)
+    this.mcpConnector = options.mcpConnector
+    this.connectorPatchDir = undefined
+    this.connectorPatchPath = undefined
     this.child = undefined
     this.url = undefined
     this.startPromise = undefined
@@ -70,19 +118,22 @@ export class HarnessWebProcess {
     const child = this.child
     this.child = undefined
     this.url = undefined
-    if (!child) return
-    if (child.exitCode !== null || child.signalCode !== null) return
-    child.kill('SIGTERM')
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL')
-        resolve()
-      }, 3_000)
-      child.once('exit', () => {
-        clearTimeout(timer)
-        resolve()
+    try {
+      if (!child || child.exitCode !== null || child.signalCode !== null) return
+      child.kill('SIGTERM')
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL')
+          resolve()
+        }, 3_000)
+        child.once('exit', () => {
+          clearTimeout(timer)
+          resolve()
+        })
       })
-    })
+    } finally {
+      await this.#removeConnectorPatch()
+    }
   }
 
   async #start() {
@@ -90,12 +141,8 @@ export class HarnessWebProcess {
       throw new Error(`DeepSeek Harness CLI was not found: ${this.cliPath}. Set DSH_CLI_PATH or DSH_ROOT.`)
     }
     this.stopping = false
-    const child = spawn(process.execPath, [
-      this.cliPath,
-      '--profile', 'web',
-      '--host', '127.0.0.1',
-      '--port', String(this.port),
-    ], {
+    const patchPath = await this.#createConnectorPatch()
+    const child = spawn(process.execPath, [this.cliPath, ...harnessArgs(this.port, patchPath)], {
       cwd: this.cwd,
       env: {
         ...this.env,
@@ -108,7 +155,7 @@ export class HarnessWebProcess {
     this.child = child
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk) => {
-      process.stderr.write(`[deepseek-harness] ${chunk}`)
+      process.stderr.write(`[deepseek-harness] ${redactHarnessDiagnostic(chunk)}`)
     })
     child.once('exit', () => {
       if (this.child !== child) return
@@ -150,6 +197,24 @@ export class HarnessWebProcess {
       await this.stop()
       throw error
     }
+  }
+
+  async #createConnectorPatch() {
+    if (this.mcpConnector === undefined) return undefined
+    if (!validMcpConnector(this.mcpConnector)) throw new Error('Native Host supplied an invalid Browser Connector endpoint')
+    const directory = await mkdtemp(`${tmpdir()}/deepseek-harness-connector-`)
+    const patchPath = resolve(directory, 'connector.cordis.yml')
+    await writeFile(patchPath, connectorPatch(this.mcpConnector.url, this.mcpConnector.token), { mode: 0o600 })
+    this.connectorPatchDir = directory
+    this.connectorPatchPath = patchPath
+    return patchPath
+  }
+
+  async #removeConnectorPatch() {
+    const directory = this.connectorPatchDir
+    this.connectorPatchDir = undefined
+    this.connectorPatchPath = undefined
+    if (directory !== undefined) await rm(directory, { recursive: true, force: true })
   }
 
   async #waitForHttp(url) {
