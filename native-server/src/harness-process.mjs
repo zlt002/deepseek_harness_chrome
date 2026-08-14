@@ -1,0 +1,170 @@
+import { existsSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { createInterface } from 'node:readline'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const THIS_DIR = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * Resolve the built DeepSeek Harness CLI. A packaged install sets
+ * `DSH_CLI_PATH`; development defaults to the sibling checkout requested by
+ * this project.
+ * @param {NodeJS.ProcessEnv} env - process environment.
+ * @returns {string}
+ */
+export function resolveHarnessCli(env = process.env) {
+  const explicit = env.DSH_CLI_PATH?.trim()
+  if (explicit) return resolve(explicit)
+  const root = env.DSH_ROOT?.trim()
+  if (root) return resolve(root, 'apps/cli/lib/bin.js')
+  const sibling = resolve(THIS_DIR, '../../../deepseek-harness/apps/cli/lib/bin.js')
+  if (existsSync(sibling)) return sibling
+  return sibling
+}
+
+/**
+ * Resolve the stable working directory used by a Native Messaging launch.
+ * Chrome does not guarantee the host process cwd, so session/workspace
+ * defaults must not depend on the browser's launch directory.
+ * @param {NodeJS.ProcessEnv} env - process environment.
+ * @returns {string}
+ */
+export function resolveHarnessCwd(env = process.env) {
+  const explicit = env.DSH_CWD?.trim()
+  if (explicit) return resolve(explicit)
+  const root = env.DSH_ROOT?.trim()
+  if (root) return resolve(root)
+  return resolve(THIS_DIR, '../..')
+}
+
+/**
+ * Spawn and supervise one `dsh --profile web` process.
+ */
+export class HarnessWebProcess {
+  /** @param {{ cliPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string }} [options] */
+  constructor(options = {}) {
+    this.env = options.env ?? process.env
+    this.cliPath = options.cliPath ?? resolveHarnessCli(this.env)
+    this.port = options.port ?? 0
+    this.cwd = options.cwd ?? resolveHarnessCwd(this.env)
+    this.child = undefined
+    this.url = undefined
+    this.startPromise = undefined
+    this.stopping = false
+  }
+
+  /** @returns {Promise<string>} */
+  start() {
+    if (this.url) return Promise.resolve(this.url)
+    if (this.startPromise) return this.startPromise
+    this.startPromise = this.#start().finally(() => {
+      this.startPromise = undefined
+    })
+    return this.startPromise
+  }
+
+  /** @returns {Promise<void>} */
+  async stop() {
+    this.stopping = true
+    const child = this.child
+    this.child = undefined
+    this.url = undefined
+    if (!child) return
+    if (child.exitCode !== null || child.signalCode !== null) return
+    child.kill('SIGTERM')
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        resolve()
+      }, 3_000)
+      child.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  }
+
+  async #start() {
+    if (!existsSync(this.cliPath)) {
+      throw new Error(`DeepSeek Harness CLI was not found: ${this.cliPath}. Set DSH_CLI_PATH or DSH_ROOT.`)
+    }
+    this.stopping = false
+    const child = spawn(process.execPath, [
+      this.cliPath,
+      '--profile', 'web',
+      '--host', '127.0.0.1',
+      '--port', String(this.port),
+    ], {
+      cwd: this.cwd,
+      env: {
+        ...this.env,
+        // Native stdout is reserved for framed messages. The child is piped,
+        // but disabling telemetry keeps the development process deterministic.
+        DSH_TELEMETRY_DISABLED: this.env.DSH_TELEMETRY_DISABLED ?? '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    this.child = child
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => {
+      process.stderr.write(`[deepseek-harness] ${chunk}`)
+    })
+    child.once('exit', () => {
+      if (this.child !== child) return
+      this.child = undefined
+      this.url = undefined
+    })
+
+    try {
+      return await new Promise((resolveUrl, reject) => {
+      let settled = false
+      const finish = (error, url) => {
+        if (settled) return
+        settled = true
+        if (error) {
+          reject(error)
+        } else {
+          this.url = url
+          resolveUrl(url)
+        }
+      }
+      const lines = createInterface({ input: child.stdout })
+      lines.on('line', (line) => {
+        const match = /^dsh web: (https?:\/\/\S+)/.exec(line.trim())
+        if (match) {
+          void this.#waitForHttp(match[1]).then(
+            () => finish(undefined, match[1]),
+            (error) => finish(error instanceof Error ? error : new Error(String(error))),
+          )
+        }
+      })
+      child.once('error', (error) => finish(error))
+      child.once('exit', (code, signal) => {
+        if (!settled && !this.stopping) {
+          finish(new Error(`DeepSeek Harness exited before readiness (code=${String(code)}, signal=${String(signal)}).`))
+        }
+      })
+      })
+    } catch (error) {
+      await this.stop()
+      throw error
+    }
+  }
+
+  async #waitForHttp(url) {
+    const deadline = Date.now() + 15_000
+    let lastError
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(url, { redirect: 'manual' })
+        if (response.status < 500) return
+        lastError = new Error(`Harness Web UI returned HTTP ${response.status}`)
+      } catch (error) {
+        lastError = error
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    throw lastError instanceof Error ? lastError : new Error(`Harness Web UI did not become ready: ${url}`)
+  }
+}

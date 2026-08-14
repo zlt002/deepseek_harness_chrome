@@ -1,0 +1,32 @@
+{
+  "name": "deepseek_harness_chrome",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness browser extension shell with a Native Messaging backend.",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "sync-harness-assets": "node scripts/sync-harness-assets.mjs",
+    "dev": "pnpm sync-harness-assets && wxt",
+    "build": "pnpm sync-harness-assets && wxt build",
+    "zip": "pnpm sync-harness-assets && wxt zip",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "register-native-host": "node scripts/register-native-host.mjs"
+  },
+  "dependencies": {
+    "@wxt-dev/module-react": "^1.1.3",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "wxt": "^0.20.8"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.27",
+    "@types/react": "^19.2.1",
+    "@types/react-dom": "^19.2.1",
+    "typescript": "^5.9.2"
+  }
+}

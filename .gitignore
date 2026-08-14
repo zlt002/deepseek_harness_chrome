@@ -1,0 +1,14 @@
+node_modules/
+.output/
+.wxt/
+coverage/
+*.log
+public/assets/
+public/plugins/
+public/harness/
+public/favicon.svg
+public/manifest.webmanifest
+
+# Generated native-host manifests contain machine-specific absolute paths.
+native-host/com.deepseek.harness.chrome.json
+native-host/com.deepseek.harness.chrome
