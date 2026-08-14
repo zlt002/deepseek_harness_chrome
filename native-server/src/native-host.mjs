@@ -2,7 +2,6 @@ import { appendFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
 import { decodeNativeFrames, encodeNativeFrame } from './protocol.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
-import { LoopbackProxy } from './loopback-proxy.mjs'
 
 const nativeLogPath = process.env.DSH_NATIVE_LOG?.trim()
 
@@ -13,6 +12,21 @@ function nativeLog(message) {
   } catch {
     // Diagnostics must never interfere with the Native Messaging protocol.
   }
+}
+
+function harnessWebUrl(value) {
+  const url = new URL(value)
+  if (url.protocol !== 'http:'
+    || url.hostname !== '127.0.0.1'
+    || url.port === ''
+    || url.username !== ''
+    || url.password !== ''
+    || url.pathname !== '/'
+    || url.search !== ''
+    || url.hash !== '') {
+    throw new Error('Harness Web URL must be an http 127.0.0.1 loopback URL with a port')
+  }
+  return url.toString().replace(/\/$/, '')
 }
 
 process.on('uncaughtException', (error) => {
@@ -32,7 +46,6 @@ export class NativeHost {
     this.processFactory = options.processFactory ?? (() => new HarnessWebProcess())
     this.exit = options.exit ?? ((code) => process.exit(code))
     this.harness = undefined
-    this.proxy = undefined
     this.serverUrl = undefined
     this.startPromise = undefined
     this.closePromise = undefined
@@ -119,9 +132,7 @@ export class NativeHost {
     nativeLog(`close reason=${reason}`)
     this.closePromise = (async () => {
       if (reason !== 'browser disconnected') process.stderr.write(`[native-server] ${reason}\n`)
-      await this.proxy?.stop()
       await this.harness?.stop()
-      this.proxy = undefined
       this.harness = undefined
       this.serverUrl = undefined
       this.exit(0)
@@ -133,12 +144,9 @@ export class NativeHost {
     try {
       if (this.harness === undefined) this.harness = this.processFactory()
       const harnessUrl = await this.harness.start()
-      if (this.proxy === undefined) this.proxy = new LoopbackProxy(harnessUrl)
-      this.serverUrl = await this.proxy.start()
+      this.serverUrl = harnessWebUrl(harnessUrl)
       return this.serverUrl
     } catch (error) {
-      await this.proxy?.stop()
-      this.proxy = undefined
       await this.harness?.stop()
       this.harness = undefined
       this.serverUrl = undefined

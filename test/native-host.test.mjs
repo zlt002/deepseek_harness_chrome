@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { NativeHost } from '../native-server/src/native-host.mjs'
 
-test('starts one Harness proxy for repeated start requests and exits on close', async () => {
+test('returns the Harness Web URL for repeated start requests and exits on close', async () => {
   const upstream = createServer((_request, response) => response.end('ok'))
   await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
   const address = upstream.address()
@@ -29,17 +29,17 @@ test('starts one Harness proxy for repeated start requests and exits on close', 
     assert.equal(starts, 1)
     assert.equal(messages.length, 2)
     assert.equal(messages[0].type, 'server_started')
-    assert.equal(messages[0].payload.url, messages[1].payload.url)
-
-    await host.close('stop requested')
-    assert.equal(stops, 1)
-    assert.deepEqual(exited, [0])
+    assert.equal(messages[0].payload.url, harnessUrl)
+    assert.equal(messages[1].payload.url, harnessUrl)
   } finally {
+    await host.close('stop requested')
     await new Promise((resolve) => upstream.close(resolve))
   }
+  assert.equal(stops, 1)
+  assert.deepEqual(exited, [0])
 })
 
-test('cleans up a Harness when proxy startup fails', async () => {
+test('cleans up a Harness when its Web URL is invalid', async () => {
   let stopped = 0
   const host = new NativeHost({
     processFactory: () => ({
@@ -55,5 +55,4 @@ test('cleans up a Harness when proxy startup fails', async () => {
   assert.equal(stopped, 1)
   assert.equal(messages[0].type, 'error')
   assert.equal(host.harness, undefined)
-  assert.equal(host.proxy, undefined)
 })

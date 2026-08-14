@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import ReactDOM from 'react-dom/client'
+import { HarnessFrameSource } from './harness-frame'
 import './style.css'
 
 type HarnessStatus = 'idle' | 'starting' | 'ready' | 'error'
@@ -21,12 +22,6 @@ function requestHarness(): Promise<HarnessResponse> {
       resolve(response ?? { ok: false, error: 'Background did not return a response.' })
     })
   })
-}
-
-function extensionHarnessUrl(nativeUrl: string): string {
-  const page = new URL(chrome.runtime.getURL('harness/index.html'))
-  page.searchParams.set('native', nativeUrl)
-  return page.toString()
 }
 
 function App(): React.JSX.Element {
@@ -84,7 +79,7 @@ function App(): React.JSX.Element {
       {status === 'ready' && url !== undefined ? (
         <iframe
           className="harness-frame"
-          src={extensionHarnessUrl(url)}
+          src={HarnessFrameSource(url)}
           title="DeepSeek Harness Web UI"
           allow="clipboard-read; clipboard-write"
         />
