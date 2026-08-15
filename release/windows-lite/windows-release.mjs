@@ -233,7 +233,7 @@ function archiveEntries(zipPath, requiredEntries) {
         'Add-Type -AssemblyName System.IO.Compression.FileSystem',
         '$required = @($env:DSH_ZIP_ENTRIES | ConvertFrom-Json)',
         '$archive = [System.IO.Compression.ZipFile]::OpenRead($env:DSH_ZIP_PATH)',
-        "try { foreach ($entry in $archive.Entries) { $name = $entry.FullName -replace '^\\./', ''; if ($required -contains $name) { [Console]::Out.WriteLine($name) } } } finally { $archive.Dispose() }",
+        "try { foreach ($entry in $archive.Entries) { $name = $entry.FullName.Replace([char]92, [char]47) -replace '^\\./', ''; if ($required -contains $name) { [Console]::Out.WriteLine($name) } } } finally { $archive.Dispose() }",
       ].join('; ')
       return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         encoding: 'utf8',
