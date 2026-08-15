@@ -34,6 +34,7 @@ async function createCheckoutFixture() {
   ]) {
     await writeFixture(sourceDir, `${directory}/package.json`, JSON.stringify({ name }))
     await writeFixture(sourceDir, `${directory}/lib/index.js`, 'export {}\n')
+    await writeFixture(sourceDir, `${directory}/node_modules/not-runtime.txt`, 'must not be copied\n')
   }
   return sourceDir
 }
@@ -81,6 +82,7 @@ test('materializer deploys a production closure, runs smoke, and only then write
   assert.equal(existsSync(path.join(outputDir, 'apps/web/dist/index.html')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cosmokit/lib/index.js')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cordis-plugin-logger-console/package.json')), true)
+  assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cordis-plugin-group/node_modules/not-runtime.txt')), false)
   assert.deepEqual(JSON.parse(await readFile(path.join(outputDir, 'harness-runtime.json'), 'utf8')), result.marker)
 })
 

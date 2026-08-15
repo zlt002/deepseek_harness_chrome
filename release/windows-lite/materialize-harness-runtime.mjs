@@ -143,7 +143,10 @@ async function copyRequiredVendorPackages({ sourceDir, deployedModules }) {
     if (manifest.name !== vendorPackage.name) {
       throw new Error(`Vendor package name mismatch for ${vendorPackage.directory}: ${String(manifest.name)}`)
     }
-    await copyDereferenced(sourcePackageDir, path.join(deployedModules, ...vendorPackage.name.split('/')))
+    const destination = path.join(deployedModules, ...vendorPackage.name.split('/'))
+    await mkdir(destination, { recursive: true })
+    await copyDereferenced(sourceManifestPath, path.join(destination, 'package.json'))
+    await copyDereferenced(sourceLibDir, path.join(destination, 'lib'))
   }
 }
 
