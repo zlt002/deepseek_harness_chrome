@@ -55,8 +55,10 @@ jobs:
         working-directory: deepseek-harness
         shell: pwsh
         run: |
-          pnpm install --frozen-lockfile
+          pnpm install --no-frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install extension dependencies
         working-directory: deepseek_harness_chrome
