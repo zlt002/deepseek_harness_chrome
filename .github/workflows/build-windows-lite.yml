@@ -12,7 +12,7 @@ on:
         default: 1.1.63
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows-lite:
@@ -90,12 +90,28 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
           [System.IO.File]::WriteAllText("$zip.sha256", "$hash  accr-ui-windows-lite-x64.zip`n", [System.Text.UTF8Encoding]::new($false))
 
-      - name: Upload Windows candidate
-        uses: actions/upload-artifact@v4
-        with:
-          name: accr-ui-windows-lite-x64-${{ inputs.version || '1.1.63' }}
-          path: |
-            deepseek_harness_chrome/release/accr-ui-windows-lite-x64.zip
-            deepseek_harness_chrome/release/accr-ui-windows-lite-x64.zip.sha256
-          if-no-files-found: error
-          retention-days: 14
+      - name: Upload Windows candidate to draft release
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.63' }}-candidate
+          RELEASE_VERSION: ${{ inputs.version || '1.1.63' }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $zip = 'release/accr-ui-windows-lite-x64.zip'
+          $checksum = "$zip.sha256"
+
+          gh release view $env:RELEASE_TAG --repo $repo *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG `
+              --repo $repo `
+              --draft `
+              --target '${{ github.sha }}' `
+              --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
+              --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Real Windows installation, Native Messaging, upgrade, and rollback acceptance are still required."
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          gh release upload $env:RELEASE_TAG $zip $checksum --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
