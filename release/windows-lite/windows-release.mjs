@@ -219,13 +219,7 @@ function releaseReadme(version) {
 
 function runZip(cwd, outputPath, input) {
   if (process.platform === 'win32') {
-    const source = input === '.' ? path.join(cwd, '*') : path.join(cwd, input)
-    execFileSync('powershell.exe', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      "$ErrorActionPreference = 'Stop'; Compress-Archive -Path $env:DSH_ZIP_SOURCE -DestinationPath $env:DSH_ZIP_OUTPUT -Force",
-    ], { env: { ...process.env, DSH_ZIP_SOURCE: source, DSH_ZIP_OUTPUT: outputPath }, stdio: 'pipe' })
+    execFileSync('tar.exe', ['-a', '-c', '-f', outputPath, input], { cwd, stdio: 'pipe' })
     return
   }
   execFileSync('zip', ['-qr', outputPath, input], { cwd, stdio: 'pipe' })
