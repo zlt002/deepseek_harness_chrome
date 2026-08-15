@@ -5,7 +5,7 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -91,6 +91,30 @@ async function assertNoExternalSymlinks(root) {
   await visit(root)
 }
 
+async function materializeExternalVendorSymlinks({ root, sourceDir, deployedModules }) {
+  const targetPackages = new Map()
+  for (const vendorPackage of REQUIRED_VENDOR_PACKAGES) {
+    const sourcePackage = await realpath(path.join(sourceDir, vendorPackage.directory))
+    targetPackages.set(sourcePackage.toLowerCase(), path.join(deployedModules, ...vendorPackage.name.split('/')))
+  }
+  async function visit(current) {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const child = path.join(current, entry.name)
+      const metadata = await lstat(child)
+      if (metadata.isSymbolicLink()) {
+        const target = await realpath(child)
+        const replacement = targetPackages.get(target.toLowerCase())
+        if (replacement === undefined) continue
+        await unlink(child)
+        await copyDereferenced(replacement, child)
+        continue
+      }
+      if (metadata.isDirectory()) await visit(child)
+    }
+  }
+  await visit(root)
+}
+
 async function findNativeAddons(root) {
   const addons = []
   async function visit(current) {
@@ -159,6 +183,7 @@ async function assembleRuntime({ sourceDir, deployedDir, outputDir, revision, sm
   const missing = required.filter((target) => !existsSync(target))
   if (missing.length > 0) throw new Error(`Harness runtime inputs are incomplete: ${missing.join(', ')}`)
   await copyRequiredVendorPackages({ sourceDir, deployedModules })
+  await materializeExternalVendorSymlinks({ root: deployedDir, sourceDir, deployedModules })
   await copyDereferenced(sourceFrontendDist, frontendDist)
   await assertNoExternalSymlinks(deployedDir)
   const nativeAddons = await assertWindowsNativeClosure(deployedModules)

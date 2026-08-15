@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -65,7 +65,12 @@ test('materializer deploys a production closure, runs smoke, and only then write
     platform: 'win32',
     arch: 'x64',
     resolveRevision: () => 'fixture-revision',
-    deploy: deployFixture,
+    deploy: async (options) => {
+      await deployFixture(options)
+      const nestedVendor = path.join(options.deployDir, 'node_modules/.pnpm/fake/node_modules/@deepseek-ai/cosmokit')
+      await mkdir(path.dirname(nestedVendor), { recursive: true })
+      await symlink(path.join(sourceDir, 'vendor/cosmokit'), nestedVendor, 'dir')
+    },
     smoke(command, args, options) {
       smokeCalled = true
       assert.equal(command, process.execPath)
@@ -81,6 +86,7 @@ test('materializer deploys a production closure, runs smoke, and only then write
   assert.equal(existsSync(path.join(outputDir, 'apps/cli/lib/bin.js')), true)
   assert.equal(existsSync(path.join(outputDir, 'apps/web/dist/index.html')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cosmokit/lib/index.js')), true)
+  assert.equal(existsSync(path.join(outputDir, 'node_modules/.pnpm/fake/node_modules/@deepseek-ai/cosmokit/lib/index.js')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cordis-plugin-logger-console/package.json')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cordis-plugin-group/node_modules/not-runtime.txt')), false)
   assert.deepEqual(JSON.parse(await readFile(path.join(outputDir, 'harness-runtime.json'), 'utf8')), result.marker)
