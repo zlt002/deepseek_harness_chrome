@@ -21,6 +21,10 @@ const REQUIRED_VENDOR_PACKAGES = [
   { name: '@deepseek-ai/cordis-plugin-group', directory: 'vendor/group' },
   { name: '@deepseek-ai/cordis-plugin-logger-console', directory: 'vendor/logger-console' },
 ]
+const WINDOWS_EXCLUDED_OPTIONAL_PACKAGES = [
+  'native/landlock-run/packages/linux-arm64',
+  'native/landlock-run/packages/linux-x64',
+]
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options })
@@ -91,11 +95,15 @@ async function assertNoExternalSymlinks(root) {
   await visit(root)
 }
 
-async function materializeExternalVendorSymlinks({ root, sourceDir, deployedModules }) {
-  const targetPackages = new Map()
+async function resolveKnownExternalSymlinks({ root, sourceDir, deployedModules }) {
+  const actions = new Map()
   for (const vendorPackage of REQUIRED_VENDOR_PACKAGES) {
     const sourcePackage = await realpath(path.join(sourceDir, vendorPackage.directory))
-    targetPackages.set(sourcePackage.toLowerCase(), path.join(deployedModules, ...vendorPackage.name.split('/')))
+    actions.set(sourcePackage.toLowerCase(), path.join(deployedModules, ...vendorPackage.name.split('/')))
+  }
+  for (const optionalPackage of WINDOWS_EXCLUDED_OPTIONAL_PACKAGES) {
+    const sourcePackage = await realpath(path.join(sourceDir, optionalPackage))
+    actions.set(sourcePackage.toLowerCase(), null)
   }
   async function visit(current) {
     for (const entry of await readdir(current, { withFileTypes: true })) {
@@ -103,10 +111,11 @@ async function materializeExternalVendorSymlinks({ root, sourceDir, deployedModu
       const metadata = await lstat(child)
       if (metadata.isSymbolicLink()) {
         const target = await realpath(child)
-        const replacement = targetPackages.get(target.toLowerCase())
-        if (replacement === undefined) continue
+        const targetKey = target.toLowerCase()
+        if (!actions.has(targetKey)) continue
+        const replacement = actions.get(targetKey)
         await unlink(child)
-        await copyDereferenced(replacement, child)
+        if (replacement !== null) await copyDereferenced(replacement, child)
         continue
       }
       if (metadata.isDirectory()) await visit(child)
@@ -183,7 +192,7 @@ async function assembleRuntime({ sourceDir, deployedDir, outputDir, revision, sm
   const missing = required.filter((target) => !existsSync(target))
   if (missing.length > 0) throw new Error(`Harness runtime inputs are incomplete: ${missing.join(', ')}`)
   await copyRequiredVendorPackages({ sourceDir, deployedModules })
-  await materializeExternalVendorSymlinks({ root: deployedDir, sourceDir, deployedModules })
+  await resolveKnownExternalSymlinks({ root: deployedDir, sourceDir, deployedModules })
   await copyDereferenced(sourceFrontendDist, frontendDist)
   await assertNoExternalSymlinks(deployedDir)
   const nativeAddons = await assertWindowsNativeClosure(deployedModules)
