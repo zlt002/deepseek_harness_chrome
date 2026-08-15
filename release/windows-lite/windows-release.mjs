@@ -265,7 +265,7 @@ function readZipBuffer(zipPath, entry) {
         '  $bytes = $memory.ToArray()',
         '  [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)',
         '} finally { if ($null -ne $stream) { $stream.Dispose() }; $archive.Dispose() }',
-      ].join(' ')
+      ].join('\n')
       return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         env: { ...process.env, DSH_ZIP_PATH: zipPath, DSH_ZIP_ENTRY: entry },
       })
