@@ -225,18 +225,19 @@ function runZip(cwd, outputPath, input) {
   execFileSync('zip', ['-qr', outputPath, input], { cwd, stdio: 'pipe' })
 }
 
-function archiveEntries(zipPath) {
+function archiveEntries(zipPath, requiredEntries) {
   try {
     if (process.platform === 'win32') {
       const script = [
         "$ErrorActionPreference = 'Stop'",
         'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+        '$required = @($env:DSH_ZIP_ENTRIES | ConvertFrom-Json)',
         '$archive = [System.IO.Compression.ZipFile]::OpenRead($env:DSH_ZIP_PATH)',
-        'try { foreach ($entry in $archive.Entries) { [Console]::Out.WriteLine($entry.FullName) } } finally { $archive.Dispose() }',
+        "try { foreach ($entry in $archive.Entries) { $name = $entry.FullName -replace '^\\./', ''; if ($required -contains $name) { [Console]::Out.WriteLine($name) } } } finally { $archive.Dispose() }",
       ].join('; ')
       return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         encoding: 'utf8',
-        env: { ...process.env, DSH_ZIP_PATH: zipPath },
+        env: { ...process.env, DSH_ZIP_PATH: zipPath, DSH_ZIP_ENTRIES: JSON.stringify(requiredEntries) },
       }).split(/\r?\n/).filter(Boolean)
     }
     return execFileSync('unzip', ['-Z1', zipPath], { encoding: 'utf8' })
@@ -275,8 +276,8 @@ function readZipBuffer(zipPath, entry) {
   }
 }
 
-function normalizedArchiveEntries(zipPath) {
-  return archiveEntries(zipPath).map((entry) => entry.replace(/^\.\//, ''))
+function normalizedArchiveEntries(zipPath, requiredEntries) {
+  return archiveEntries(zipPath, requiredEntries).map((entry) => entry.replace(/^\.\//, ''))
 }
 
 function readZipText(zipPath, entry) {
@@ -304,10 +305,11 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     `runtime/${NATIVE_HOST_NAME}.json`,
     `runtime/${LEGACY_NATIVE_HOST_NAME}.json`,
   ]
+  const requiredPayloadEntries = [manifestEntry, runtimeCliEntry, nativeLauncherEntry, registerNativeHostEntry, startEntry, ...nativeManifestEntries]
   let payloadEntries = []
   if (existsSync(payloadZipPath)) {
-    payloadEntries = normalizedArchiveEntries(payloadZipPath)
-    for (const requiredPath of [manifestEntry, runtimeCliEntry, nativeLauncherEntry, registerNativeHostEntry, startEntry, ...nativeManifestEntries]) {
+    payloadEntries = normalizedArchiveEntries(payloadZipPath, requiredPayloadEntries)
+    for (const requiredPath of requiredPayloadEntries) {
       if (!payloadEntries.includes(requiredPath)) errors.push(`payload.zip is missing ${requiredPath}`)
     }
   }
@@ -377,9 +379,10 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     }
   }
   if (existsSync(zipPath)) {
-    const entries = archiveEntries(zipPath)
     const root = `${path.basename(packageDir)}/`
-    for (const requiredPath of ['install.ps1', 'install.vbs', 'payload.zip']) {
+    const requiredOuterPaths = ['install.ps1', 'install.vbs', 'payload.zip']
+    const entries = normalizedArchiveEntries(zipPath, requiredOuterPaths.map((requiredPath) => `${root}${requiredPath}`))
+    for (const requiredPath of requiredOuterPaths) {
       if (!entries.includes(`${root}${requiredPath}`)) errors.push(`outer ZIP is missing ${requiredPath}`)
     }
   } else {
