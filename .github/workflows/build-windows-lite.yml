@@ -35,8 +35,10 @@ jobs:
       - name: Apply Harness UI snapshot
         shell: pwsh
         run: |
-          git -C deepseek-harness apply --check --whitespace=nowarn ../deepseek_harness_chrome/release/windows-lite/harness-ui.patch
-          git -C deepseek-harness apply --whitespace=nowarn ../deepseek_harness_chrome/release/windows-lite/harness-ui.patch
+          git -C deepseek-harness apply --check --ignore-space-change --whitespace=nowarn ../deepseek_harness_chrome/release/windows-lite/harness-ui.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C deepseek-harness apply --ignore-space-change --whitespace=nowarn ../deepseek_harness_chrome/release/windows-lite/harness-ui.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
