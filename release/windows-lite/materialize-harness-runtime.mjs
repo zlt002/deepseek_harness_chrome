@@ -21,7 +21,8 @@ const REQUIRED_VENDOR_PACKAGES = [
   { name: '@deepseek-ai/cordis-plugin-group', directory: 'vendor/group' },
   { name: '@deepseek-ai/cordis-plugin-logger-console', directory: 'vendor/logger-console' },
 ]
-const WINDOWS_EXCLUDED_OPTIONAL_PACKAGES = [
+const WINDOWS_EXCLUDED_EXTERNAL_PACKAGES = [
+  'apps/cli',
   'native/landlock-run/packages/linux-arm64',
   'native/landlock-run/packages/linux-x64',
 ]
@@ -101,8 +102,8 @@ async function resolveKnownExternalSymlinks({ root, sourceDir, deployedModules }
     const sourcePackage = await realpath(path.join(sourceDir, vendorPackage.directory))
     actions.set(sourcePackage.toLowerCase(), path.join(deployedModules, ...vendorPackage.name.split('/')))
   }
-  for (const optionalPackage of WINDOWS_EXCLUDED_OPTIONAL_PACKAGES) {
-    const sourcePackage = await realpath(path.join(sourceDir, optionalPackage))
+  for (const excludedPackage of WINDOWS_EXCLUDED_EXTERNAL_PACKAGES) {
+    const sourcePackage = await realpath(path.join(sourceDir, excludedPackage))
     actions.set(sourcePackage.toLowerCase(), null)
   }
   async function visit(current) {

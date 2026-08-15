@@ -75,6 +75,9 @@ test('materializer deploys a production closure, runs smoke, and only then write
       await symlink(path.join(sourceDir, 'vendor/cosmokit'), nestedVendor, 'dir')
       const linuxOnly = path.join(options.deployDir, 'node_modules/.pnpm/fake/node_modules/@deepseek-ai/node-addon-landlock-run-linux-arm64')
       await symlink(path.join(sourceDir, 'native/landlock-run/packages/linux-arm64'), linuxOnly, 'dir')
+      const cliSelfLink = path.join(options.deployDir, 'node_modules/.pnpm/node_modules/@deepseek-ai/dsh')
+      await mkdir(path.dirname(cliSelfLink), { recursive: true })
+      await symlink(path.join(sourceDir, 'apps/cli'), cliSelfLink, 'dir')
     },
     smoke(command, args, options) {
       smokeCalled = true
@@ -93,6 +96,7 @@ test('materializer deploys a production closure, runs smoke, and only then write
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cosmokit/lib/index.js')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/.pnpm/fake/node_modules/@deepseek-ai/cosmokit/lib/index.js')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/.pnpm/fake/node_modules/@deepseek-ai/node-addon-landlock-run-linux-arm64')), false)
+  assert.equal(existsSync(path.join(outputDir, 'node_modules/.pnpm/node_modules/@deepseek-ai/dsh')), false)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cordis-plugin-logger-console/package.json')), true)
   assert.equal(existsSync(path.join(outputDir, 'node_modules/@deepseek-ai/cordis-plugin-group/node_modules/not-runtime.txt')), false)
   assert.deepEqual(JSON.parse(await readFile(path.join(outputDir, 'harness-runtime.json'), 'utf8')), result.marker)
