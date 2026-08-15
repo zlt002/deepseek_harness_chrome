@@ -42,7 +42,6 @@ async function deployFixture({ deployDir }) {
   await writeFixture(deployDir, 'package.json', JSON.stringify({ name: '@deepseek-ai/dsh' }))
   await writeFixture(deployDir, 'lib/bin.js', 'console.log("dsh help")\n')
   await writeFixture(deployDir, 'config/default.yml', '[]\n')
-  await writeFixture(deployDir, 'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html', '<!doctype html>')
   for (const packageName of ['dsh-app-boot', 'dsh-web-app', 'dsh-web-frontend']) {
     await writeFixture(deployDir, `node_modules/@deepseek-ai/${packageName}/package.json`, JSON.stringify({ name: `@deepseek-ai/${packageName}` }))
   }

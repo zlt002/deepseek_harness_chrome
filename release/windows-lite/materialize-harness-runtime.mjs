@@ -151,10 +151,12 @@ async function assembleRuntime({ sourceDir, deployedDir, outputDir, revision, sm
   const deployedCli = path.join(deployedDir, 'lib', 'bin.js')
   const deployedModules = path.join(deployedDir, 'node_modules')
   const frontendDist = path.join(deployedDir, FRONTEND_DIST)
-  const required = [deployedCli, deployedModules, path.join(frontendDist, 'index.html')]
+  const sourceFrontendDist = path.join(sourceDir, 'apps', 'web', 'dist')
+  const required = [deployedCli, deployedModules, path.join(sourceFrontendDist, 'index.html')]
   const missing = required.filter((target) => !existsSync(target))
-  if (missing.length > 0) throw new Error(`pnpm deploy did not create the production Harness closure: ${missing.join(', ')}`)
+  if (missing.length > 0) throw new Error(`Harness runtime inputs are incomplete: ${missing.join(', ')}`)
   await copyRequiredVendorPackages({ sourceDir, deployedModules })
+  await copyDereferenced(sourceFrontendDist, frontendDist)
   await assertNoExternalSymlinks(deployedDir)
   const nativeAddons = await assertWindowsNativeClosure(deployedModules)
   await mkdir(path.join(outputDir, 'apps', 'cli'), { recursive: true })
