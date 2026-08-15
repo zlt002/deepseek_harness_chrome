@@ -13,6 +13,10 @@
     "dev": "pnpm sync-harness-assets && node scripts/prepare-dev-port.mjs && wxt --port 3001",
     "build": "pnpm sync-harness-assets && wxt build",
     "zip": "pnpm sync-harness-assets && wxt zip",
+    "release:windows-lite": "pnpm build && node release/windows-lite/windows-release.mjs",
+    "materialize:windows-harness-runtime": "node release/windows-lite/materialize-harness-runtime.mjs",
+    "test:windows-release": "node --test test/windows-release.test.mjs",
+    "test:windows-runtime": "node --test test/materialize-harness-runtime.test.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
     "register-native-host": "node scripts/register-native-host.mjs"

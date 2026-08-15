@@ -1,0 +1,94 @@
+name: Build Windows Lite
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: AccrUI-compatible extension version
+        required: true
+        default: 1.1.63
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-lite:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out extension release source
+        uses: actions/checkout@v4
+        with:
+          path: deepseek_harness_chrome
+
+      - name: Check out pinned Harness source
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 47f943859bef60e4160492346772ded9b24f765a
+          path: deepseek-harness
+
+      - name: Apply Harness UI snapshot
+        shell: pwsh
+        run: |
+          git -C deepseek-harness apply --check --whitespace=nowarn ../deepseek_harness_chrome/release/windows-lite/harness-ui.patch
+          git -C deepseek-harness apply --whitespace=nowarn ../deepseek_harness_chrome/release/windows-lite/harness-ui.patch
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.7.0 --activate
+
+      - name: Install and build Harness
+        working-directory: deepseek-harness
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Install extension dependencies
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Materialize Windows Harness runtime
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: >-
+          pnpm materialize:windows-harness-runtime --
+          --source ../deepseek-harness
+          --out release/windows-lite/harness-runtime-win32-x64
+          --revision 47f943859bef60e4160492346772ded9b24f765a
+
+      - name: Build AccrUI-compatible Windows package
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: >-
+          pnpm release:windows-lite --
+          --harness-runtime release/windows-lite/harness-runtime-win32-x64
+          --version "${{ inputs.version }}"
+
+      - name: Write checksum
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: |
+          $zip = 'release/accr-ui-windows-lite-x64.zip'
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText("$zip.sha256", "$hash  accr-ui-windows-lite-x64.zip`n", [System.Text.UTF8Encoding]::new($false))
+
+      - name: Upload Windows candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: accr-ui-windows-lite-x64-${{ inputs.version }}
+          path: |
+            deepseek_harness_chrome/release/accr-ui-windows-lite-x64.zip
+            deepseek_harness_chrome/release/accr-ui-windows-lite-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -85,3 +85,37 @@ pnpm build
 ## 后续迁移方向
 
 下一阶段可以补充用户安装包、Windows Native Host launcher、版本升级和真实模型验收。当前 iframe 只访问 Native Host 启动的本机 `127.0.0.1` Harness 服务，不会把 Harness UI 请求发到公网。
+
+## Windows-first AccrUI 兼容候选包
+
+Windows 包不重排现有扩展或 Native Server 目录，而是由 `release/windows-lite` 生成一个独立发行模块。它保留 AccrUI 更新器的外层契约：
+
+```text
+accr-ui-windows-lite-x64.zip
+└── accr-ui-windows-lite-x64/
+    ├── install.ps1
+    ├── install.vbs
+    └── payload.zip
+```
+
+`payload.zip` 内是本项目真实的 extension、native-server 和一个显式提供的、完整的 Harness runtime；没有旧 AccrUI Agent Backend。扩展会固定为 AccrUI 正式 ID `cmgjacoohdgjedoekbdbhbelpmboankg`，并要求版本不低于 `1.1.63`。
+
+先准备一个已经构建且依赖闭包完整的 Harness runtime 目录（必须包含 `apps/cli/lib/bin.js`、Web dist 和 `node_modules/@deepseek-ai` 的必要包），再运行：
+
+```sh
+pnpm release:windows-lite -- --harness-runtime <runtime-directory> --version 1.1.63
+pnpm test:windows-release
+```
+
+没有 `--harness-runtime` 时会直接失败，绝不会悄悄把开发机上相邻的 `deepseek-harness` 路径写进用户包。生成 ZIP 只证明更新器契约和静态内容；仍需在真实 Windows 机器验证安装、Native Messaging、Harness 启动与回滚。
+
+Windows x64 Runtime 必须先在 Windows x64 上物化，不能从 macOS 开发机复制 `node_modules`：
+
+```sh
+pnpm materialize:windows-harness-runtime -- --source <built-harness-checkout> --out <runtime-directory> --revision <git-revision>
+pnpm release:windows-lite -- --harness-runtime <runtime-directory> --version 1.1.63
+```
+
+materializer 使用上游 `pnpm deploy --prod` 获取 CLI 的生产依赖闭包，再补入构建后的 Web dist。它拒绝外部 symlink、非 Windows PE 原生 addon 和不通过 `node apps/cli/lib/bin.js --help` 的产物；仅这些检查均通过后才写入 `harness-runtime.json` 的 `closureComplete: true`。
+
+仓库的 `Build Windows Lite` GitHub Actions 工作流会在 `windows-latest` 上完成上述步骤并上传 ZIP 与 SHA-256。`release/windows-lite/harness-ui.patch` 是当前 Harness UI 工作树相对于固定上游提交的发布快照；更新快照时必须同时更新工作流中的 Harness 提交号，并先用 `git apply --check` 验证补丁。

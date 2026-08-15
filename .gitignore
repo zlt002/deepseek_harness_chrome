@@ -1,4 +1,5 @@
 node_modules/
+.DS_Store
 .output/
 .wxt/
 coverage/
@@ -8,6 +9,13 @@ public/plugins/
 public/harness/
 public/favicon.svg
 public/manifest.webmanifest
+
+# Windows Lite release outputs are reproducible artifacts, not source.
+release/.tmp/
+release/accr-ui-windows-lite-x64/
+release/accr-ui-windows-lite-x64.zip
+release/windows-lite/harness-runtime-win32-x64/
+release/windows-lite/harness-runtime-win32-x64.staging/
 
 # Generated native-host manifests contain machine-specific absolute paths.
 native-host/com.deepseek.harness.chrome.json
