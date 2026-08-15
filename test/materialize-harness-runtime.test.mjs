@@ -118,7 +118,7 @@ test('materializer rejects a non-Windows active platform addon instead of markin
 
 test('materializer uses pnpm legacy deploy for pnpm 11 workspace closure compatibility', () => {
   assert.deepEqual(legacyDeployArgs({ sourceDir: 'D:\\harness', deployDir: 'D:\\deploy' }), [
-    '--dir', 'D:\\harness', '--filter', '@deepseek-ai/dsh', 'deploy', '--prod', '--legacy', 'D:\\deploy',
+    '--dir', 'D:\\harness', '--filter', '@deepseek-ai/dsh', 'deploy', '--prod', '--legacy', '--ignore-scripts', 'D:\\deploy',
   ])
 })
 

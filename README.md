@@ -116,6 +116,6 @@ pnpm materialize:windows-harness-runtime -- --source <built-harness-checkout> --
 pnpm release:windows-lite -- --harness-runtime <runtime-directory> --version 1.1.63
 ```
 
-materializer 使用上游 `pnpm deploy --prod` 获取 CLI 的生产依赖闭包，再补入构建后的 Web dist。它拒绝外部 symlink、非 Windows PE 原生 addon 和不通过 `node apps/cli/lib/bin.js --help` 的产物；仅这些检查均通过后才写入 `harness-runtime.json` 的 `closureComplete: true`。
+materializer 使用上游 `pnpm deploy --prod --ignore-scripts` 获取已经构建完成的 CLI 生产依赖闭包，再补入构建后的 Web dist；deploy 阶段不会重复执行第三方安装脚本。它拒绝外部 symlink、非 Windows PE 原生 addon 和不通过 `node apps/cli/lib/bin.js --help` 的产物；仅这些检查均通过后才写入 `harness-runtime.json` 的 `closureComplete: true`。
 
 仓库的 `Build Windows Lite` GitHub Actions 工作流会在 `windows-latest` 上完成上述步骤并上传 ZIP 与 SHA-256。`release/windows-lite/harness-ui.patch` 是当前 Harness UI 工作树相对于固定上游提交的发布快照；更新快照时必须同时更新工作流中的 Harness 提交号，并先用 `git apply --check` 验证补丁。

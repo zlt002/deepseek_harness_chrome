@@ -67,7 +67,7 @@ function sourceRevision(sourceDir, requestedRevision) {
 }
 
 export function legacyDeployArgs({ sourceDir, deployDir }) {
-  return ['--dir', sourceDir, '--filter', '@deepseek-ai/dsh', 'deploy', '--prod', '--legacy', deployDir]
+  return ['--dir', sourceDir, '--filter', '@deepseek-ai/dsh', 'deploy', '--prod', '--legacy', '--ignore-scripts', deployDir]
 }
 
 function deployHarnessCli({ sourceDir, deployDir }) {
