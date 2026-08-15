@@ -231,13 +231,13 @@ function archiveEntries(zipPath, requiredEntries) {
       const script = [
         "$ErrorActionPreference = 'Stop'",
         'Add-Type -AssemblyName System.IO.Compression.FileSystem',
-        '$required = @($env:DSH_ZIP_ENTRIES | ConvertFrom-Json)',
+        "$required = @($env:DSH_ZIP_ENTRIES -split '\\r?\\n')",
         '$archive = [System.IO.Compression.ZipFile]::OpenRead($env:DSH_ZIP_PATH)',
-        "try { foreach ($entry in $archive.Entries) { $name = $entry.FullName.Replace([char]92, [char]47) -replace '^\\./', ''; if ($required -contains $name) { [Console]::Out.WriteLine($name) } } } finally { $archive.Dispose() }",
+        "$index = 0; try { foreach ($entry in $archive.Entries) { $name = $entry.FullName.Replace([char]92, [char]47) -replace '^\\./', ''; if ($index -lt 5 -or $required -contains $name) { [Console]::Out.WriteLine($name) }; $index += 1 } } finally { $archive.Dispose() }",
       ].join('; ')
       return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         encoding: 'utf8',
-        env: { ...process.env, DSH_ZIP_PATH: zipPath, DSH_ZIP_ENTRIES: JSON.stringify(requiredEntries) },
+        env: { ...process.env, DSH_ZIP_PATH: zipPath, DSH_ZIP_ENTRIES: requiredEntries.join('\n') },
       }).split(/\r?\n/).filter(Boolean)
     }
     return execFileSync('unzip', ['-Z1', zipPath], { encoding: 'utf8' })
@@ -309,9 +309,12 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   let payloadEntries = []
   if (existsSync(payloadZipPath)) {
     payloadEntries = normalizedArchiveEntries(payloadZipPath, requiredPayloadEntries)
+    const missingPayloadEntries = []
     for (const requiredPath of requiredPayloadEntries) {
-      if (!payloadEntries.includes(requiredPath)) errors.push(`payload.zip is missing ${requiredPath}`)
+      if (!payloadEntries.includes(requiredPath)) missingPayloadEntries.push(requiredPath)
     }
+    for (const requiredPath of missingPayloadEntries) errors.push(`payload.zip is missing ${requiredPath}`)
+    if (missingPayloadEntries.length > 0) errors.push(`payload.zip entry sample: ${payloadEntries.slice(0, 5).join(', ')}`)
   }
   let manifest
   if (payloadEntries.includes(manifestEntry)) {
@@ -382,9 +385,12 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     const root = `${path.basename(packageDir)}/`
     const requiredOuterPaths = ['install.ps1', 'install.vbs', 'payload.zip']
     const entries = normalizedArchiveEntries(zipPath, requiredOuterPaths.map((requiredPath) => `${root}${requiredPath}`))
+    const missingOuterPaths = []
     for (const requiredPath of requiredOuterPaths) {
-      if (!entries.includes(`${root}${requiredPath}`)) errors.push(`outer ZIP is missing ${requiredPath}`)
+      if (!entries.includes(`${root}${requiredPath}`)) missingOuterPaths.push(requiredPath)
     }
+    for (const requiredPath of missingOuterPaths) errors.push(`outer ZIP is missing ${requiredPath}`)
+    if (missingOuterPaths.length > 0) errors.push(`outer ZIP entry sample: ${entries.slice(0, 5).join(', ')}`)
   } else {
     errors.push(`missing outer ZIP ${path.basename(zipPath)}`)
   }
