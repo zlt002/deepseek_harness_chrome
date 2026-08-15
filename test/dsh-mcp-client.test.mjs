@@ -56,7 +56,15 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
       reconnect: { enabled: false, initialDelayMs: 10, maxDelayMs: 10, maxAttempts: 1 },
     })
 
-    assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name), ['mcp__chrome__office_get_context'])
+    assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name).sort(), [
+      'mcp__chrome__browser_open_tab',
+      'mcp__chrome__code_search',
+      'mcp__chrome__knowledge_search',
+      'mcp__chrome__office_get_context',
+      'mcp__chrome__office_read_range',
+      'mcp__chrome__office_write_range',
+      'mcp__chrome__team_doc_create',
+    ])
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
       callId: 'dsh-mcp-client-test',
@@ -106,6 +114,8 @@ test('a real DSH Web profile loads, discovers, and executes its generated Connec
   try {
     const url = await harness.start()
     assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/)
+    const html = await fetch(`${url}/`).then((response) => response.text())
+    assert.match(html, /@deepseek-ai\/dsh-client-ui-knowledge-scope/)
     const timeout = setTimeout(() => listed.reject(new Error('DSH Web profile never listed the generated Connector patch tools')), 15_000)
     try {
       await listed.promise

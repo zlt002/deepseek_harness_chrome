@@ -7,12 +7,23 @@ import { defineConfig } from 'wxt'
  */
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
+  dev: {
+    server: {
+      strictPort: true,
+    },
+  },
   manifest: {
     name: 'DeepSeek Harness',
     description: 'Use DeepSeek Harness from a Chrome side panel.',
     minimum_chrome_version: '120',
-    permissions: ['sidePanel', 'nativeMessaging', 'storage', 'tabs'],
-    host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'],
+    permissions: ['sidePanel', 'nativeMessaging', 'storage', 'tabs', 'webNavigation', 'scripting'],
+    host_permissions: [
+      'http://127.0.0.1/*',
+      'http://localhost/*',
+      'https://doc.midea.com/*',
+      'https://webedit.midea.com/*',
+      'https://anapi-uat.annto.com/*',
+    ],
     action: {
       default_title: 'Open DeepSeek Harness',
     },

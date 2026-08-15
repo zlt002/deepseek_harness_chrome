@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { redactSensitiveDiagnostic } from './redact.mjs'
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url))
@@ -73,9 +73,47 @@ function connectorPatch(url, token) {
         url: '${url}'
         headers:
           Authorization: 'Bearer ${token}'
+        forwardSessionIdentity: true
+        toolCallTimeoutMs: 1800000
         failOnStartupError: true
         reconnect:
           enabled: false
+
+- insert:
+    - id: deepseek-harness-knowledge-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: knowledge_subagent
+        backgroundMode: continuable
+        toolFilter:
+          allow:
+            - mcp__chrome__knowledge_search
+            - mcp__chrome__code_search
+`
+}
+
+function yamlString(value) {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
+/**
+ * Add Claude Code's standard skill root to the host-level catalog. The web
+ * profile mounts a separate filesystem provider for each agent preset, so a
+ * distinct provider preserves its existing .dsh and .agents discovery.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+export function claudeSkillsPatch(env = process.env) {
+  const home = env.HOME?.trim() || homedir()
+  const claudeSkillsDir = resolve(home, '.claude/skills')
+  return `- insert:
+    - id: deepseek-harness-chrome-claude-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        includeDefaultRoots: false
+        customSkillDirs:
+          - ${yamlString(claudeSkillsDir)}
 `
 }
 
@@ -197,11 +235,11 @@ export class HarnessWebProcess {
   }
 
   async #createConnectorPatch() {
-    if (this.mcpConnector === undefined) return undefined
-    if (!validMcpConnector(this.mcpConnector)) throw new Error('Native Host supplied an invalid Browser Connector endpoint')
+    if (this.mcpConnector !== undefined && !validMcpConnector(this.mcpConnector)) throw new Error('Native Host supplied an invalid Browser Connector endpoint')
     const directory = await mkdtemp(`${tmpdir()}/deepseek-harness-connector-`)
     const patchPath = resolve(directory, 'connector.cordis.yml')
-    await writeFile(patchPath, connectorPatch(this.mcpConnector.url, this.mcpConnector.token), { mode: 0o600 })
+    const connector = this.mcpConnector === undefined ? '' : connectorPatch(this.mcpConnector.url, this.mcpConnector.token)
+    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${connector}`, { mode: 0o600 })
     this.connectorPatchDir = directory
     this.connectorPatchPath = patchPath
     return patchPath

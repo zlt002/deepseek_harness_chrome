@@ -50,6 +50,23 @@ function sameBrowserTarget(left, right) {
     && left.url === right.url
 }
 
+function validUnavailableBrowserTarget(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === 2
+    && value.reason === 'closed_or_changed'
+    && validBrowserTarget(value.browserTarget)
+}
+
+function validBrowserTargetBinding(browserTarget, browserTargets, unavailableBrowserTargets) {
+  const targets = browserTargets ?? (validBrowserTarget(browserTarget) ? [browserTarget] : [])
+  const unavailable = unavailableBrowserTargets ?? []
+  return validBrowserTarget(browserTarget)
+    && Array.isArray(targets) && targets.length > 0 && targets.every(validBrowserTarget)
+    && targets.some((target) => sameBrowserTarget(target, browserTarget))
+    && new Set(targets.map((target) => `${target.windowId}:${target.tabId}:${target.url}`)).size === targets.length
+    && Array.isArray(unavailable) && unavailable.every(validUnavailableBrowserTarget)
+}
+
 process.on('uncaughtException', (error) => {
   nativeLog(`uncaughtException ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
 })
@@ -70,6 +87,8 @@ export class NativeHost {
     this.harness = undefined
     this.connector = undefined
     this.browserTargets = new Map()
+    this.browserTargetSets = new Map()
+    this.unavailableBrowserTargets = new Map()
     this.currentRunId = undefined
     this.serverUrl = undefined
     this.startPromise = undefined
@@ -122,7 +141,11 @@ export class NativeHost {
       return
     }
     if (type === 'start') {
-      await this.startHarness(message.browserTarget)
+      await this.startHarness(message.browserTarget, message.browserTargets, message.unavailableBrowserTargets)
+      return
+    }
+    if (type === 'transfer-browser-target') {
+      this.transferBrowserTarget(message.requestId, message.runId, message.browserTarget, message.browserTargets, message.unavailableBrowserTargets)
       return
     }
     if (type === 'connector_response') {
@@ -138,18 +161,22 @@ export class NativeHost {
     this.send({ type: 'error', error: `Unknown native message type: ${String(type)}` })
   }
 
-  async startHarness(browserTarget) {
+  async startHarness(browserTarget, browserTargets, unavailableBrowserTargets) {
     if (this.closed) return
-    if (this.serverUrl === undefined && !validBrowserTarget(browserTarget)) {
-      this.send({ type: 'error', error: 'Native start requires an explicit Chrome Browser Target.' })
-      return
-    }
     const boundTarget = this.currentRunId === undefined ? undefined : this.browserTargets.get(this.currentRunId)
     if (validBrowserTarget(browserTarget) && validBrowserTarget(boundTarget) && !sameBrowserTarget(browserTarget, boundTarget)) {
       this.send({ type: 'error', error: 'Harness Run is already bound to a different Browser Target.' })
       return
     }
-    if (validBrowserTarget(browserTarget) && boundTarget === undefined) this.#bindBrowserTarget(browserTarget)
+    if (browserTarget !== undefined && !validBrowserTargetBinding(browserTarget, browserTargets, unavailableBrowserTargets)) {
+      this.send({ type: 'error', error: 'Browser Target binding must contain a trusted primary target and one or more unique selected targets.' })
+      return
+    }
+    if (this.currentRunId === undefined) this.#createRun(browserTarget, browserTargets, unavailableBrowserTargets)
+    else if (validBrowserTarget(browserTarget) && boundTarget === undefined) {
+      this.send({ type: 'error', error: 'Harness Run is unbound. Use transfer-browser-target to bind an explicit Browser Target.' })
+      return
+    }
     if (this.serverUrl !== undefined) {
       this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId } })
       return
@@ -167,6 +194,33 @@ export class NativeHost {
     }
   }
 
+  transferBrowserTarget(requestId, runId, browserTarget, browserTargets, unavailableBrowserTargets) {
+    if (typeof requestId !== 'string' || requestId.length === 0 || typeof runId !== 'string' || runId.length === 0
+      || !validBrowserTargetBinding(browserTarget, browserTargets, unavailableBrowserTargets)) {
+      this.send({ type: 'browser_target_transfer_failed', requestId, error: 'transfer-browser-target requires a request id, Run id, and explicit Chrome Browser Target.' })
+      return false
+    }
+    if (runId !== this.currentRunId) {
+      this.send({ type: 'browser_target_transfer_failed', requestId, error: 'Browser Target transfer does not match the active Harness Run.' })
+      return false
+    }
+    this.browserTargets.set(runId, { ...browserTarget })
+    const targetSet = browserTargets ?? [browserTarget]
+    const unavailable = unavailableBrowserTargets ?? []
+    this.browserTargetSets.set(runId, targetSet.map((target) => ({ ...target })))
+    this.unavailableBrowserTargets.set(runId, unavailable.map((item) => ({ browserTarget: { ...item.browserTarget }, reason: item.reason })))
+    this.connector?.bindBrowserTarget(runId, browserTarget, targetSet, unavailable)
+    const isMultiTarget = browserTargets !== undefined || unavailableBrowserTargets !== undefined
+    this.send({ type: 'browser_target_transferred', requestId, payload: {
+      runId, browserTarget: { ...browserTarget },
+      ...(isMultiTarget ? {
+        browserTargets: targetSet.map((target) => ({ ...target })),
+        unavailableBrowserTargets: unavailable.map((item) => ({ browserTarget: { ...item.browserTarget }, reason: item.reason })),
+      } : {}),
+    } })
+    return true
+  }
+
   async close(reason) {
     if (this.closed) return
     this.closed = true
@@ -178,6 +232,8 @@ export class NativeHost {
       await this.connector?.stop()
       this.connector = undefined
       this.browserTargets.clear()
+      this.browserTargetSets.clear()
+      this.unavailableBrowserTargets.clear()
       this.currentRunId = undefined
       this.serverUrl = undefined
       this.exit(0)
@@ -191,7 +247,9 @@ export class NativeHost {
         this.connector = this.connectorFactory({
           requestExtension: (request) => this.send(request),
         })
-        for (const [runId, browserTarget] of this.browserTargets) this.connector.bindBrowserTarget(runId, browserTarget)
+        if (this.currentRunId !== undefined) {
+          this.connector.registerRun(this.currentRunId, this.browserTargets.get(this.currentRunId), this.browserTargetSets.get(this.currentRunId), this.unavailableBrowserTargets.get(this.currentRunId))
+        }
       }
       const connector = await this.connector.start()
       if (this.harness === undefined) {
@@ -208,17 +266,25 @@ export class NativeHost {
       await this.connector?.stop()
       this.connector = undefined
       this.browserTargets.clear()
+      this.browserTargetSets.clear()
+      this.unavailableBrowserTargets.clear()
       this.currentRunId = undefined
       this.serverUrl = undefined
       throw error
     }
   }
 
-  #bindBrowserTarget(browserTarget) {
+  #createRun(browserTarget, browserTargets, unavailableBrowserTargets) {
     const runId = randomUUID()
     this.currentRunId = runId
-    this.browserTargets.set(runId, { ...browserTarget })
-    this.connector?.bindBrowserTarget(runId, browserTarget)
+    if (validBrowserTarget(browserTarget)) {
+      const targetSet = browserTargets ?? [browserTarget]
+      const unavailable = unavailableBrowserTargets ?? []
+      this.browserTargets.set(runId, { ...browserTarget })
+      this.browserTargetSets.set(runId, targetSet.map((target) => ({ ...target })))
+      this.unavailableBrowserTargets.set(runId, unavailable.map((item) => ({ browserTarget: { ...item.browserTarget }, reason: item.reason })))
+    }
+    this.connector?.registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets)
   }
 
   /** @param {unknown} message */

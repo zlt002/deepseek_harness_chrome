@@ -106,6 +106,38 @@ test('publishes office_get_context and correlates a simulated extension response
   }
 })
 
+test('publishes every trusted pinned context and unavailable item without model-selected targets', async () => {
+  const first = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/one' }
+  const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
+  const unavailable = { browserTarget: { browser: 'chrome', windowId: 4, tabId: 14, url: 'https://docs.example.test/closed' }, reason: 'closed_or_changed' }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+      browserTarget: primary, browserTargets: [first, primary], unavailableBrowserTargets: [unavailable],
+      result: {
+        status: 'browser_target_verified', pageIdentity: { title: 'Two', url: primary.url }, documentIdentity: null,
+        primaryBrowserTarget: primary,
+        pages: [
+          { browserTarget: first, pageIdentity: { title: 'One', url: first.url }, documentIdentity: null, isPrimary: false },
+          { browserTarget: primary, pageIdentity: { title: 'Two', url: primary.url }, documentIdentity: null, isPrimary: true },
+        ],
+        unavailableBrowserTargets: [unavailable],
+      },
+    })),
+  })
+  connector.bindBrowserTarget('run-pinned', primary, [first, primary], [unavailable])
+  const endpoint = await connector.start()
+  try {
+    const body = await callOfficeGetContext(endpoint)
+    assert.deepEqual(body.result.structuredContent.browserTargets, [first, primary])
+    assert.deepEqual(body.result.structuredContent.primaryBrowserTarget, primary)
+    assert.deepEqual(body.result.structuredContent.unavailableBrowserTargets, [unavailable])
+    assert.equal(body.result.structuredContent.officeContext.pages.length, 2)
+  } finally {
+    await connector.stop()
+  }
+})
+
 test('accepts the official MCP client at the public tools/list and tools/call seam', async () => {
   const target = { browser: 'chrome', windowId: 3, tabId: 8, url: 'https://docs.example.test/official' }
   const connector = new BrowserConnector({
@@ -134,7 +166,7 @@ test('accepts the official MCP client at the public tools/list and tools/call se
   try {
     await client.connect(transport)
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'team_doc_create', 'browser_open_tab', 'knowledge_search', 'code_search'])
 
     const result = await client.callTool({
       name: 'office_get_context',
@@ -144,6 +176,109 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     assert.equal(result.structuredContent.officeContext.pageIdentity.title, 'Official-client.xlsx — Sheet1')
   } finally {
     await client.close()
+    await connector.stop()
+  }
+})
+
+test('routes a continuable child identity to the knowledge adapter without model-controlled scope arguments', async () => {
+  let seen
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      seen = request
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+        result: { status: 'complete', answer: '知识答案', sources: [{ id: 'page-1', title: '来源' }] },
+      }))
+    },
+  })
+  connector.registerRun('knowledge-run')
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'knowledge_search', arguments: { question: '订单流程' }, _meta: { 'io.deepseek.harness/sessionId': 'child-1', 'io.deepseek.harness/parentSessionId': 'parent-1' } } }),
+    })
+    const body = await response.json()
+    assert.equal(body.result.structuredContent.answer, '知识答案')
+    assert.deepEqual(seen, { type: 'connector_request', requestId: seen.requestId, runId: 'knowledge-run', generation: seen.generation, tool: 'knowledge_search', harnessSessionId: 'child-1', harnessParentSessionId: 'parent-1', question: '订单流程' })
+  } finally { await connector.stop() }
+})
+
+test('keeps the long knowledge timeout separate and cancels the Extension request when it expires', async () => {
+  const requests = []
+  const connector = new BrowserConnector({
+    requestExtension: (request) => requests.push(request),
+    requestTimeoutMs: 1,
+    knowledgeRequestTimeoutMs: 20,
+  })
+  connector.registerRun('knowledge-timeout-run')
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'knowledge_search', arguments: { question: '慢查询' }, _meta: { 'io.deepseek.harness/sessionId': 'child-1', 'io.deepseek.harness/parentSessionId': 'parent-1' } } }),
+    })
+    const body = await response.json()
+    assert.equal(body.result.isError, true)
+    assert.match(body.result.content[0].text, /timed out/)
+    assert.equal(requests[0].type, 'connector_request')
+    assert.deepEqual(requests[1], {
+      type: 'connector_cancel', requestId: requests[0].requestId, runId: 'knowledge-timeout-run', generation: requests[0].generation,
+    })
+  } finally { await connector.stop() }
+})
+
+test('publishes browser_open_tab and returns the target that the Extension explicitly transferred for the Run', async () => {
+  const opened = { browser: 'chrome', windowId: 4, tabId: 19, url: 'https://docs.example.test/opened' }
+  const initial = { browser: 'chrome', windowId: 4, tabId: 18, url: 'https://docs.example.test/initial' }
+  const requests = []
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      requests.push(request)
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+        browserTarget: opened, result: { pageIdentity: { title: 'Opened target', url: opened.url } },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-open', initial)
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'browser_open_tab', arguments: { url: opened.url } },
+      }),
+    })
+    const body = await response.json()
+    assert.equal(body.result.structuredContent.runId, 'run-open')
+    assert.deepEqual(body.result.structuredContent.browserTarget, opened)
+    assert.deepEqual(body.result.structuredContent.pageIdentity, { title: 'Opened target', url: opened.url })
+    assert.deepEqual(requests[0], {
+      type: 'connector_request', requestId: requests[0].requestId, runId: 'run-open', generation: requests[0].generation,
+      tool: 'browser_open_tab', url: opened.url,
+    })
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('rejects browser_open_tab for an unbound none Run without requesting the Extension', async () => {
+  let extensionRequests = 0
+  const connector = new BrowserConnector({ requestExtension: () => { extensionRequests += 1 } })
+  connector.registerRun('run-none')
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'browser_open_tab', arguments: { url: 'https://docs.example.test/new' } } }),
+    })
+    const body = await response.json()
+    assert.equal(body.result.isError, true)
+    assert.match(body.result.content[0].text, /No Browser Target is bound/i)
+    assert.equal(extensionRequests, 0)
+  } finally {
     await connector.stop()
   }
 })
@@ -190,6 +325,41 @@ test('rejects office_get_context before extension execution until the trusted Na
     assert.equal(modelSelectedTarget.error.code, -32602)
     assert.match(modelSelectedTarget.error.message, /no model-controlled target arguments/i)
     assert.equal(extensionRequests, 1)
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('uses an Extension-confirmed Browser Target transfer for the next office turn', async () => {
+  const initial = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://www.baidu.com/' }
+  const next = { browser: 'chrome', windowId: 7, tabId: 43, url: 'https://wb.example.test/' }
+  const connector = new BrowserConnector({
+    requestTimeoutMs: 50,
+    requestExtension: (request) => {
+      queueMicrotask(() => {
+        connector.bindBrowserTarget(request.runId, next)
+        connector.acceptExtensionResponse({
+          type: 'connector_response',
+          requestId: request.requestId,
+          runId: request.runId,
+          generation: request.generation,
+          browserTarget: next,
+          result: {
+            status: 'browser_target_verified',
+            pageIdentity: { title: 'WB', url: next.url },
+            documentIdentity: null,
+          },
+        })
+      })
+    },
+  })
+  connector.bindBrowserTarget('run-follow', initial)
+  const endpoint = await connector.start()
+
+  try {
+    const response = await callOfficeGetContext(endpoint)
+    assert.equal(response.result.structuredContent.browserTarget.url, next.url)
+    assert.equal(response.result.structuredContent.officeContext.pageIdentity.url, next.url)
   } finally {
     await connector.stop()
   }
