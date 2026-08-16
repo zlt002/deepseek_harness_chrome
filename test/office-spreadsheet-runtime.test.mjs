@@ -23,6 +23,7 @@ function fakeApp() {
   const cells = [[3, 2], [1, 4]]
   const formulas = [['', ''], ['', '']]
   let filterOperator = 'equals'
+  let activeRow = 1; let activeColumn = 1; let freezePanes = false; let splitRow = 0; let splitColumn = 0
   const comments = { Count: 0 }
   let nextHyperlink = 1; const hyperlinks = { Count: 0, items: [], Add: (_range, url, subAddress, screenTip, textToDisplay) => { hyperlinks.items.push({ Address: url, SubAddress: subAddress, ScreenTip: screenTip, TextToDisplay: textToDisplay, Name: `Link${nextHyperlink++}`, Type: 'hyperlink' }); hyperlinks.Count += 1 }, Delete: () => { hyperlinks.Count = 0; hyperlinks.items = [] }, Item: (index) => hyperlinks.items[index - 1] }
   const conditionalFormats = { Count: 0, items: [], Add: (type, operator, formula1, formula2) => { const item = { Type: type, Operator: operator, Formula1: formula1, Formula2: formula2 ?? '', Priority: conditionalFormats.Count + 1, Interior: { Color: '#FFFFFF' }, Font: { Color: '#000000', Bold: false, Italic: false } }; conditionalFormats.items.push(item); conditionalFormats.Count += 1; return item }, Delete: () => { conditionalFormats.Count = 0; conditionalFormats.items = [] }, Item: (index) => conditionalFormats.items[index - 1] }
@@ -46,14 +47,17 @@ function fakeApp() {
     ToImageDataURL: () => 'data:image/png;base64,AQID',
   }
   const sheet = {
-    Name: 'Sheet1', getName: () => 'Sheet1', getRange: () => range, Range: () => range, Comments: comments, Shapes: charts,
+    Name: 'Sheet1', getName: () => 'Sheet1', getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
     getPivotTables: () => pivots,
     addChart: (_style, type, _range, callback) => { const chart = { Id: charts.Count + 1, Name: `Chart ${charts.Count + 1}`, Type: type }; charts.items.push(chart); charts.Count += 1; callback(chart, 'ok') },
     ExportImage: () => ({ result: 'ok', data: { size: 3, type: 'image/png', arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } }),
   }
   range.createPivotTable = (options, callback) => { const pivot = { Id: pivots.Count + 1, Name: `Pivot ${pivots.Count + 1}`, Destination: options.destRangeText }; pivots.items.push(pivot); pivots.Count += 1; callback({ isOk: true, pivotTableId: pivot.Id }) }
   const workbook = { Name: 'Budget.xlsx', getName: () => 'Budget.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet }, ExportAsFixedFormat: () => ({ url: 'https://download.example.test/Budget.pdf?Expires=2000000000' }) }
-  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
+  const activeWindow = { get FreezePanes() { return freezePanes }, set FreezePanes(value) { freezePanes = value; if (value) { splitRow = activeRow - 1; splitColumn = activeColumn - 1 } }, get SplitRow() { return splitRow }, get SplitColumn() { return splitColumn }, Zoom: 100, ScrollRow: 1, ScrollColumn: 1 }
+  const app = { ActiveWorkbook: workbook, ActiveSheet: sheet, ActiveWindow: activeWindow, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook, _activeWindow: activeWindow }
+  Object.defineProperty(app, 'ActiveCell', { get: () => ({ Row: activeRow, Column: activeColumn }) })
+  return app
 }
 
 function p0App(values, options = {}) {
@@ -429,6 +433,23 @@ test('conditional formats fail closed for stale, incomplete, wrong, changed, dri
   const oversizedApp = fakeApp(); oversizedApp._conditionalFormats.Count = 201; const oversized = await runtimeWith(oversizedApp); const features = await oversized({ action: 'range_features', range: 'A1:B2' }); assert.equal(features.result.rangeFeatures.conditionalFormatsSupported, false); assert.equal(features.result.rangeFeatures.conditionalFormats, null)
 })
 
+test('view reads and verified zoom/freeze writes use complete view preconditions', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const view = await run({ action: 'view' }); assert.equal(view.result.view.supported, true); assert.equal(view.result.view.zoom, 100)
+  const zoomed = await run({ action: 'write', resource, operation: 'set_zoom', payload: { zoom: 125 } }); assert.equal(zoomed.result.observed.view.zoom, 125)
+  const frozen = await run({ action: 'write', resource, operation: 'set_freeze_panes', payload: { freeze: true, target: 'B3' } }); assert.equal(frozen.ok, true, JSON.stringify(frozen)); assert.equal(frozen.result.observed.view.freezePanes, true); assert.equal(frozen.result.observed.view.splitRow, 2); assert.equal(frozen.result.observed.view.splitColumn, 1)
+  const unfrozen = await run({ action: 'write', resource, operation: 'set_freeze_panes', payload: { freeze: false } }); assert.equal(unfrozen.result.observed.view.freezePanes, false)
+})
+
+test('view writes fail closed for stale, invalid targets, missing APIs, and incorrect readback', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource; const inspected = await run.raw({ action: 'inspect_write', operation: 'set_zoom', payload: { zoom: 125 } }); app._activeWindow.ScrollRow = 2
+  assert.equal((await run.raw({ action: 'write', resource, operation: 'set_zoom', payload: { zoom: 125 }, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
+  assert.equal((await run({ action: 'inspect_write', operation: 'set_freeze_panes', payload: { freeze: true, target: 'A1:B2' } })).error.code, 'invalid_range')
+  const missing = fakeApp(); delete missing._activeWindow; delete missing.ActiveWindow; const missingRun = await runtimeWith(missing); const missingResource = (await missingRun({ action: 'context' })).result.resource; assert.equal((await missingRun({ action: 'write', resource: missingResource, operation: 'set_zoom', payload: { zoom: 125 } })).error.code, 'unsupported')
+  const noSelect = fakeApp(); noSelect._sheet.getRange = () => noSelect._range; const noSelectRun = await runtimeWith(noSelect); const noSelectResource = (await noSelectRun({ action: 'context' })).result.resource; assert.equal((await noSelectRun({ action: 'write', resource: noSelectResource, operation: 'set_freeze_panes', payload: { freeze: true, target: 'B2' } })).error.code, 'unsupported')
+  const wrong = fakeApp(); Object.defineProperty(wrong._activeWindow, 'FreezePanes', { configurable: true, get: () => false, set: () => {} }); const wrongRun = await runtimeWith(wrong); const wrongResource = (await wrongRun({ action: 'context' })).result.resource; assert.equal((await wrongRun({ action: 'write', resource: wrongResource, operation: 'set_freeze_panes', payload: { freeze: true, target: 'B2' } })).error.code, 'readback_mismatch')
+})
+
 test('data validation fails closed for stale state, missing API, wrong property readback, changed range state, and oversized feature reads', async () => {
   const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const resource = (await stale({ action: 'context' })).result.resource; const payload = { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' }
   const inspected = await stale.raw({ action: 'inspect_write', operation: 'set_data_validation', payload }); staleApp._validation.Type = 3
@@ -483,7 +504,7 @@ test('unusable spreadsheet exports fail closed before invoking WebEdit export AP
 test('every unverified AccrUI spreadsheet family fails closed before mutation', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   let mutations = 0; app._range.copyRange = () => { mutations += 1 }
-  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'set_freeze_panes', 'set_print_settings', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
+  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'set_print_settings', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
     const result = await run({ action: 'write', resource, operation, payload: { range: 'A1' } })
     assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
   }

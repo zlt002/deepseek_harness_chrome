@@ -351,3 +351,15 @@ test('validates conditional-format schema and independently verifies complete co
     const clearInspection = await call(endpoint, { action: 'inspect_write', operation: 'clear_conditional_formats', payload: { range: 'A1' } }); const cleared = await call(endpoint, { action: 'write', challenge: clearInspection.result.structuredContent.challenge, idempotencyIdentity: 'conditional-format-clear', resource, operation: 'clear_conditional_formats', payload: { range: 'A1' } }); assert.equal(cleared.result.structuredContent.status, 'verified_write')
   } finally { await connector.stop() }
 })
+
+test('validates and independently verifies view zoom preconditions', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 38, url: 'https://doc.midea.com/sheets/view' }; const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'View.xlsx', sheetName: 'Sheet1', fingerprint: 'view-sheet' }
+  const view = { sheetName: 'Sheet1', activeCell: 'A1', freezePanes: false, splitRow: 0, splitColumn: 0, zoom: 100, scrollRow: 1, scrollColumn: 1 }; const precondition = { version: 4, view }; let forge = false
+  const connector = new BrowserConnector({ officeSpreadsheetWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: request.action === 'write' ? { status: 'verified_write', resource, operation: 'set_zoom', requested: { zoom: 125 }, observed: { view: { ...view, zoom: 125, ...(forge ? { scrollRow: 2 } : {}) }, verified: true } } : { status: 'ok', resource, precondition } })) })
+  connector.bindBrowserTarget('spreadsheet-view-run', target); const endpoint = await connector.start()
+  try {
+    const invalid = await call(endpoint, { action: 'inspect_write', operation: 'set_zoom', payload: { zoom: 9 } }); assert.equal(invalid.error.code, -32602)
+    const inspected = await call(endpoint, { action: 'inspect_write', operation: 'set_zoom', payload: { zoom: 125 } }); const success = await call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'view-zoom-success', resource, operation: 'set_zoom', payload: { zoom: 125 } }); assert.equal(success.result.structuredContent.status, 'verified_write')
+    forge = true; const second = await call(endpoint, { action: 'inspect_write', operation: 'set_zoom', payload: { zoom: 125 } }); const rejected = await call(endpoint, { action: 'write', challenge: second.result.structuredContent.challenge, idempotencyIdentity: 'view-zoom-forged', resource, operation: 'set_zoom', payload: { zoom: 125 } }); assert.equal(rejected.result.isError, true)
+  } finally { await connector.stop() }
+})

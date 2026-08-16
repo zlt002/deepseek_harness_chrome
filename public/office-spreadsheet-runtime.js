@@ -28,6 +28,7 @@
     alignment: ['general', 'General', 0, -4105], wrap: [false, 0],
   }
   const WORKBOOK_OPERATIONS = new Set(['create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'])
+  const VIEW_OPERATIONS = new Set(['set_zoom', 'set_freeze_panes'])
 
   async function appAndSheet(requestedSheet) {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
@@ -41,6 +42,18 @@
     return { app, workbook, sheet, resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: typeof workbookName === 'string' ? workbookName : null, sheetName: typeof sheetName === 'string' ? sheetName : null, fingerprint: resourceFingerprint(workbookName, sheetName) } }
   }
   async function rangeFor(sheet, address) { return await call(sheet, 'getRange', [address]) ?? await call(sheet, 'Range', [address]) }
+  async function viewSnapshot(resolved) {
+    const activeWindow = await property(resolved.app, 'ActiveWindow') ?? await call(resolved.app, 'getActiveWindow'); const activeCell = await property(resolved.app, 'ActiveCell'); const activeSheet = await property(resolved.app, 'ActiveSheet')
+    const sheetName = await call(activeSheet, 'getName') ?? await property(activeSheet, 'Name'); const row = Number(await property(activeCell, 'Row')); const column = Number(await property(activeCell, 'Column')); const freezePanes = await property(activeWindow, 'FreezePanes'); const splitRow = Number(await property(activeWindow, 'SplitRow')); const splitColumn = Number(await property(activeWindow, 'SplitColumn')); const zoom = Number(await property(activeWindow, 'Zoom')); const scrollRow = Number(await property(activeWindow, 'ScrollRow')); const scrollColumn = Number(await property(activeWindow, 'ScrollColumn') )
+    if (!activeWindow || typeof sheetName !== 'string' || sheetName.length === 0 || sheetName !== resolved.resource.sheetName || !Number.isInteger(row) || row < 1 || row > 1048576 || !Number.isInteger(column) || column < 1 || column > 16384 || typeof freezePanes !== 'boolean' || !Number.isInteger(splitRow) || splitRow < 0 || splitRow > 1048575 || !Number.isInteger(splitColumn) || splitColumn < 0 || splitColumn > 16383 || !Number.isInteger(zoom) || zoom < 10 || zoom > 400 || !Number.isInteger(scrollRow) || scrollRow < 1 || scrollRow > 1048576 || !Number.isInteger(scrollColumn) || scrollColumn < 1 || scrollColumn > 16384) return { supported: false, activeWindow: null }
+    return { supported: true, activeWindow, view: { sheetName, activeCell: `${columnName(column)}${row}`, freezePanes, splitRow, splitColumn, zoom, scrollRow, scrollColumn } }
+  }
+  function requestedViewOperation(operation, payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+    if (operation === 'set_zoom') return Object.keys(payload).every((key) => ['sheetName', 'zoom'].includes(key)) && Number.isInteger(payload.zoom) && payload.zoom >= 10 && payload.zoom <= 400 ? { zoom: payload.zoom } : null
+    if (operation === 'set_freeze_panes') { if (!Object.keys(payload).every((key) => ['sheetName', 'freeze', 'target'].includes(key)) || typeof payload.freeze !== 'boolean' || (payload.freeze ? typeof payload.target !== 'string' : payload.target !== undefined)) return null; const target = payload.freeze ? parseAddress(payload.target) : null; return payload.freeze ? target && target.rowFrom === target.rowTo && target.colFrom === target.colTo ? { freeze: true, target: payload.target } : null : { freeze: false } }
+    return null
+  }
   async function rangeSnapshot(sheet, address) {
     const range = await rangeFor(sheet, address)
     if (!range) return { error: fail('invalid_range', 'WebEdit could not resolve the requested range') }
@@ -401,6 +414,10 @@
       return { ok: true, result: { status: 'ok', resource: resolved.resource, definedNames: names.names } }
     }
     if (request.action === 'capabilities') return capabilities(resolved, request.range)
+    if (request.action === 'view') {
+      const snapshot = await viewSnapshot(resolved)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, view: snapshot.supported ? { supported: true, ...snapshot.view } : { supported: false } } }
+    }
     if (request.action === 'range_features') {
       if (typeof request.range !== 'string' || request.range.length === 0 || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
       const range = await rangeFor(resolved.sheet, request.range); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
@@ -433,6 +450,14 @@
   }
   async function inspectWrite(request) {
     const payload = request.payload ?? {}; const operation = request.operation
+    if (VIEW_OPERATIONS.has(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const requested = requestedViewOperation(operation, payload); const before = await viewSnapshot(resolved)
+      if (!requested) return fail('invalid_range', 'view write requires a bounded zoom or freeze target')
+      if (!before.supported) return fail('unsupported', 'WebEdit does not expose a complete readable worksheet view')
+      if (operation === 'set_freeze_panes' && requested.freeze) { const target = await rangeFor(resolved.sheet, requested.target); if (!target || typeof target.Select !== 'function') return fail('unsupported', 'WebEdit does not expose a selectable freeze target') }
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 4, view: before.view } } }
+    }
     if (WORKBOOK_OPERATIONS.has(operation)) {
       const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
       const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets) return fail('unsupported', 'WebEdit cannot create a bounded worksheet precondition')
@@ -501,6 +526,7 @@
   }
   async function preconditionMatches(resolved, request) {
     const approved = request.precondition
+    if (approved?.version === 4 && approved.view) { const current = await viewSnapshot(resolved); return current.supported && same(current.view, approved.view) ? null : fail('fingerprint_mismatch', 'The worksheet view changed since inspection; reread and inspect before writing') }
     if (approved?.version === 3 && Array.isArray(approved.sheets)) {
       const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets || !same(sheets.sheets, approved.sheets)) return fail('fingerprint_mismatch', 'The workbook sheet order or visibility changed since inspection')
       if (approved.definedNames !== undefined) { const names = await definedNamesSnapshot(resolved.workbook); if (!names || !same(names.names, approved.definedNames)) return fail('fingerprint_mismatch', 'The workbook defined names changed since inspection') }
@@ -921,6 +947,28 @@
     }
     return fail('unsupported', 'unsupported workbook operation')
   }
+  async function writeView(resolved, request) {
+    const payload = request.payload ?? {}; const expected = requestedViewOperation(request.operation, payload); const before = request.precondition?.view; const snapshot = await viewSnapshot(resolved)
+    if (!expected || !before || !snapshot.supported || !same(snapshot.view, before)) return fail('fingerprint_mismatch', 'The worksheet view changed since inspection; reread and inspect before writing')
+    const window = snapshot.activeWindow
+    if (request.operation === 'set_zoom') {
+      if (!await set(window, 'Zoom', expected.zoom)) return fail('unsupported', 'WebEdit does not expose worksheet zoom mutation')
+      const after = await viewSnapshot(resolved); if (!after.supported || after.view.zoom !== expected.zoom || !same({ ...after.view, zoom: before.zoom }, before)) return fail('readback_mismatch', 'WebEdit zoom readback changed another view field')
+      return { requested: { zoom: expected.zoom }, observed: { view: after.view, verified: true } }
+    }
+    if (!expected.freeze) {
+      if (!await set(window, 'FreezePanes', false)) return fail('unsupported', 'WebEdit does not expose worksheet freeze mutation')
+      const after = await viewSnapshot(resolved); if (!after.supported || after.view.freezePanes !== false || after.view.zoom !== before.zoom || after.view.scrollRow !== before.scrollRow || after.view.scrollColumn !== before.scrollColumn || after.view.sheetName !== before.sheetName || after.view.activeCell !== before.activeCell) return fail('readback_mismatch', 'WebEdit unfreeze readback changed a non-target view field')
+      return { requested: { freeze: false }, observed: { view: after.view, verified: true } }
+    }
+    const parsed = parseAddress(expected.target); const target = parsed && await rangeFor(resolved.sheet, expected.target)
+    if (!parsed || !target || typeof target.Select !== 'function') return fail('unsupported', 'WebEdit does not expose a selectable freeze target')
+    await resolve(target.Select()); const selected = await viewSnapshot(resolved)
+    if (!selected.supported || selected.view.activeCell !== expected.target || selected.view.zoom !== before.zoom || selected.view.scrollRow !== before.scrollRow || selected.view.scrollColumn !== before.scrollColumn || selected.view.sheetName !== before.sheetName) return fail('readback_mismatch', 'WebEdit cannot prove the selected freeze target before changing panes')
+    if (!await set(window, 'FreezePanes', false) || !await set(window, 'FreezePanes', true)) return fail('unsupported', 'WebEdit does not expose worksheet freeze mutation')
+    const after = await viewSnapshot(resolved); if (!after.supported || after.view.freezePanes !== true || after.view.splitRow !== parsed.rowFrom - 1 || after.view.splitColumn !== parsed.colFrom - 1 || after.view.activeCell !== expected.target || after.view.zoom !== before.zoom || after.view.scrollRow !== before.scrollRow || after.view.scrollColumn !== before.scrollColumn || after.view.sheetName !== before.sheetName) return fail('readback_mismatch', 'WebEdit freeze readback differs from target or changed another view field')
+    return { requested: { freeze: true, target: expected.target }, observed: { view: after.view, verified: true } }
+  }
   async function write(request) {
     const resolved = await appAndSheet(request.resource?.sheetName); if (resolved.error) return resolved.error
     if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select'].includes(request.operation)) return fail('unsupported', 'WebEdit structural sheet mutation lacks a mutation-safe preflight and is unavailable')
@@ -928,6 +976,11 @@
     const stale = await preconditionMatches(resolved, request); if (stale) return stale
     if (WORKBOOK_OPERATIONS.has(request.operation)) {
       const result = await writeWorkbook(resolved, request)
+      if (!result.ok && result.error) return result
+      return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
+    }
+    if (VIEW_OPERATIONS.has(request.operation)) {
+      const result = await writeView(resolved, request)
       if (!result.ok && result.error) return result
       return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
     }

@@ -38,8 +38,10 @@ test('routes office_spreadsheet writes only to the WebEdit iframe and forwards r
     listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-hyperlink-safe-name-reference', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'inspect_write', operation: 'add_hyperlink', payload: { range: 'A1', url: '', subAddress: 'QuarterlySales', textToDisplay: 'Quarterly sales' } }))
     listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-conditional-invalid', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'inspect_write', operation: 'add_conditional_format', payload: { range: 'A1', conditionType: 'cellValue', operator: 'between', formula1: '1', fillColor: '#FF0000' } }))
     listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-conditional-safe', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'inspect_write', operation: 'add_conditional_format', payload: { range: 'A1', conditionType: 'cellValue', operator: 'between', formula1: '1', formula2: '9', fillColor: '#FF0000', fontColor: '#00FF00', bold: true, italic: false } }))
+    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-view-invalid', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'inspect_write', operation: 'set_zoom', payload: { zoom: 401 } }))
+    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-view-safe', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'inspect_write', operation: 'set_zoom', payload: { zoom: 125 } }))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    assert.equal(sent.length, 4)
+    assert.equal(sent.length, 5)
     const response = nativeMessages.find((message) => message.type === 'connector_response')
     assert.deepEqual(response.error, { code: 'readback_mismatch', message: 'readback differs' })
   } finally { delete globalThis.chrome; delete globalThis.defineBackground }
