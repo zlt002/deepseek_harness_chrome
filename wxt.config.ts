@@ -67,6 +67,14 @@ export default defineConfig({
       'https://webedit.midea.com/*',
       '*://*.annto.com/*',
     ],
+    web_accessible_resources: [{
+      resources: [
+        'office-read-runtime.js',
+        'office-light-document-runtime.js',
+        'office-spreadsheet-runtime.js',
+      ],
+      matches: ['https://webedit.midea.com/*'],
+    }],
     action: {
       default_title: 'Open DeepSeek Harness',
     },
