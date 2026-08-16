@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { PmdDeliveryRecordStore } from './pmd-delivery-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
+import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
 
 const REQUEST_TIMEOUT_MS = 15_000
 const KNOWLEDGE_REQUEST_TIMEOUT_MS = 30 * 60_000
@@ -11,6 +12,10 @@ const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 60_000
 const OFFICE_DOCUMENT_MAX_RECORDS = 256
 const MCP_PATH = '/mcp'
 const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
+const MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES = 128 * 1024
+// Operations without a stable public API and operation-specific readback are
+// deliberately absent. Accepting them and failing after a mutation is unsafe.
+const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format']
 
 function spreadsheetArtifactSummary(result) {
   const artifact = result?.observed?.artifact
@@ -29,6 +34,12 @@ function spreadsheetToolResponse(id, structuredContent) {
   const body = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent } }
   if (Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_SPREADSHEET_TOOL_RESPONSE_BYTES) return body
   return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Spreadsheet result exceeds the ${MAX_SPREADSHEET_TOOL_RESPONSE_BYTES}-byte response limit; no artifact payload was returned.` }], isError: true } }
+}
+
+function lightDocumentToolResponse(id, structuredContent) {
+  const body = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } }
+  if (Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES) return body
+  return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Light-document result exceeds the ${MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES}-byte response limit; no payload was returned.` }], isError: true } }
 }
 
 const knowledgeSearchTool = {
@@ -208,7 +219,7 @@ const officeDocumentTool = {
       action: { enum: ['read', 'search', 'selection', 'inspect_write', 'write'] },
       offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, query: { type: 'string', minLength: 1, maxLength: 500 },
       challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 },
-      operation: { enum: ['insert', 'replace', 'delete', 'format', 'title'] }, payload: { type: 'object', additionalProperties: true },
+      operation: { enum: LIGHT_DOCUMENT_OPERATIONS }, payload: { type: 'object', additionalProperties: true },
     },
   },
   outputSchema: {
@@ -479,18 +490,21 @@ function validLightDocumentResource(value) {
 function validOfficeDocumentArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
   const keys = Object.keys(value)
-  if (value.action === 'read') return keys.every((key) => ['action', 'offset', 'limit'].includes(key))
+  const validPayload = value.payload === undefined || (value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000)
+  if (value.action === 'read') return keys.every((key) => ['action', 'offset', 'limit', 'payload'].includes(key))
     && (value.offset === undefined || (Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000))
-    && (value.limit === undefined || (Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200))
+    && (value.limit === undefined || (Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)) && validPayload
   if (value.action === 'search') return keys.every((key) => ['action', 'query', 'offset', 'limit'].includes(key))
     && typeof value.query === 'string' && value.query.trim().length > 0 && value.query.length <= 500
     && (value.offset === undefined || (Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000))
     && (value.limit === undefined || (Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200))
-  if (value.action === 'selection' || value.action === 'inspect_write') return keys.length === 1
+  if (value.action === 'selection') return keys.every((key) => ['action', 'payload'].includes(key)) && validPayload
+  if (value.action === 'inspect_write') return keys.length === 3 && typeof value.operation === 'string' && LIGHT_DOCUMENT_OPERATIONS.includes(value.operation)
+    && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000
   if (value.action !== 'write' || keys.length !== 5) return false
   return typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256
     && typeof value.idempotencyIdentity === 'string' && value.idempotencyIdentity.length > 0 && value.idempotencyIdentity.length <= 128
-    && ['insert', 'replace', 'delete', 'format', 'title'].includes(value.operation)
+    && LIGHT_DOCUMENT_OPERATIONS.includes(value.operation)
     && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload)
     && JSON.stringify(value.payload).length <= 100000
 }
@@ -504,6 +518,22 @@ function validOfficeDocumentWriteResult(value) {
   return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write'
     && validLightDocumentResource(value.resource) && value.requested && typeof value.requested === 'object'
     && value.observed && typeof value.observed === 'object'
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  return JSON.stringify(value)
+}
+function lightDocumentWriteHash(operation, payload) { return createHash('sha256').update(canonicalJson({ operation, payload })).digest('hex') }
+function sameLightDocumentTarget(left, right) {
+  return validLightDocumentResource(left) && validLightDocumentResource(right)
+    && left.kind === right.kind && left.origin === right.origin && left.documentName === right.documentName
+}
+function verifiedLightDocumentWriteMatches(result, request) {
+  return validOfficeDocumentWriteResult(result) && result.requested?.operation === request.operation
+    && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
+    && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
 }
 const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image']
 function validOfficeSpreadsheetArguments(value) {
@@ -799,7 +829,7 @@ function knowledgeProxyHeaders(entries, cookie) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
@@ -827,6 +857,7 @@ export class BrowserConnector {
     this.pmdDeliveryLocks = new Map()
     this.officeDocumentChallenges = new Map()
     this.officeDocumentWrites = new Map()
+    this.officeDocumentWriteStore = options.officeDocumentWriteStore ?? new OfficeDocumentWriteRecordStore()
     this.officeSpreadsheetChallenges = new Map()
     this.officeSpreadsheetWrites = new Map()
   }
@@ -978,7 +1009,7 @@ export class BrowserConnector {
       pending.reject(new Error('Extension peer returned an invalid verified Office write schema'))
       return true
     }
-    if (isOfficeDocumentRequest && ((pending.request.action === 'write' && !validOfficeDocumentWriteResult(response.result))
+    if (isOfficeDocumentRequest && ((pending.request.action === 'write' && !verifiedLightDocumentWriteMatches(response.result, pending.request))
       || (pending.request.action !== 'write' && !validOfficeDocumentReadResult(response.result)))) {
       pending.reject(new Error('Extension peer returned an invalid light-document result'))
       return true
@@ -1317,25 +1348,48 @@ export class BrowserConnector {
         this.#toolError(response, message.id, 'Light-document approval challenge is missing, stale, or already used.')
         return
       }
-      const requestFingerprint = createHash('sha256').update(JSON.stringify([grant.resource.fingerprint, args.operation, args.payload])).digest('hex')
+      const payloadHash = lightDocumentWriteHash(args.operation, args.payload)
+      if (grant.operation !== args.operation || grant.payloadHash !== payloadHash) {
+        this.#toolError(response, message.id, 'Light-document approval does not match this operation and payload.')
+        return
+      }
+      const requestFingerprint = hash(canonicalJson([grant.resource.fingerprint, args.operation, args.payload]))
       const existing = this.officeDocumentWrites.get(args.idempotencyIdentity)
       if (existing !== undefined) {
         if (existing.fingerprint !== requestFingerprint) {
           this.#toolError(response, message.id, 'Light-document idempotency identity conflicts with the approved document or payload.')
           return
         }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(existing.result) }], structuredContent: existing.result } })
+        this.#reply(response, lightDocumentToolResponse(message.id, existing.result))
+        return
+      }
+      let checkpoint
+      try {
+        checkpoint = await this.officeDocumentWriteStore.create({
+          idempotencyIdentity: args.idempotencyIdentity, targetFingerprint: hash(canonicalJson(browserTarget)), resourceFingerprint: grant.resource.fingerprint,
+          operation: args.operation, payloadHash,
+        })
+      } catch (error) {
+        this.#toolError(response, message.id, error instanceof Error ? error.message : 'Could not persist the light-document write fence.')
+        return
+      }
+      if (!checkpoint.createdNew) {
+        this.#toolError(response, message.id, checkpoint.record.state === 'verified'
+          ? 'This idempotency identity was already verified; reread the document before continuing.'
+          : 'This idempotency identity is uncertain after an interrupted write; automatic retry is forbidden. Reread and resolve manually.')
         return
       }
       const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'write', operation: args.operation, payload: args.payload, resource: grant.resource }
       try {
         const resolved = await this.#requestExtension(correlation)
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
-        if (!validOfficeDocumentWriteResult(resolved.result)) throw new Error('Browser Connector produced an invalid verified light-document write')
+        if (!verifiedLightDocumentWriteMatches(resolved.result, correlation)) throw new Error('Browser Connector produced an invalid verified light-document write')
+        await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'verified')
         if (this.officeDocumentWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentWrites.delete(this.officeDocumentWrites.keys().next().value)
         this.officeDocumentWrites.set(args.idempotencyIdentity, { fingerprint: requestFingerprint, result })
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        this.#reply(response, lightDocumentToolResponse(message.id, result))
       } catch (error) {
+        try { await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'uncertain') } catch {}
         this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document write failed')
       }
       return
@@ -1343,7 +1397,7 @@ export class BrowserConnector {
 
     const correlation = {
       type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: args.action,
-      ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.query === undefined ? {} : { query: args.query.trim() }),
+      ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.query === undefined ? {} : { query: args.query.trim() }), ...(args.payload === undefined ? {} : { payload: args.payload }), ...(args.operation === undefined ? {} : { operation: args.operation }),
     }
     try {
       const resolved = await this.#requestExtension(correlation)
@@ -1352,13 +1406,13 @@ export class BrowserConnector {
         const challenge = randomBytes(32).toString('base64url')
         for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
         if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
-        this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, challenge }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payloadHash: lightDocumentWriteHash(args.operation, args.payload), expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, challenge }
+        this.#reply(response, lightDocumentToolResponse(message.id, result))
         return
       }
       const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      this.#reply(response, lightDocumentToolResponse(message.id, result))
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document read failed')
     }

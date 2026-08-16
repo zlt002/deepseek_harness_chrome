@@ -303,7 +303,7 @@ interface OfficeWriteRangeRequest {
 }
 
 type OfficeDocumentAction = 'read' | 'search' | 'selection' | 'inspect_write' | 'write'
-type OfficeDocumentOperation = 'insert' | 'replace' | 'delete' | 'format' | 'title'
+type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format'
 
 interface LightDocumentResourceIdentity {
   kind: 'webedit_light_document'
@@ -510,13 +510,17 @@ function isOfficeDocumentRequest(message: NativeMessage): message is OfficeDocum
     && typeof message.generation === 'string' && message.tool === 'office_document' && isBrowserTarget(message.browserTarget))) return false
   if (!['read', 'search', 'selection', 'inspect_write', 'write'].includes(String(message.action))) return false
   const action = message.action as OfficeDocumentAction
+  const validPayload = message.payload === undefined || (message.payload !== null && typeof message.payload === 'object' && !Array.isArray(message.payload) && JSON.stringify(message.payload).length <= 100000)
   if (action === 'read') return (message.offset === undefined || (Number.isInteger(message.offset) && (message.offset as number) >= 0 && (message.offset as number) <= 100000))
-    && (message.limit === undefined || (Number.isInteger(message.limit) && (message.limit as number) >= 1 && (message.limit as number) <= 200))
+    && (message.limit === undefined || (Number.isInteger(message.limit) && (message.limit as number) >= 1 && (message.limit as number) <= 200)) && validPayload
   if (action === 'search') return typeof message.query === 'string' && message.query.trim().length > 0 && message.query.length <= 500
     && (message.offset === undefined || (Number.isInteger(message.offset) && (message.offset as number) >= 0 && (message.offset as number) <= 100000))
     && (message.limit === undefined || (Number.isInteger(message.limit) && (message.limit as number) >= 1 && (message.limit as number) <= 200))
-  if (action === 'selection' || action === 'inspect_write') return message.offset === undefined && message.limit === undefined && message.query === undefined
-  return ['insert', 'replace', 'delete', 'format', 'title'].includes(String(message.operation))
+  if (action === 'selection') return message.offset === undefined && message.limit === undefined && message.query === undefined && validPayload
+  if (action === 'inspect_write') return message.offset === undefined && message.limit === undefined && message.query === undefined
+    && ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format'].includes(String(message.operation))
+    && message.payload !== null && typeof message.payload === 'object' && !Array.isArray(message.payload) && JSON.stringify(message.payload).length <= 100000
+  return ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format'].includes(String(message.operation))
     && message.payload !== null && typeof message.payload === 'object' && !Array.isArray(message.payload)
     && JSON.stringify(message.payload).length <= 100000 && isLightDocumentResourceIdentity(message.resource)
 }
