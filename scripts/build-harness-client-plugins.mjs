@@ -32,7 +32,7 @@ for (const name of selected.length > 0 ? selected : packageNames) {
   // Node cannot spawn Windows .cmd shims directly without a command shell.
   const result = spawnSync(process.execPath, [tsdown, '--config', 'tsdown.config.ts'], {
     cwd,
-    env: { ...process.env, DSH_BUILD_FACE: '' },
+    env: { ...process.env, DSH_BUILD_FACE: '', DSH_ROOT: harnessRoot },
     encoding: 'utf8',
   })
   if (result.error) throw result.error

@@ -76,5 +76,17 @@ test('Harness client plugins execute the portable tsdown JavaScript entrypoint',
 
   assert.match(script, /node_modules', 'tsdown', 'dist', 'run\.mjs'/)
   assert.match(script, /spawnSync\(process\.execPath, \[tsdown/)
+  assert.match(script, /DSH_ROOT: harnessRoot/)
   assert.doesNotMatch(script, /tsdown\.cmd/)
+
+  for (const name of [
+    'harness-ui-agent-preset',
+    'harness-ui-browser-target',
+    'harness-ui-knowledge-scope',
+    'harness-skill-settings',
+  ]) {
+    const config = await readFile(resolve(root, 'packages', name, 'tsdown.config.ts'), 'utf8')
+    assert.match(config, /loadHarnessClientBundle/)
+    assert.doesNotMatch(config, /upstream\/deepseek-harness/)
+  }
 })
