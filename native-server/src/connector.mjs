@@ -4,6 +4,7 @@ import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { PmdDeliveryRecordStore } from './pmd-delivery-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
+import { OfficeSpreadsheetWriteRecordStore } from './office-spreadsheet-write-record-store.mjs'
 
 const REQUEST_TIMEOUT_MS = 15_000
 const KNOWLEDGE_REQUEST_TIMEOUT_MS = 30 * 60_000
@@ -29,11 +30,34 @@ function spreadsheetArtifactSummary(result) {
   }
 }
 
+function spreadsheetResponseSummary(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result
+  const requested = result.requested && typeof result.requested === 'object' && !Array.isArray(result.requested)
+    ? Object.fromEntries(Object.entries(result.requested).filter(([key]) => !['values', 'formulas'].includes(key))) : undefined
+  const observed = result.observed && typeof result.observed === 'object' && !Array.isArray(result.observed)
+    ? Object.fromEntries(Object.entries(result.observed).filter(([key]) => !['values', 'formulas', 'text', 'rows'].includes(key)).map(([key, value]) => key === 'artifact' && value && typeof value === 'object' ? [key, Object.fromEntries(Object.entries(value).filter(([artifactKey]) => artifactKey !== 'dataUrl'))] : [key, value])) : undefined
+  return {
+    ...(typeof result.runId === 'string' ? { runId: result.runId } : {}),
+    ...(typeof result.requestId === 'string' ? { requestId: result.requestId } : {}),
+    ...(typeof result.generation === 'string' ? { generation: result.generation } : {}),
+    ...(result.browserTarget && typeof result.browserTarget === 'object' ? { browserTarget: result.browserTarget } : {}),
+    ...(typeof result.status === 'string' ? { status: result.status } : {}),
+    ...(result.resource && typeof result.resource === 'object' ? { resource: result.resource } : {}),
+    ...(typeof result.operation === 'string' ? { operation: result.operation } : {}),
+    ...(requested ? { requested } : {}),
+    ...(observed ? { observed } : {}),
+  }
+}
+
 function spreadsheetToolResponse(id, structuredContent) {
   const content = spreadsheetArtifactSummary(structuredContent)
   const body = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent } }
   if (Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_SPREADSHEET_TOOL_RESPONSE_BYTES) return body
-  return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Spreadsheet result exceeds the ${MAX_SPREADSHEET_TOOL_RESPONSE_BYTES}-byte response limit; no artifact payload was returned.` }], isError: true } }
+  const compact = spreadsheetResponseSummary(structuredContent)
+  const compactBody = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(compact) }], structuredContent: compact } }
+  if (Buffer.byteLength(JSON.stringify(compactBody), 'utf8') <= MAX_SPREADSHEET_TOOL_RESPONSE_BYTES) return compactBody
+  const minimal = { status: structuredContent?.status, operation: structuredContent?.operation, observed: { verified: structuredContent?.observed?.verified === true } }
+  return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(minimal) }], structuredContent: minimal } }
 }
 
 function lightDocumentToolResponse(id, structuredContent) {
@@ -239,7 +263,7 @@ const officeSpreadsheetTool = {
   inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
     action: { enum: ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
     challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
-    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'] }, payload: { type: 'object', additionalProperties: true },
+    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters'] }, payload: { type: 'object', additionalProperties: true },
   } },
 }
 
@@ -455,6 +479,10 @@ function validOfficeResource(value) {
     && (typeof value.sheetName === 'string' || value.sheetName === null)
     && typeof value.fingerprint === 'string' && value.fingerprint.length > 0 && value.fingerprint.length <= 128
 }
+function sameOfficeResource(left, right) {
+  return validOfficeResource(left) && validOfficeResource(right)
+    && left.kind === right.kind && left.origin === right.origin && left.workbookName === right.workbookName && left.sheetName === right.sheetName && left.fingerprint === right.fingerprint
+}
 
 function validOfficeWriteRangeArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 || typeof value.range !== 'string' || value.range.trim().length === 0 || value.range.length > 128 || !validOfficeResource(value.resource)) return false
@@ -535,11 +563,22 @@ function verifiedLightDocumentWriteMatches(result, request) {
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
 }
-const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image']
+const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters']
+function validSpreadsheetPrecondition(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !value.state || typeof value.state !== 'object' || Array.isArray(value.state)) return false
+  const state = value.state
+  if (!['values', 'formulas', 'merged', 'filter', 'rowHeight', 'columnWidth', 'format'].every((key) => Object.hasOwn(state, key)) || !Array.isArray(state.values) || !Array.isArray(state.formulas)) return false
+  if (!(state.merged === null || typeof state.merged === 'boolean') || !(state.rowHeight === null || typeof state.rowHeight === 'number') || !(state.columnWidth === null || typeof state.columnWidth === 'number')) return false
+  if (!(state.filter === null || typeof state.filter === 'object' && !Array.isArray(state.filter) && typeof state.filter.operator === 'string' && state.filter.operator.length <= 64)) return false
+  if (!state.format || typeof state.format !== 'object' || Array.isArray(state.format)) return false
+  return JSON.stringify(value).length <= 100_000
+}
 function validOfficeSpreadsheetArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
   const keys = Object.keys(value)
-  if (['context', 'sheets', 'inspect_write'].includes(value.action)) return keys.length === 1
+  if (['context', 'sheets'].includes(value.action)) return keys.length === 1
+  if (value.action === 'inspect_write') return keys.length === 3 && SPREADSHEET_OPERATIONS.includes(value.operation)
+    && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000
   if (value.action === 'capabilities') return keys.every((key) => ['action', 'range', 'sheetName'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && (value.sheetName === undefined || typeof value.sheetName === 'string')
   if (value.action === 'range') return keys.every((key) => ['action', 'range', 'sheetName'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && (value.sheetName === undefined || typeof value.sheetName === 'string')
   if (value.action === 'search') return keys.every((key) => ['action', 'range', 'sheetName', 'query', 'matchCase', 'matchEntireCell', 'searchBy', 'offset', 'limit'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && typeof value.query === 'string' && value.query.trim().length > 0 && value.query.length <= 500 && (value.searchBy === undefined || ['value', 'text', 'formula'].includes(value.searchBy)) && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000) && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
@@ -547,7 +586,7 @@ function validOfficeSpreadsheetArguments(value) {
 }
 function validOfficeSpreadsheetReadResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'ok' && validOfficeResource(value.resource) }
 function validOfficeSpreadsheetWriteResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write' && validOfficeResource(value.resource) && SPREADSHEET_OPERATIONS.includes(value.operation) && value.requested && typeof value.requested === 'object' && value.observed && typeof value.observed === 'object' }
-function spreadsheetWriteHash(operation, payload) { return hash(JSON.stringify({ operation, payload })) }
+function spreadsheetWriteHash(operation, payload) { return hash(canonicalJson({ operation, payload })) }
 function jsonMatches(left, right) { return JSON.stringify(left) === JSON.stringify(right) }
 function hasVerifiedSpreadsheetRange(result, payload) { return result.requested.range === payload.range && result.observed.range === payload.range && result.observed.verified === true }
 function requestedFormatMatches(requested, payload) {
@@ -561,8 +600,8 @@ function observedFormatMatches(observed, payload) {
     && (payload.alignment === undefined || jsonMatches(observed.alignment, payload.alignment))
     && (payload.wrap === undefined || jsonMatches(observed.wrap, payload.wrap))
 }
-function verifiedSpreadsheetWriteMatches(result, operation, payload) {
-  if (!validOfficeSpreadsheetWriteResult(result) || result.operation !== operation) return false
+function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedResource) {
+  if (!validOfficeSpreadsheetWriteResult(result) || result.operation !== operation || !sameOfficeResource(result.resource, approvedResource)) return false
   if (operation === 'set_values') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.values, payload.values) && jsonMatches(result.observed.values, payload.values)
   if (operation === 'set_formula') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.formulas, payload.formulas) && jsonMatches(result.observed.formulas, payload.formulas)
   if (operation === 'clear') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.isBlank === true && Array.isArray(result.observed.values) && Array.isArray(result.observed.formulas)
@@ -570,26 +609,9 @@ function verifiedSpreadsheetWriteMatches(result, operation, payload) {
   if (operation === 'merge' || operation === 'unmerge') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.merged === (operation === 'merge') && result.observed.merged === (operation === 'merge')
   if (operation === 'row_height') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.RowHeight === payload.value && result.observed.RowHeight === payload.value
   if (operation === 'column_width') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.ColumnWidth === payload.value && result.observed.ColumnWidth === payload.value
-  if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns'].includes(operation)) return false
-  if (operation === 'sheet_add') return result.requested.name === payload.name && result.observed.name === payload.name && Number.isInteger(result.observed.beforeCount) && result.observed.afterCount === result.observed.beforeCount + 1 && result.observed.verified === true
-  if (operation === 'sheet_rename') return result.requested.name === (payload.name ?? payload.sheetName) && result.requested.newName === payload.newName && result.observed.name === payload.newName && result.observed.afterCount === result.observed.beforeCount && result.observed.verified === true
-  if (operation === 'sheet_delete') return result.requested.name === (payload.name ?? payload.sheetName) && result.requested.deleted === true && result.observed.name === (payload.name ?? payload.sheetName) && result.observed.deleted === true && result.observed.afterCount === result.observed.beforeCount - 1 && result.observed.verified === true
-  if (operation === 'sheet_select') return result.requested.name === (payload.name ?? payload.sheetName) && result.observed.name === (payload.name ?? payload.sheetName) && result.observed.verified === true
   if (operation === 'sort') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.sorts, payload.sorts) && result.requested.hasHeader === (payload.hasHeader !== false) && Array.isArray(result.observed.values)
   if (operation === 'set_auto_filter') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.enabled === payload.enabled && result.observed.enabled === payload.enabled
   if (operation === 'clear_filters') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.after?.operator === 'none'
-  if (operation === 'set_data_validation') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.validationType === payload.validationType && result.requested.formula1 === payload.formula1 && result.requested.formula2 === payload.formula2 && Number.isInteger(result.observed.type) && result.observed.formula1 === (payload.formula1 ?? null) && result.observed.formula2 === (payload.formula2 ?? null)
-  if (operation === 'clear_data_validation') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && [null, 0].includes(result.observed.type)
-  if (operation === 'add_hyperlink') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.url === (payload.url ?? null) && result.requested.subAddress === (payload.subAddress ?? null) && result.observed.url === (payload.url ?? null) && result.observed.subAddress === (payload.subAddress ?? null) && Number.isInteger(result.observed.count) && result.observed.count >= 1
-  if (operation === 'delete_hyperlinks') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.delete === true && result.observed.count === 0
-  if (operation === 'add_comment') return false
-  if (operation === 'delete_comments') return false
-  if (operation === 'create_chart') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.chartType === (payload.chartType ?? 'columnClustered') && result.requested.chartStyle === (Number.isInteger(payload.chartStyle) ? payload.chartStyle : 0) && Number.isInteger(result.observed.beforeCount) && result.observed.afterCount > result.observed.beforeCount && result.observed.chart && result.observed.chart.type === result.requested.chartType && (typeof result.observed.chart.id === 'string' || typeof result.observed.chart.id === 'number' || typeof result.observed.chart.name === 'string')
-  if (operation === 'create_pivot_table') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.destination === payload.destination && result.requested.isNewSheet === false && Number.isInteger(result.observed.beforeCount) && result.observed.afterCount > result.observed.beforeCount && result.observed.destination === String(payload.destination).replace(/^.*!/, '').replace(/\$/g, '').toUpperCase() && result.observed.pivot && (typeof result.observed.pivot.id === 'string' || typeof result.observed.pivot.id === 'number')
-  if (operation === 'insert_cell_image') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.url === payload.url && typeof result.observed.formula === 'string' && /^=DISPIMG\(/i.test(result.observed.formula)
-  if (operation === 'export_pdf') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.scope === (payload.scope ?? 'workbook') && result.observed.artifact?.kind === 'pdf' && result.observed.artifact?.mimeType === 'application/pdf' && typeof result.observed.artifact?.sourceOrigin === 'string'
-  if (operation === 'export_range_image') return hasVerifiedSpreadsheetRange(result, payload) && result.observed.artifact?.kind === 'range_image' && /^image\//.test(result.observed.artifact?.mimeType ?? '') && Number.isInteger(result.observed.artifact?.byteLength)
-  if (operation === 'export_worksheet_image') return hasVerifiedSpreadsheetRange(result, payload) && result.observed.artifact?.kind === 'worksheet_image' && /^image\//.test(result.observed.artifact?.mimeType ?? '') && Number.isInteger(result.observed.artifact?.byteLength)
   return false
 }
 
@@ -829,7 +851,7 @@ function knowledgeProxyHeaders(entries, cookie) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore, officeSpreadsheetWriteStore?: OfficeSpreadsheetWriteRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
@@ -860,6 +882,7 @@ export class BrowserConnector {
     this.officeDocumentWriteStore = options.officeDocumentWriteStore ?? new OfficeDocumentWriteRecordStore()
     this.officeSpreadsheetChallenges = new Map()
     this.officeSpreadsheetWrites = new Map()
+    this.officeSpreadsheetWriteStore = options.officeSpreadsheetWriteStore ?? new OfficeSpreadsheetWriteRecordStore()
   }
 
   /** @returns {Promise<{ url: string, token: string, generation: string }>} */
@@ -1426,6 +1449,7 @@ export class BrowserConnector {
     if (args.action === 'write') {
       const grant = this.officeSpreadsheetChallenges.get(args.challenge); this.officeSpreadsheetChallenges.delete(args.challenge)
       if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.browserTarget, browserTarget)) { this.#toolError(response, message.id, 'Spreadsheet approval challenge is missing, stale, or already used.'); return }
+      if (grant.operation !== args.operation || grant.payloadHash !== spreadsheetWriteHash(args.operation, args.payload)) { this.#toolError(response, message.id, 'Spreadsheet approval does not match this operation and payload.'); return }
       if (!validOfficeResource(args.resource) || args.resource.fingerprint !== grant.resource.fingerprint || args.resource.sheetName !== grant.resource.sheetName) { this.#toolError(response, message.id, 'Spreadsheet resource differs from the approved inspection.'); return }
       const fingerprint = spreadsheetWriteHash(args.operation, args.payload)
       const existing = this.officeSpreadsheetWrites.get(args.idempotencyIdentity)
@@ -1433,27 +1457,39 @@ export class BrowserConnector {
         if (existing.fingerprint !== fingerprint || existing.resourceFingerprint !== grant.resource.fingerprint) { this.#toolError(response, message.id, 'Spreadsheet idempotency identity conflicts with the approved operation or payload.'); return }
         this.#reply(response, spreadsheetToolResponse(message.id, existing.result)); return
       }
-      const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: 'write', resource: grant.resource, operation: args.operation, payload: args.payload }
+      let checkpoint
+      try {
+        checkpoint = await this.officeSpreadsheetWriteStore.create({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint: hash(canonicalJson(browserTarget)), resourceFingerprint: grant.resource.fingerprint, operation: args.operation, payloadHash: fingerprint })
+      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Could not persist spreadsheet write fence.'); return }
+      if (!checkpoint.createdNew) {
+        this.#toolError(response, message.id, checkpoint.record.state === 'verified'
+          ? 'This idempotency identity was already verified; reread the spreadsheet before continuing.'
+          : 'This idempotency identity is uncertain after an interrupted write; automatic retry is forbidden. Reread and resolve manually.')
+        return
+      }
+      const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: 'write', resource: grant.resource, operation: args.operation, payload: args.payload, precondition: grant.precondition }
       try {
         const resolved = await this.#requestExtension(correlation)
-        if (!verifiedSpreadsheetWriteMatches(resolved.result, args.operation, args.payload)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
+        if (!verifiedSpreadsheetWriteMatches(resolved.result, args.operation, args.payload, grant.resource)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
+        await this.officeSpreadsheetWriteStore.setState(args.idempotencyIdentity, 'verified')
         if (this.officeSpreadsheetWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetWrites.delete(this.officeSpreadsheetWrites.keys().next().value)
         this.officeSpreadsheetWrites.set(args.idempotencyIdentity, { fingerprint, resourceFingerprint: grant.resource.fingerprint, result })
         this.#reply(response, spreadsheetToolResponse(message.id, result))
-      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet write failed') }
+      } catch (error) { try { await this.officeSpreadsheetWriteStore.setState(args.idempotencyIdentity, 'uncertain') } catch {}; this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet write failed') }
       return
     }
-    const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: args.action, ...(args.range === undefined ? {} : { range: args.range }), ...(args.sheetName === undefined ? {} : { sheetName: args.sheetName }), ...(args.query === undefined ? {} : { query: args.query }), ...(args.matchCase === undefined ? {} : { matchCase: args.matchCase }), ...(args.matchEntireCell === undefined ? {} : { matchEntireCell: args.matchEntireCell }), ...(args.searchBy === undefined ? {} : { searchBy: args.searchBy }), ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }) }
+    const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: args.action, ...(args.range === undefined ? {} : { range: args.range }), ...(args.sheetName === undefined ? {} : { sheetName: args.sheetName }), ...(args.query === undefined ? {} : { query: args.query }), ...(args.matchCase === undefined ? {} : { matchCase: args.matchCase }), ...(args.matchEntireCell === undefined ? {} : { matchEntireCell: args.matchEntireCell }), ...(args.searchBy === undefined ? {} : { searchBy: args.searchBy }), ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.operation === undefined ? {} : { operation: args.operation }), ...(args.payload === undefined ? {} : { payload: args.payload }) }
     try {
       const resolved = await this.#requestExtension(correlation)
       if (!validOfficeSpreadsheetReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded spreadsheet read')
       if (args.action === 'inspect_write') {
+        if (!validSpreadsheetPrecondition(resolved.result.precondition)) throw new Error('Browser Connector produced an invalid spreadsheet write precondition')
         const challenge = randomBytes(32).toString('base64url')
         for (const [key, candidate] of this.officeSpreadsheetChallenges) if (candidate.expiresAt < Date.now()) this.officeSpreadsheetChallenges.delete(key)
         if (this.officeSpreadsheetChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetChallenges.delete(this.officeSpreadsheetChallenges.keys().next().value)
-        this.officeSpreadsheetChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, challenge }
+        this.officeSpreadsheetChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payloadHash: spreadsheetWriteHash(args.operation, args.payload), precondition: resolved.result.precondition, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, challenge }
         this.#reply(response, spreadsheetToolResponse(message.id, result)); return
       }
       const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }

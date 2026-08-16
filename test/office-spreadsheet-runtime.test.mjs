@@ -8,7 +8,15 @@ async function runtimeWith(app) {
   const context = vm.createContext({ APP: app, location: { origin: 'https://webedit.midea.com', pathname: '/sheet/1' }, globalThis: null, window: null, console, btoa: (value) => Buffer.from(value, 'binary').toString('base64'), setTimeout, clearTimeout, Uint8Array, Date, URL })
   context.globalThis = context; context.window = context
   vm.runInContext(source, context)
-  return context.__deepseekHarnessOfficeSpreadsheet.run
+  const raw = context.__deepseekHarnessOfficeSpreadsheet.run
+  const run = async (request) => {
+    if (request?.action !== 'write' || request.precondition !== undefined) return raw(request)
+    const inspected = await raw({ action: 'inspect_write', operation: request.operation, payload: request.payload })
+    if (inspected.ok !== true) return inspected
+    return raw({ ...request, precondition: inspected.result.precondition })
+  }
+  run.raw = raw
+  return run
 }
 
 function fakeApp() {
@@ -98,16 +106,22 @@ test('spreadsheet runtime rejects a stale resource and unsupported structural AP
   assert.equal(unsupported.error.code, 'unsupported')
 })
 
-test('spreadsheet runtime verifies sheet lifecycle against worksheet enumeration and active-sheet readback', async () => {
+test('spreadsheet write rereads its inspected precondition before mutation', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const payload = { range: 'A1:B2', values: [[10, 20], [30, 40]] }
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'set_values', payload })
+  assert.equal(inspected.ok, true)
+  const setValues = app._range.setValue2
+  setValues([[99, 2], [1, 4]])
+  let writes = 0; app._range.setValue2 = (value) => { writes += 1; setValues(value) }
+  const result = await run.raw({ action: 'write', resource, operation: 'set_values', payload, precondition: inspected.result.precondition })
+  assert.equal(result.error.code, 'fingerprint_mismatch'); assert.equal(writes, 0)
+})
+
+test('spreadsheet runtime fails closed for sheet lifecycle mutations without preflight contracts', async () => {
   const app = sheetApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
-  const added = await run({ action: 'write', resource, operation: 'sheet_add', payload: { name: 'Plan' } })
-  assert.equal(added.result.observed.afterCount, 3)
-  const renamed = await run({ action: 'write', resource, operation: 'sheet_rename', payload: { name: 'Plan', newName: 'Final' } })
-  assert.equal(renamed.result.observed.name, 'Final')
-  const selected = await run({ action: 'write', resource, operation: 'sheet_select', payload: { name: 'Final' } })
-  assert.equal(selected.result.observed.name, 'Final')
-  const deleted = await run({ action: 'write', resource, operation: 'sheet_delete', payload: { name: 'Final' } })
-  assert.equal(deleted.result.observed.afterCount, 2)
+  const added = await run.raw({ action: 'write', resource, operation: 'sheet_add', payload: { name: 'Plan' } })
+  assert.equal(added.error.code, 'unsupported')
 })
 
 test('spreadsheet runtime fail-closes clear and filter clearing when the observable readback disagrees', async () => {
@@ -125,82 +139,53 @@ test('spreadsheet runtime probes and verifies AccrUI-derived advanced range oper
   const app = fakeApp(); const run = await runtimeWith(app)
   const resource = (await run({ action: 'context' })).result.resource
   const capabilities = await run({ action: 'capabilities', range: 'A1:B2' })
-  assert.deepEqual(JSON.parse(JSON.stringify(capabilities.result.capabilities)), {
-    sort: true, autoFilter: true, dataValidation: true, hyperlinks: true, comments: false,
-    charts: true, pivots: true, cellImages: true, exportPdf: true, exportRangeImage: true, exportWorksheetImage: true, detectedButUnsupported: ['comments'],
-  })
+  assert.equal(capabilities.result.capabilities.sort, true)
+  assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.cellInsertDeleteHidden.supported, false)
+  assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.chartManagement.create, false)
+  assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.pivotManagement.refresh, false)
   const sort = await run({ action: 'write', resource, operation: 'sort', payload: { range: 'A1:B2', sorts: [{ key: 1, order: 'asc' }] } })
   assert.equal(sort.result.observed.verified, true); assert.deepEqual(sort.result.observed.values, [[1, 4], [3, 2]])
   const filtered = await run({ action: 'write', resource, operation: 'set_auto_filter', payload: { range: 'A1:B2', enabled: true } })
   assert.equal(filtered.result.observed.enabled, true)
   const filtersCleared = await run({ action: 'write', resource, operation: 'clear_filters', payload: { range: 'A1:B2' } })
   assert.equal(filtersCleared.result.observed.after.operator, 'none')
-  const validated = await run({ action: 'write', resource, operation: 'set_data_validation', payload: { range: 'A1', validationType: 'list', formula1: 'yes,no' } })
-  assert.equal(validated.result.observed.type, 3)
-  const linked = await run({ action: 'write', resource, operation: 'add_hyperlink', payload: { range: 'A1', url: 'https://example.test' } })
-  assert.equal(linked.result.observed.count, 1)
-  const commentUnsupported = await run({ action: 'write', resource, operation: 'add_comment', payload: { range: 'A1', text: '复核' } })
-  assert.equal(commentUnsupported.error.code, 'unsupported')
-  const deleteCommentsUnsupported = await run({ action: 'write', resource, operation: 'delete_comments', payload: { range: 'A1' } })
-  assert.equal(deleteCommentsUnsupported.error.code, 'unsupported')
-  assert.equal(app._comments.Count, 0)
-  const image = await run({ action: 'write', resource, operation: 'insert_cell_image', payload: { range: 'A1', url: 'https://example.test/image.png' } })
-  assert.match(image.result.observed.formula, /^=DISPIMG\(/)
-  const chart = await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2', chartType: 'columnClustered' } })
-  assert.equal(chart.result.observed.afterCount, 1); assert.equal(chart.result.observed.chart.name, 'Chart 1')
-  const pivot = await run({ action: 'write', resource, operation: 'create_pivot_table', payload: { range: 'A1:B2', destination: 'D1', isNewSheet: false } })
-  assert.equal(pivot.result.observed.afterCount, 1); assert.equal(pivot.result.observed.pivot.name, 'Pivot 1')
-  const pdf = await run({ action: 'write', resource, operation: 'export_pdf', payload: { range: 'A1', scope: 'workbook' } })
-  assert.equal(pdf.result.observed.artifact.mimeType, 'application/pdf'); assert.equal(pdf.result.observed.artifact.sourceOrigin, 'https://download.example.test'); assert.equal(pdf.result.observed.artifact.queryRedacted, true)
-  const rangeImage = await run({ action: 'write', resource, operation: 'export_range_image', payload: { range: 'A1' } })
-  assert.equal(rangeImage.result.observed.artifact.byteLength, 3)
-  const worksheetImage = await run({ action: 'write', resource, operation: 'export_worksheet_image', payload: { range: 'A1' } })
-  assert.equal(worksheetImage.result.observed.artifact.byteLength, 3)
+  for (const operation of ['set_data_validation', 'add_hyperlink', 'insert_cell_image', 'create_chart', 'create_pivot_table']) assert.equal((await run({ action: 'write', resource, operation, payload: { range: 'A1:B2' } })).error.code, 'unsupported')
+  assert.equal(capabilities.result.capabilities.exportPdf, false)
+  assert.equal(capabilities.result.capabilities.exportRangeImage, false)
+  assert.equal(capabilities.result.capabilities.exportWorksheetImage, false)
 })
 
-test('chart waits for its callback, rejects callback failures, and binds callback identity to collection readback', async () => {
+test('chart creation is unavailable before callback-driven mutation', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  let callbacks = 0
   app._sheet.addChart = (_style, type, _range, callback) => {
-    const chart = { Id: 7, Name: 'Async Chart', Type: type }
-    queueMicrotask(() => { app._charts.items.push(chart); app._charts.Count += 1; callback(chart, 'ok') })
+    callbacks += 1; callback({ Id: 7, Name: 'Async Chart', Type: type }, 'ok')
     return Promise.resolve({ accepted: true })
   }
-  const completed = await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2' } })
-  assert.equal(completed.result.observed.chart.id, 7)
-
-  app._sheet.addChart = (_style, _type, _range, callback) => { queueMicrotask(() => callback({ isOk: false, error: 'chart rejected' })); return Promise.resolve({ accepted: true }) }
-  const rejected = await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2' } })
-  assert.equal(rejected.error.code, 'readback_mismatch'); assert.match(rejected.error.message, /chart rejected/)
-
-  app._sheet.addChart = (_style, type, _range, callback) => {
-    const collectionChart = { Id: 8, Name: 'Collection Chart', Type: type }
-    app._charts.items.push(collectionChart); app._charts.Count += 1; callback({ Id: 9, Name: 'Different Chart', Type: type }, 'ok')
-  }
-  const mismatched = await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2' } })
-  assert.equal(mismatched.error.code, 'readback_mismatch'); assert.match(mismatched.error.message, /identify the same created chart/)
+  const result = await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2' } })
+  assert.equal(result.error.code, 'unsupported'); assert.equal(callbacks, 0); assert.equal(app._charts.Count, 0)
 })
 
-test('spreadsheet artifacts keep data URLs small and redact PDF query credentials', async () => {
+test('unusable spreadsheet exports fail closed before invoking WebEdit export APIs', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
-  const imageDataUrl = (bytes) => `data:image/png;base64,${Buffer.alloc(bytes, 1).toString('base64')}`
-  app._range.ToImageDataURL = () => imageDataUrl(8 * 1024)
-  const inline = await run({ action: 'write', resource, operation: 'export_range_image', payload: { range: 'A1' } })
-  assert.equal(inline.result.observed.artifact.delivery, 'inline'); assert.ok(inline.result.observed.artifact.dataUrl)
+  let exports = 0
+  app._range.ToImageDataURL = () => { exports += 1; return 'data:image/png;base64,AQID' }
+  app._sheet.ExportImage = () => { exports += 1; return {} }
+  app._workbook.ExportAsFixedFormat = () => { exports += 1; return {} }
+  for (const operation of ['export_pdf', 'export_range_image', 'export_worksheet_image']) {
+    const payload = { range: 'A1' }; const inspected = await run.raw({ action: 'inspect_write', operation, payload })
+    const result = await run.raw({ action: 'write', resource, operation, payload, precondition: inspected.result.precondition })
+    assert.equal(result.error.code, 'unsupported')
+  }
+  assert.equal(exports, 0)
+})
 
-  app._range.ToImageDataURL = () => imageDataUrl(8 * 1024 + 1)
-  const metadataOnly = await run({ action: 'write', resource, operation: 'export_range_image', payload: { range: 'A1' } })
-  assert.equal(metadataOnly.result.observed.artifact.delivery, 'metadata_only'); assert.equal('dataUrl' in metadataOnly.result.observed.artifact, false)
-
-  app._range.ToImageDataURL = () => imageDataUrl(256 * 1024)
-  const maximum = await run({ action: 'write', resource, operation: 'export_range_image', payload: { range: 'A1' } })
-  assert.equal(maximum.result.observed.artifact.delivery, 'metadata_only'); assert.equal(maximum.result.observed.artifact.byteLength, 256 * 1024)
-
-  app._range.ToImageDataURL = () => imageDataUrl(256 * 1024 + 1)
-  const tooLarge = await run({ action: 'write', resource, operation: 'export_range_image', payload: { range: 'A1' } })
-  assert.equal(tooLarge.error.code, 'readback_mismatch'); assert.match(tooLarge.error.message, /bounded image artifact/)
-
-  app._workbook.ExportAsFixedFormat = () => ({ url: 'https://download.example.test/Budget.pdf?X-Amz-Signature=secret&token=also-secret&Expires=2000000000' })
-  const pdf = await run({ action: 'write', resource, operation: 'export_pdf', payload: { range: 'A1', scope: 'workbook' } })
-  assert.equal(pdf.result.observed.artifact.queryRedacted, true)
-  assert.equal(JSON.stringify(pdf.result).includes('secret'), false)
+test('every unverified AccrUI spreadsheet family fails closed before mutation', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  let mutations = 0; app._range.copyRange = () => { mutations += 1 }
+  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'add_conditional_format', 'copy_range', 'move_range', 'set_freeze_panes', 'create_defined_name', 'set_print_settings', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
+    const result = await run({ action: 'write', resource, operation, payload: { range: 'A1' } })
+    assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
+  }
+  assert.equal(mutations, 0)
 })

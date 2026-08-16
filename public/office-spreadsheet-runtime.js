@@ -9,7 +9,7 @@
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
   const matrix = (source) => Array.isArray(source) ? source : [[source ?? null]]
   const resourceFingerprint = (workbookName, sheetName) => `webedit:${location.origin}${location.pathname}|${workbookName ?? ''}|${sheetName ?? ''}`
-  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'])
+  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image'])
   const MAX_IMAGE_ARTIFACT_BYTES = 256 * 1024
   const MAX_INLINE_IMAGE_ARTIFACT_BYTES = 8 * 1024
   const VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
@@ -36,6 +36,43 @@
     const text = matrix(await call(range, 'getText') ?? await property(range, 'Text'))
     const rows = values.map((row, rowIndex) => row.map((cell, columnIndex) => ({ value: cell ?? null, text: valueOf(text, rowIndex, columnIndex) == null ? (cell == null ? '' : String(cell)) : String(valueOf(text, rowIndex, columnIndex)), formula: typeof valueOf(formulas, rowIndex, columnIndex) === 'string' ? valueOf(formulas, rowIndex, columnIndex) : null })))
     return { range, snapshot: { address, values, formulas, text, rows } }
+  }
+  // A write approval is bound to the smallest readable state that can be
+  // affected by the supported operation.  Keep it bounded because this
+  // object crosses the page -> extension -> native-host boundary twice.
+  async function writePrecondition(range, address) {
+    const snapshot = await rangeSnapshotFromRange(range, address)
+    if (!snapshot) return null
+    const font = await property(range, 'Font') ?? {}
+    const interior = await property(range, 'Interior') ?? {}
+    const state = {
+      values: snapshot.values,
+      formulas: snapshot.formulas,
+      merged: await property(range, 'MergeCells') ?? null,
+      filter: await filterCondition(range),
+      rowHeight: await property(await property(range, 'EntireRow') ?? range, 'RowHeight') ?? null,
+      columnWidth: await property(await property(range, 'EntireColumn') ?? range, 'ColumnWidth') ?? null,
+      format: {
+        bold: await property(font, 'bold') ?? await property(font, 'Bold') ?? null,
+        italic: await property(font, 'italic') ?? await property(font, 'Italic') ?? null,
+        underline: await property(font, 'underline') ?? await property(font, 'Underline') ?? null,
+        size: await property(font, 'size') ?? await property(font, 'Size') ?? null,
+        name: await property(font, 'name') ?? await property(font, 'Name') ?? null,
+        color: await property(font, 'color') ?? await property(font, 'Color') ?? null,
+        fill: await property(interior, 'color') ?? await property(interior, 'Color') ?? null,
+        numberFormat: await property(range, 'numberFormat') ?? await property(range, 'NumberFormat') ?? null,
+        alignment: await property(range, 'alignment') ?? await property(range, 'HorizontalAlignment') ?? null,
+        wrap: await property(range, 'wrap') ?? await property(range, 'WrapText') ?? null,
+      },
+    }
+    const precondition = { version: 1, range: address, state }
+    return JSON.stringify(precondition).length <= 96_000 ? precondition : null
+  }
+  async function rangeSnapshotFromRange(range, address) {
+    if (!range) return null
+    const values = matrix(await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value'))
+    const formulas = matrix(await call(range, 'getFormula') ?? await property(range, 'Formula'))
+    return { address, values, formulas }
   }
   function blankCell(value) { return value === null || value === undefined || value === '' }
   function blankSnapshot(snapshot) {
@@ -148,19 +185,34 @@
     const detected = {
       sort: !!(range && (typeof range.sort === 'function' || typeof range.Sort === 'function')),
       autoFilter: !!(range && (typeof range.setAutoFilter === 'function' || typeof range.SetAutoFilter === 'function') && filterState !== undefined),
-      dataValidation: !!(validation && typeof validation.Add === 'function' && await property(validation, 'Type') !== undefined),
-      hyperlinks: !!(hyperlinks && typeof hyperlinks.Add === 'function' && await collectionCount(hyperlinks) !== null),
+      dataValidation: false,
+      hyperlinks: false,
       comments: false,
-      charts: !!(resolved.sheet && typeof resolved.sheet.addChart === 'function' && charts && await collectionCount(charts) !== null),
-      pivots: !!(range && typeof range.createPivotTable === 'function' && pivots && await collectionCount(pivots) !== null),
-      cellImages: !!(range && typeof range.insertCellPictureUrl === 'function'),
-      exportPdf: !!(resolved.workbook && typeof resolved.workbook.ExportAsFixedFormat === 'function'),
-      exportRangeImage: !!(range && typeof range.ToImageDataURL === 'function'),
-      exportWorksheetImage: !!(resolved.sheet && typeof resolved.sheet.ExportImage === 'function'),
+      charts: false, pivots: false, cellImages: false,
+      exportPdf: false,
+      exportRangeImage: false,
+      exportWorksheetImage: false,
     }
     const detectedButUnsupported = []
     if (range && (typeof range.AddComment === 'function' || typeof range.ClearComments === 'function') && comments && await collectionCount(comments) !== null) detectedButUnsupported.push('comments')
-    return { ok: true, result: { status: 'ok', resource: resolved.resource, capabilities: { ...detected, detectedButUnsupported } } }
+    const unavailable = 'unavailable: no stable public mutation callback plus same-object readback contract'
+    // AccrUI exposes these tool names, but they are not evidence that the
+    // current WebEdit frame can perform an auditable Harness Verified Write.
+    const accruiMigrationMatrix = {
+      cellInsertDeleteHidden: { supported: false, reason: unavailable },
+      fillReplaceTextToColumnsRemoveDuplicates: { supported: false, reason: unavailable },
+      autoFit: { supported: false, reason: unavailable },
+      conditionalFormatting: { supported: false, reason: unavailable },
+      copyPasteMove: { supported: false, reason: unavailable },
+      viewFreeze: { supported: false, reason: unavailable },
+      definedNames: { supported: false, reason: unavailable },
+      printSettings: { supported: false, reason: unavailable },
+      worksheetCopyMoveHide: { supported: false, reason: unavailable },
+      undoRedo: { supported: false, reason: unavailable },
+      chartManagement: { create: false, list: false, update: false, resize: false, delete: false, reason: unavailable },
+      pivotManagement: { create: false, list: false, refresh: false, fields: false, delete: false, reason: unavailable },
+    }
+    return { ok: true, result: { status: 'ok', resource: resolved.resource, capabilities: { ...detected, detectedButUnsupported, accruiMigrationMatrix } } }
   }
   async function context() {
     const resolved = await appAndSheet()
@@ -211,6 +263,25 @@
     if (!request.resource || request.resource.fingerprint !== resolved.resource.fingerprint || request.resource.sheetName !== resolved.resource.sheetName) return fail('fingerprint_mismatch', 'The WebEdit workbook or sheet changed since inspection')
     return null
   }
+  async function inspectWrite(request) {
+    const payload = request.payload ?? {}; const address = payload.range
+    if (typeof address !== 'string' || !address || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
+    const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+    const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
+    const precondition = await writePrecondition(range, address)
+    if (!precondition) return fail('unsupported', 'WebEdit cannot create a bounded writable-range precondition')
+    return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
+  }
+  async function preconditionMatches(resolved, request) {
+    const approved = request.precondition
+    if (!approved || approved.version !== 1 || typeof approved.range !== 'string' || !approved.state || typeof approved.state !== 'object' || Array.isArray(approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet write is missing its inspected precondition')
+    const address = request.payload?.range
+    if (approved.range !== address) return fail('fingerprint_mismatch', 'The spreadsheet write range differs from its inspected precondition')
+    const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
+    const current = await writePrecondition(range, address)
+    if (!current || !same(current.state, approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet range changed since inspection; reread and inspect before writing')
+    return null
+  }
   async function setValues(range, values) { if (typeof range.setValue2 === 'function') { await call(range, 'setValue2', [values]); return true } if (typeof range.setValue === 'function') { await call(range, 'setValue', [values]); return true } return set(range, 'Value2', values) }
   async function setFormula(range, formulas) { if (typeof range.setFormula === 'function') { await call(range, 'setFormula', [formulas]); return true } return set(range, 'Formula', formulas) }
   function sortColumn(key, width) {
@@ -234,6 +305,7 @@
   }
   async function advancedWrite(resolved, request, range, address) {
     const payload = request.payload ?? {}; const operation = request.operation
+    if (['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return fail('unsupported', 'WebEdit operation lacks a mutation-safe preflight and deliverable-artifact contract and is unavailable')
     if (!ADVANCED_OPERATIONS.has(operation)) return null
     if (operation === 'sort') {
       const sorts = Array.isArray(payload.sorts) ? payload.sorts.filter((item) => item && typeof item === 'object').slice(0, 3) : []
@@ -342,9 +414,12 @@
       const target = scope === 'worksheet' ? resolved.sheet : resolved.workbook
       if (!scope) return fail('invalid_range', 'export_pdf scope must be workbook or worksheet')
       if (!target || typeof target.ExportAsFixedFormat !== 'function') return fail('unsupported', 'WebEdit does not expose an auditable PDF export API')
-      const artifact = await artifactUrl(await resolve(target.ExportAsFixedFormat(0)))
+      const exported = await resolve(target.ExportAsFixedFormat(0))
+      const businessError = await property(exported, 'errorCode') ?? await property(exported, 'ErrorCode')
+      if (await property(exported, 'isSuccessful') === false || await property(exported, 'success') === false || (businessError !== undefined && businessError !== null && String(businessError) !== '0')) return fail('runtime_error', 'WebEdit PDF export reported a business failure')
+      const artifact = await artifactUrl(exported)
       if (!artifact) return fail('readback_mismatch', 'WebEdit PDF export did not return an auditable https artifact URL')
-      return { requested: { range: address, scope }, observed: { range: address, artifact: { kind: 'pdf', mimeType: 'application/pdf', filename: artifact.filename || null, sourceOrigin: artifact.origin, expiresAt: artifact.expiresAt ? new Date(artifact.expiresAt * 1000).toISOString() : null, queryRedacted: artifact.queryRedacted, delivery: 'browser_session_only' }, verified: true } }
+      return { requested: { range: address, scope }, observed: { range: address, artifact: { kind: 'pdf', mimeType: 'application/pdf', sourceOrigin: artifact.origin, expiresAt: artifact.expiresAt ? new Date(artifact.expiresAt * 1000).toISOString() : null, queryRedacted: artifact.queryRedacted, delivery: 'browser_session_only' }, verified: true } }
     }
     if (operation === 'export_range_image') {
       if (typeof range.ToImageDataURL !== 'function') return fail('unsupported', 'WebEdit does not expose Range.ToImageDataURL')
@@ -471,13 +546,15 @@
   }
   async function write(request) {
     const resolved = await appAndSheet(request.resource?.sheetName); if (resolved.error) return resolved.error
+    if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select'].includes(request.operation)) return fail('unsupported', 'WebEdit structural sheet mutation lacks a mutation-safe preflight and is unavailable')
     const denied = await writable(resolved, request); if (denied) return denied
+    const stale = await preconditionMatches(resolved, request); if (stale) return stale
     const sheetOperation = String(request.operation).startsWith('sheet_')
     const result = sheetOperation ? await writeSheet(resolved, request) : await writeRange(resolved, request)
     if (!result.ok && result.error) return result
     return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
   }
-  async function run(request) { return request?.action === 'write' ? write(request) : request?.action === 'inspect_write' ? context() : read(request ?? {}) }
+  async function run(request) { return request?.action === 'write' ? write(request) : request?.action === 'inspect_write' ? inspectWrite(request) : read(request ?? {}) }
   globalThis.__deepseekHarnessOfficeSpreadsheet = { run }
   const REQUEST = 'deepseek-harness-office-spreadsheet-request/v1'; const RESPONSE = 'deepseek-harness-office-spreadsheet-response/v1'
   window.addEventListener?.(REQUEST, (event) => { const detail = event.detail; if (!detail || typeof detail.id !== 'string') return; void run(detail).then((payload) => window.dispatchEvent(new CustomEvent(RESPONSE, { detail: { id: detail.id, ...payload } }))).catch(() => window.dispatchEvent(new CustomEvent(RESPONSE, { detail: { id: detail.id, ...fail('runtime_error', 'WebEdit spreadsheet operation failed') } }))) })

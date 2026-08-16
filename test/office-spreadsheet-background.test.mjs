@@ -10,6 +10,7 @@ test('routes office_spreadsheet writes only to the WebEdit iframe and forwards r
   const sent = []; const nativeMessages = []; const listeners = new Set()
   const target = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://doc.midea.com/sheets/budget' }
   const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Budget.xlsx', sheetName: 'Summary', fingerprint: 'sheet-1' }
+  const precondition = { version: 1, range: 'A1', state: { values: [[null]], formulas: [[null]], merged: null, filter: null, rowHeight: null, columnWidth: null, format: {} } }
   const port = {
     onDisconnect: { addListener: () => {}, removeListener: () => {} }, onMessage: { addListener: (listener) => listeners.add(listener), removeListener: (listener) => listeners.delete(listener) },
     postMessage: (message) => { nativeMessages.push(message); if (message.type === 'start') queueMicrotask(() => listeners.forEach((listener) => listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'spreadsheet-background-run' } }))) },
@@ -24,9 +25,9 @@ test('routes office_spreadsheet writes only to the WebEdit iframe and forwards r
   try {
     await import(`data:text/javascript,${encodeURIComponent(compiled)}#office-spreadsheet-${Date.now()}`)
     await new Promise((resolve, reject) => { const open = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error))); if (open !== true) reject(new Error('ensure-harness did not retain the response channel')) })
-    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-write-1', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'write', resource, operation: 'set_values', payload: { range: 'A1', values: [[1]] } }))
+    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-write-1', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'write', resource, operation: 'set_values', payload: { range: 'A1', values: [[1]] }, precondition }))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    assert.deepEqual(sent, [{ tabId: 42, message: { type: 'office-spreadsheet/v1', action: 'write', resource, operation: 'set_values', payload: { range: 'A1', values: [[1]] } }, options: { frameId: 17 } }])
+    assert.deepEqual(sent, [{ tabId: 42, message: { type: 'office-spreadsheet/v1', action: 'write', resource, operation: 'set_values', payload: { range: 'A1', values: [[1]] }, precondition }, options: { frameId: 17 } }])
     const response = nativeMessages.find((message) => message.type === 'connector_response')
     assert.deepEqual(response.error, { code: 'readback_mismatch', message: 'readback differs' })
   } finally { delete globalThis.chrome; delete globalThis.defineBackground }

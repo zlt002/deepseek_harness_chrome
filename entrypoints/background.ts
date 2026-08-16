@@ -329,7 +329,20 @@ interface OfficeDocumentRequest {
 }
 
 type OfficeSpreadsheetAction = 'context' | 'range' | 'search' | 'sheets' | 'capabilities' | 'inspect_write' | 'write'
-type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'insert_rows' | 'delete_rows' | 'insert_columns' | 'delete_columns' | 'row_height' | 'column_width' | 'sheet_add' | 'sheet_rename' | 'sheet_delete' | 'sheet_select' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'set_data_validation' | 'clear_data_validation' | 'add_hyperlink' | 'delete_hyperlinks' | 'add_comment' | 'delete_comments' | 'create_chart' | 'create_pivot_table' | 'insert_cell_image' | 'export_pdf' | 'export_range_image' | 'export_worksheet_image'
+type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'sort' | 'set_auto_filter' | 'clear_filters'
+interface OfficeSpreadsheetPrecondition {
+  version: 1
+  range: string
+  state: {
+    values: unknown[][]
+    formulas: unknown[][]
+    merged: boolean | null
+    filter: { operator: string } | null
+    rowHeight: number | null
+    columnWidth: number | null
+    format: Record<string, unknown>
+  }
+}
 interface OfficeSpreadsheetRequest {
   type: 'connector_request'
   requestId: string
@@ -349,6 +362,7 @@ interface OfficeSpreadsheetRequest {
   resource?: OfficeResourceIdentity
   operation?: OfficeSpreadsheetOperation
   payload?: Record<string, unknown>
+  precondition?: OfficeSpreadsheetPrecondition
 }
 
 interface OfficeReadFailure {
@@ -525,16 +539,32 @@ function isOfficeDocumentRequest(message: NativeMessage): message is OfficeDocum
     && JSON.stringify(message.payload).length <= 100000 && isLightDocumentResourceIdentity(message.resource)
 }
 
+function isOfficeSpreadsheetPrecondition(value: unknown): value is OfficeSpreadsheetPrecondition {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const candidate = value as Partial<OfficeSpreadsheetPrecondition>
+  const state = candidate.state
+  return candidate.version === 1 && typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
+    && !!state && typeof state === 'object' && !Array.isArray(state)
+    && Array.isArray(state.values) && Array.isArray(state.formulas)
+    && (state.merged === null || typeof state.merged === 'boolean')
+    && (state.filter === null || !!state.filter && typeof state.filter === 'object' && !Array.isArray(state.filter) && typeof state.filter.operator === 'string' && state.filter.operator.length <= 64)
+    && (state.rowHeight === null || typeof state.rowHeight === 'number')
+    && (state.columnWidth === null || typeof state.columnWidth === 'number')
+    && !!state.format && typeof state.format === 'object' && !Array.isArray(state.format)
+    && JSON.stringify(value).length <= 100_000
+}
+
 function isOfficeSpreadsheetRequest(message: NativeMessage): message is OfficeSpreadsheetRequest {
   const candidate = message as NativeMessage & Partial<OfficeSpreadsheetRequest>
   if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
     && message.tool === 'office_spreadsheet' && isBrowserTarget(message.browserTarget)
     && ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
-  if (candidate.action === 'context' || candidate.action === 'sheets' || candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined
+  if (candidate.action === 'context' || candidate.action === 'sheets') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined
+  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000
   if (candidate.action === 'range') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'capabilities') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'search') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128 && typeof candidate.query === 'string' && candidate.query.trim().length > 0 && candidate.query.length <= 500
-  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000
+  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetPrecondition(candidate.precondition)
 }
 
 function isTeamDocParent(value: unknown): value is TeamDocParent {
@@ -1109,7 +1139,7 @@ async function readOfficeSpreadsheet(request: OfficeSpreadsheetRequest): Promise
   try {
     const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, {
       type: 'office-spreadsheet/v1', action: request.action,
-      ...(request.range === undefined ? {} : { range: request.range }), ...(request.sheetName === undefined ? {} : { sheetName: request.sheetName }), ...(request.query === undefined ? {} : { query: request.query }), ...(request.matchCase === undefined ? {} : { matchCase: request.matchCase }), ...(request.matchEntireCell === undefined ? {} : { matchEntireCell: request.matchEntireCell }), ...(request.searchBy === undefined ? {} : { searchBy: request.searchBy }), ...(request.offset === undefined ? {} : { offset: request.offset }), ...(request.limit === undefined ? {} : { limit: request.limit }), ...(request.resource === undefined ? {} : { resource: request.resource }), ...(request.operation === undefined ? {} : { operation: request.operation }), ...(request.payload === undefined ? {} : { payload: request.payload }),
+      ...(request.range === undefined ? {} : { range: request.range }), ...(request.sheetName === undefined ? {} : { sheetName: request.sheetName }), ...(request.query === undefined ? {} : { query: request.query }), ...(request.matchCase === undefined ? {} : { matchCase: request.matchCase }), ...(request.matchEntireCell === undefined ? {} : { matchEntireCell: request.matchEntireCell }), ...(request.searchBy === undefined ? {} : { searchBy: request.searchBy }), ...(request.offset === undefined ? {} : { offset: request.offset }), ...(request.limit === undefined ? {} : { limit: request.limit }), ...(request.resource === undefined ? {} : { resource: request.resource }), ...(request.operation === undefined ? {} : { operation: request.operation }), ...(request.payload === undefined ? {} : { payload: request.payload }), ...(request.precondition === undefined ? {} : { precondition: request.precondition }),
     }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
     if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while handling the spreadsheet.' }
     const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
