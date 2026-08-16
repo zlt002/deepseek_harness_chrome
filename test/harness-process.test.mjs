@@ -55,17 +55,30 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   const skill = await readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8')
   const template = await readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8')
   const pointer = await readFile(new URL('../skills/pmd-prd/templates.md', import.meta.url), 'utf8')
+  const capabilityMatrix = await readFile(new URL('../skills/pmd-prd/references/capability-matrix.md', import.meta.url), 'utf8')
   assert.match(skill, /name: pmd-prd/)
+  assert.match(skill, /disable-model-invocation: true/)
   assert.match(skill, /pmd_prd_delivery/)
   assert.match(skill, /documents_confirmed/)
   assert.match(skill, /partial_delivery/)
+  assert.doesNotMatch(skill, /mcp__chrome__knowledge_search/)
+  assert.match(skill, /search_selected_remote_code/)
+  assert.match(skill, /search_selected_knowledge/)
+  assert.match(skill, /Q<n>/)
+  assert.match(skill, /process\.md/)
+  assert.match(skill, /domain-model\.md/)
+  assert.match(skill, /decisions\//)
   assert.match(pointer, /references\/templates\.md/)
+  assert.doesNotMatch(capabilityMatrix, /一次 `knowledge_search`/)
+  assert.match(capabilityMatrix, /search_selected_remote_code/)
+  assert.match(capabilityMatrix, /search_selected_knowledge/)
   assert.match(template, /PRD: \{编号\} - \{主题\}/)
   for (const heading of [
     '# 一、术语与缩写', '# 二、背景与目标', '# 三、整体流程', '# 四、功能性需求',
     '# 五、角色权限', '# 六、非功能性需求', '# 七、配置与开关', '# 八、测试关注点',
     '# 九、参考文档', '## AccrUI 需求交接附录',
   ]) assert.match(template, new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  for (const rule of ['必填项无事实时写', '选填项不适用时写', '每个功能至少包含正常场景', 'PRD 只写结论和索引']) assert.match(template, new RegExp(rule))
 })
 
 test('advertises distinct selected-source routes with isolated MCP tools', async () => {
