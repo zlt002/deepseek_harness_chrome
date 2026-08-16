@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
+import { connect } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -63,6 +64,44 @@ function capture(command, args) {
   })
 }
 
+export function devServerAvailable(port = 3001, host = 'localhost') {
+  return new Promise((resolvePromise) => {
+    const socket = connect({ port, host })
+    const finish = (available) => {
+      socket.removeAllListeners()
+      socket.destroy()
+      resolvePromise(available)
+    }
+    socket.setTimeout(500)
+    socket.once('connect', () => finish(true))
+    socket.once('timeout', () => finish(false))
+    socket.once('error', () => finish(false))
+  })
+}
+
+async function waitForDevServer(child, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await devServerAvailable()) return
+    if (child.exitCode !== null) throw new Error(`WXT dev server exited before port 3001 became ready (exit ${String(child.exitCode)}).`)
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+  }
+  child.kill('SIGTERM')
+  throw new Error('Timed out waiting for the WXT dev server on localhost:3001.')
+}
+
+function startDevServer() {
+  const child = spawn('pnpm', ['dev'], { cwd: projectRoot, stdio: 'inherit' })
+  const closed = new Promise((resolvePromise, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => {
+      if (code === 0 || signal === 'SIGINT' || signal === 'SIGTERM') resolvePromise()
+      else reject(new Error(`pnpm dev failed (${signal ?? `exit ${String(code)}`})`))
+    })
+  })
+  return { child, closed }
+}
+
 async function installedPaths() {
   if (platform() !== 'darwin') throw new Error('dev:restart currently supports the macOS Chrome/Edge development setup.')
   const installRoot = join(homedir(), 'Library/Application Support/DeepSeekHarness')
@@ -97,13 +136,13 @@ export async function main(args = process.argv.slice(2)) {
 
   if (!skipHarnessBuild) {
     if (!existsSync(join(harnessRoot, 'package.json'))) throw new Error(`Harness checkout not found: ${harnessRoot}`)
-    console.log('1/3 Building the latest Harness host libraries...')
+    console.log('1/4 Building the latest Harness host libraries...')
     await run('pnpm', ['run', 'build:lib:host'], { cwd: harnessRoot })
   } else {
-    console.log('1/3 Skipping Harness host build.')
+    console.log('1/4 Skipping Harness host build.')
   }
 
-  console.log('2/3 Installing the latest Native Host sources...')
+  console.log('2/4 Installing the latest Native Host sources...')
   await run(process.execPath, [join(projectRoot, 'scripts/register-native-host.mjs')], {
     cwd: projectRoot,
     env: {
@@ -113,11 +152,24 @@ export async function main(args = process.argv.slice(2)) {
     },
   })
 
-  console.log('3/3 Restarting the active development host...')
+  let ownedDevServer
+  if (await devServerAvailable()) {
+    console.log('3/4 WXT dev server is already running on localhost:3001.')
+  } else {
+    console.log('3/4 Starting the WXT dev server on localhost:3001...')
+    ownedDevServer = startDevServer()
+    await waitForDevServer(ownedDevServer.child)
+  }
+
+  console.log('4/4 Restarting the active development host...')
   const stopped = await stopInstalledHost(installRoot)
   console.log(stopped === 0
     ? 'Updated. Open the side panel to start the latest version.'
     : `Updated and stopped ${String(stopped)} old process(es). The open side panel will reconnect automatically.`)
+  if (ownedDevServer !== undefined) {
+    console.log('WXT hot reload is active. Keep this terminal open; press Ctrl+C to stop it.')
+    await ownedDevServer.closed
+  }
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

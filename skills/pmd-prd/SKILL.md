@@ -17,11 +17,15 @@ Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel�
 `input → reference_selection → research → analysis_interview → analysis_confirmed → preview → documents_confirmed → parent_inspect → parent_confirmed → creating → partial/paused/failed → completed`
 
 阶段对照和可检查完成条件见 [`references/capability-matrix.md`](references/capability-matrix.md)。
-启动新 Run、确认资料范围、记录访谈/查询/状态，或恢复暂停/部分交付时，读取 [`references/process-state.md`](references/process-state.md)；它是本 Skill 的运行绑定、持久过程文件和恢复合同。
+仅当本条消息已包含业务需求而启动新 Run、确认资料范围、记录访谈/查询/状态，或用户明确要求恢复暂停/部分交付时，读取 [`references/process-state.md`](references/process-state.md)；它是本 Skill 的运行绑定、持久过程文件和恢复合同。
+
+### 空调用与恢复判定
+
+只输入 `/pmd-prd` 时，第一响应只能请用户直接描述业务需求。不得扫描目录、读取旧 manifest 或创建任何状态；也不得读取 `process-state.md`、模板或其他本地资料来猜测旧 Run。只有本条消息已包含业务需求后，才生成运行绑定并进入阶段 1；只有用户明确表示恢复或继续旧 Run 时，才读取 manifest 和恢复状态。空调用、普通的新需求或仅出现业务编号都不是恢复请求。
 
 ### 阶段 1：输入需求
 
-Run 开始时由 Harness 自动生成内部 `requirementId`，并绑定当前 `runId/sessionId`；用户只提供业务需求，不填写内部 ID。若用户文本出现类似 `req_...` 的业务编号，将其作为业务事实保留，不把它当作内部绑定。随后从同一条用户消息提取用户、场景、问题、目标、范围、约束和验收要求；缺失项标记 `[待确认]`。先用不超过 200 字复述根理解，建立依赖设计树。若根理解无歧义，直接进入阶段 2；不得先询问 Agent 可自行查明的代码事实。完成条件：内部需求绑定已建立，根理解已确认/无歧义，设计树根和当前 frontier 已建立。
+本条消息包含业务需求时，Harness 才自动生成内部 `requirementId`，并绑定当前 `runId/sessionId`；用户只提供业务需求，不填写内部 ID。若用户文本出现类似 `req_...` 的业务编号，将其作为业务事实保留，不把它当作内部绑定。随后从同一条用户消息提取用户、场景、问题、目标、范围、约束和验收要求；缺失项标记 `[待确认]`。先用不超过 200 字复述根理解，建立依赖设计树。若根理解无歧义，直接进入阶段 2；不得先询问 Agent 可自行查明的代码事实。完成条件：内部需求绑定已建立，根理解已确认/无歧义，设计树根和当前 frontier 已建立。
 
 ### 阶段 2：选择参考资料
 

@@ -4,6 +4,13 @@ import { claudeSkillsPatch, harnessArgs, resolveHarnessCwd, resolveHarnessCli } 
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import yaml from 'js-yaml'
+import { Context } from '../../deepseek-harness/vendor/cordis/lib/index.js'
+import { entryListSchema } from '../../deepseek-harness/vendor/include/lib/index.js'
+import SystemPrompt, { renderPrompt } from '../../deepseek-harness/packages/core/system-prompt/lib/index.js'
+import { createScope } from '../../deepseek-harness/packages/core/scope/lib/index.js'
+import * as Persona from '../../deepseek-harness/packages/preset/persona/lib/index.js'
+import * as SelectedSourceRoutingPrompt from '../native-server/src/selected-source-routing-prompt.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -35,7 +42,7 @@ test('passes the Native Host-owned MCP patch to the official Harness client', ()
   )
 })
 
-test('adds Claude Code skills as a host-level catalog without replacing the preset roots', () => {
+test('mounts Harness-native skills before Claude skills so duplicate names resolve to this project', () => {
   const harnessSkillsDir = resolve(projectRoot, 'skills')
   assert.equal(
     claudeSkillsPatch({ HOME: '/Users/alice' }),
@@ -45,8 +52,8 @@ test('adds Claude Code skills as a host-level catalog without replacing the pres
       config:
         includeDefaultRoots: false
         customSkillDirs:
-          - '/Users/alice/.claude/skills'
           - '${harnessSkillsDir}'
+          - '/Users/alice/.claude/skills'
 `,
   )
 })
@@ -68,6 +75,10 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   assert.match(skill, /process\.md/)
   assert.match(skill, /domain-model\.md/)
   assert.match(skill, /references\/process-state\.md/)
+  assert.match(skill, /Harness Workspace 是唯一用户界面/)
+  assert.match(skill, /自动生成内部 `requirementId`/)
+  assert.doesNotMatch(skill, /pmd-workspace/)
+  assert.doesNotMatch(skill, /clarification\.md/)
   assert.match(pointer, /references\/templates\.md/)
   assert.doesNotMatch(capabilityMatrix, /一次 `knowledge_search`/)
   assert.match(capabilityMatrix, /search_selected_remote_code/)
@@ -112,10 +123,20 @@ test('declares pmd-prd run binding, isolated scope, persisted state, and stale-c
   }
 })
 
+test('keeps an empty pmd-prd invocation free of workspace scans and manifest recovery', async () => {
+  const skill = await readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8')
+  const processState = await readFile(new URL('../skills/pmd-prd/references/process-state.md', import.meta.url), 'utf8')
+
+  assert.match(skill, /只输入 `\/pmd-prd` 时，第一响应只能请用户直接描述业务需求/)
+  assert.match(skill, /不得扫描目录、读取旧 manifest 或创建任何状态/)
+  assert.match(skill, /只有用户明确表示恢复或继续旧 Run 时，才读取 manifest/)
+  assert.match(processState, /空 `\/pmd-prd` 不是恢复请求/)
+})
+
 test('advertises distinct selected-source routes with isolated MCP tools', async () => {
   const source = await readFile(new URL('../native-server/src/harness-process.mjs', import.meta.url), 'utf8')
-  assert.match(source, /When a request clearly concerns enterprise code or knowledge, prefer the corresponding selected-source tool/)
-  assert.match(source, /If that search reports no selected or enabled range, report that limitation instead of falling back to local files, shell, or git/)
+  assert.match(source, /deepseek-harness-selected-source-routing/)
+  assert.match(source, /selected-source-routing-prompt\.mjs/)
   assert.match(source, /toolScopes:/)
   assert.match(source, /default: global/)
   assert.match(source, /code_search: continuable-child/)
@@ -130,4 +151,30 @@ test('advertises distinct selected-source routes with isolated MCP tools', async
   assert.doesNotMatch(code, /mcp__chrome__knowledge_search/)
   assert.match(knowledge, /- mcp__chrome__knowledge_search/)
   assert.doesNotMatch(knowledge, /mcp__chrome__code_search/)
+})
+
+test('keeps selected-source routing in the final Code preset system prompt', async () => {
+  const codePresetPath = resolve(projectRoot, '../deepseek-harness/apps/cli/config/agent-presets/code/agent.cordis.yml')
+  const entries = yaml.load(await readFile(codePresetPath, 'utf8'), { schema: entryListSchema })
+  assert.ok(Array.isArray(entries))
+  const codePersona = entries.find((entry) => entry?.id === 'persona')
+  assert.equal(codePersona?.name, '@deepseek-ai/dsh-persona')
+  assert.equal(typeof codePersona?.config?.text, 'string')
+
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt, { persona: 'deployment persona that Code shadows' })
+  ctx.systemPrompt.variable('model', () => 'test-model')
+  ctx.systemPrompt.variable('cwd', () => '/workspace')
+  const codeScope = { agent: 'code-preset' }
+  await createScope(ctx, codeScope).ctx.plugin(Persona, codePersona.config)
+  await ctx.plugin(SelectedSourceRoutingPrompt)
+
+  const prompt = renderPrompt(await ctx.systemPrompt.assemble({ scope: codeScope }))
+  assert.match(prompt, /You are a coding agent powered by the test-model model/)
+  assert.doesNotMatch(prompt, /deployment persona that Code shadows/)
+  assert.match(prompt, /search_selected_remote_code/)
+  assert.match(prompt, /search_selected_knowledge/)
+  assert.match(prompt, /selected remote range as authoritative/)
+  assert.match(prompt, /never substitute the local workspace, Bash, grep, or Git/)
+  assert.match(prompt, /report that limitation instead of falling back to local files, shell, or git/)
 })

@@ -86,6 +86,12 @@ test('installs the native host into a stable macOS location', async () => {
     await stat(launcher)
     await stat(join(nativeServer, 'bin.mjs'))
     await stat(join(nativeServer, 'src/native-host.mjs'))
+    const installedSkill = join(installRoot, 'skills/pmd-prd/SKILL.md')
+    await stat(installedSkill)
+    const installedSkillSource = await readFile(installedSkill, 'utf8')
+    assert.match(installedSkillSource, /Harness Workspace 是唯一用户界面/)
+    assert.match(installedSkillSource, /自动生成内部 `requirementId`/)
+    assert.doesNotMatch(installedSkillSource, /pmd-workspace|clarification\.md/)
 
     const manifests = await Promise.all(manifestPaths.map(async (manifestPath) => JSON.parse(await readFile(manifestPath, 'utf8'))))
     for (const manifest of manifests) {

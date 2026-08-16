@@ -13,6 +13,7 @@ const extensionIds = [...new Set(
     .filter(Boolean),
 )]
 const nativeServerSource = resolve(projectRoot, 'native-server')
+const skillsSource = resolve(projectRoot, 'skills')
 const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined
 const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim() || undefined
 const siblingHarnessRoot = resolve(projectRoot, '../deepseek-harness')
@@ -48,6 +49,7 @@ const installRoot = platform() === 'darwin'
     ? join(process.env.APPDATA ?? join(homedir(), 'AppData/Roaming'), 'DeepSeekHarness')
     : join(homedir(), '.local/share/DeepSeekHarness')
 const nativeServer = join(installRoot, 'native-server')
+const skills = join(installRoot, 'skills')
 const launcher = join(installRoot, 'com.deepseek.harness.chrome')
 const launcherLines = [
   '#!/bin/sh',
@@ -98,6 +100,7 @@ async function writeManifestAtomically(manifestPath, manifest) {
 
 await mkdir(installRoot, { recursive: true })
 await cp(nativeServerSource, nativeServer, { recursive: true })
+await cp(skillsSource, skills, { recursive: true })
 await writeFile(launcher, `${launcherLines.join('\n')}\n`, 'utf8')
 await chmod(launcher, 0o755)
 for (const target of targets) {

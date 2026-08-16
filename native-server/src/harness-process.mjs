@@ -68,7 +68,10 @@ function connectorPatch(url, token) {
   config:
     text: >-
       You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
-      When a request clearly concerns enterprise code or knowledge, prefer the corresponding selected-source tool before local tools: use search_selected_remote_code for remote repository questions and search_selected_knowledge for enterprise knowledge questions. Treat the selected remote range as authoritative; never substitute the local workspace, Bash, grep, or Git for it. Give the selected-source tool one focused, bounded question. If that search reports no selected or enabled range, report that limitation instead of falling back to local files, shell, or git.
+
+- insert:
+    - id: deepseek-harness-selected-source-routing
+      name: ${yamlString(resolve(THIS_DIR, 'selected-source-routing-prompt.mjs'))}
 
 - insert:
     - id: deepseek-harness-browser-connector
@@ -129,9 +132,8 @@ function yamlString(value) {
 }
 
 /**
- * Add Claude Code's standard skill root to the host-level catalog. The web
- * profile mounts a separate filesystem provider for each agent preset, so a
- * distinct provider preserves its existing .dsh and .agents discovery.
+ * Mount the installed Harness-native skills before the optional Claude catalog
+ * so the product-owned contract wins when both roots contain the same name.
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
@@ -145,8 +147,8 @@ export function claudeSkillsPatch(env = process.env) {
       config:
         includeDefaultRoots: false
         customSkillDirs:
-          - ${yamlString(claudeSkillsDir)}
           - ${yamlString(harnessChromeSkillsDir)}
+          - ${yamlString(claudeSkillsDir)}
 `
 }
 

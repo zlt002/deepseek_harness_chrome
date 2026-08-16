@@ -64,9 +64,10 @@ pnpm run register-native-host
 
 Native Host 的工作目录默认跟随 `DSH_ROOT`；需要使用其他工作区时设置 `DSH_CWD`。
 
-开发时，扩展页面和样式由 `pnpm dev` 自动热更新。修改 `native-server`、Harness
-服务端插件或工具配置后，运行下面的一键命令；它会重建 Harness Host、同步 Native
-Host 并结束旧进程，已经打开的 side panel 会自动连接到最新版：
+开发时，扩展页面和样式由 WXT 自动热更新。修改 `native-server`、Harness 服务端插件或
+工具配置后，运行下面的一键命令；它会按需启动 WXT、重建 Harness Host、同步 Native
+Host 并结束旧进程，已经打开的 side panel 会自动连接到最新版。如果命令启动了 WXT，
+需要保持这个终端运行：
 
 ```sh
 pnpm run dev:restart
