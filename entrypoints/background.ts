@@ -150,6 +150,7 @@ const NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
 const START_TIMEOUT_MS = 30_000
 const TARGET_SETTINGS_KEY = 'harnessBrowserTargetSettings'
 const TRANSFER_TIMEOUT_MS = 15_000
+const TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY = 'teamKnowledgeCreateCheckpointsV1'
 
 interface NativeMessage {
   type?: unknown
@@ -1645,6 +1646,34 @@ function teamKnowledgeItemFingerprint(kind: TeamKnowledgeItemKind, catalogId: st
   return `team-knowledge-item-v1-${(hash >>> 0).toString(16).padStart(8, '0')}`
 }
 
+interface TeamKnowledgeCreateCheckpoint {
+  contractHash: string
+  catalogId: string
+  updatedAt: number
+}
+
+async function teamKnowledgeContractHash(request: TeamKnowledgeItemRequest, parent: TeamKnowledgeParent): Promise<string> {
+  const source = JSON.stringify({ parentFingerprint: parent.fingerprint, parentId: parent.parentId, bookId: parent.bookId, kind: request.kind, name: request.name, body: request.body })
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source))
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+async function loadTeamKnowledgeCreateCheckpoint(idempotencyIdentity: string, contractHash: string): Promise<TeamKnowledgeCreateCheckpoint | null> {
+  const stored = (await chrome.storage.local.get(TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY))?.[TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY] as Record<string, TeamKnowledgeCreateCheckpoint> | undefined
+  const checkpoint = stored?.[idempotencyIdentity]
+  if (!checkpoint) return null
+  if (checkpoint.contractHash !== contractHash || typeof checkpoint.catalogId !== 'string' || !/^\d+$/.test(checkpoint.catalogId)) throw new Error('team_knowledge_create_checkpoint_conflict')
+  return checkpoint
+}
+
+async function saveTeamKnowledgeCreateCheckpoint(idempotencyIdentity: string, checkpoint: TeamKnowledgeCreateCheckpoint): Promise<void> {
+  const stored = (await chrome.storage.local.get(TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY))?.[TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY] as Record<string, TeamKnowledgeCreateCheckpoint> | undefined
+  const next = { ...(stored ?? {}), [idempotencyIdentity]: checkpoint }
+  const ordered = Object.entries(next).sort((left, right) => Number(left[1]?.updatedAt ?? 0) - Number(right[1]?.updatedAt ?? 0))
+  while (ordered.length > 256) { const [oldest] = ordered.shift()!; delete next[oldest] }
+  await chrome.storage.local.set({ [TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY]: next })
+}
+
 async function teamKnowledgeItemFrame(tabId: number): Promise<chrome.webNavigation.GetAllFrameResultDetails | undefined> {
   const deadline = Date.now() + 30_000
   while (Date.now() < deadline) {
@@ -1703,12 +1732,23 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   if (kind !== 'light_document' && kind !== 'spreadsheet') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
   const priorStages = request.recovery?.stages ?? []
   const stages = ['parent_inspected', ...priorStages.filter((stage) => stage !== 'parent_inspected')]
-  const recoveryCatalogId = request.recovery?.catalogId
+  const checkpointContractHash = await teamKnowledgeContractHash(request, parent)
+  let checkpoint: TeamKnowledgeCreateCheckpoint | null
+  try { checkpoint = await loadTeamKnowledgeCreateCheckpoint(request.idempotencyIdentity!, checkpointContractHash) } catch (error) {
+    return teamKnowledgeItemPartial({ failedAt: 'create', error: error instanceof Error ? error.message : 'team_knowledge_create_checkpoint_conflict', stages })
+  }
+  const recoveryCatalogId = request.recovery?.catalogId ?? checkpoint?.catalogId
+  const creatingNewItem = !recoveryCatalogId
   const resolution = recoveryCatalogId
     ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId }] })
     : await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, name: request.name!, kind }] })
   const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; catalogId?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   const catalogId = typeof created?.catalogId === 'string' ? created.catalogId : typeof created?.documentId === 'string' ? created.documentId : null
+  if (creatingNewItem && catalogId && /^\d+$/.test(catalogId)) {
+    try { await saveTeamKnowledgeCreateCheckpoint(request.idempotencyIdentity!, { contractHash: checkpointContractHash, catalogId, updatedAt: Date.now() }) } catch {
+      return teamKnowledgeItemPartial({ stages, failedAt: 'create', error: 'team_knowledge_create_checkpoint_failed' })
+    }
+  }
   if (created?.ok !== true || !catalogId || !/^\d+$/.test(catalogId) || typeof created.url !== 'string') {
     return teamKnowledgeItemPartial({ stages, failedAt: created?.failedAt === 'unsupported' ? 'unsupported' : created?.failedAt === 'rediscover' ? 'rediscover' : 'create', error: typeof created?.error === 'string' ? created.error : 'team_knowledge_create_failed', diagnostic: created?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
   }

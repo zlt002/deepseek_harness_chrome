@@ -67,6 +67,7 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
       'mcp__chrome__office_write_range',
       'mcp__chrome__pmd_prd_delivery',
       'mcp__chrome__team_doc_create',
+      'mcp__chrome__team_knowledge_batch',
       'mcp__chrome__team_knowledge_item',
     ])
     const result = await ctx.tools.execute({

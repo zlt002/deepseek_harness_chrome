@@ -166,7 +166,7 @@ test('accepts the official MCP client at the public tools/list and tools/call se
   try {
     await client.connect(transport)
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'office_document', 'office_spreadsheet', 'team_doc_create', 'team_knowledge_item', 'pmd_prd_delivery', 'browser_open_tab', 'knowledge_search', 'code_search'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'office_document', 'office_spreadsheet', 'team_doc_create', 'team_knowledge_item', 'team_knowledge_batch', 'pmd_prd_delivery', 'browser_open_tab', 'knowledge_search', 'code_search'])
     const codeSearch = tools.tools.find((tool) => tool.name === 'code_search')
     assert.deepEqual(codeSearch?.inputSchema, {
       type: 'object', additionalProperties: false, required: ['question'],

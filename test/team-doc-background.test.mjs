@@ -38,10 +38,14 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
     onMessage: { addListener: (listener) => nativeListeners.add(listener), removeListener: (listener) => nativeListeners.delete(listener) },
     postMessage: (message) => { nativeMessages.push(message); if (message.type === 'start') queueMicrotask(() => nativeListeners.forEach((listener) => listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-team-doc' } }))) },
   }
+  const localStorage = {}
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } },
     runtime: { connectNative: () => port, lastError: undefined, onMessage: { addListener: (listener) => { runtimeListener = listener } }, sendMessage: async () => {} },
-    storage: { session: { get: async () => ({ harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }), set: async () => {} } },
+    storage: {
+      session: { get: async () => ({ harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }), set: async () => {} },
+      local: { get: async (key) => ({ [key]: localStorage[key] }), set: async (value) => { Object.assign(localStorage, value) } },
+    },
     windows: { getLastFocused: async () => ({ id: target.windowId }), onFocusChanged: { addListener: () => {} } },
     tabs: {
       query: async () => [tab], get: async (tabId) => { if (tabId !== tab.id) throw new Error('tab not found'); return { ...tab } },
@@ -56,8 +60,16 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
   globalThis.defineBackground = (setup) => setup()
   await import(`data:text/javascript,${encodeURIComponent(compiled)}#team-doc-background-${Date.now()}-${Math.random()}`)
   await new Promise((resolve, reject) => { const open = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error))); if (open !== true) reject(new Error('ensure-harness did not retain the response channel')) })
-  const sendNative = async (request) => { nativeListeners.forEach((listener) => listener(request)); await new Promise((resolve) => setTimeout(resolve, 0)); return nativeMessages.findLast((message) => message.type === 'connector_response' && message.requestId === request.requestId) }
-  return { executions, sendNative, cleanup: () => { delete globalThis.chrome; delete globalThis.defineBackground } }
+  const sendNative = async (request) => {
+    nativeListeners.forEach((listener) => listener(request))
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const response = nativeMessages.findLast((message) => message.type === 'connector_response' && message.requestId === request.requestId)
+      if (response) return response
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    return undefined
+  }
+  return { executions, localStorage, sendNative, cleanup: () => { delete globalThis.chrome; delete globalThis.defineBackground } }
 }
 
 const inspectRequest = (overrides = {}) => ({ type: 'connector_request', requestId: 'inspect-1', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_doc_create', phase: 'inspect', ...overrides })
@@ -88,6 +100,26 @@ test('creates a child light document only after the verified parent, rediscovery
     assert.equal(response.result.item.catalogId, '9007199254740995')
     assert.deepEqual(response.result.stages, ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'])
     assert.equal(response.result.readback.body, 'Child')
+  } finally { harness.cleanup() }
+})
+
+test('persists the remote-create checkpoint before readback so a retry rediscoveries instead of creating again', async () => {
+  let creates = 0; let rediscoveries = 0; let writes = 0
+  const createdUrl = 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995'
+  const harness = await loadBackground({ execute: async ({ func }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+    if (func.name === 'createTeamDocInPage') { creates += 1; return { ok: true, catalogId: '9007199254740995', documentId: '9007199254740995', kind: 'light_document', url: createdUrl } }
+    if (func.name === 'rediscoverTeamDocInPage') { rediscoveries += 1; return { ok: true, documentId: '9007199254740995', catalogId: '9007199254740995', url: createdUrl } }
+    if (func.name === 'writeTeamDocInWebEdit') { writes += 1; return writes === 1 ? { ok: false, readbackMatches: false, error: 'lost_after_create' } : { ok: true, readbackMatches: true, observedBody: 'Child' } }
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const first = await harness.sendNative(itemRequest({ requestId: 'checkpoint-first', idempotencyIdentity: 'checkpoint-item' }))
+    assert.equal(first.result.status, 'partial_delivery')
+    const retry = await harness.sendNative(itemRequest({ requestId: 'checkpoint-retry', idempotencyIdentity: 'checkpoint-item' }))
+    assert.equal(retry.result.status, 'verified_write')
+    assert.equal(creates, 1); assert.equal(rediscoveries, 1)
+    assert.equal(JSON.stringify(harness.localStorage).includes('# Child'), false)
   } finally { harness.cleanup() }
 })
 

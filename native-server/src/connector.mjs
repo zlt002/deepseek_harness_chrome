@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { PmdDeliveryRecordStore } from './pmd-delivery-record-store.mjs'
+import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 
 const REQUEST_TIMEOUT_MS = 15_000
 const KNOWLEDGE_REQUEST_TIMEOUT_MS = 30 * 60_000
@@ -251,6 +252,16 @@ const teamKnowledgeItemTool = {
       challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, catalogId: { type: 'string', pattern: '^\\d+$' },
     },
   },
+}
+
+const teamKnowledgeBatchTool = {
+  name: 'team_knowledge_batch', title: 'Create a batch of Team Knowledge light documents',
+  description: 'Create one to ten ordered light documents in the bound Team Knowledge directory. Inspect the parent, preview the exact ordered names and body hashes, then create or resume only unfinished items. Each item requires catalog rediscovery and WebEdit body readback before it is verified.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
+    action: { enum: ['inspect_parent', 'preview', 'create', 'status'] }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 }, challenge: { type: 'string', minLength: 1, maxLength: 256 },
+    items: { type: 'array', minItems: 1, maxItems: 10, items: { type: 'object', additionalProperties: false, required: ['name', 'body'], properties: { name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', minLength: 1, maxLength: 100000 } } } },
+  } },
 }
 
 const pmdPrdDeliveryTool = {
@@ -604,6 +615,36 @@ function validTeamKnowledgeItemArguments(args) {
     && typeof args.body === 'string' && args.body.length <= 100000 && (args.kind === 'spreadsheet' || args.body.trim().length > 0)
   return args.action === 'readback' && keys.length === 3 && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.catalogId === 'string' && /^\d+$/.test(args.catalogId)
 }
+function validTeamKnowledgeBatchItems(items) {
+  return Array.isArray(items) && items.length >= 1 && items.length <= 10
+    && items.every((item) => item && typeof item === 'object' && !Array.isArray(item) && Object.keys(item).length === 2
+      && typeof item.name === 'string' && item.name === item.name.trim() && item.name.length > 0 && item.name.length <= 120
+      && typeof item.body === 'string' && item.body.trim().length > 0 && item.body.length <= 100000)
+    && new Set(items.map((item) => item.name.normalize('NFKC'))).size === items.length
+}
+function validTeamKnowledgeBatchArguments(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
+  const keys = Object.keys(args)
+  if (args.action === 'inspect_parent') return keys.length === 1
+  if (args.action === 'status') return keys.length === 2 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
+  if (args.action === 'preview') return keys.length === 4 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
+    && typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256 && validTeamKnowledgeBatchItems(args.items)
+  return args.action === 'create' && keys.length === 4 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
+    && typeof args.challenge === 'string' && args.challenge.length > 0 && args.challenge.length <= 256 && validTeamKnowledgeBatchItems(args.items)
+}
+function teamKnowledgeBatchFingerprint(items) {
+  return hash(JSON.stringify(items.map((item) => ({ name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
+}
+function validVerifiedTeamKnowledgeBatchItem(result, approved, persisted = false) {
+  if (!validTeamKnowledgeItemResult(result) || result.status !== 'verified_write' || result.item?.kind !== 'light_document' || result.item?.name !== approved.name) return false
+  if (typeof result.item.catalogId !== 'string' || !/^\d+$/.test(result.item.catalogId) || !Array.isArray(result.stages)) return false
+  if (!['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'].every((stage) => result.stages.includes(stage))) return false
+  try {
+    const url = new URL(result.item.url)
+    if (url.origin !== 'https://doc.midea.com' || !url.pathname.includes(result.item.catalogId)) return false
+  } catch { return false }
+  return persisted || result.readback?.body === approved.body
+}
 
 const PMD_DOCUMENT_KINDS = ['analysis', 'prd']
 function validPmdDocuments(value, requirementId) {
@@ -758,7 +799,7 @@ function knowledgeProxyHeaders(entries, cookie) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
@@ -778,6 +819,9 @@ export class BrowserConnector {
     this.teamDocChallenges = new Map()
     this.teamDocStore = options.teamDocStore ?? new TeamDocRecordStore()
     this.teamKnowledgeItemChallenges = new Map()
+    this.teamKnowledgeBatchStore = options.teamKnowledgeBatchStore ?? new TeamKnowledgeBatchRecordStore()
+    this.teamKnowledgeBatchChallenges = new Map()
+    this.teamKnowledgeBatchLocks = new Map()
     this.pmdDeliveryStore = options.pmdDeliveryStore ?? new PmdDeliveryRecordStore()
     this.pmdDeliveryChallenges = new Map()
     this.pmdDeliveryLocks = new Map()
@@ -824,6 +868,7 @@ export class BrowserConnector {
     this.officeSpreadsheetChallenges.clear()
     this.officeSpreadsheetWrites.clear()
     this.teamKnowledgeItemChallenges.clear()
+    this.teamKnowledgeBatchChallenges.clear()
     this.pmdDeliveryChallenges.clear()
     this.browserTargets.clear()
     this.browserTargetSets.clear()
@@ -848,6 +893,7 @@ export class BrowserConnector {
       this.officeSpreadsheetChallenges.clear()
       this.officeSpreadsheetWrites.clear()
       this.teamKnowledgeItemChallenges.clear()
+      this.teamKnowledgeBatchChallenges.clear()
       this.pmdDeliveryChallenges.clear()
     }
     this.currentRunId = runId
@@ -1016,7 +1062,7 @@ export class BrowserConnector {
     }
     if (message.method === 'tools/list') {
       this.onToolsListed?.()
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, officeSpreadsheetTool, teamDocCreateTool, teamKnowledgeItemTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool] } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, officeSpreadsheetTool, teamDocCreateTool, teamKnowledgeItemTool, teamKnowledgeBatchTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool] } })
       return
     }
     if (message.method !== 'tools/call') {
@@ -1049,6 +1095,10 @@ export class BrowserConnector {
     }
     if (message.params?.name === 'team_knowledge_item') {
       await this.#teamKnowledgeItem(message, response)
+      return
+    }
+    if (message.params?.name === 'team_knowledge_batch') {
+      await this.#teamKnowledgeBatch(message, response)
       return
     }
     if (message.params?.name === 'pmd_prd_delivery') {
@@ -1469,6 +1519,114 @@ export class BrowserConnector {
       await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, kind: args.kind, name: args.name, stages: result.stages, catalogId: result.item?.catalogId ?? null, verified: result.status === 'verified_write', result })
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge item operation failed') }
+  }
+
+  async #withTeamKnowledgeBatchLock(key, work) {
+    const previous = this.teamKnowledgeBatchLocks.get(key) ?? Promise.resolve()
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const queued = previous.catch(() => undefined).then(() => gate)
+    this.teamKnowledgeBatchLocks.set(key, queued)
+    await previous.catch(() => undefined)
+    try { return await work() } finally {
+      release()
+      if (this.teamKnowledgeBatchLocks.get(key) === queued) this.teamKnowledgeBatchLocks.delete(key)
+    }
+  }
+
+  async #teamKnowledgeBatch(message, response) {
+    const args = message.params?.arguments ?? {}
+    if (!validTeamKnowledgeBatchArguments(args)) {
+      this.#reply(response, errorResponse(message.id, -32602, 'team_knowledge_batch requires a valid action-specific payload'))
+      return
+    }
+    const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
+    if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    const inspectParent = async () => {
+      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
+      const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
+      if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge batch parent')
+      if (result.capabilities?.light_document === false) throw new Error('team_knowledge_light_document_unsupported')
+      return result
+    }
+    try {
+      if (args.action === 'status') {
+        const inspected = await inspectParent()
+        const batch = await this.teamKnowledgeBatchStore.load(args.batchId)
+        if (!batch) throw new Error('team_knowledge_batch_not_found')
+        if (batch.targetFingerprint !== teamKnowledgeTargetFingerprint(target, inspected.parent, 'light_document')) throw new Error('team_knowledge_batch_target_mismatch')
+        const result = { action: 'status', browserTarget: target, parent: inspected.parent, batch }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+      if (args.action === 'inspect_parent') {
+        const inspected = await inspectParent()
+        const result = { action: 'inspect_parent', browserTarget: target, parent: inspected.parent, capabilities: inspected.capabilities ?? {} }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+      const contentFingerprint = teamKnowledgeBatchFingerprint(args.items)
+      if (args.action === 'preview') {
+        const inspected = await inspectParent(); const parent = inspected.parent
+        if (parent.fingerprint !== args.parentFingerprint) throw new Error('Team Knowledge parent changed; inspect and confirm the directory again.')
+        const targetFingerprint = teamKnowledgeTargetFingerprint(target, parent, 'light_document')
+        const batch = await this.teamKnowledgeBatchStore.create({
+          batchId: args.batchId, targetFingerprint, contentFingerprint,
+          items: args.items.map((item, index) => ({ index, name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body), idempotencyIdentity: `team-batch:${hash(args.batchId).slice(0, 48)}:${String(index)}` })),
+        })
+        if (batch.status === 'completed') {
+          const result = { action: 'preview', status: 'already_completed', browserTarget: target, parent, batch }
+          this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+          return
+        }
+        for (const [key, grant] of this.teamKnowledgeBatchChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeBatchChallenges.delete(key)
+        if (this.teamKnowledgeBatchChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.teamKnowledgeBatchChallenges.delete(this.teamKnowledgeBatchChallenges.keys().next().value)
+        const challenge = randomBytes(32).toString('base64url')
+        this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target, parent, batchId: args.batchId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { action: 'preview', status: batch.status, browserTarget: target, parent, batch, challenge }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+      const grant = this.teamKnowledgeBatchChallenges.get(args.challenge)
+      this.teamKnowledgeBatchChallenges.delete(args.challenge)
+      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)
+        || grant.batchId !== args.batchId || grant.contentFingerprint !== contentFingerprint) throw new Error('Team Knowledge batch approval challenge is missing, stale, changed, or already used.')
+      const inspected = await inspectParent()
+      if (inspected.parent.fingerprint !== grant.parent.fingerprint) throw new Error('Team Knowledge parent changed after confirmation.')
+      const targetFingerprint = teamKnowledgeTargetFingerprint(target, grant.parent, 'light_document')
+      const result = await this.#withTeamKnowledgeBatchLock(JSON.stringify([args.batchId, targetFingerprint]), async () => {
+        let batch = await this.teamKnowledgeBatchStore.load(args.batchId)
+        if (!batch || batch.targetFingerprint !== targetFingerprint || batch.contentFingerprint !== contentFingerprint) throw new Error('team_knowledge_batch_conflict')
+        for (const item of batch.items.filter((candidate) => candidate.status !== 'created')) {
+          const document = args.items[item.index]
+          const existing = await this.teamDocStore.load(item.idempotencyIdentity)
+          if (existing && (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== item.contentHash || existing.kind !== 'light_document' || existing.name !== item.name)) {
+            await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'failed', error: 'Team Knowledge batch item idempotency identity conflicts with the approved parent or content.' })
+            continue
+          }
+          if (existing?.verified && validVerifiedTeamKnowledgeBatchItem(existing.result, document, true) && existing.result.item.catalogId === existing.catalogId) {
+            await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'created', catalogId: existing.result.item.catalogId, stages: existing.result.stages, error: null })
+            continue
+          }
+          const recovery = existing ? { catalogId: existing.catalogId ?? null, stages: existing.stages ?? [] } : undefined
+          await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'creating', error: null })
+          await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
+          try {
+            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
+            const resolved = await this.#requestExtension(request); const itemResult = resolved.teamKnowledgeItem
+            if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid Team Knowledge batch item result')
+            if (itemResult.status === 'verified_write' && !validVerifiedTeamKnowledgeBatchItem(itemResult, document)) throw new Error('Extension peer verified the wrong Team Knowledge batch item')
+            await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
+            await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: itemResult.status === 'verified_write' ? 'created' : 'failed', catalogId: itemResult.item?.catalogId ?? null, stages: itemResult.stages, error: itemResult.status === 'verified_write' ? null : itemResult.error })
+          } catch (error) {
+            await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'failed', error: error instanceof Error ? error.message : 'Team Knowledge batch item creation failed' })
+          }
+        }
+        batch = await this.teamKnowledgeBatchStore.load(args.batchId)
+        return { action: 'create', status: batch.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: target, parent: grant.parent, batch }
+      })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch operation failed') }
   }
 
   async #withPmdDeliveryLock(key, work) {
