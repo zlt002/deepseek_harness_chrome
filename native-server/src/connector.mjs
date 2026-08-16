@@ -263,7 +263,7 @@ const officeSpreadsheetTool = {
   inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
     action: { enum: ['context', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
     challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
-    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'] }, payload: { type: 'object', additionalProperties: true },
+    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'] }, payload: { type: 'object', additionalProperties: true },
   } },
 }
 
@@ -592,7 +592,7 @@ function verifiedLightDocumentWriteMatches(result, request) {
     : observed[index]?.id === item.id && canonicalJson(observed[index]?.style) === canonicalJson(item.style) && typeof observed[index]?.text === 'string' && typeof observed[index]?.type === 'string'
       && (item.style.blockType === undefined || observed[index].type === item.style.blockType))
 }
-const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility']
+const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility']
 const SPREADSHEET_VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
 const SPREADSHEET_VALIDATION_ALERT_STYLES = { stop: 1, warning: 2, information: 3 }
 const SPREADSHEET_VALIDATION_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
@@ -603,6 +603,22 @@ function spreadsheetRequestedValidation(payload) {
   return { type, alertStyle, operator, formula1, formula2, ignoreBlank: payload.ignoreBlank ?? true, showError: payload.showError ?? true, errorTitle: payload.errorTitle ?? '', errorMessage: payload.errorMessage ?? '' }
 }
 function validSpreadsheetValidation(value) { return value === null || value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 8 && Number.isInteger(value.type) && value.type >= 1 && value.type <= 7 && Number.isInteger(value.alertStyle) && Number.isInteger(value.operator) && typeof value.formula1 === 'string' && value.formula1.length <= 1024 && typeof value.formula2 === 'string' && value.formula2.length <= 1024 && typeof value.ignoreBlank === 'boolean' && typeof value.showError === 'boolean' && typeof value.errorTitle === 'string' && value.errorTitle.length <= 255 && typeof value.errorMessage === 'string' && value.errorMessage.length <= 1024 }
+function validSpreadsheetHyperlink(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every((key) => ['address', 'subAddress', 'textToDisplay', 'name', 'type', 'screenTip'].includes(key)) && ['address', 'subAddress', 'textToDisplay', 'name', 'type'].every((key) => Object.hasOwn(value, key)) && typeof value.address === 'string' && value.address.length <= 2048 && typeof value.subAddress === 'string' && value.subAddress.length <= 256 && typeof value.textToDisplay === 'string' && value.textToDisplay.length <= 500 && typeof value.name === 'string' && value.name.length <= 500 && (typeof value.type === 'string' || typeof value.type === 'number') && (value.screenTip === undefined || typeof value.screenTip === 'string' && value.screenTip.length <= 500) }
+function validSpreadsheetHyperlinks(value) { return Array.isArray(value) && value.length <= 200 && value.every(validSpreadsheetHyperlink) }
+function isSafeInternalHyperlinkReference(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f\[\]]/.test(value)) return false
+  const a1 = '\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6}(?::\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6})?'
+  const sheet = "(?:[A-Za-z_][A-Za-z0-9_.]{0,30}|'(?:[^'\\[\\]\\u0000-\\u001f\\u007f]|''){1,62}')!"
+  return new RegExp(`^(?:${sheet})?${a1}$`).test(value) || /^[A-Za-z_][A-Za-z0-9_.]{0,254}$/.test(value)
+}
+function spreadsheetRequestedHyperlink(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['range', 'sheetName', 'url', 'subAddress', 'screenTip', 'textToDisplay'].includes(key))) return null
+  const url = payload.url ?? ''; const subAddress = payload.subAddress ?? ''; const screenTip = payload.screenTip; const textToDisplay = payload.textToDisplay
+  if (typeof url !== 'string' || url.length > 2048 || typeof subAddress !== 'string' || subAddress.length > 256 || typeof textToDisplay !== 'string' || textToDisplay.length > 500 || (screenTip !== undefined && (typeof screenTip !== 'string' || screenTip.length > 500)) || /[\u0000-\u001f\u007f]/.test(url) || /[\u0000-\u001f\u007f]/.test(subAddress)) return null
+  if (subAddress && !isSafeInternalHyperlinkReference(subAddress)) return null
+  if (url) { try { const parsed = new URL(url); if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password || parsed.href !== url) return null } catch { return null } } else if (!isSafeInternalHyperlinkReference(subAddress)) return null
+  return { url, subAddress, textToDisplay, ...(screenTip === undefined ? {} : { screenTip }) }
+}
 function validSpreadsheetMatrix(value) { return Array.isArray(value) && value.every((row) => Array.isArray(row)) }
 function spreadsheetMatrixMatchesAddress(value, address) { const parsed = parseSpreadsheetAddress(address); const rows = parsed ? parsed.rowTo - parsed.rowFrom + 1 : 0; const columns = parsed ? parsed.colTo - parsed.colFrom + 1 : 0; return rows > 0 && columns > 0 && validSpreadsheetMatrix(value) && value.length === rows && value.every((row) => row.length === columns) }
 function validWorkbookSheet(value) { return value && typeof value === 'object' && Number.isInteger(value.index) && value.index >= 1 && value.index <= 200 && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 31 && (value.visible === null || typeof value.visible === 'boolean') && (value.active === null || typeof value.active === 'boolean') }
@@ -616,10 +632,12 @@ function validSpreadsheetPrecondition(value) {
   if (!['values', 'formulas', 'merged', 'filter', 'rowHeight', 'columnWidth', 'format'].every((key) => Object.hasOwn(state, key)) || !spreadsheetMatrixMatchesAddress(state.values, value.range) || !spreadsheetMatrixMatchesAddress(state.formulas, value.range)) return false
   if (!(state.merged === null || typeof state.merged === 'boolean') || !(state.rowHeight === null || typeof state.rowHeight === 'number') || !(state.columnWidth === null || typeof state.columnWidth === 'number')) return false
   if (!(state.filter === null || typeof state.filter === 'object' && !Array.isArray(state.filter) && typeof state.filter.operator === 'string' && state.filter.operator.length <= 64)) return false
-  if (!state.format || typeof state.format !== 'object' || Array.isArray(state.format) || (state.validation !== undefined && !validSpreadsheetValidation(state.validation))) return false
+  if (!state.format || typeof state.format !== 'object' || Array.isArray(state.format) || (state.validation !== undefined && !validSpreadsheetValidation(state.validation)) || (state.hyperlinks !== undefined && !validSpreadsheetHyperlinks(state.hyperlinks))) return false
   return JSON.stringify(value).length <= 100_000
 }
 function validSpreadsheetOperationPayload(operation, payload) {
+  if (operation === 'add_hyperlink') return spreadsheetRequestedHyperlink(payload) !== null && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128
+  if (operation === 'delete_hyperlinks') return !!payload && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128 && Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))
   if (!['set_data_validation', 'clear_data_validation'].includes(operation)) return true
   return !!payload && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128
     && (operation === 'clear_data_validation' ? Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key)) : spreadsheetRequestedValidation(payload) !== null)
@@ -723,6 +741,7 @@ function spreadsheetP0Plan(operation, payload, precondition) {
 }
 function validSpreadsheetOperationPrecondition(operation, payload, precondition) {
   if (['set_data_validation', 'clear_data_validation'].includes(operation)) return precondition?.version === 1 && precondition.range === payload?.range && validSpreadsheetOperationPayload(operation, payload) && Object.hasOwn(precondition.state ?? {}, 'validation') && validSpreadsheetValidation(precondition.state?.validation) && completeSpreadsheetDataValidationState(precondition.state)
+  if (['add_hyperlink', 'delete_hyperlinks'].includes(operation)) return precondition?.version === 1 && precondition.range === payload?.range && validSpreadsheetOperationPayload(operation, payload) && Object.hasOwn(precondition.state ?? {}, 'validation') && validSpreadsheetValidation(precondition.state?.validation) && Object.hasOwn(precondition.state ?? {}, 'hyperlinks') && validSpreadsheetHyperlinks(precondition.state?.hyperlinks) && completeSpreadsheetDataValidationState(precondition.state) && (operation !== 'add_hyperlink' || payload.screenTip === undefined || precondition.state.hyperlinks.length > 0 && precondition.state.hyperlinks.every((item) => typeof item.screenTip === 'string'))
   if (['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) return spreadsheetP0Plan(operation, payload, precondition) !== null
   if (!['create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(operation)) return true
   if (precondition?.version !== 3 || !Array.isArray(precondition.sheets)) return false
@@ -752,6 +771,16 @@ function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedRes
   if (operation === 'clear_data_validation') {
     const expectedState = precondition?.state ? { ...precondition.state, validation: null } : null
     return !!expectedState && hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.requested.validation === null && result.observed.validation === null && jsonMatches(result.observed.state, expectedState)
+  }
+  if (operation === 'add_hyperlink') {
+    const expected = spreadsheetRequestedHyperlink(payload); const before = precondition?.state?.hyperlinks
+    if (!expected || !validSpreadsheetHyperlinks(before) || !validSpreadsheetHyperlinks(result.observed.hyperlinks) || !validSpreadsheetHyperlink(result.observed.newItem)) return false
+    const added = result.observed.hyperlinks.filter((item) => !before.some((prior) => jsonMatches(prior, item))); const expectedState = { ...precondition.state, hyperlinks: result.observed.hyperlinks }
+    return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.hyperlink, expected) && result.observed.hyperlinks.length === before.length + 1 && added.length === 1 && jsonMatches(result.observed.newItem, added[0]) && added[0].address === expected.url && added[0].subAddress === expected.subAddress && added[0].textToDisplay === expected.textToDisplay && (expected.screenTip === undefined || added[0].screenTip === expected.screenTip) && jsonMatches(result.observed.state, expectedState)
+  }
+  if (operation === 'delete_hyperlinks') {
+    const before = precondition?.state?.hyperlinks; const expectedState = precondition?.state ? { ...precondition.state, hyperlinks: [] } : null
+    return validSpreadsheetHyperlinks(before) && !!expectedState && hasVerifiedSpreadsheetRange(result, payload) && result.requested.delete === true && validSpreadsheetHyperlinks(result.observed.hyperlinks) && result.observed.hyperlinks.length === 0 && jsonMatches(result.observed.state, expectedState)
   }
   if (operation === 'create_defined_name') {
     const expected = precondition?.definedNames?.find((item) => item.name === payload.name?.trim()); return precondition?.version === 3 && !expected && result.requested.name === payload.name?.trim() && result.requested.refersTo === payload.refersTo?.trim() && result.requested.visible === (payload.visible ?? true) && result.requested.scope === 'workbook' && result.observed.name === payload.name?.trim() && result.observed.refersTo === payload.refersTo?.trim() && result.observed.visible === (payload.visible ?? true) && result.observed.scope === 'workbook' && Array.isArray(result.observed.names) && jsonMatches(result.observed.names.filter((item) => item.name !== payload.name?.trim()), precondition.definedNames) && result.observed.verified === true

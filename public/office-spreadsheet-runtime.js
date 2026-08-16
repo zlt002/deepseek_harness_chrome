@@ -70,13 +70,15 @@
   // A write approval is bound to the smallest readable state that can be
   // affected by the supported operation.  Keep it bounded because this
   // object crosses the page -> extension -> native-host boundary twice.
-  async function writePrecondition(range, address, includeValidation = false) {
+  async function writePrecondition(range, address, includeValidation = false, includeHyperlinks = false, requireHyperlinkScreenTip = false) {
     const snapshot = await rangeSnapshotFromRange(range, address)
     if (!snapshot) return null
     const font = await property(range, 'Font') ?? {}
     const interior = await property(range, 'Interior') ?? {}
     const validation = includeValidation ? await validationSnapshot(range) : null
     if (includeValidation && !validation.supported) return null
+    const hyperlinks = includeHyperlinks ? await hyperlinksSnapshot(range, requireHyperlinkScreenTip) : null
+    if (includeHyperlinks && !hyperlinks.supported) return null
     const state = {
       values: snapshot.values,
       formulas: snapshot.formulas,
@@ -97,6 +99,7 @@
         wrap: await property(range, 'wrap') ?? await property(range, 'WrapText') ?? null,
       },
       ...(includeValidation ? { validation: validation.validation } : {}),
+      ...(includeHyperlinks ? { hyperlinks: hyperlinks.items } : {}),
     }
     const precondition = { version: 1, range: address, state }
     return JSON.stringify(precondition).length <= 96_000 ? precondition : null
@@ -159,6 +162,38 @@
     return Number.isInteger(count) && count >= 0 && count <= 100000 ? count : null
   }
   async function collectionItem(collection, index) { return await call(collection, 'Item', [index]) ?? await call(collection, 'getItemAt', [index - 1]) }
+  async function hyperlinkItemSnapshot(item, requireScreenTip = false) {
+    const address = await property(item, 'Address') ?? await property(item, 'address'); const subAddress = await property(item, 'SubAddress') ?? await property(item, 'subAddress'); const textToDisplay = await property(item, 'TextToDisplay') ?? await property(item, 'textToDisplay'); const name = await property(item, 'Name') ?? await property(item, 'name'); const type = await property(item, 'Type') ?? await property(item, 'type'); const screenTip = requireScreenTip ? (await property(item, 'ScreenTip') ?? await property(item, 'screenTip')) : undefined
+    if (typeof address !== 'string' || typeof subAddress !== 'string' || typeof textToDisplay !== 'string' || typeof name !== 'string' || !(typeof type === 'string' || typeof type === 'number') || (requireScreenTip && typeof screenTip !== 'string')) return null
+    return { address, subAddress, textToDisplay, name, type, ...(requireScreenTip ? { screenTip } : {}) }
+  }
+  async function hyperlinksSnapshot(range, requireScreenTip = false) {
+    const collection = await property(range, 'Hyperlinks'); const count = Number(await property(collection, 'Count'))
+    if (!collection || !Number.isInteger(count) || count < 0 || count > 200) return { supported: false, items: [], collection: null }
+    const items = []
+    for (let index = 1; index <= count; index += 1) {
+      const item = await collectionItem(collection, index); const snapshot = await hyperlinkItemSnapshot(item, requireScreenTip)
+      if (!snapshot) return { supported: false, items: [], collection: null }
+      items.push(snapshot)
+    }
+    return { supported: true, items, collection }
+  }
+  function isSafeInternalHyperlinkReference(value) {
+    if (typeof value !== 'string' || value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f\[\]]/.test(value)) return false
+    const a1 = "\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6}(?::\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6})?"
+    const sheet = "(?:[A-Za-z_][A-Za-z0-9_.]{0,30}|'(?:[^'\\[\\]\\u0000-\\u001f\\u007f]|''){1,62}')!"
+    return new RegExp(`^(?:${sheet})?${a1}$`).test(value) || /^[A-Za-z_][A-Za-z0-9_.]{0,254}$/.test(value)
+  }
+  function requestedHyperlink(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['range', 'sheetName', 'url', 'subAddress', 'screenTip', 'textToDisplay'].includes(key))) return null
+    const url = payload.url ?? ''; const subAddress = payload.subAddress ?? ''; const screenTip = payload.screenTip; const textToDisplay = payload.textToDisplay
+    if (typeof url !== 'string' || url.length > 2048 || typeof subAddress !== 'string' || subAddress.length > 256 || typeof textToDisplay !== 'string' || textToDisplay.length > 500 || (screenTip !== undefined && (typeof screenTip !== 'string' || screenTip.length > 500)) || /[\u0000-\u001f\u007f]/.test(url) || /[\u0000-\u001f\u007f]/.test(subAddress)) return null
+    if (subAddress && !isSafeInternalHyperlinkReference(subAddress)) return null
+    if (url) {
+      try { const parsed = new URL(url); if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password || parsed.href !== url) return null } catch { return null }
+    } else if (!isSafeInternalHyperlinkReference(subAddress)) return null
+    return { url, subAddress, textToDisplay, ...(screenTip === undefined ? {} : { screenTip }) }
+  }
   async function worksheetSnapshot(workbook) {
     const collection = workbook?.Worksheets ?? workbook?.Sheets
     const count = await collectionCount(collection)
@@ -271,7 +306,7 @@
     if (typeof address === 'string' && !range) return fail('invalid_range', 'WebEdit could not resolve the requested capability range')
     const validation = await property(range, 'Validation')
     const validationState = range ? await validationSnapshot(range) : { supported: false }
-    const hyperlinks = await property(range, 'Hyperlinks')
+    const hyperlinks = await property(range, 'Hyperlinks'); const hyperlinkState = range ? await hyperlinksSnapshot(range) : { supported: false }
     const comments = await property(resolved.sheet, 'Comments')
     const charts = await chartCollection(resolved.sheet)
     const pivots = await pivotCollection(resolved.sheet)
@@ -281,7 +316,7 @@
       sort: !!(range && (typeof range.sort === 'function' || typeof range.Sort === 'function')),
       autoFilter: !!(range && (typeof range.setAutoFilter === 'function' || typeof range.SetAutoFilter === 'function') && filterState !== undefined),
       dataValidation: !!(range && validationState.supported && validation && typeof validation.Delete === 'function' && typeof validation.Add === 'function' && VALIDATION_PROPERTY_NAMES.every((name) => hasProperty(validation, name))),
-      hyperlinks: false,
+      hyperlinks: !!(range && hyperlinkState.supported && hyperlinks && typeof hyperlinks.Add === 'function' && typeof hyperlinks.Delete === 'function' && typeof hyperlinks.Item === 'function'),
       comments: false,
       charts: false, pivots: false, cellImages: false,
       exportPdf: false,
@@ -333,8 +368,8 @@
     if (request.action === 'range_features') {
       if (typeof request.range !== 'string' || request.range.length === 0 || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
       const range = await rangeFor(resolved.sheet, request.range); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
-      const validation = await validationSnapshot(range)
-      return { ok: true, result: { status: 'ok', resource: resolved.resource, rangeFeatures: { range: request.range, supported: validation.supported, validation: validation.validation } } }
+      const validation = await validationSnapshot(range); const hyperlinks = await hyperlinksSnapshot(range)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, rangeFeatures: { range: request.range, supported: validation.supported && hyperlinks.supported, validation: validation.validation, hyperlinks: hyperlinks.supported ? hyperlinks.items : null, hyperlinksSupported: hyperlinks.supported } } }
     }
     if (request.action === 'range') {
       if (typeof request.range !== 'string' || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
@@ -378,11 +413,14 @@
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
     if (operation === 'set_data_validation' && !requestedValidation(payload)) return fail('invalid_range', 'set_data_validation requires a complete bounded validation schema')
     if (operation === 'clear_data_validation' && !Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))) return fail('invalid_range', 'clear_data_validation accepts only a bounded range')
+    if (operation === 'add_hyperlink' && !requestedHyperlink(payload)) return fail('invalid_range', 'add_hyperlink requires a safe bounded URL or internal reference and exact display text')
+    if (operation === 'delete_hyperlinks' && !Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))) return fail('invalid_range', 'delete_hyperlinks accepts only a bounded range')
     if (!['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) {
-      const requiresValidation = ['set_data_validation', 'clear_data_validation'].includes(operation)
-      const precondition = await writePrecondition(range, address, requiresValidation)
+      const requiresValidation = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(operation); const requiresHyperlinks = ['add_hyperlink', 'delete_hyperlinks'].includes(operation)
+      const precondition = await writePrecondition(range, address, requiresValidation, requiresHyperlinks, operation === 'add_hyperlink' && payload.screenTip !== undefined)
       if (!precondition) return fail('unsupported', 'WebEdit cannot create a bounded writable-range precondition')
-      if (['set_data_validation', 'clear_data_validation'].includes(operation) && !completeDataValidationState(precondition.state)) return fail('unsupported', 'WebEdit cannot fully read all non-validation range state before a data-validation write')
+      if (['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(operation) && !completeDataValidationState(precondition.state)) return fail('unsupported', 'WebEdit cannot fully read all non-target range state before this feature write')
+      if (operation === 'add_hyperlink' && payload.screenTip !== undefined && precondition.state.hyperlinks.length === 0) return fail('unsupported', 'WebEdit cannot prove ScreenTip readback before the first hyperlink mutation')
       return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
     }
     const parsed = parseAddress(address); const snapshot = await rangeSnapshot(resolved.sheet, address)
@@ -442,9 +480,10 @@
     const address = request.payload?.range
     if (approved.range !== address) return fail('fingerprint_mismatch', 'The spreadsheet write range differs from its inspected precondition')
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
-    const current = await writePrecondition(range, address, ['set_data_validation', 'clear_data_validation'].includes(request.operation))
+    const featureWrite = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(request.operation); const hyperlinkWrite = ['add_hyperlink', 'delete_hyperlinks'].includes(request.operation)
+    const current = await writePrecondition(range, address, featureWrite, hyperlinkWrite, request.operation === 'add_hyperlink' && request.payload?.screenTip !== undefined)
     if (!current || !same(current.state, approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet range changed since inspection; reread and inspect before writing')
-    if (['set_data_validation', 'clear_data_validation'].includes(request.operation) && !completeDataValidationState(current.state)) return fail('unsupported', 'WebEdit cannot fully reread all non-validation range state before a data-validation write')
+    if (featureWrite && !completeDataValidationState(current.state)) return fail('unsupported', 'WebEdit cannot fully reread all non-target range state before this feature write')
     return null
   }
   async function setValues(range, values) { if (typeof range.setValue2 === 'function') { await call(range, 'setValue2', [values]); return true } if (typeof range.setValue === 'function') { await call(range, 'setValue', [values]); return true } return set(range, 'Value2', values) }
@@ -470,7 +509,7 @@
   }
   async function advancedWrite(resolved, request, range, address) {
     const payload = request.payload ?? {}; const operation = request.operation
-    if (['add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return fail('unsupported', 'WebEdit operation lacks a mutation-safe preflight and deliverable-artifact contract and is unavailable')
+    if (['add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return fail('unsupported', 'WebEdit operation lacks a mutation-safe preflight and deliverable-artifact contract and is unavailable')
     if (!ADVANCED_OPERATIONS.has(operation)) return null
     if (operation === 'sort') {
       const sorts = Array.isArray(payload.sorts) ? payload.sorts.filter((item) => item && typeof item === 'object').slice(0, 3) : []
@@ -520,19 +559,19 @@
       return { requested: { range: address, validation: expected }, observed: { range: address, validation: after.validation, state: state.state, verified: true } }
     }
     if (operation === 'add_hyperlink' || operation === 'delete_hyperlinks') {
-      const links = await property(range, 'Hyperlinks'); const before = await collectionCount(links)
-      if (!links || before === null || (operation === 'add_hyperlink' ? typeof links.Add !== 'function' : typeof links.Delete !== 'function')) return fail('unsupported', 'WebEdit does not expose readable hyperlink APIs')
+      const requireScreenTip = operation === 'add_hyperlink' && payload.screenTip !== undefined; const before = await hyperlinksSnapshot(range, requireScreenTip); const links = before.collection
+      if (!before.supported || !links || (operation === 'add_hyperlink' ? (typeof links.Add !== 'function' || typeof links.Item !== 'function') : typeof links.Delete !== 'function')) return fail('unsupported', 'WebEdit does not expose complete readable hyperlink APIs')
       if (operation === 'add_hyperlink') {
-        if ((typeof payload.url !== 'string' || !/^https:\/\//i.test(payload.url) || payload.url.length > 2048) && (typeof payload.subAddress !== 'string' || !payload.subAddress.trim() || payload.subAddress.length > 128)) return fail('invalid_range', 'add_hyperlink requires a bounded https URL or workbook subAddress')
-        await resolve(links.Add(range, payload.url ?? '', payload.subAddress ?? '', typeof payload.screenTip === 'string' ? payload.screenTip.slice(0, 500) : '', typeof payload.textToDisplay === 'string' ? payload.textToDisplay.slice(0, 500) : undefined))
-        const afterLinks = await property(range, 'Hyperlinks'); const after = await collectionCount(afterLinks); if (after !== before + 1) return fail('readback_mismatch', 'WebEdit did not add the requested hyperlink')
-        const created = await collectionItem(afterLinks, after); const observedUrl = await property(created, 'Address') ?? await property(created, 'address'); const observedSubAddress = await property(created, 'SubAddress') ?? await property(created, 'subAddress')
-        if ((payload.url !== undefined && observedUrl === undefined) || (payload.subAddress !== undefined && observedSubAddress === undefined)) return fail('unsupported', 'WebEdit hyperlink readback does not expose the requested target')
-        if ((payload.url !== undefined && !same(observedUrl, payload.url)) || (payload.subAddress !== undefined && !same(observedSubAddress, payload.subAddress))) return fail('readback_mismatch', 'WebEdit hyperlink target readback differs from request')
-        return { requested: { range: address, url: payload.url ?? null, subAddress: payload.subAddress ?? null }, observed: { range: address, count: after, url: observedUrl ?? null, subAddress: observedSubAddress ?? null, verified: true } }
+        const expected = requestedHyperlink(payload); if (!expected || before.items.some((item) => item.address === expected.url && item.subAddress === expected.subAddress && item.textToDisplay === expected.textToDisplay)) return fail('invalid_range', 'add_hyperlink requires a uniquely identifiable new link')
+        await resolve(links.Add(range, expected.url, expected.subAddress, expected.screenTip ?? '', expected.textToDisplay))
+        const after = await hyperlinksSnapshot(range, requireScreenTip); const state = await writePrecondition(range, address, true, true, requireScreenTip)
+        const added = after.supported ? after.items.filter((item) => !before.items.some((prior) => same(prior, item))) : []
+        if (!after.supported || after.items.length !== before.items.length + 1 || added.length !== 1 || added[0].address !== expected.url || added[0].subAddress !== expected.subAddress || added[0].textToDisplay !== expected.textToDisplay || (requireScreenTip && added[0].screenTip !== expected.screenTip) || !state || !same({ ...state.state, hyperlinks: before.items }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit hyperlink add readback differs from request or changed the range')
+        return { requested: { range: address, hyperlink: expected }, observed: { range: address, hyperlinks: after.items, newItem: added[0], state: state.state, verified: true } }
       }
-      await resolve(links.Delete()); const after = await collectionCount(await property(range, 'Hyperlinks')); if (after !== 0) return fail('readback_mismatch', 'WebEdit did not delete range hyperlinks')
-      return { requested: { range: address, delete: true }, observed: { range: address, count: after, verified: true } }
+      await resolve(links.Delete()); const after = await hyperlinksSnapshot(range); const state = await writePrecondition(range, address, true, true)
+      if (!after.supported || after.items.length !== 0 || !state || !same({ ...state.state, hyperlinks: before.items }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit hyperlink delete readback differs from request or changed the range')
+      return { requested: { range: address, delete: true }, observed: { range: address, hyperlinks: after.items, state: state.state, verified: true } }
     }
     if (operation === 'add_comment' || operation === 'delete_comments') return fail('unsupported', 'WebEdit cell-comment APIs do not expose range-scoped content readback, so Harness will not mutate comments')
     if (operation === 'insert_cell_image') {

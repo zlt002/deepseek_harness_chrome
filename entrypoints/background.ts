@@ -329,7 +329,7 @@ interface OfficeDocumentRequest {
 }
 
 type OfficeSpreadsheetAction = 'context' | 'range' | 'range_features' | 'search' | 'sheets' | 'defined_names' | 'capabilities' | 'inspect_write' | 'write'
-type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'set_data_validation' | 'clear_data_validation' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range' | 'create_defined_name' | 'delete_defined_name' | 'copy_worksheet' | 'move_worksheet' | 'set_worksheet_visibility'
+type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'set_data_validation' | 'clear_data_validation' | 'add_hyperlink' | 'delete_hyperlinks' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range' | 'create_defined_name' | 'delete_defined_name' | 'copy_worksheet' | 'move_worksheet' | 'set_worksheet_visibility'
 interface OfficeSpreadsheetPreconditionTarget {
   range: string
   state: {
@@ -341,6 +341,7 @@ interface OfficeSpreadsheetPreconditionTarget {
     columnWidth: number | null
     format: Record<string, unknown>
     validation?: { type: number; alertStyle: number; operator: number; formula1: string; formula2: string; ignoreBlank: boolean; showError: boolean; errorTitle: string; errorMessage: string } | null
+    hyperlinks?: Array<{ address: string; subAddress: string; textToDisplay: string; name: string; type: string | number; screenTip?: string }>
   }
 }
 interface OfficeSpreadsheetPreconditionV1 extends OfficeSpreadsheetPreconditionTarget {
@@ -563,6 +564,7 @@ function isOfficeSpreadsheetPrecondition(value: unknown): value is OfficeSpreads
       && typeof state.validation.formula1 === 'string' && state.validation.formula1.length <= 1024 && typeof state.validation.formula2 === 'string' && state.validation.formula2.length <= 1024
       && typeof state.validation.ignoreBlank === 'boolean' && typeof state.validation.showError === 'boolean'
       && typeof state.validation.errorTitle === 'string' && state.validation.errorTitle.length <= 255 && typeof state.validation.errorMessage === 'string' && state.validation.errorMessage.length <= 1024)
+    && (state.hyperlinks === undefined || Array.isArray(state.hyperlinks) && state.hyperlinks.length <= 200 && state.hyperlinks.every((item) => item && typeof item.address === 'string' && item.address.length <= 2048 && typeof item.subAddress === 'string' && item.subAddress.length <= 256 && typeof item.textToDisplay === 'string' && item.textToDisplay.length <= 500 && typeof item.name === 'string' && item.name.length <= 500 && (typeof item.type === 'string' || typeof item.type === 'number') && (item.screenTip === undefined || typeof item.screenTip === 'string' && item.screenTip.length <= 500)))
   }
   const candidate = value as { version?: unknown; range?: unknown; state?: unknown; targets?: unknown }
   const workbook = value as Partial<OfficeSpreadsheetPreconditionV3>
@@ -571,7 +573,23 @@ function isOfficeSpreadsheetPrecondition(value: unknown): value is OfficeSpreads
     && JSON.stringify(value).length <= 100_000
 }
 
+function isSafeInternalHyperlinkReference(value: string): boolean {
+  if (value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f\[\]]/.test(value)) return false
+  const a1 = '\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6}(?::\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6})?'
+  const sheet = "(?:[A-Za-z_][A-Za-z0-9_.]{0,30}|'(?:[^'\\[\\]\\u0000-\\u001f\\u007f]|''){1,62}')!"
+  return new RegExp(`^(?:${sheet})?${a1}$`).test(value) || /^[A-Za-z_][A-Za-z0-9_.]{0,254}$/.test(value)
+}
+
 function isOfficeSpreadsheetDataValidationPayload(operation: unknown, payload: unknown): boolean {
+  if (operation === 'add_hyperlink') {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+    const value = payload as Record<string, unknown>; const keys = Object.keys(value); const url = value.url ?? ''; const subAddress = value.subAddress ?? ''
+    if (typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !keys.every((key) => ['range', 'sheetName', 'url', 'subAddress', 'screenTip', 'textToDisplay'].includes(key)) || typeof url !== 'string' || url.length > 2048 || typeof subAddress !== 'string' || subAddress.length > 256 || typeof value.textToDisplay !== 'string' || value.textToDisplay.length > 500 || (value.screenTip !== undefined && (typeof value.screenTip !== 'string' || value.screenTip.length > 500)) || /[\u0000-\u001f\u007f]/.test(url) || /[\u0000-\u001f\u007f]/.test(subAddress)) return false
+    if (subAddress && !isSafeInternalHyperlinkReference(subAddress)) return false
+    if (!url) return isSafeInternalHyperlinkReference(subAddress)
+    try { const parsed = new URL(url); return /^https?:$/.test(parsed.protocol) && !parsed.username && !parsed.password && parsed.href === url } catch { return false }
+  }
+  if (operation === 'delete_hyperlinks') return !!payload && typeof payload === 'object' && !Array.isArray(payload) && typeof (payload as Record<string, unknown>).range === 'string' && Object.keys(payload as Record<string, unknown>).every((key) => ['range', 'sheetName'].includes(key))
   if (operation !== 'set_data_validation' && operation !== 'clear_data_validation') return true
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
   const value = payload as Record<string, unknown>; const keys = Object.keys(value)
@@ -603,11 +621,11 @@ function isOfficeSpreadsheetRequest(message: NativeMessage): message is OfficeSp
     && message.tool === 'office_spreadsheet' && isBrowserTarget(message.browserTarget)
     && ['context', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
   if (candidate.action === 'context' || candidate.action === 'sheets' || candidate.action === 'defined_names') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined
-  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload)
+  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload)
   if (candidate.action === 'range' || candidate.action === 'range_features') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'capabilities') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'search') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128 && typeof candidate.query === 'string' && candidate.query.trim().length > 0 && candidate.query.length <= 500
-  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload) && isOfficeSpreadsheetPrecondition(candidate.precondition) && (!['set_data_validation', 'clear_data_validation'].includes(candidate.operation) || hasCompleteDataValidationRangeState(candidate.precondition))
+  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload) && isOfficeSpreadsheetPrecondition(candidate.precondition) && (!['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(candidate.operation) || hasCompleteDataValidationRangeState(candidate.precondition)) && (!['add_hyperlink', 'delete_hyperlinks'].includes(candidate.operation) || !!candidate.precondition && typeof candidate.precondition === 'object' && Object.hasOwn(candidate.precondition as unknown as Record<string, unknown>, 'state') && Object.hasOwn((candidate.precondition as { state: Record<string, unknown> }).state, 'hyperlinks'))
 }
 
 function isTeamDocParent(value: unknown): value is TeamDocParent {

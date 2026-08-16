@@ -24,7 +24,7 @@ function fakeApp() {
   const formulas = [['', ''], ['', '']]
   let filterOperator = 'equals'
   const comments = { Count: 0 }
-  const hyperlinks = { Count: 0, items: [], Add: (_range, url, subAddress) => { hyperlinks.items.push({ Address: url, SubAddress: subAddress }); hyperlinks.Count += 1 }, Delete: () => { hyperlinks.Count = 0; hyperlinks.items = [] }, Item: (index) => hyperlinks.items[index - 1] }
+  let nextHyperlink = 1; const hyperlinks = { Count: 0, items: [], Add: (_range, url, subAddress, screenTip, textToDisplay) => { hyperlinks.items.push({ Address: url, SubAddress: subAddress, ScreenTip: screenTip, TextToDisplay: textToDisplay, Name: `Link${nextHyperlink++}`, Type: 'hyperlink' }); hyperlinks.Count += 1 }, Delete: () => { hyperlinks.Count = 0; hyperlinks.items = [] }, Item: (index) => hyperlinks.items[index - 1] }
   const validation = { Type: 0, AlertStyle: 1, Operator: 1, Formula1: '', Formula2: '', IgnoreBlank: true, ShowError: true, ErrorTitle: '', ErrorMessage: '', Add: (type, alertStyle, operator, formula1, formula2) => { validation.Type = type; validation.AlertStyle = alertStyle; validation.Operator = operator; validation.Formula1 = formula1 ?? ''; validation.Formula2 = formula2 ?? '' }, Delete: () => { validation.Type = 0; validation.Formula1 = ''; validation.Formula2 = '' } }
   const charts = { Count: 0, Item: (index) => charts.items[index - 1], items: [] }
   const pivots = { Count: 0, Item: (index) => pivots.items[index - 1], items: [] }
@@ -52,7 +52,7 @@ function fakeApp() {
   }
   range.createPivotTable = (options, callback) => { const pivot = { Id: pivots.Count + 1, Name: `Pivot ${pivots.Count + 1}`, Destination: options.destRangeText }; pivots.items.push(pivot); pivots.Count += 1; callback({ isOk: true, pivotTableId: pivot.Id }) }
   const workbook = { Name: 'Budget.xlsx', getName: () => 'Budget.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet }, ExportAsFixedFormat: () => ({ url: 'https://download.example.test/Budget.pdf?Expires=2000000000' }) }
-  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
+  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
 }
 
 function p0App(values, options = {}) {
@@ -308,7 +308,7 @@ test('spreadsheet runtime probes and verifies AccrUI-derived advanced range oper
   assert.equal(filtered.result.observed.enabled, true)
   const filtersCleared = await run({ action: 'write', resource, operation: 'clear_filters', payload: { range: 'A1:B2' } })
   assert.equal(filtersCleared.result.observed.after.operator, 'none')
-  for (const operation of ['add_hyperlink', 'insert_cell_image', 'create_chart', 'create_pivot_table']) assert.equal((await run({ action: 'write', resource, operation, payload: { range: 'A1:B2' } })).error.code, 'unsupported')
+  for (const operation of ['insert_cell_image', 'create_chart', 'create_pivot_table']) assert.equal((await run({ action: 'write', resource, operation, payload: { range: 'A1:B2' } })).error.code, 'unsupported')
   assert.equal((await run({ action: 'write', resource, operation: 'set_data_validation', payload: { range: 'A1:B2' } })).error.code, 'invalid_range')
   assert.equal(capabilities.result.capabilities.exportPdf, false)
   assert.equal(capabilities.result.capabilities.exportRangeImage, false)
@@ -330,10 +330,62 @@ test('data validation reads bounded features and verifies all requested fields w
 })
 
 test('ordinary range writes do not require Validation, while validation writes fail before mutation when it is unavailable', async () => {
-  const app = fakeApp(); delete app._range.Validation; const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const app = fakeApp(); delete app._range.Validation; delete app._range.Hyperlinks; const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   const values = await run({ action: 'write', resource, operation: 'set_values', payload: { range: 'A1:B2', values: [[10, 20], [30, 40]] } })
   assert.equal(values.result.observed.verified, true)
   assert.equal((await run({ action: 'write', resource, operation: 'set_data_validation', payload: { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' } })).error.code, 'unsupported')
+})
+
+test('hyperlinks read, add, and delete with complete collection and non-target state readback', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const before = await run({ action: 'range_features', range: 'A1:B2' }); assert.equal(before.result.rangeFeatures.hyperlinksSupported, true); assert.equal(before.result.rangeFeatures.hyperlinks.length, 0)
+  const payload = { range: 'A1:B2', url: 'https://example.com/', subAddress: '', textToDisplay: 'Example' }
+  const added = await run({ action: 'write', resource, operation: 'add_hyperlink', payload })
+  assert.equal(added.result.observed.hyperlinks.length, 1); assert.equal(added.result.observed.newItem.address, payload.url); assert.deepEqual(added.result.observed.state.values, [[3, 2], [1, 4]])
+  const sheetReference = await run({ action: 'write', resource, operation: 'add_hyperlink', payload: { range: 'A1:B2', url: '', subAddress: "'Sales 2026'!$A$1:$B$2", textToDisplay: 'Sales' } })
+  assert.equal(sheetReference.result.observed.newItem.subAddress, "'Sales 2026'!$A$1:$B$2")
+  const namedReference = await run({ action: 'write', resource, operation: 'add_hyperlink', payload: { range: 'A1:B2', url: '', subAddress: 'QuarterlySales', textToDisplay: 'Quarterly sales' } })
+  assert.equal(namedReference.result.observed.newItem.subAddress, 'QuarterlySales')
+  const withScreenTip = await run({ action: 'write', resource, operation: 'add_hyperlink', payload: { range: 'A1:B2', url: 'https://example.org/', subAddress: '', textToDisplay: 'Example 2', screenTip: 'Open Example 2' } })
+  assert.equal(withScreenTip.result.observed.newItem.screenTip, 'Open Example 2')
+  const deleted = await run({ action: 'write', resource, operation: 'delete_hyperlinks', payload: { range: 'A1:B2' } })
+  assert.equal(deleted.result.observed.hyperlinks.length, 0)
+})
+
+test('hyperlinks fail closed for stale collections, unsafe URLs, missing APIs, wrong items, unrelated link changes, state drift, and oversized collections', async () => {
+  const payload = { range: 'A1:B2', url: 'https://example.com/', subAddress: '', textToDisplay: 'Example' }
+  const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const staleResource = (await stale({ action: 'context' })).result.resource; const inspected = await stale.raw({ action: 'inspect_write', operation: 'add_hyperlink', payload }); staleApp._hyperlinks.Add(staleApp._range, 'https://before.example/', '', '', 'Before')
+  let staleAdds = 0; const staleAdd = staleApp._hyperlinks.Add; staleApp._hyperlinks.Add = (...args) => { staleAdds += 1; staleAdd(...args) }
+  assert.equal((await stale.raw({ action: 'write', resource: staleResource, operation: 'add_hyperlink', payload, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch'); assert.equal(staleAdds, 0)
+
+  const unsafe = await runtimeWith(fakeApp()); assert.equal((await unsafe.raw({ action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, url: 'javascript:alert(1)' } })).error.code, 'invalid_range')
+  for (const subAddress of ['javascript:alert(1)', '[Other.xlsx]Sheet1!A1', 'Sheet1!A1:javascript']) {
+    assert.equal((await unsafe.raw({ action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, url: '', subAddress } })).error.code, 'invalid_range')
+  }
+  assert.equal((await unsafe.raw({ action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, subAddress: 'javascript:alert(1)' } })).error.code, 'invalid_range')
+
+  const noApiApp = fakeApp(); const noApi = await runtimeWith(noApiApp); const noApiResource = (await noApi({ action: 'context' })).result.resource; let noApiAdds = 0; delete noApiApp._hyperlinks.Item; const noApiAdd = noApiApp._hyperlinks.Add; noApiApp._hyperlinks.Add = (...args) => { noApiAdds += 1; noApiAdd(...args) }
+  assert.equal((await noApi({ action: 'write', resource: noApiResource, operation: 'add_hyperlink', payload })).error.code, 'unsupported'); assert.equal(noApiAdds, 0)
+
+  const noAddApp = fakeApp(); const noAdd = await runtimeWith(noAddApp); const noAddResource = (await noAdd({ action: 'context' })).result.resource; delete noAddApp._hyperlinks.Add
+  assert.equal((await noAdd({ action: 'write', resource: noAddResource, operation: 'add_hyperlink', payload })).error.code, 'unsupported'); assert.equal(noAddApp._hyperlinks.Count, 0)
+
+  const noDeleteApp = fakeApp(); noDeleteApp._hyperlinks.Add(noDeleteApp._range, 'https://before.example/', '', '', 'Before'); const noDelete = await runtimeWith(noDeleteApp); const noDeleteResource = (await noDelete({ action: 'context' })).result.resource; delete noDeleteApp._hyperlinks.Delete
+  assert.equal((await noDelete({ action: 'write', resource: noDeleteResource, operation: 'delete_hyperlinks', payload: { range: 'A1:B2' } })).error.code, 'unsupported'); assert.equal(noDeleteApp._hyperlinks.Count, 1)
+
+  const screenApp = fakeApp(); screenApp._hyperlinks.Add(screenApp._range, 'https://before.example/', '', '', 'Before'); delete screenApp._hyperlinks.items[0].ScreenTip; const screen = await runtimeWith(screenApp); const screenResource = (await screen({ action: 'context' })).result.resource; let screenAdds = 0; const screenAdd = screenApp._hyperlinks.Add; screenApp._hyperlinks.Add = (...args) => { screenAdds += 1; screenAdd(...args) }
+  assert.equal((await screen({ action: 'write', resource: screenResource, operation: 'add_hyperlink', payload: { ...payload, screenTip: 'Tip' } })).error.code, 'unsupported'); assert.equal(screenAdds, 0)
+
+  const wrongApp = fakeApp(); const wrong = await runtimeWith(wrongApp); const wrongResource = (await wrong({ action: 'context' })).result.resource; const wrongAdd = wrongApp._hyperlinks.Add; wrongApp._hyperlinks.Add = (range, _url, subAddress, screenTip, text) => wrongAdd(range, 'https://wrong.example/', subAddress, screenTip, text)
+  assert.equal((await wrong({ action: 'write', resource: wrongResource, operation: 'add_hyperlink', payload })).error.code, 'readback_mismatch')
+
+  const changedLinksApp = fakeApp(); changedLinksApp._hyperlinks.Add(changedLinksApp._range, 'https://before.example/', '', '', 'Before'); const changedLinks = await runtimeWith(changedLinksApp); const changedLinksResource = (await changedLinks({ action: 'context' })).result.resource; const changedLinksAdd = changedLinksApp._hyperlinks.Add; changedLinksApp._hyperlinks.Add = (...args) => { changedLinksAdd(...args); changedLinksApp._hyperlinks.items[0].TextToDisplay = 'Changed' }
+  assert.equal((await changedLinks({ action: 'write', resource: changedLinksResource, operation: 'add_hyperlink', payload })).error.code, 'readback_mismatch')
+
+  const driftApp = fakeApp(); const drift = await runtimeWith(driftApp); const driftResource = (await drift({ action: 'context' })).result.resource; const driftAdd = driftApp._hyperlinks.Add; driftApp._hyperlinks.Add = (...args) => { driftAdd(...args); driftApp._range.NumberFormat = '0.00' }
+  assert.equal((await drift({ action: 'write', resource: driftResource, operation: 'add_hyperlink', payload })).error.code, 'readback_mismatch')
+
+  const oversizedApp = fakeApp(); oversizedApp._hyperlinks.Count = 201; const oversized = await runtimeWith(oversizedApp); const features = await oversized({ action: 'range_features', range: 'A1:B2' }); assert.equal(features.result.rangeFeatures.hyperlinksSupported, false); assert.equal(features.result.rangeFeatures.hyperlinks, null)
 })
 
 test('data validation fails closed for stale state, missing API, wrong property readback, changed range state, and oversized feature reads', async () => {

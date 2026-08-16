@@ -286,3 +286,41 @@ test('validates data-validation schema, range features, and independently reject
     assert.match(rejected.result.content[0].text, /invalid verified spreadsheet write/i)
   } finally { await connector.stop() }
 })
+
+test('verifies complete hyperlink collection deltas independently of browser attestations', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 35, url: 'https://doc.midea.com/sheets/hyperlinks' }
+  const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Links.xlsx', sheetName: 'Sheet1', fingerprint: 'links-sheet' }
+  const payload = { range: 'A1', url: 'https://example.com/', subAddress: '', textToDisplay: 'Example' }; const expected = { url: 'https://example.com/', subAddress: '', textToDisplay: 'Example' }
+  const baseline = writePrecondition('A1'); const precondition = { ...baseline, state: { ...baseline.state, validation: null, hyperlinks: [], merged: false, filter: { operator: 'none' }, rowHeight: 15, columnWidth: 8, format: { bold: false, italic: false, underline: false, size: 11, name: 'Arial', color: '#000000', fill: '#FFFFFF', numberFormat: 'General', alignment: 'general', wrap: false } } }
+  const item = { address: expected.url, subAddress: '', textToDisplay: 'Example', name: 'Link1', type: 'hyperlink' }; let forge = false
+  const connector = new BrowserConnector({ officeSpreadsheetWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    const links = forge ? [{ ...item, textToDisplay: 'Wrong' }] : [item]
+    const result = request.action === 'write'
+      ? { status: 'verified_write', resource, operation: request.operation, requested: { range: 'A1', hyperlink: expected }, observed: { range: 'A1', hyperlinks: links, newItem: links[0], state: { ...precondition.state, hyperlinks: links }, verified: true } }
+      : { status: 'ok', resource, precondition }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result })
+  }) })
+  connector.bindBrowserTarget('spreadsheet-hyperlink-run', target); const endpoint = await connector.start()
+  try {
+    const dangerous = await call(endpoint, { action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, url: 'data:text/html,unsafe' } }); assert.equal(dangerous.error.code, -32602)
+    for (const subAddress of ['javascript:alert(1)', '[Other.xlsx]Sheet1!A1', 'Sheet1!A1:javascript']) {
+      const invalidReference = await call(endpoint, { action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, url: '', subAddress } }); assert.equal(invalidReference.error.code, -32602)
+    }
+    const invalidCombinedReference = await call(endpoint, { action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, subAddress: 'javascript:alert(1)' } }); assert.equal(invalidCombinedReference.error.code, -32602)
+    const sheetReference = await call(endpoint, { action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, url: '', subAddress: "'Sales 2026'!$A$1:$B$2", textToDisplay: 'Sales' } }); assert.equal(sheetReference.error, undefined)
+    const namedReference = await call(endpoint, { action: 'inspect_write', operation: 'add_hyperlink', payload: { ...payload, url: '', subAddress: 'QuarterlySales', textToDisplay: 'Quarterly sales' } }); assert.equal(namedReference.error, undefined)
+    const inspected = await call(endpoint, { action: 'inspect_write', operation: 'add_hyperlink', payload }); const success = await call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'hyperlink-success', resource, operation: 'add_hyperlink', payload }); assert.equal(success.result.structuredContent.status, 'verified_write')
+    forge = true
+    const second = await call(endpoint, { action: 'inspect_write', operation: 'add_hyperlink', payload }); const rejected = await call(endpoint, { action: 'write', challenge: second.result.structuredContent.challenge, idempotencyIdentity: 'hyperlink-forged', resource, operation: 'add_hyperlink', payload }); assert.equal(rejected.result.isError, true); assert.match(rejected.result.content[0].text, /invalid verified spreadsheet write/i)
+  } finally { await connector.stop() }
+})
+
+test('verifies hyperlink delete-all against the complete inspected collection', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 36, url: 'https://doc.midea.com/sheets/hyperlinks-delete' }; const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Links.xlsx', sheetName: 'Sheet1', fingerprint: 'links-delete' }
+  const item = { address: 'https://example.com/', subAddress: '', textToDisplay: 'Example', name: 'Link1', type: 'hyperlink' }; const baseline = writePrecondition('A1'); const precondition = { ...baseline, state: { ...baseline.state, validation: null, hyperlinks: [item], merged: false, filter: { operator: 'none' }, rowHeight: 15, columnWidth: 8, format: { bold: false, italic: false, underline: false, size: 11, name: 'Arial', color: '#000000', fill: '#FFFFFF', numberFormat: 'General', alignment: 'general', wrap: false } } }
+  const connector = new BrowserConnector({ officeSpreadsheetWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: request.action === 'write' ? { status: 'verified_write', resource, operation: 'delete_hyperlinks', requested: { range: 'A1', delete: true }, observed: { range: 'A1', hyperlinks: [], state: { ...precondition.state, hyperlinks: [] }, verified: true } } : { status: 'ok', resource, precondition } })) })
+  connector.bindBrowserTarget('spreadsheet-hyperlink-delete', target); const endpoint = await connector.start()
+  try {
+    const inspected = await call(endpoint, { action: 'inspect_write', operation: 'delete_hyperlinks', payload: { range: 'A1' } }); const deleted = await call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'hyperlink-delete', resource, operation: 'delete_hyperlinks', payload: { range: 'A1' } }); assert.equal(deleted.result.structuredContent.status, 'verified_write')
+  } finally { await connector.stop() }
+})
