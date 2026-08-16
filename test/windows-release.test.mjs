@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -18,6 +19,7 @@ import {
   validateHarnessRuntime,
   validateWindowsRelease,
 } from '../release/windows-lite/windows-release.mjs'
+import { encodeNativeMessage, smokeNativeMessageChild } from '../release/windows-lite/native-message-smoke.mjs'
 
 async function writeFixture(root, relativePath, content = '') {
   const target = path.join(root, relativePath)
@@ -29,6 +31,84 @@ async function writeFixture(root, relativePath, content = '') {
 function readZipUtf16Le(zipPath, entry) {
   const content = execFileSync('unzip', ['-p', zipPath, entry])
   return content.subarray(content[0] === 0xff && content[1] === 0xfe ? 2 : 0).toString('utf16le')
+}
+
+function decodeMessage(frame) {
+  const length = frame.readUInt32LE(0)
+  return JSON.parse(frame.subarray(4, 4 + length).toString('utf8'))
+}
+
+function fakeStream() {
+  const stream = new EventEmitter()
+  stream.destroyedBySmoke = false
+  stream.destroy = () => { stream.destroyedBySmoke = true }
+  stream.setEncoding = () => {}
+  return stream
+}
+
+function fakeNativeChild({ onEnd } = {}) {
+  const child = new EventEmitter()
+  child.pid = 1234
+  child.exitCode = null
+  child.signalCode = null
+  child.stdin = fakeStream()
+  child.stdout = fakeStream()
+  child.stderr = fakeStream()
+  child.frames = []
+  child.killedByFallback = false
+  child.unrefCalled = false
+  child.stdin.write = (frame) => { child.frames.push(Buffer.from(frame)); return true }
+  child.stdin.end = (frame) => {
+    child.frames.push(Buffer.from(frame))
+    onEnd?.(child)
+  }
+  child.kill = () => { child.killedByFallback = true; return true }
+  child.unref = () => { child.unrefCalled = true }
+  child.close = (code = 0, signal = null) => {
+    child.exitCode = code
+    child.signalCode = signal
+    child.emit('close', code, signal)
+  }
+  return child
+}
+
+function timerHarness() {
+  let nextId = 0
+  const active = new Map()
+  return {
+    active,
+    setTimer(callback) { const id = ++nextId; active.set(id, callback); return id },
+    clearTimer(id) { active.delete(id) },
+    fire() {
+      const latest = [...active].at(-1)
+      assert.notEqual(latest, undefined, 'expected an active timer')
+      active.delete(latest[0])
+      latest[1]()
+    },
+  }
+}
+
+function assertSmokeClean(child, timers) {
+  assert.equal(timers.active.size, 0)
+  assert.equal(child.listenerCount('error'), 0)
+  assert.equal(child.listenerCount('close'), 0)
+  assert.equal(child.stdin.listenerCount('error'), 0)
+  assert.equal(child.stdin.listenerCount('finish'), 0)
+  assert.equal(child.stdout.listenerCount('data'), 0)
+  assert.equal(child.stderr.listenerCount('data'), 0)
+  assert.equal(child.stdin.destroyedBySmoke, true)
+  assert.equal(child.stdout.destroyedBySmoke, true)
+  assert.equal(child.stderr.destroyedBySmoke, true)
+  assert.equal(child.unrefCalled, true)
+}
+
+function runFakeSmoke(child, timers, killTree = () => ({ ok: true })) {
+  return smokeNativeMessageChild({
+    child,
+    killTree,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  })
 }
 
 async function createFixture() {
@@ -151,10 +231,83 @@ test('release CLI requires an explicit runtime input', () => {
   assert.throws(() => parseWindowsReleaseArgs(['--runtime', 'C:\\harness-runtime']), /Unknown argument/)
 })
 
-test('Windows Native Messaging smoke stops and bounds the launched process tree', async () => {
-  const smoke = await readFile(path.resolve('release/windows-lite/native-message-smoke.mjs'), 'utf8')
-  assert.match(smoke, /child\.stdin\.write\(encodeMessage\(\{ type: 'ping' \}\)\)/)
-  assert.match(smoke, /child\.stdin\.end\(encodeMessage\(\{ type: 'stop' \}\)\)/)
-  assert.match(smoke, /taskkill\.exe/)
-  assert.match(smoke, /Native Host did not exit after stop/)
+test('Windows Native Messaging smoke accepts a fragmented pong, writes stop, and exits cleanly', async () => {
+  const timers = timerHarness()
+  const child = fakeNativeChild({
+    onEnd(target) {
+      queueMicrotask(() => {
+        target.stdin.emit('finish')
+        target.close(0)
+      })
+    },
+  })
+  const smoke = runFakeSmoke(child, timers)
+  const pong = encodeNativeMessage({ type: 'pong' })
+  child.stdout.emit('data', pong.subarray(0, 3))
+  child.stdout.emit('data', pong.subarray(3))
+
+  assert.deepEqual(await smoke, { type: 'pong' })
+  assert.deepEqual(child.frames.map(decodeMessage), [{ type: 'ping' }, { type: 'stop' }])
+  assertSmokeClean(child, timers)
+})
+
+test('Windows Native Messaging smoke rejects invalid JSON and terminates the tree', async () => {
+  const timers = timerHarness()
+  const child = fakeNativeChild()
+  let kills = 0
+  const smoke = runFakeSmoke(child, timers, () => { kills += 1; return { ok: true } })
+  const invalid = Buffer.concat([Buffer.from([1, 0, 0, 0]), Buffer.from('{')])
+  child.stdout.emit('data', invalid)
+
+  await assert.rejects(smoke, /invalid JSON/)
+  assert.equal(kills, 1)
+  assertSmokeClean(child, timers)
+})
+
+test('Windows Native Messaging smoke rejects a clean exit before stop finishes writing', async () => {
+  const timers = timerHarness()
+  const child = fakeNativeChild()
+  const smoke = runFakeSmoke(child, timers)
+  child.stdout.emit('data', encodeNativeMessage({ type: 'pong' }))
+  child.close(0)
+
+  await assert.rejects(smoke, /before the stop frame finished writing/)
+  assertSmokeClean(child, timers)
+})
+
+test('Windows Native Messaging smoke handles stdin EPIPE without leaving a process handle', async () => {
+  const timers = timerHarness()
+  const child = fakeNativeChild({ onEnd(target) { queueMicrotask(() => target.stdin.emit('error', Object.assign(new Error('broken pipe'), { code: 'EPIPE' }))) } })
+  let kills = 0
+  const smoke = runFakeSmoke(child, timers, () => { kills += 1; return { ok: true } })
+  child.stdout.emit('data', encodeNativeMessage({ type: 'pong' }))
+
+  await assert.rejects(smoke, /stdin failed: broken pipe/)
+  assert.equal(kills, 1)
+  assertSmokeClean(child, timers)
+})
+
+test('Windows Native Messaging smoke bounds a ping timeout', async () => {
+  const timers = timerHarness()
+  const child = fakeNativeChild()
+  let kills = 0
+  const smoke = runFakeSmoke(child, timers, () => { kills += 1; return { ok: true } })
+  timers.fire()
+
+  await assert.rejects(smoke, /ping timed out/)
+  assert.equal(kills, 1)
+  assertSmokeClean(child, timers)
+})
+
+test('Windows Native Messaging smoke falls back when stop-timeout taskkill fails', async () => {
+  const timers = timerHarness()
+  const child = fakeNativeChild({ onEnd(target) { queueMicrotask(() => target.stdin.emit('finish')) } })
+  const smoke = runFakeSmoke(child, timers, () => ({ ok: false, error: 'access denied' }))
+  child.stdout.emit('data', encodeNativeMessage({ type: 'pong' }))
+  await new Promise((resolvePromise) => queueMicrotask(resolvePromise))
+  timers.fire()
+
+  await assert.rejects(smoke, /process-tree termination failed: access denied/)
+  assert.equal(child.killedByFallback, true)
+  assertSmokeClean(child, timers)
 })
