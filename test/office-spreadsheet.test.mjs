@@ -324,3 +324,30 @@ test('verifies hyperlink delete-all against the complete inspected collection', 
     const inspected = await call(endpoint, { action: 'inspect_write', operation: 'delete_hyperlinks', payload: { range: 'A1' } }); const deleted = await call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'hyperlink-delete', resource, operation: 'delete_hyperlinks', payload: { range: 'A1' } }); assert.equal(deleted.result.structuredContent.status, 'verified_write')
   } finally { await connector.stop() }
 })
+
+test('validates conditional-format schema and independently verifies complete collection deltas', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 37, url: 'https://doc.midea.com/sheets/conditional-formats' }
+  const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Formats.xlsx', sheetName: 'Sheet1', fingerprint: 'formats-sheet' }
+  const payload = { range: 'A1', conditionType: 'cellValue', operator: 'between', formula1: '1', formula2: '9', fillColor: '#FF0000', fontColor: '#00FF00', bold: true, italic: false }
+  const expected = { type: 1, operator: 1, formula1: '1', formula2: '9', fillColor: '#FF0000', fontColor: '#00FF00', bold: true, italic: false }
+  const baseline = writePrecondition('A1'); const precondition = { ...baseline, state: { ...baseline.state, conditionalFormats: [], merged: false, filter: { operator: 'none' }, rowHeight: 15, columnWidth: 8, format: { bold: false, italic: false, underline: false, size: 11, name: 'Arial', color: '#000000', fill: '#FFFFFF', numberFormat: 'General', alignment: 'general', wrap: false } } }
+  const item = { ...expected, priority: 1 }; let forge = false
+  const connector = new BrowserConnector({ officeSpreadsheetWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    const formats = forge ? [{ ...item, formula1: 'wrong' }] : [item]
+    const result = request.action === 'write'
+      ? request.operation === 'clear_conditional_formats'
+        ? { status: 'verified_write', resource, operation: request.operation, requested: { range: 'A1', clear: true }, observed: { range: 'A1', conditionalFormats: [], state: { ...precondition.state, conditionalFormats: [] }, verified: true } }
+        : { status: 'verified_write', resource, operation: request.operation, requested: { range: 'A1', conditionalFormat: expected }, observed: { range: 'A1', conditionalFormats: formats, newItem: formats[0], state: { ...precondition.state, conditionalFormats: formats }, verified: true } }
+      : { status: 'ok', resource, precondition }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result })
+  }) })
+  connector.bindBrowserTarget('spreadsheet-conditional-format-run', target); const endpoint = await connector.start()
+  try {
+    const missingFormula2 = await call(endpoint, { action: 'inspect_write', operation: 'add_conditional_format', payload: { ...payload, formula2: undefined } }); assert.equal(missingFormula2.error.code, -32602)
+    const invalidColor = await call(endpoint, { action: 'inspect_write', operation: 'add_conditional_format', payload: { ...payload, fillColor: 'red' } }); assert.equal(invalidColor.error.code, -32602)
+    const inspected = await call(endpoint, { action: 'inspect_write', operation: 'add_conditional_format', payload }); const success = await call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'conditional-format-success', resource, operation: 'add_conditional_format', payload }); assert.equal(success.result.structuredContent.status, 'verified_write')
+    forge = true
+    const second = await call(endpoint, { action: 'inspect_write', operation: 'add_conditional_format', payload }); const rejected = await call(endpoint, { action: 'write', challenge: second.result.structuredContent.challenge, idempotencyIdentity: 'conditional-format-forged', resource, operation: 'add_conditional_format', payload }); assert.equal(rejected.result.isError, true); assert.match(rejected.result.content[0].text, /invalid verified spreadsheet write/i)
+    const clearInspection = await call(endpoint, { action: 'inspect_write', operation: 'clear_conditional_formats', payload: { range: 'A1' } }); const cleared = await call(endpoint, { action: 'write', challenge: clearInspection.result.structuredContent.challenge, idempotencyIdentity: 'conditional-format-clear', resource, operation: 'clear_conditional_formats', payload: { range: 'A1' } }); assert.equal(cleared.result.structuredContent.status, 'verified_write')
+  } finally { await connector.stop() }
+})

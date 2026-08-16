@@ -9,12 +9,14 @@
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
   const matrix = (source) => Array.isArray(source) ? source : [[source ?? null]]
   const resourceFingerprint = (workbookName, sheetName) => `webedit:${location.origin}${location.pathname}|${workbookName ?? ''}|${sheetName ?? ''}`
-  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image'])
+  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image'])
   const MAX_IMAGE_ARTIFACT_BYTES = 256 * 1024
   const MAX_INLINE_IMAGE_ARTIFACT_BYTES = 8 * 1024
   const VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
   const ALERT_STYLES = { stop: 1, warning: 2, information: 3 }
   const VALIDATION_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
+  const CONDITIONAL_FORMAT_TYPES = { cellValue: 1, expression: 2 }
+  const CONDITIONAL_FORMAT_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
   const VALIDATION_PROPERTY_NAMES = ['AlertStyle', 'Operator', 'Formula1', 'Formula2', 'IgnoreBlank', 'ShowError', 'ErrorTitle', 'ErrorMessage']
   // Range.Cut is permitted only when every formatting property is explicitly
   // readable and one of WebEdit's known unstyled defaults. null means the API
@@ -70,7 +72,7 @@
   // A write approval is bound to the smallest readable state that can be
   // affected by the supported operation.  Keep it bounded because this
   // object crosses the page -> extension -> native-host boundary twice.
-  async function writePrecondition(range, address, includeValidation = false, includeHyperlinks = false, requireHyperlinkScreenTip = false) {
+  async function writePrecondition(range, address, includeValidation = false, includeHyperlinks = false, requireHyperlinkScreenTip = false, includeConditionalFormats = false) {
     const snapshot = await rangeSnapshotFromRange(range, address)
     if (!snapshot) return null
     const font = await property(range, 'Font') ?? {}
@@ -79,6 +81,8 @@
     if (includeValidation && !validation.supported) return null
     const hyperlinks = includeHyperlinks ? await hyperlinksSnapshot(range, requireHyperlinkScreenTip) : null
     if (includeHyperlinks && !hyperlinks.supported) return null
+    const conditionalFormats = includeConditionalFormats ? await conditionalFormatsSnapshot(range) : null
+    if (includeConditionalFormats && !conditionalFormats.supported) return null
     const state = {
       values: snapshot.values,
       formulas: snapshot.formulas,
@@ -100,6 +104,7 @@
       },
       ...(includeValidation ? { validation: validation.validation } : {}),
       ...(includeHyperlinks ? { hyperlinks: hyperlinks.items } : {}),
+      ...(includeConditionalFormats ? { conditionalFormats: conditionalFormats.items } : {}),
     }
     const precondition = { version: 1, range: address, state }
     return JSON.stringify(precondition).length <= 96_000 ? precondition : null
@@ -177,6 +182,37 @@
       items.push(snapshot)
     }
     return { supported: true, items, collection }
+  }
+  function canonicalColor(value) {
+    if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) return value.toUpperCase()
+    if (Number.isInteger(value) && value >= 0 && value <= 0xFFFFFF) return `#${value.toString(16).padStart(6, '0').toUpperCase()}`
+    return null
+  }
+  function requestedColor(value) { return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value.toUpperCase() : null }
+  async function conditionalFormatItemSnapshot(item) {
+    const interior = await property(item, 'Interior'); const font = await property(item, 'Font')
+    const type = await property(item, 'Type'); const operator = await property(item, 'Operator'); const formula1 = await property(item, 'Formula1'); const formula2 = await property(item, 'Formula2'); const priority = await property(item, 'Priority')
+    const fillColor = canonicalColor(await property(interior, 'Color') ?? await property(interior, 'color')); const fontColor = canonicalColor(await property(font, 'Color') ?? await property(font, 'color'))
+    const bold = await property(font, 'Bold') ?? await property(font, 'bold'); const italic = await property(font, 'Italic') ?? await property(font, 'italic')
+    if (!Number.isInteger(type) || !Number.isInteger(operator) || !Object.values(CONDITIONAL_FORMAT_TYPES).includes(type) || !Object.values(CONDITIONAL_FORMAT_OPERATORS).includes(operator) || typeof formula1 !== 'string' || formula1.length === 0 || formula1.length > 1024 || typeof formula2 !== 'string' || formula2.length > 1024 || ((operator === 1 || operator === 2) && formula2.length === 0) || !Number.isInteger(priority) || priority < 1 || priority > 200 || !fillColor || !fontColor || typeof bold !== 'boolean' || typeof italic !== 'boolean') return null
+    return { type, operator, formula1, formula2, priority, fillColor, fontColor, bold, italic }
+  }
+  async function conditionalFormatsSnapshot(range) {
+    const collection = await property(range, 'FormatConditions'); const count = Number(await property(collection, 'Count'))
+    if (!collection || typeof collection.Item !== 'function' || !Number.isInteger(count) || count < 0 || count > 200) return { supported: false, items: [], collection: null }
+    const items = []
+    for (let index = 1; index <= count; index += 1) {
+      const snapshot = await conditionalFormatItemSnapshot(await collectionItem(collection, index))
+      if (!snapshot) return { supported: false, items: [], collection: null }
+      items.push(snapshot)
+    }
+    return { supported: true, items, collection }
+  }
+  function requestedConditionalFormat(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['range', 'sheetName', 'conditionType', 'operator', 'formula1', 'formula2', 'fillColor', 'fontColor', 'bold', 'italic'].includes(key))) return null
+    const type = CONDITIONAL_FORMAT_TYPES[payload.conditionType]; const operator = CONDITIONAL_FORMAT_OPERATORS[payload.operator ?? 'equal']; const formula1 = payload.formula1; const formula2 = payload.formula2 ?? ''
+    if (!type || !operator || typeof formula1 !== 'string' || formula1.length === 0 || formula1.length > 1024 || typeof formula2 !== 'string' || formula2.length > 1024 || ((operator === 1 || operator === 2) && (payload.formula2 === undefined || formula2.length === 0)) || (payload.fillColor !== undefined && !requestedColor(payload.fillColor)) || (payload.fontColor !== undefined && !requestedColor(payload.fontColor)) || (payload.bold !== undefined && typeof payload.bold !== 'boolean') || (payload.italic !== undefined && typeof payload.italic !== 'boolean')) return null
+    return { type, operator, formula1, formula2, ...(payload.fillColor === undefined ? {} : { fillColor: requestedColor(payload.fillColor) }), ...(payload.fontColor === undefined ? {} : { fontColor: requestedColor(payload.fontColor) }), ...(payload.bold === undefined ? {} : { bold: payload.bold }), ...(payload.italic === undefined ? {} : { italic: payload.italic }) }
   }
   function isSafeInternalHyperlinkReference(value) {
     if (typeof value !== 'string' || value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f\[\]]/.test(value)) return false
@@ -368,8 +404,8 @@
     if (request.action === 'range_features') {
       if (typeof request.range !== 'string' || request.range.length === 0 || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
       const range = await rangeFor(resolved.sheet, request.range); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
-      const validation = await validationSnapshot(range); const hyperlinks = await hyperlinksSnapshot(range)
-      return { ok: true, result: { status: 'ok', resource: resolved.resource, rangeFeatures: { range: request.range, supported: validation.supported && hyperlinks.supported, validation: validation.validation, hyperlinks: hyperlinks.supported ? hyperlinks.items : null, hyperlinksSupported: hyperlinks.supported } } }
+      const validation = await validationSnapshot(range); const hyperlinks = await hyperlinksSnapshot(range); const conditionalFormats = await conditionalFormatsSnapshot(range)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, rangeFeatures: { range: request.range, supported: validation.supported && hyperlinks.supported, validation: validation.validation, hyperlinks: hyperlinks.supported ? hyperlinks.items : null, hyperlinksSupported: hyperlinks.supported, conditionalFormats: conditionalFormats.supported ? conditionalFormats.items : null, conditionalFormatsSupported: conditionalFormats.supported } } }
     }
     if (request.action === 'range') {
       if (typeof request.range !== 'string' || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
@@ -415,11 +451,14 @@
     if (operation === 'clear_data_validation' && !Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))) return fail('invalid_range', 'clear_data_validation accepts only a bounded range')
     if (operation === 'add_hyperlink' && !requestedHyperlink(payload)) return fail('invalid_range', 'add_hyperlink requires a safe bounded URL or internal reference and exact display text')
     if (operation === 'delete_hyperlinks' && !Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))) return fail('invalid_range', 'delete_hyperlinks accepts only a bounded range')
+    if (operation === 'add_conditional_format' && !requestedConditionalFormat(payload)) return fail('invalid_range', 'add_conditional_format requires a complete bounded condition and readable style')
+    if (operation === 'clear_conditional_formats' && !Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))) return fail('invalid_range', 'clear_conditional_formats accepts only a bounded range')
     if (!['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) {
       const requiresValidation = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(operation); const requiresHyperlinks = ['add_hyperlink', 'delete_hyperlinks'].includes(operation)
-      const precondition = await writePrecondition(range, address, requiresValidation, requiresHyperlinks, operation === 'add_hyperlink' && payload.screenTip !== undefined)
+      const requiresConditionalFormats = ['add_conditional_format', 'clear_conditional_formats'].includes(operation)
+      const precondition = await writePrecondition(range, address, requiresValidation, requiresHyperlinks, operation === 'add_hyperlink' && payload.screenTip !== undefined, requiresConditionalFormats)
       if (!precondition) return fail('unsupported', 'WebEdit cannot create a bounded writable-range precondition')
-      if (['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(operation) && !completeDataValidationState(precondition.state)) return fail('unsupported', 'WebEdit cannot fully read all non-target range state before this feature write')
+      if (['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats'].includes(operation) && !completeDataValidationState(precondition.state)) return fail('unsupported', 'WebEdit cannot fully read all non-target range state before this feature write')
       if (operation === 'add_hyperlink' && payload.screenTip !== undefined && precondition.state.hyperlinks.length === 0) return fail('unsupported', 'WebEdit cannot prove ScreenTip readback before the first hyperlink mutation')
       return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
     }
@@ -480,8 +519,8 @@
     const address = request.payload?.range
     if (approved.range !== address) return fail('fingerprint_mismatch', 'The spreadsheet write range differs from its inspected precondition')
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
-    const featureWrite = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(request.operation); const hyperlinkWrite = ['add_hyperlink', 'delete_hyperlinks'].includes(request.operation)
-    const current = await writePrecondition(range, address, featureWrite, hyperlinkWrite, request.operation === 'add_hyperlink' && request.payload?.screenTip !== undefined)
+    const featureWrite = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats'].includes(request.operation); const hyperlinkWrite = ['add_hyperlink', 'delete_hyperlinks'].includes(request.operation); const conditionalFormatWrite = ['add_conditional_format', 'clear_conditional_formats'].includes(request.operation)
+    const current = await writePrecondition(range, address, featureWrite && !conditionalFormatWrite, hyperlinkWrite, request.operation === 'add_hyperlink' && request.payload?.screenTip !== undefined, conditionalFormatWrite)
     if (!current || !same(current.state, approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet range changed since inspection; reread and inspect before writing')
     if (featureWrite && !completeDataValidationState(current.state)) return fail('unsupported', 'WebEdit cannot fully reread all non-target range state before this feature write')
     return null
@@ -572,6 +611,26 @@
       await resolve(links.Delete()); const after = await hyperlinksSnapshot(range); const state = await writePrecondition(range, address, true, true)
       if (!after.supported || after.items.length !== 0 || !state || !same({ ...state.state, hyperlinks: before.items }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit hyperlink delete readback differs from request or changed the range')
       return { requested: { range: address, delete: true }, observed: { range: address, hyperlinks: after.items, state: state.state, verified: true } }
+    }
+    if (operation === 'add_conditional_format' || operation === 'clear_conditional_formats') {
+      const before = await conditionalFormatsSnapshot(range); const formats = before.collection
+      if (!before.supported || !formats || (operation === 'add_conditional_format' ? typeof formats.Add !== 'function' : typeof formats.Delete !== 'function')) return fail('unsupported', 'WebEdit does not expose complete readable conditional-format APIs')
+      if (operation === 'clear_conditional_formats') {
+        await resolve(formats.Delete()); const after = await conditionalFormatsSnapshot(range); const state = await writePrecondition(range, address, false, false, false, true)
+        if (!after.supported || after.items.length !== 0 || !state || !same({ ...state.state, conditionalFormats: before.items }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit conditional-format clear readback differs from the inspected range')
+        return { requested: { range: address, clear: true }, observed: { range: address, conditionalFormats: after.items, state: state.state, verified: true } }
+      }
+      const expected = requestedConditionalFormat(payload)
+      if (!expected || before.items.some((item) => item.type === expected.type && item.operator === expected.operator && item.formula1 === expected.formula1 && item.formula2 === expected.formula2 && (expected.fillColor === undefined || item.fillColor === expected.fillColor) && (expected.fontColor === undefined || item.fontColor === expected.fontColor) && (expected.bold === undefined || item.bold === expected.bold) && (expected.italic === undefined || item.italic === expected.italic))) return fail('invalid_range', 'add_conditional_format requires a uniquely identifiable new condition')
+      const condition = await resolve(formats.Add(expected.type, expected.operator, expected.formula1, expected.formula2))
+      const interior = await property(condition, 'Interior'); const font = await property(condition, 'Font')
+      const styleApplied = !!condition && (expected.fillColor === undefined || !!interior && await set(interior, 'Color', Number.parseInt(expected.fillColor.slice(1), 16))) && (expected.fontColor === undefined || !!font && await set(font, 'Color', Number.parseInt(expected.fontColor.slice(1), 16))) && (expected.bold === undefined || !!font && await set(font, 'Bold', expected.bold)) && (expected.italic === undefined || !!font && await set(font, 'Italic', expected.italic))
+      if (!styleApplied) return fail('unsupported', 'WebEdit cannot apply every requested conditional-format style property')
+      const after = await conditionalFormatsSnapshot(range); const state = await writePrecondition(range, address, false, false, false, true)
+      const added = after.supported ? after.items.filter((item) => !before.items.some((prior) => same(prior, item))) : []
+      const matches = (item) => item && item.type === expected.type && item.operator === expected.operator && item.formula1 === expected.formula1 && item.formula2 === expected.formula2 && (expected.fillColor === undefined || item.fillColor === expected.fillColor) && (expected.fontColor === undefined || item.fontColor === expected.fontColor) && (expected.bold === undefined || item.bold === expected.bold) && (expected.italic === undefined || item.italic === expected.italic)
+      if (!after.supported || after.items.length !== before.items.length + 1 || added.length !== 1 || !matches(added[0]) || !state || !same({ ...state.state, conditionalFormats: before.items }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit conditional-format add readback differs from request or changed the range')
+      return { requested: { range: address, conditionalFormat: expected }, observed: { range: address, conditionalFormats: after.items, newItem: added[0], state: state.state, verified: true } }
     }
     if (operation === 'add_comment' || operation === 'delete_comments') return fail('unsupported', 'WebEdit cell-comment APIs do not expose range-scoped content readback, so Harness will not mutate comments')
     if (operation === 'insert_cell_image') {

@@ -25,6 +25,7 @@ function fakeApp() {
   let filterOperator = 'equals'
   const comments = { Count: 0 }
   let nextHyperlink = 1; const hyperlinks = { Count: 0, items: [], Add: (_range, url, subAddress, screenTip, textToDisplay) => { hyperlinks.items.push({ Address: url, SubAddress: subAddress, ScreenTip: screenTip, TextToDisplay: textToDisplay, Name: `Link${nextHyperlink++}`, Type: 'hyperlink' }); hyperlinks.Count += 1 }, Delete: () => { hyperlinks.Count = 0; hyperlinks.items = [] }, Item: (index) => hyperlinks.items[index - 1] }
+  const conditionalFormats = { Count: 0, items: [], Add: (type, operator, formula1, formula2) => { const item = { Type: type, Operator: operator, Formula1: formula1, Formula2: formula2 ?? '', Priority: conditionalFormats.Count + 1, Interior: { Color: '#FFFFFF' }, Font: { Color: '#000000', Bold: false, Italic: false } }; conditionalFormats.items.push(item); conditionalFormats.Count += 1; return item }, Delete: () => { conditionalFormats.Count = 0; conditionalFormats.items = [] }, Item: (index) => conditionalFormats.items[index - 1] }
   const validation = { Type: 0, AlertStyle: 1, Operator: 1, Formula1: '', Formula2: '', IgnoreBlank: true, ShowError: true, ErrorTitle: '', ErrorMessage: '', Add: (type, alertStyle, operator, formula1, formula2) => { validation.Type = type; validation.AlertStyle = alertStyle; validation.Operator = operator; validation.Formula1 = formula1 ?? ''; validation.Formula2 = formula2 ?? '' }, Delete: () => { validation.Type = 0; validation.Formula1 = ''; validation.Formula2 = '' } }
   const charts = { Count: 0, Item: (index) => charts.items[index - 1], items: [] }
   const pivots = { Count: 0, Item: (index) => pivots.items[index - 1], items: [] }
@@ -39,7 +40,7 @@ function fakeApp() {
     AutoFilter: false, setAutoFilter: (enabled) => { range.AutoFilter = enabled },
     queryAutoFilterListItems: (_kind, _options, callback) => callback({ result: { fieldData: { condition: { operator: filterOperator } } } }),
     autoFilterShowAll: (callback) => { filterOperator = 'none'; callback({ isOk: true }) },
-    Validation: validation, Hyperlinks: hyperlinks,
+    Validation: validation, Hyperlinks: hyperlinks, FormatConditions: conditionalFormats,
     AddComment: () => { comments.Count += 1 }, ClearComments: () => { comments.Count = 0 },
     insertCellPictureUrl: () => { range.Formula = '=DISPIMG("image")' },
     ToImageDataURL: () => 'data:image/png;base64,AQID',
@@ -52,7 +53,7 @@ function fakeApp() {
   }
   range.createPivotTable = (options, callback) => { const pivot = { Id: pivots.Count + 1, Name: `Pivot ${pivots.Count + 1}`, Destination: options.destRangeText }; pivots.items.push(pivot); pivots.Count += 1; callback({ isOk: true, pivotTableId: pivot.Id }) }
   const workbook = { Name: 'Budget.xlsx', getName: () => 'Budget.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet }, ExportAsFixedFormat: () => ({ url: 'https://download.example.test/Budget.pdf?Expires=2000000000' }) }
-  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
+  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
 }
 
 function p0App(values, options = {}) {
@@ -330,7 +331,7 @@ test('data validation reads bounded features and verifies all requested fields w
 })
 
 test('ordinary range writes do not require Validation, while validation writes fail before mutation when it is unavailable', async () => {
-  const app = fakeApp(); delete app._range.Validation; delete app._range.Hyperlinks; const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const app = fakeApp(); delete app._range.Validation; delete app._range.Hyperlinks; delete app._range.FormatConditions; const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   const values = await run({ action: 'write', resource, operation: 'set_values', payload: { range: 'A1:B2', values: [[10, 20], [30, 40]] } })
   assert.equal(values.result.observed.verified, true)
   assert.equal((await run({ action: 'write', resource, operation: 'set_data_validation', payload: { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' } })).error.code, 'unsupported')
@@ -388,6 +389,46 @@ test('hyperlinks fail closed for stale collections, unsafe URLs, missing APIs, w
   const oversizedApp = fakeApp(); oversizedApp._hyperlinks.Count = 201; const oversized = await runtimeWith(oversizedApp); const features = await oversized({ action: 'range_features', range: 'A1:B2' }); assert.equal(features.result.rangeFeatures.hyperlinksSupported, false); assert.equal(features.result.rangeFeatures.hyperlinks, null)
 })
 
+test('conditional formats read, add, and clear with complete collection and core-state readback', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const before = await run({ action: 'range_features', range: 'A1:B2' }); assert.equal(before.result.rangeFeatures.conditionalFormatsSupported, true); assert.equal(before.result.rangeFeatures.conditionalFormats.length, 0)
+  const payload = { range: 'A1:B2', conditionType: 'cellValue', operator: 'between', formula1: '1', formula2: '9', fillColor: '#ff0000', fontColor: '#00ff00', bold: true, italic: true }
+  const added = await run({ action: 'write', resource, operation: 'add_conditional_format', payload })
+  assert.equal(added.result.observed.conditionalFormats.length, 1); assert.equal(JSON.stringify(added.result.observed.newItem), JSON.stringify({ type: 1, operator: 1, formula1: '1', formula2: '9', priority: 1, fillColor: '#FF0000', fontColor: '#00FF00', bold: true, italic: true })); assert.deepEqual(added.result.observed.state.values, [[3, 2], [1, 4]])
+  const cleared = await run({ action: 'write', resource, operation: 'clear_conditional_formats', payload: { range: 'A1:B2' } })
+  assert.equal(cleared.result.observed.conditionalFormats.length, 0)
+})
+
+test('conditional formats fail closed for stale, incomplete, wrong, changed, drifted, and oversized collections', async () => {
+  const payload = { range: 'A1:B2', conditionType: 'cellValue', operator: 'between', formula1: '1', formula2: '9', fillColor: '#FF0000', fontColor: '#00FF00', bold: true, italic: true }
+  const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const staleResource = (await stale({ action: 'context' })).result.resource; const inspected = await stale.raw({ action: 'inspect_write', operation: 'add_conditional_format', payload }); staleApp._conditionalFormats.Add(1, 3, '4', '')
+  let staleAdds = 0; const staleAdd = staleApp._conditionalFormats.Add; staleApp._conditionalFormats.Add = (...args) => { staleAdds += 1; return staleAdd(...args) }
+  assert.equal((await stale.raw({ action: 'write', resource: staleResource, operation: 'add_conditional_format', payload, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch'); assert.equal(staleAdds, 0)
+
+  const incompleteApp = fakeApp(); incompleteApp._conditionalFormats.Add(1, 3, '4', ''); delete incompleteApp._conditionalFormats.items[0].Font.Italic; const incomplete = await runtimeWith(incompleteApp); const incompleteResource = (await incomplete({ action: 'context' })).result.resource; let incompleteAdds = 0; const incompleteAdd = incompleteApp._conditionalFormats.Add; incompleteApp._conditionalFormats.Add = (...args) => { incompleteAdds += 1; return incompleteAdd(...args) }
+  assert.equal((await incomplete({ action: 'write', resource: incompleteResource, operation: 'add_conditional_format', payload })).error.code, 'unsupported'); assert.equal(incompleteAdds, 0)
+
+  const noItemApp = fakeApp(); delete noItemApp._conditionalFormats.Item; const noItem = await runtimeWith(noItemApp); const noItemResource = (await noItem({ action: 'context' })).result.resource; let noItemAdds = 0; const noItemAdd = noItemApp._conditionalFormats.Add; noItemApp._conditionalFormats.Add = (...args) => { noItemAdds += 1; return noItemAdd(...args) }
+  assert.equal((await noItem({ action: 'write', resource: noItemResource, operation: 'add_conditional_format', payload })).error.code, 'unsupported'); assert.equal(noItemAdds, 0)
+
+  const noAddApp = fakeApp(); delete noAddApp._conditionalFormats.Add; const noAdd = await runtimeWith(noAddApp); const noAddResource = (await noAdd({ action: 'context' })).result.resource
+  assert.equal((await noAdd({ action: 'write', resource: noAddResource, operation: 'add_conditional_format', payload })).error.code, 'unsupported')
+
+  const noDeleteApp = fakeApp(); noDeleteApp._conditionalFormats.Add(1, 3, '4', ''); delete noDeleteApp._conditionalFormats.Delete; const noDelete = await runtimeWith(noDeleteApp); const noDeleteResource = (await noDelete({ action: 'context' })).result.resource
+  assert.equal((await noDelete({ action: 'write', resource: noDeleteResource, operation: 'clear_conditional_formats', payload: { range: 'A1:B2' } })).error.code, 'unsupported'); assert.equal(noDeleteApp._conditionalFormats.Count, 1)
+
+  const wrongApp = fakeApp(); const wrong = await runtimeWith(wrongApp); const wrongResource = (await wrong({ action: 'context' })).result.resource; const wrongAdd = wrongApp._conditionalFormats.Add; wrongApp._conditionalFormats.Add = (type, operator, _formula1, formula2) => wrongAdd(type, operator, 'wrong', formula2)
+  assert.equal((await wrong({ action: 'write', resource: wrongResource, operation: 'add_conditional_format', payload })).error.code, 'readback_mismatch')
+
+  const changedApp = fakeApp(); changedApp._conditionalFormats.Add(1, 3, '4', ''); const changed = await runtimeWith(changedApp); const changedResource = (await changed({ action: 'context' })).result.resource; const changedAdd = changedApp._conditionalFormats.Add; changedApp._conditionalFormats.Add = (...args) => { const item = changedAdd(...args); changedApp._conditionalFormats.items[0].Font.Bold = true; return item }
+  assert.equal((await changed({ action: 'write', resource: changedResource, operation: 'add_conditional_format', payload })).error.code, 'readback_mismatch')
+
+  const driftApp = fakeApp(); const drift = await runtimeWith(driftApp); const driftResource = (await drift({ action: 'context' })).result.resource; const driftAdd = driftApp._conditionalFormats.Add; driftApp._conditionalFormats.Add = (...args) => { const item = driftAdd(...args); driftApp._range.NumberFormat = '0.00'; return item }
+  assert.equal((await drift({ action: 'write', resource: driftResource, operation: 'add_conditional_format', payload })).error.code, 'readback_mismatch')
+
+  const oversizedApp = fakeApp(); oversizedApp._conditionalFormats.Count = 201; const oversized = await runtimeWith(oversizedApp); const features = await oversized({ action: 'range_features', range: 'A1:B2' }); assert.equal(features.result.rangeFeatures.conditionalFormatsSupported, false); assert.equal(features.result.rangeFeatures.conditionalFormats, null)
+})
+
 test('data validation fails closed for stale state, missing API, wrong property readback, changed range state, and oversized feature reads', async () => {
   const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const resource = (await stale({ action: 'context' })).result.resource; const payload = { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' }
   const inspected = await stale.raw({ action: 'inspect_write', operation: 'set_data_validation', payload }); staleApp._validation.Type = 3
@@ -442,7 +483,7 @@ test('unusable spreadsheet exports fail closed before invoking WebEdit export AP
 test('every unverified AccrUI spreadsheet family fails closed before mutation', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   let mutations = 0; app._range.copyRange = () => { mutations += 1 }
-  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'add_conditional_format', 'copy_range', 'move_range', 'set_freeze_panes', 'set_print_settings', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
+  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'set_freeze_panes', 'set_print_settings', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
     const result = await run({ action: 'write', resource, operation, payload: { range: 'A1' } })
     assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
   }
