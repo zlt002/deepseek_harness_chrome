@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
-import { chmod, cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -109,10 +109,35 @@ async function writeManifestAtomically(manifestPath, manifest) {
   await rename(temporaryPath, manifestPath)
 }
 
+async function replaceDirectory(source, destination, prepare) {
+  const staging = `${destination}.${process.pid}.staging`
+  const backup = `${destination}.${process.pid}.backup`
+  await rm(staging, { recursive: true, force: true })
+  await rm(backup, { recursive: true, force: true })
+  // pnpm dependencies are symlinks. Dereference them so the installed host is
+  // self-contained and a later install never follows an old link back into the source tree.
+  await cp(source, staging, { recursive: true, dereference: true })
+  if (prepare !== undefined) await prepare(staging)
+
+  const hadPrevious = existsSync(destination)
+  try {
+    if (hadPrevious) await rename(destination, backup)
+    await rename(staging, destination)
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true })
+    if (hadPrevious && !existsSync(destination) && existsSync(backup)) {
+      await rename(backup, destination)
+    }
+    throw error
+  }
+  await rm(backup, { recursive: true, force: true })
+}
+
 await mkdir(installRoot, { recursive: true })
-await cp(nativeServerSource, nativeServer, { recursive: true })
-await bundleHarnessRuntimePlugin({ outfile: join(nativeServer, 'harness-runtime.mjs'), projectRoot })
-await cp(skillsSource, skills, { recursive: true })
+await replaceDirectory(nativeServerSource, nativeServer, async (staging) => {
+  await bundleHarnessRuntimePlugin({ outfile: join(staging, 'harness-runtime.mjs'), projectRoot })
+})
+await replaceDirectory(skillsSource, skills)
 await writeFile(launcher, `${launcherLines.join('\n')}\n`, 'utf8')
 await chmod(launcher, 0o755)
 for (const target of targets) {

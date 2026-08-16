@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -104,6 +104,26 @@ test('installs the native host into a stable macOS location', async () => {
     assert.match(launcherSource, new RegExp(`exec .*${nativeServer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/bin\\.mjs`))
     assert.doesNotMatch(launcherSource, new RegExp(`${projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/native-server`))
     assert.doesNotMatch(JSON.stringify(manifests), new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('can reinstall over a pnpm-linked native host dependency', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
+  const installedSdk = join(home, 'Library/Application Support/DeepSeekHarness/native-server/node_modules/@modelcontextprotocol/sdk')
+  const workspaceSdk = join(projectRoot, 'apps/native-server/node_modules/@modelcontextprotocol/sdk')
+  try {
+    const first = await runRegister(home)
+    assert.equal(first.code, 0, first.stderr)
+
+    await rm(installedSdk, { recursive: true, force: true })
+    await symlink(await realpath(workspaceSdk), installedSdk)
+    assert.equal((await lstat(installedSdk)).isSymbolicLink(), true)
+
+    const second = await runRegister(home)
+    assert.equal(second.code, 0, second.stderr)
+    assert.equal((await lstat(installedSdk)).isDirectory(), true)
   } finally {
     await rm(home, { recursive: true, force: true })
   }
