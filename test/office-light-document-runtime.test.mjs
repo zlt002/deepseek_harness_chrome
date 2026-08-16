@@ -24,7 +24,7 @@ async function runtime(options = {}) {
   }, ...(options.selection ?? {}) }
   const documentApi = { selection, ...(options.documentApi ?? {}) }
   const editor = { canvas, document: documentApi, ...(options.editorApi ?? {}) }
-  const context = vm.createContext({ window, globalThis: null, APP: { openApi: { editor } }, location: { href: 'https://webedit.midea.com/weboffice/office/o/1', origin: 'https://webedit.midea.com', pathname: '/weboffice/office/o/1' }, document: { title: '测试', createElement() { return { set innerHTML(value) { this.value = String(value).replace(/<[^>]+>/g, '') }, value: '' } } }, crypto: webcrypto, TextEncoder, Uint8Array, URL, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail } }, setTimeout, clearTimeout, Date })
+  const context = vm.createContext({ window, globalThis: null, APP: { openApi: { editor }, ...(options.otlSelection ? { OTL: { state: { selection: options.otlSelection } } } : {}) }, location: { href: 'https://webedit.midea.com/weboffice/office/o/1', origin: 'https://webedit.midea.com', pathname: '/weboffice/office/o/1' }, document: { title: '测试', createElement() { return { set innerHTML(value) { this.value = String(value).replace(/<[^>]+>/g, '') }, value: '' } } }, crypto: webcrypto, TextEncoder, Uint8Array, URL, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail } }, setTimeout, clearTimeout, Date })
   context.globalThis = context
   vm.runInContext(await readFile(new URL('../public/office-light-document-runtime.js', import.meta.url), 'utf8'), context)
   let id = 0
@@ -80,6 +80,19 @@ test('light-document runtime verifies selection_insert only from a stable snapsh
   }
 })
 
+test('light-document selection_insert permits stable collapsed public anchors and runtime coordinates', async () => {
+  const cases = [
+    { selection: { async getSelectionContent() { return { text: '' } }, async getSelectionAnchor() { return { blockId: 'one', start: 4, end: 4 } } } },
+    { selection: { async getSelectionContent() { return { text: '' } } }, otlSelection: { from: 4, to: 4, anchor: 4, head: 4, empty: true } },
+  ]
+  for (const options of cases) {
+    const state = {}; const call = await runtime({ ...options, state }); const read = await call({ action: 'selection' })
+    assert.equal(read.result.document.selection.stable, true); assert.equal(read.result.document.selection.isCollapsed, true)
+    const inserted = await call({ action: 'write', operation: 'selection_insert', resource: read.result.resource, payload: { text: '光标写入', expectedSelectionFingerprint: read.result.document.selection.selectionFingerprint } })
+    assert.equal(inserted.ok, true); assert.equal(state.selectionCalls, 1)
+  }
+})
+
 test('light-document selection_insert rejects drift, ambiguity, runtime failure, and insufficient XML readback without replay', async () => {
   const stable = { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 3 } } }
   const driftState = {}; let content = '选区'
@@ -88,7 +101,7 @@ test('light-document selection_insert rejects drift, ambiguity, runtime failure,
   const drifted = await drift({ action: 'write', operation: 'selection_insert', resource: initial.result.resource, payload: { text: '新内容', expectedSelectionFingerprint: initial.result.document.selection.selectionFingerprint } })
   assert.equal(drifted.ok, false); assert.equal(drifted.error.code, 'fingerprint_mismatch'); assert.equal(driftState.selectionCalls ?? 0, 0)
 
-  for (const selection of [{ async getSelectionContent() { return { text: '选区' } } }, { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 1 } } }]) {
+  for (const selection of [{ async getSelectionContent() { return { text: '选区' } } }, { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { start: 1, end: 1 } } }]) {
     const state = {}; const call = await runtime({ state, selection }); const read = await call({ action: 'selection' }); assert.equal(read.ok, true, JSON.stringify(read))
     const rejected = await call({ action: 'write', operation: 'selection_insert', resource: read.result.resource, payload: { text: '新内容', expectedSelectionFingerprint: read.result.document.selection.selectionFingerprint } })
     assert.equal(rejected.ok, false); assert.equal(rejected.error.code, 'invalid_range'); assert.equal(state.selectionCalls ?? 0, 0)

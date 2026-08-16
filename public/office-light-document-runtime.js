@@ -81,8 +81,8 @@
     const canvas = current?.openApi?.editor?.canvas?.canvas
     let info
     try { info = canvas?.getSelectionInfo?.() } catch {}
-    const range = raw && Number.isFinite(raw.from) && Number.isFinite(raw.to)
-      ? { from: Number(raw.from), to: Number(raw.to), anchor: Number.isFinite(raw.anchor) ? Number(raw.anchor) : null, head: Number.isFinite(raw.head) ? Number(raw.head) : null }
+    const range = raw && Number.isFinite(raw.from) && Number.isFinite(raw.to) && Number.isFinite(raw.anchor) && Number.isFinite(raw.head)
+      ? { from: Number(raw.from), to: Number(raw.to), anchor: Number(raw.anchor), head: Number(raw.head) }
       : null
     const ids = Array.isArray(info?.selected_tag_ids) ? info.selected_tag_ids.filter((id) => typeof id === 'string' && id.length > 0).slice(0, 50) : []
     return { range, selectedTagIds: ids, isCollapsed: raw?.empty === true || (range !== null && range.from === range.to) }
@@ -93,7 +93,7 @@
     const anchorId = typeof value.anchorId === 'string' && value.anchorId ? value.anchorId : null
     const start = Number.isInteger(value.start) ? value.start : null
     const end = Number.isInteger(value.end) ? value.end : null
-    if (!blockId && !anchorId && start === null) return null
+    if ((!blockId && !anchorId) || start === null || end === null) return null
     return { blockId, anchorId, start, end }
   }
   const readSelection = async (current, maxChars = 20_000) => {
@@ -107,11 +107,11 @@
     let publicAnchor = null
     try { if (typeof selection.getSelectionAnchor === 'function') publicAnchor = stableSelectionAnchor(await selection.getSelectionAnchor()) } catch {}
     const range = runtime.range
-    const stableRange = range && range.from !== range.to ? range : null
-    const anchor = publicAnchor ?? (stableRange ? { blockId: runtime.selectedTagIds[0] ?? null, anchorId: null, start: stableRange.from, end: stableRange.to } : null)
+    const stableRange = range ?? null
+    const anchor = publicAnchor ?? (stableRange ? { blockId: runtime.selectedTagIds[0] ?? 'runtime_selection', anchorId: null, start: stableRange.from, end: stableRange.to } : null)
     const hasContent = Object.values(content).some((item) => String(item).length > 0)
     const isCollapsed = runtime.isCollapsed === true || (anchor !== null && anchor.start !== null && anchor.end !== null && anchor.start === anchor.end)
-    const stable = !!anchor && isCollapsed === false
+    const stable = !!anchor
     const serialized = JSON.stringify({ anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, isCollapsed, content })
     return { supported: true, content, anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, hasSelection: hasContent || stableRange !== null, isCollapsed, stable, selectionFingerprint: selectionHash(serialized), truncated: Object.values(truncated).some(Boolean), truncatedFields: Object.keys(truncated).filter((key) => truncated[key]) }
   }
@@ -263,6 +263,7 @@
     if (!expected || JSON.stringify(expected) !== JSON.stringify(before.result.resource)) return fail('fingerprint_mismatch', 'The light document changed since inspect_write')
     const current = await app()
     const beforeXml = await current.openApi.editor.canvas.getDocXml()
+    if (typeof beforeXml !== 'string' || JSON.stringify(expected) !== JSON.stringify(await documentResource(beforeXml, current))) return fail('fingerprint_mismatch', 'The light document changed before mutation')
     const markdown = typeof input.payload?.markdown === 'string' ? input.payload.markdown : typeof input.payload?.text === 'string' ? input.payload.text : ''
     if (input.operation === 'blocks_delete' || input.operation === 'blocks_format') {
       const items = batchBlockItems(input.operation, input.payload)
@@ -304,7 +305,7 @@
       // A content read is useful even on runtimes without selection coordinates,
       // but a mutation is never safe unless the selected range is stable.
       const snapshot = await readSelection(current, 20_000)
-      if (!snapshot.supported || snapshot.truncated || !snapshot.stable || snapshot.isCollapsed || !snapshot.anchor) return fail('invalid_range', 'Light-document selection insert requires a complete, stable, non-collapsed selection snapshot')
+      if (!snapshot.supported || snapshot.truncated || !snapshot.stable || !snapshot.anchor) return fail('invalid_range', 'Light-document selection insert requires a complete, stable selection or cursor snapshot')
       if (snapshot.selectionFingerprint !== requested.expectedSelectionFingerprint) return fail('fingerprint_mismatch', 'The light-document selection changed since inspect_write')
       const insertContent = { [requested.kind]: requested.value, ...(requested.insertBelow ? { insertBlow: true } : {}) }
       // Exactly one public mutation follows the final resource and selection
