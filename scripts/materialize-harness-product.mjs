@@ -92,6 +92,11 @@ runVisible('git', ['worktree', 'prune'], source)
 // worktree-local Lefthook settings. Keeping the clone under .generated still
 // guarantees that the official submodule itself remains untouched.
 runVisible('git', ['clone', '--no-hardlinks', '--no-checkout', source, target], projectRoot)
+// GitHub Windows runners commonly enable core.autocrlf globally. Configure the
+// generated clone before checkout so official sources retain their committed LF
+// bytes and the portable contribution patches apply identically on every OS.
+runVisible('git', ['config', 'core.autocrlf', 'false'], target)
+runVisible('git', ['config', 'core.eol', 'lf'], target)
 runVisible('git', ['checkout', '--detach', revision], target)
 
 for (const patch of patchFiles) {

@@ -54,3 +54,15 @@ test('root orchestrates apps while product code stays outside the clean upstream
     assert.doesNotMatch(source, /upstream\/deepseek-harness\/.*\/src/, `product package imports upstream source: ${file}`)
   }
 })
+
+test('Harness product checkout pins LF before applying portable patches', async () => {
+  const script = await readFile(resolve(root, 'scripts/materialize-harness-product.mjs'), 'utf8')
+  const clone = script.indexOf("runVisible('git', ['clone'")
+  const autocrlf = script.indexOf("runVisible('git', ['config', 'core.autocrlf', 'false']")
+  const eol = script.indexOf("runVisible('git', ['config', 'core.eol', 'lf']")
+  const checkout = script.indexOf("runVisible('git', ['checkout'")
+  const apply = script.indexOf("runVisible('git', ['apply', '--check'")
+
+  assert.ok(clone >= 0)
+  assert.ok(clone < autocrlf && autocrlf < eol && eol < checkout && checkout < apply)
+})
