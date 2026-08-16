@@ -99,6 +99,34 @@
     })
     return source.every(Boolean) ? source.join('') : null
   }
+  const batchBlockItems = (operation, payload) => {
+    const source = Array.isArray(payload?.blocks) ? payload.blocks
+      : operation === 'blocks_delete' && Array.isArray(payload?.deletions) ? payload.deletions
+        : operation === 'blocks_delete' && Array.isArray(payload?.ids) ? payload.ids.map((id) => ({ id }))
+          : operation === 'blocks_format' && Array.isArray(payload?.formats) ? payload.formats
+            : [payload]
+    if (source.length < 1 || source.length > 50) return null
+    const seen = new Set(); const items = []
+    for (const item of source) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.id !== 'string' || !item.id || item.id.length > 256 || seen.has(item.id)) return null
+      seen.add(item.id)
+      if (operation === 'blocks_delete') { items.push({ id: item.id }); continue }
+      const style = item.style ?? payload?.style
+      if (!style || typeof style !== 'object' || Array.isArray(style) || Object.keys(style).length < 1 || !Object.keys(style).every((key) => ['bold', 'italic', 'blockType'].includes(key))) return null
+      if ((style.bold !== undefined && typeof style.bold !== 'boolean') || (style.italic !== undefined && typeof style.italic !== 'boolean') || (style.blockType !== undefined && !/^(p|h[1-6]|li|blockquote|pre|codeBlock)$/i.test(style.blockType))) return null
+      items.push({ id: item.id, style: { ...(style.bold === undefined ? {} : { bold: style.bold }), ...(style.italic === undefined ? {} : { italic: style.italic }), ...(style.blockType === undefined ? {} : { blockType: style.blockType.toLowerCase() }) } })
+    }
+    return items
+  }
+  const formattedBlock = (target, style) => {
+    if (!style || typeof style !== 'object' || Array.isArray(style) || Object.keys(style).length < 1 || !Object.keys(style).every((key) => ['bold', 'italic', 'blockType'].includes(key))) return null
+    if ((style.bold !== undefined && typeof style.bold !== 'boolean') || (style.italic !== undefined && typeof style.italic !== 'boolean') || (style.blockType !== undefined && !/^(p|h[1-6]|li|blockquote|pre|codeBlock)$/i.test(style.blockType))) return null
+    let body = target.body
+    if (style.bold !== undefined) { body = body.replace(/<\/?strong\b[^>]*>/gi, ''); if (style.bold) body = `<strong>${body}</strong>` }
+    if (style.italic !== undefined) { body = body.replace(/<\/?em\b[^>]*>/gi, ''); if (style.italic) body = `<em>${body}</em>` }
+    const tag = style.blockType === undefined ? target.tag : style.blockType.toLowerCase()
+    return { body, tag, xml: `<${tag}${target.attrs}>${body}</${tag}>` }
+  }
   const patchAndVerify = async (current, beforeXml, inner, expected, operation, requested) => {
     const patched = await patchXml(current, beforeXml, inner)
     if (!patched.ok) return patched
@@ -175,8 +203,39 @@
     const current = await app()
     const beforeXml = await current.openApi.editor.canvas.getDocXml()
     const markdown = typeof input.payload?.markdown === 'string' ? input.payload.markdown : typeof input.payload?.text === 'string' ? input.payload.text : ''
-    if (input.operation === 'blocks_delete') return write({ ...input, operation: 'delete' })
-    if (input.operation === 'blocks_format') return write({ ...input, operation: 'format' })
+    if (input.operation === 'blocks_delete' || input.operation === 'blocks_format') {
+      const items = batchBlockItems(input.operation, input.payload)
+      const parsed = editableBlocks(beforeXml)
+      if (!items || !parsed) return fail('invalid_range', `${input.operation} requires one to fifty distinct stable block ids and bounded formatting`)
+      const changes = []
+      for (const item of items) {
+        const target = parsed.list.find((block) => block.id === item.id)
+        if (!target) return fail('invalid_range', `${input.operation} target block was not found by stable id`)
+        if (input.operation === 'blocks_delete') { changes.push({ target, xml: '' }); continue }
+        const formatted = formattedBlock(target, item.style)
+        if (!formatted) return fail('invalid_range', 'blocks_format contains unsupported formatting')
+        changes.push({ target, style: item.style, formatted, xml: formatted.xml })
+      }
+      let inner = parsed.inner
+      for (const change of changes.slice().sort((left, right) => right.target.start - left.target.start)) inner = `${inner.slice(0, change.target.start)}${change.xml}${inner.slice(change.target.end)}`
+      const patched = await patchXml(current, beforeXml, inner)
+      if (!patched.ok) return patched
+      const after = editableBlocks(patched.xml)
+      if (!after) return fail('readback_mismatch', `WebEdit did not return readable ${input.operation} XML`)
+      const verifiedBlocks = []
+      for (const change of changes) {
+        const actual = after.list.find((block) => block.id === change.target.id)
+        if (input.operation === 'blocks_delete') {
+          if (actual) return fail('readback_mismatch', 'WebEdit did not remove every requested stable block id')
+          verifiedBlocks.push({ id: change.target.id, deleted: true })
+          continue
+        }
+        const style = change.style
+        if (!actual || actual.text !== change.target.text || actual.tag.toLowerCase() !== change.formatted.tag.toLowerCase() || actual.body !== change.formatted.body) return fail('readback_mismatch', 'WebEdit did not apply every requested stable block format without changing inline content')
+        verifiedBlocks.push({ id: change.target.id, text: actual.text, type: actual.tag.toLowerCase(), style })
+      }
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload, count: items.length }, observed: { verifiedBlocks, verified: true } } }
+    }
     if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'selection_insert' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'insert_drawing' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
     if (input.operation === 'set_title') {
       const document = documentApi(current); const title = typeof input.payload?.title === 'string' ? input.payload.title.trim() : ''
@@ -239,11 +298,9 @@
     } else if (input.operation === 'delete') {
       inner = `${inner.slice(0, located.target.start)}${inner.slice(located.target.end)}`; expectedText = located.target.text
     } else if (input.operation === 'format') {
-      const style = input.payload?.style || {}; const body = escapeXml(located.target.text)
-      const formatted = `${style.bold ? '<strong>' : ''}${style.italic ? '<em>' : ''}${body}${style.italic ? '</em>' : ''}${style.bold ? '</strong>' : ''}`
-      const tag = /^h[1-6]$/i.test(style.blockType) ? style.blockType : located.target.tag
-      const replacement = `<${tag}${located.target.attrs}>${formatted}</${tag}>`
-      inner = `${inner.slice(0, located.target.start)}${replacement}${inner.slice(located.target.end)}`; expectedText = located.target.text
+      const formatted = formattedBlock(located.target, input.payload?.style)
+      if (!formatted) return fail('invalid_range', 'format requires supported bold, italic, or blockType fields')
+      inner = `${inner.slice(0, located.target.start)}${formatted.xml}${inner.slice(located.target.end)}`; expectedText = located.target.text
     } else if (input.operation === 'title') {
       if (!markdown.trim()) return fail('invalid_range', 'title requires bounded markdown or text')
       const title = located.all.find((block) => block.tag.toLowerCase() === 'outlinetitle')
@@ -265,9 +322,8 @@
       if (!actual || actual.text !== expectedText) return fail('readback_mismatch', 'WebEdit light-document structural readback differs from the requested edit')
     }
     if (input.operation === 'format') {
-      const style = input.payload?.style || {}; const actual = afterBlocks.list.find((block) => block.id === located.target.id)
-      if (!actual || (style.blockType && actual.tag.toLowerCase() !== String(style.blockType).toLowerCase())
-        || (style.bold === true && !/<strong\b/i.test(actual.xml)) || (style.italic === true && !/<em\b/i.test(actual.xml))) return fail('readback_mismatch', 'WebEdit did not apply the requested light-document format')
+      const formatted = formattedBlock(located.target, input.payload?.style); const actual = afterBlocks.list.find((block) => block.id === located.target.id)
+      if (!formatted || !actual || actual.tag.toLowerCase() !== formatted.tag.toLowerCase() || actual.body !== formatted.body) return fail('readback_mismatch', 'WebEdit did not apply the requested light-document format without changing inline content')
     }
     return { ok: true, result: {
       status: 'verified_write', resource: await documentResource(patched.xml, current),

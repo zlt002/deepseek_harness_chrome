@@ -12,7 +12,7 @@ async function runtime(options = {}) {
   const window = { addEventListener(name, listener) { listeners.set(name, listener) }, dispatchEvent(event) { listeners.get(event.type)?.(event) } }
   const canvas = {
     async getDocXml() { return xml },
-    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (state) state.xml = xml; return { success: true } },
+    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
   }
   const selection = { async insertContent({ markdown, html, text }) { xml = xml.replace('</apcanvas>', `<p id="inserted">${markdown ?? html ?? text}</p></apcanvas>`) }, ...(options.selection ?? {}) }
   const documentApi = { selection, ...(options.documentApi ?? {}) }
@@ -111,4 +111,43 @@ test('light-document runtime verifies stable-ID batch edits while ambiguous sele
   assert.equal(exactReplace.ok, false); assert.equal(exactReplace.error.code, 'unsupported')
   const unsupported = await call({ action: 'write', resource: deleted.result.resource, operation: 'insert_image', payload: { url: 'https://example.test/a.png' } })
   assert.equal(unsupported.ok, false); assert.equal(unsupported.error.code, 'unsupported')
+})
+
+test('light-document runtime preserves batch delete/format contracts and reports ordered stable-id readback', async () => {
+  const state = {}; const call = await runtime({ state })
+  const initial = await call({ action: 'read' })
+  const formatPayload = { blocks: [{ id: 'two', style: { italic: true } }, { id: 'one', style: { bold: true, blockType: 'h2' } }] }
+  const formatted = await call({ action: 'write', resource: initial.result.resource, operation: 'blocks_format', payload: formatPayload })
+  assert.equal(formatted.ok, true); assert.equal(formatted.result.requested.operation, 'blocks_format'); assert.deepEqual(formatted.result.requested.payload, formatPayload)
+  assert.deepEqual(Array.from(formatted.result.observed.verifiedBlocks, (item) => item.id), ['two', 'one'])
+  const deletePayload = { blocks: [{ id: 'two' }, { id: 'one' }] }
+  const deleted = await call({ action: 'write', resource: formatted.result.resource, operation: 'blocks_delete', payload: deletePayload })
+  assert.equal(deleted.ok, true); assert.equal(deleted.result.requested.operation, 'blocks_delete'); assert.deepEqual(deleted.result.requested.payload, deletePayload)
+  assert.deepEqual(Array.from(deleted.result.observed.verifiedBlocks, (item) => ({ id: item.id, deleted: item.deleted })), [{ id: 'two', deleted: true }, { id: 'one', deleted: true }])
+  assert.equal(state.patchCalls, 2)
+})
+
+test('light-document batch writes reject unstable ids before mutation and never attest partial mutation', async () => {
+  const beforeState = {}; const before = await runtime({ state: beforeState }); const resource = (await before({ action: 'read' })).result.resource
+  const unstable = await before({ action: 'write', resource, operation: 'blocks_delete', payload: { blocks: [{ index: 0 }] } })
+  assert.equal(unstable.ok, false); assert.equal(beforeState.patchCalls ?? 0, 0)
+
+  const partialState = {}; const partial = await runtime({ state: partialState, keepBlockId: 'two' }); const partialResource = (await partial({ action: 'read' })).result.resource
+  const result = await partial({ action: 'write', resource: partialResource, operation: 'blocks_delete', payload: { blocks: [{ id: 'one' }, { id: 'two' }] } })
+  assert.equal(result.ok, false); assert.equal(result.error.code, 'readback_mismatch'); assert.equal(partialState.patchCalls, 1)
+})
+
+test('single and batch formatting preserve links and inline markup while changing only requested formatting', async () => {
+  const initialXml = '<apcanvas><outlineTitle id="title">标题</outlineTitle><p id="one">前<a href="/x"><span class="mark">链接</span></a>后</p><p id="two"><span data-k="v">第二段</span></p></apcanvas>'
+  const state = {}; const call = await runtime({ initialXml, state }); const resource = (await call({ action: 'read' })).result.resource
+  const single = await call({ action: 'write', resource, operation: 'format', payload: { id: 'one', style: { bold: true, blockType: 'h2' } } })
+  assert.equal(single.ok, true); assert.match(state.xml, /<h2 id="one"><strong>前<a href="\/x"><span class="mark">链接<\/span><\/a>后<\/strong><\/h2>/)
+  const batch = await call({ action: 'write', resource: single.result.resource, operation: 'blocks_format', payload: { blocks: [{ id: 'one', style: { bold: false } }, { id: 'two', style: { italic: true } }] } })
+  assert.equal(batch.ok, true); assert.doesNotMatch(state.xml, /<strong\b/)
+  assert.match(state.xml, /<h2 id="one">前<a href="\/x"><span class="mark">链接<\/span><\/a>后<\/h2>/)
+  assert.match(state.xml, /<p id="two"><em><span data-k="v">第二段<\/span><\/em><\/p>/)
+
+  const ignored = await runtime({ initialXml, ignoreFormat: true }); const ignoredResource = (await ignored({ action: 'read' })).result.resource
+  const mismatch = await ignored({ action: 'write', resource: ignoredResource, operation: 'blocks_format', payload: { blocks: [{ id: 'one', style: { italic: true } }] } })
+  assert.equal(mismatch.ok, false); assert.equal(mismatch.error.code, 'readback_mismatch')
 })

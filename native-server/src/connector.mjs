@@ -529,12 +529,13 @@ function validOfficeDocumentArguments(value) {
   if (value.action === 'selection') return keys.every((key) => ['action', 'payload'].includes(key)) && validPayload
   if (value.action === 'inspect_write') return keys.length === 3 && typeof value.operation === 'string' && LIGHT_DOCUMENT_OPERATIONS.includes(value.operation)
     && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000
+    && validLightDocumentOperationPayload(value.operation, value.payload)
   if (value.action !== 'write' || keys.length !== 5) return false
   return typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256
     && typeof value.idempotencyIdentity === 'string' && value.idempotencyIdentity.length > 0 && value.idempotencyIdentity.length <= 128
     && LIGHT_DOCUMENT_OPERATIONS.includes(value.operation)
     && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload)
-    && JSON.stringify(value.payload).length <= 100000
+    && JSON.stringify(value.payload).length <= 100000 && validLightDocumentOperationPayload(value.operation, value.payload)
 }
 
 function validOfficeDocumentReadResult(value) {
@@ -558,10 +559,38 @@ function sameLightDocumentTarget(left, right) {
   return validLightDocumentResource(left) && validLightDocumentResource(right)
     && left.kind === right.kind && left.origin === right.origin && left.documentName === right.documentName
 }
+function lightDocumentBatchItems(operation, payload) {
+  if (!['blocks_delete', 'blocks_format'].includes(operation)) return null
+  const source = Array.isArray(payload?.blocks) ? payload.blocks
+    : operation === 'blocks_delete' && Array.isArray(payload?.deletions) ? payload.deletions
+      : operation === 'blocks_delete' && Array.isArray(payload?.ids) ? payload.ids.map((id) => ({ id }))
+        : operation === 'blocks_format' && Array.isArray(payload?.formats) ? payload.formats
+          : [payload]
+  if (source.length < 1 || source.length > 50) return null
+  const seen = new Set(); const items = []
+  for (const item of source) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.id !== 'string' || !item.id || item.id.length > 256 || seen.has(item.id)) return null
+    seen.add(item.id)
+    if (operation === 'blocks_delete') { items.push({ id: item.id }); continue }
+    const style = item.style ?? payload?.style
+    if (!style || typeof style !== 'object' || Array.isArray(style) || Object.keys(style).length < 1 || !Object.keys(style).every((key) => ['bold', 'italic', 'blockType'].includes(key))) return null
+    if ((style.bold !== undefined && typeof style.bold !== 'boolean') || (style.italic !== undefined && typeof style.italic !== 'boolean') || (style.blockType !== undefined && (typeof style.blockType !== 'string' || !/^(p|h[1-6]|li|blockquote|pre|codeBlock)$/i.test(style.blockType)))) return null
+    items.push({ id: item.id, style: { ...(style.bold === undefined ? {} : { bold: style.bold }), ...(style.italic === undefined ? {} : { italic: style.italic }), ...(style.blockType === undefined ? {} : { blockType: style.blockType.toLowerCase() }) } })
+  }
+  return items
+}
+function validLightDocumentOperationPayload(operation, payload) { return !['blocks_delete', 'blocks_format'].includes(operation) || lightDocumentBatchItems(operation, payload) !== null }
 function verifiedLightDocumentWriteMatches(result, request) {
-  return validOfficeDocumentWriteResult(result) && result.requested?.operation === request.operation
+  const matchesRequest = validOfficeDocumentWriteResult(result) && result.requested?.operation === request.operation
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
+  if (!matchesRequest || !['blocks_delete', 'blocks_format'].includes(request.operation)) return matchesRequest
+  const expected = lightDocumentBatchItems(request.operation, request.payload); const observed = result.observed?.verifiedBlocks
+  if (!expected || result.requested?.count !== expected.length || !Array.isArray(observed) || observed.length !== expected.length) return false
+  return expected.every((item, index) => request.operation === 'blocks_delete'
+    ? observed[index]?.id === item.id && observed[index]?.deleted === true
+    : observed[index]?.id === item.id && canonicalJson(observed[index]?.style) === canonicalJson(item.style) && typeof observed[index]?.text === 'string' && typeof observed[index]?.type === 'string'
+      && (item.style.blockType === undefined || observed[index].type === item.style.blockType))
 }
 const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility']
 function validSpreadsheetMatrix(value) { return Array.isArray(value) && value.every((row) => Array.isArray(row)) }

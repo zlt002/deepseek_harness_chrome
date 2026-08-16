@@ -180,6 +180,56 @@ test('binds approval and extension readback to the exact operation and payload, 
   } finally { await connector.stop() }
 })
 
+test('accepts exact ordered blocks_delete and blocks_format readback through the Connector', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 19, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/107?id=107' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '批量文档', fingerprint: 'before' }
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+    type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+    result: request.action !== 'write' ? { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [] } }
+      : request.operation === 'blocks_delete'
+        ? { status: 'verified_write', resource: { ...resource, fingerprint: 'after-delete' }, requested: { operation: request.operation, payload: request.payload, count: 2 }, observed: { verifiedBlocks: request.payload.blocks.map((item) => ({ id: item.id, deleted: true })), verified: true } }
+        : { status: 'verified_write', resource: { ...resource, fingerprint: 'after-format' }, requested: { operation: request.operation, payload: request.payload, count: 2 }, observed: { verifiedBlocks: request.payload.blocks.map((item) => ({ id: item.id, text: item.id, type: item.style.blockType ?? 'p', style: item.style })), verified: true } },
+  })) })
+  connector.bindBrowserTarget('light-doc-batch-success-run', target); const endpoint = await connector.start()
+  const write = async (operation, payload, identity, id) => {
+    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation, payload }, id)
+    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation, payload }, id + 1)
+  }
+  try {
+    const deleted = await write('blocks_delete', { blocks: [{ id: 'two' }, { id: 'one' }] }, 'batch-delete-success', 1)
+    assert.equal(deleted.result.structuredContent.status, 'verified_write'); assert.deepEqual(deleted.result.structuredContent.observed.verifiedBlocks.map((item) => item.id), ['two', 'one'])
+    const formatted = await write('blocks_format', { blocks: [{ id: 'one', style: { bold: true, blockType: 'h2' } }, { id: 'two', style: { italic: false } }] }, 'batch-format-success', 3)
+    assert.equal(formatted.result.structuredContent.status, 'verified_write'); assert.deepEqual(formatted.result.structuredContent.observed.verifiedBlocks.map((item) => item.id), ['one', 'two'])
+  } finally { await connector.stop() }
+})
+
+test('rejects forged batch operation, partial ordered readback, and wrong target, then fences retries', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 20, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/108?id=108' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '批量文档', fingerprint: 'before' }
+  let writes = 0
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [] } } })
+    writes += 1; const marker = request.payload.blocks[0].id
+    const verifiedBlocks = request.payload.blocks.map((item) => ({ id: item.id, deleted: true }))
+    const result = { status: 'verified_write', resource: marker === 'wrong-target' ? { ...resource, documentName: '另一文档', fingerprint: 'after' } : { ...resource, fingerprint: 'after' }, requested: { operation: marker === 'wrong-operation' ? 'delete' : request.operation, payload: request.payload, count: request.payload.blocks.length }, observed: { verifiedBlocks: marker === 'partial' ? verifiedBlocks.slice(0, 1) : verifiedBlocks, verified: true } }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result })
+  }) })
+  connector.bindBrowserTarget('light-doc-batch-forgery-run', target); const endpoint = await connector.start()
+  const write = async (payload, identity, id) => {
+    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_delete', payload }, id)
+    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation: 'blocks_delete', payload }, id + 1)
+  }
+  try {
+    for (const [marker, identity, id] of [['wrong-operation', 'forged-operation', 1], ['partial', 'partial-readback', 3], ['wrong-target', 'wrong-target-readback', 5]]) {
+      const payload = { blocks: [{ id: marker }, { id: 'second' }] }; const result = await write(payload, identity, id)
+      assert.equal(result.result.isError, true)
+    }
+    assert.equal(writes, 3)
+    const retry = await write({ blocks: [{ id: 'partial' }, { id: 'second' }] }, 'partial-readback', 7)
+    assert.equal(retry.result.isError, true); assert.match(retry.result.content[0].text, /uncertain/i); assert.equal(writes, 3)
+  } finally { await connector.stop() }
+})
+
 test('persists a timeout checkpoint across connector restart and never repeats the mutation', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 17, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/105?id=105' }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '演示文档', fingerprint: 'before' }
