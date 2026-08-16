@@ -499,6 +499,24 @@ test('outline fail-closes invalid axes, unavailable APIs, stale levels, and wron
   assert.equal((await forgedRun({ action: 'write', resource: forgedResource, operation: 'set_outline_group', payload: { range: '1:2', axis: 'row', grouped: true } })).error.code, 'readback_mismatch')
 })
 
+test('special_cells returns bounded canonical Area pages and proves local empty candidates', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app)
+  const areas = [{ Row: 1, Column: 1, Rows: { Count: 1 }, Columns: { Count: 1 }, Count: 1 }, { Row: 2, Column: 2, Rows: { Count: 1 }, Columns: { Count: 1 }, Count: 1 }]
+  app._range.SpecialCells = () => ({ Count: 2, Areas: { Count: 2, Item: (index) => areas[index - 1] } })
+  const page = await run({ action: 'special_cells', range: 'A1:B2', kind: 'constants', offset: 1, limit: 1 })
+  assert.equal(page.result.specialCells.returned, 1); assert.equal(page.result.specialCells.areas[0].address, 'B2:B2'); assert.equal(page.result.specialCells.hasMore, false); assert.equal(page.result.specialCells.nextOffset, null)
+  const exhausted = await run({ action: 'special_cells', range: 'A1:B2', kind: 'constants', offset: 2, limit: 1 }); assert.equal(exhausted.result.specialCells.returned, 0); assert.equal(exhausted.result.specialCells.hasMore, false); assert.equal(exhausted.result.specialCells.nextOffset, null)
+  const empty = await run({ action: 'special_cells', range: 'A1:B2', kind: 'blanks' }); assert.equal(empty.result.specialCells.count, 0); assert.equal(empty.result.specialCells.returned, 0)
+})
+
+test('special_cells fails closed for invalid inputs, unavailable APIs, forged counts, and out-of-range Areas', async () => {
+  const invalid = await runtimeWith(fakeApp()); assert.equal((await invalid({ action: 'special_cells', range: 'A1:B2', kind: 'wrong' })).error.code, 'invalid_range'); assert.equal((await invalid({ action: 'special_cells', range: 'A1:XFD1048576', kind: 'constants' })).error.code, 'invalid_range')
+  const missing = await runtimeWith(fakeApp()); assert.equal((await missing({ action: 'special_cells', range: 'A1:B2', kind: 'constants' })).error.code, 'unsupported')
+  const countForged = fakeApp(); countForged._range.SpecialCells = () => ({ Count: 1, Areas: { Count: 2, Item: () => ({ Row: 1, Column: 1, Rows: { Count: 1 }, Columns: { Count: 1 }, Count: 1 }) } }); const forgedRun = await runtimeWith(countForged); assert.equal((await forgedRun({ action: 'special_cells', range: 'A1:B2', kind: 'constants' })).error.code, 'unsupported')
+  const overlapping = fakeApp(); overlapping._range.SpecialCells = () => ({ Count: 2, Areas: { Count: 2, Item: () => ({ Row: 1, Column: 1, Rows: { Count: 1 }, Columns: { Count: 1 }, Count: 1 }) } }); const overlappingRun = await runtimeWith(overlapping); assert.equal((await overlappingRun({ action: 'special_cells', range: 'A1:B2', kind: 'constants' })).error.code, 'unsupported')
+  const outside = fakeApp(); outside._range.SpecialCells = () => ({ Count: 1, Areas: { Count: 1, Item: () => ({ Row: 3, Column: 1, Rows: { Count: 1 }, Columns: { Count: 1 }, Count: 1 }) } }); const outsideRun = await runtimeWith(outside); assert.equal((await outsideRun({ action: 'special_cells', range: 'A1:B2', kind: 'constants' })).error.code, 'unsupported')
+})
+
 test('dimensions read each bounded item and verify hide/show and AutoFit without field drift', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   const read = await run({ action: 'dimensions', range: '1:2', axis: 'row' }); assert.equal(JSON.stringify(read.result.dimensions.items), JSON.stringify([{ index: 1, hidden: false, size: 15 }, { index: 2, hidden: false, size: 15 }]))

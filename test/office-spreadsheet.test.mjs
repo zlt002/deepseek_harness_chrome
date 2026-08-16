@@ -377,6 +377,17 @@ test('validates and independently verifies print and outline write contracts', a
   } finally { await connector.stop() }
 })
 
+test('validates SpecialCells request and rejects forged bounded read results', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 40, url: 'https://doc.midea.com/sheets/special' }; const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Special.xlsx', sheetName: 'Sheet1', fingerprint: 'special-sheet' }; let forge = false
+  const connector = new BrowserConnector({ officeSpreadsheetWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => { const specialCells = { range: 'A1:B2', sheetName: 'Sheet1', kind: 'constants', count: 2, areaCount: 2, offset: 0, limit: 1, returned: 1, hasMore: true, nextOffset: 1, truncated: true, areas: [{ index: 1, address: forge ? 'C1:C1' : 'A1:A1', row: forge ? 1 : 1, column: forge ? 3 : 1, rowsCount: 1, columnsCount: 1, count: 1 }] }; connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, specialCells } }) }) })
+  connector.bindBrowserTarget('spreadsheet-special-run', target); const endpoint = await connector.start()
+  try {
+    const invalid = await call(endpoint, { action: 'special_cells', range: 'A1:B2', kind: 'wrong' }); assert.equal(invalid.error.code, -32602)
+    const valid = await call(endpoint, { action: 'special_cells', range: 'A1:B2', kind: 'constants', offset: 0, limit: 1 }); assert.equal(valid.result.structuredContent.specialCells.areas[0].address, 'A1:A1')
+    forge = true; const rejected = await call(endpoint, { action: 'special_cells', range: 'A1:B2', kind: 'constants', offset: 0, limit: 1 }); assert.equal(rejected.result.isError, true)
+  } finally { await connector.stop() }
+})
+
 test('validates dimension write scope and rejects forged per-item hidden or size readback', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 40, url: 'https://doc.midea.com/sheets/dimensions' }; const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Dimensions.xlsx', sheetName: 'Sheet1', fingerprint: 'dimensions-sheet' }
   const dimensions = { sheetName: 'Sheet1', range: '1:2', axis: 'row', items: [{ index: 1, hidden: false, size: 15 }, { index: 2, hidden: false, size: 15 }] }; const precondition = { version: 7, dimensions }; let forge = false

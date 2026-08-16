@@ -172,6 +172,7 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_freeze_panes'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_print_settings'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_outline_group'))
+    assert.ok(spreadsheet.inputSchema.properties.action.enum.includes('special_cells'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_rows_hidden'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_columns_hidden'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('auto_fit'))

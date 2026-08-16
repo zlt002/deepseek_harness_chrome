@@ -34,6 +34,7 @@
   const DIMENSION_OPERATIONS = new Set(['set_rows_hidden', 'set_columns_hidden', 'auto_fit'])
   const PRINT_KEYS = ['printArea', 'printTitleRows', 'printTitleColumns', 'orientation', 'zoom', 'fitToPagesWide', 'fitToPagesTall', 'centerHorizontally', 'centerVertically', 'leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'headerMargin', 'footerMargin']
   const PRINT_PROPERTY = { printArea: 'PrintArea', printTitleRows: 'PrintTitleRows', printTitleColumns: 'PrintTitleColumns', orientation: 'Orientation', zoom: 'Zoom', fitToPagesWide: 'FitToPagesWide', fitToPagesTall: 'FitToPagesTall', centerHorizontally: 'CenterHorizontally', centerVertically: 'CenterVertically', leftMargin: 'LeftMargin', rightMargin: 'RightMargin', topMargin: 'TopMargin', bottomMargin: 'BottomMargin', headerMargin: 'HeaderMargin', footerMargin: 'FooterMargin' }
+  const SPECIAL_CELL_TYPES = { blanks: 4, constants: 2, formulas: -4123, lastCell: 11, visible: 12 }
 
   async function appAndSheet(requestedSheet) {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
@@ -72,6 +73,44 @@
   function requestedOutlineOperation(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['sheetName', 'range', 'axis', 'grouped'].includes(key)) || typeof payload.axis !== 'string' || typeof payload.grouped !== 'boolean') return null
     const target = parseOutlineRange(payload.range, payload.axis); return target ? { ...target, axis: payload.axis, grouped: payload.grouped } : null
+  }
+  function specialCellCandidateExists(snapshot, kind) {
+    if (!snapshot || kind === 'lastCell' || kind === 'visible') return true
+    for (let row = 0; row < snapshot.values.length; row += 1) for (let column = 0; column < snapshot.values[row].length; column += 1) {
+      const value = snapshot.values[row][column]; const formula = snapshot.formulas[row][column]; const hasFormula = typeof formula === 'string' && formula.startsWith('=')
+      if (kind === 'blanks' && (value === null || value === undefined || value === '')) return true
+      if (kind === 'constants' && value !== null && value !== undefined && value !== '' && !hasFormula) return true
+      if (kind === 'formulas' && hasFormula) return true
+    }
+    return false
+  }
+  function specialCellsRequest(request) {
+    if (!request || typeof request.range !== 'string' || !Object.hasOwn(SPECIAL_CELL_TYPES, request.kind)) return null
+    const target = parseAddress(request.range); const cells = target && (target.rowTo - target.rowFrom + 1) * (target.colTo - target.colFrom + 1)
+    if (!target || cells > 100000 || !Number.isInteger(request.offset ?? 0) || request.offset < 0 || request.offset > 100000 || !Number.isInteger(request.limit ?? 200) || request.limit < 1 || request.limit > 200) return null
+    return { target, kind: request.kind, type: SPECIAL_CELL_TYPES[request.kind], offset: request.offset ?? 0, limit: request.limit ?? 200 }
+  }
+  function insideAddress(area, target) { return area.rowFrom >= target.rowFrom && area.rowTo <= target.rowTo && area.colFrom >= target.colFrom && area.colTo <= target.colTo }
+  async function specialCells(resolved, request) {
+    const requested = specialCellsRequest(request); if (!requested) return fail('invalid_range', 'special_cells requires a simple bounded range, supported kind, offset, and limit')
+    const input = await rangeSnapshot(resolved.sheet, request.range); if (input.error) return input.error
+    if (!specialCellCandidateExists(input.snapshot, requested.kind)) return { ok: true, result: { status: 'ok', resource: resolved.resource, specialCells: { range: request.range, sheetName: resolved.resource.sheetName, kind: requested.kind, count: 0, areaCount: 0, offset: requested.offset, limit: requested.limit, returned: 0, hasMore: false, nextOffset: null, truncated: false, areas: [] } } }
+    if (typeof input.range.SpecialCells !== 'function') return fail('unsupported', 'WebEdit does not expose Range.SpecialCells')
+    let specialRange; try { specialRange = await resolve(input.range.SpecialCells(requested.type)) } catch { return fail('unsupported', 'WebEdit SpecialCells did not return a readable collection') }
+    const collection = await property(specialRange, 'Areas'); const count = Number(await property(specialRange, 'Count')); const areaCount = Number(await property(collection, 'Count'))
+    if (!specialRange || !collection || !Number.isInteger(count) || count < 0 || count > 100000 || !Number.isInteger(areaCount) || areaCount < 0 || areaCount > 100000 || areaCount > count) return fail('unsupported', 'WebEdit returned an incomplete or inconsistent SpecialCells collection')
+    const start = Math.min(requested.offset, areaCount); const end = Math.min(areaCount, requested.offset + requested.limit); const areas = []; const areaRanges = []; let returnedCells = 0
+    for (let index = start; index < end; index += 1) {
+      const area = await call(collection, 'Item', [index + 1]); const row = Number(await property(area, 'Row')); const column = Number(await property(area, 'Column')); const rows = await property(area, 'Rows'); const columns = await property(area, 'Columns'); const rowsCount = Number(await property(rows, 'Count')); const columnsCount = Number(await property(columns, 'Count')); const areaCountValue = Number(await property(area, 'Count'))
+      const parsed = Number.isInteger(row) && Number.isInteger(column) && Number.isInteger(rowsCount) && Number.isInteger(columnsCount) && row >= 1 && column >= 1 && rowsCount >= 1 && columnsCount >= 1 && row + rowsCount - 1 <= 1048576 && column + columnsCount - 1 <= 16384 ? { rowFrom: row, rowTo: row + rowsCount - 1, colFrom: column, colTo: column + columnsCount - 1 } : null
+      const cells = parsed ? rowsCount * columnsCount : 0
+      if (!area || !parsed || !insideAddress(parsed, requested.target) || areaRanges.some((candidate) => overlap(candidate, parsed)) || !Number.isInteger(areaCountValue) || areaCountValue !== cells || returnedCells + cells > count) return fail('unsupported', 'WebEdit returned an invalid or overlapping SpecialCells Area; no partial page was accepted')
+      returnedCells += cells; areaRanges.push(parsed); areas.push({ index: index + 1, address: addressFor(parsed), row, column, rowsCount, columnsCount, count: cells })
+    }
+    if (areas.length !== end - start) return fail('unsupported', 'WebEdit omitted a requested SpecialCells Area; no partial page was accepted')
+    if (start === 0 && end === areaCount && returnedCells !== count) return fail('unsupported', 'WebEdit SpecialCells Count differs from the fully enumerated Areas')
+    const hasMore = end < areaCount
+    return { ok: true, result: { status: 'ok', resource: resolved.resource, specialCells: { range: request.range, sheetName: resolved.resource.sheetName, kind: requested.kind, count, areaCount, offset: requested.offset, limit: requested.limit, returned: areas.length, hasMore, nextOffset: hasMore ? end : null, truncated: hasMore, areas } } }
   }
   function requestedDimensionOperation(operation, payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
@@ -524,6 +563,7 @@
       const snapshot = await outlineSnapshot(resolved, { ...target, axis: request.axis })
       return { ok: true, result: { status: 'ok', resource: resolved.resource, outline: snapshot.supported ? { supported: true, ...snapshot.outline } : { supported: false } } }
     }
+    if (request.action === 'special_cells') return specialCells(resolved, request)
     if (request.action === 'dimensions') {
       const target = parseOutlineRange(request.range, request.axis)
       if (!target) return fail('invalid_range', 'dimensions requires a bounded whole-row or whole-column range with matching axis')
