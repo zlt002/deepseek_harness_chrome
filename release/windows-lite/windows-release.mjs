@@ -171,39 +171,8 @@ foreach ($nativeHostName in @('${NATIVE_HOST_NAME}', '${LEGACY_NATIVE_HOST_NAME}
 `
 }
 
-function installPs1(extensionId) {
-  return `# AccrUI-compatible Harness Windows Lite installer
-$ErrorActionPreference = 'Stop'
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$payloadZip = Join-Path $scriptDir 'payload.zip'
-$installRoot = Join-Path $env:LOCALAPPDATA 'accr-ui-harness'
-
-if (-not (Test-Path -LiteralPath $payloadZip -PathType Leaf)) { throw '缺少 payload.zip 安装包。' }
-$node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) { throw '未检测到 Node.js；Harness UI 需要 Node.js 22 或更高版本。' }
-$nodePath = [System.IO.Path]::GetFullPath($node.Source)
-if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw "Node.js 路径无效：$nodePath" }
-$nodeVersion = (& $nodePath --version).Trim()
-if ($nodeVersion -notmatch '^v?(?<major>\\d+)' -or [int]$Matches.major -lt 22) { throw "Node.js $nodeVersion 版本过低；Harness UI 需要 Node.js 22 或更高版本。" }
-New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-# Preserve user-owned workspace, logs, and .webmcp; only release-owned trees are replaced.
-foreach ($replaceableName in @('extension', 'runtime')) {
-  $replaceablePath = Join-Path $installRoot $replaceableName
-  if (Test-Path -LiteralPath $replaceablePath) { Remove-Item -LiteralPath $replaceablePath -Recurse -Force }
-}
-Expand-Archive -LiteralPath $payloadZip -DestinationPath $installRoot -Force
-$extensionManifest = Join-Path $installRoot 'extension\\manifest.json'
-$cli = Join-Path $installRoot 'runtime\\harness\\apps\\cli\\lib\\bin.js'
-$registerScript = Join-Path $installRoot 'runtime\\register-native-host.ps1'
-if (-not (Test-Path -LiteralPath $extensionManifest -PathType Leaf)) { throw '安装包不完整：缺少 extension\\manifest.json。' }
-if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw '安装包不完整：缺少 Harness runtime。' }
-if (-not (Test-Path -LiteralPath $registerScript -PathType Leaf)) { throw '安装包不完整：缺少 Native Host 注册脚本。' }
-& $registerScript -InstallRoot $installRoot
-New-Item -Path 'HKCU:\\Software\\accr-ui\\Lite' -Force | Out-Null
-Set-ItemProperty -Path 'HKCU:\\Software\\accr-ui\\Lite' -Name InstallDir -Value $installRoot
-Set-ItemProperty -Path 'HKCU:\\Software\\accr-ui\\Lite' -Name Product -Value 'Harness UI'
-Write-Host "Harness UI 已安装。请在 chrome://extensions 或 edge://extensions 重新加载 AccrUI 扩展。"
-`
+async function installPs1() {
+  return readFile(path.join(MODULE_DIR, 'templates', 'install.ps1'), 'utf8')
 }
 
 function installVbs() {
@@ -373,8 +342,8 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   const installerPath = path.join(packageDir, 'install.ps1')
   if (existsSync(installerPath)) {
     const installer = await readFile(installerPath, 'utf8')
-    if (!installer.includes('& $registerScript -InstallRoot $installRoot') || !installer.includes('-lt 22')) {
-      errors.push('install.ps1 does not validate Node 22+ and reuse the runtime registration script')
+    if (!installer.includes('Register-ReleaseTree $installRoot') || !installer.includes('-lt 22')) {
+      errors.push('install.ps1 does not validate Node 22+ and register the installed release tree')
     }
     if (installer.includes('NativeMessagingHosts')) {
       errors.push('install.ps1 must not duplicate Native Messaging registration logic')
@@ -384,6 +353,15 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     }
     for (const retainedPath of ['workspace', 'logs', '.webmcp']) {
       if (!installer.includes(retainedPath)) errors.push(`install.ps1 does not document preservation of ${retainedPath}`)
+    }
+    for (const transactionalText of [
+      'param([switch]$Rollback)',
+      'Move-ManagedTree $installRoot $previousRoot',
+      'Move-ManagedTree $previousRoot $installRoot',
+      'Move-ManagedTree $rollbackRoot $installRoot',
+      "'manage-install.ps1'",
+    ]) {
+      if (!installer.includes(transactionalText)) errors.push(`install.ps1 is missing transactional behavior: ${transactionalText}`)
     }
   }
   if (existsSync(zipPath)) {
@@ -468,7 +446,7 @@ export async function buildWindowsRelease({
 
   await mkdir(releaseDir, { recursive: true })
   runZip(payloadDir, path.join(packageDir, 'payload.zip'), '.')
-  await writeFile(path.join(packageDir, 'install.ps1'), installPs1(ACCR_UI_EXTENSION_ID), 'utf8')
+  await writeFile(path.join(packageDir, 'install.ps1'), await installPs1(), 'utf8')
   await writeFile(path.join(packageDir, 'install.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(installVbs(), 'utf16le')]))
   await writeFile(path.join(packageDir, 'README.zh-CN.md'), releaseReadme(version), 'utf8')
   runZip(releaseDir, zipPath, ACCR_UI_WINDOWS_PACKAGE_NAME)
