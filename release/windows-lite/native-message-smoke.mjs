@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -14,16 +14,30 @@ const child = spawn(command, ['/d', '/s', '/c', `"${launcher}"`], {
   stdio: 'pipe',
   windowsHide: true,
 })
-const body = Buffer.from('{"type":"ping"}', 'utf8')
-const frame = Buffer.alloc(4 + body.length)
-frame.writeUInt32LE(body.length, 0)
-body.copy(frame, 4)
+function encodeMessage(message) {
+  const body = Buffer.from(JSON.stringify(message), 'utf8')
+  const frame = Buffer.alloc(4 + body.length)
+  frame.writeUInt32LE(body.length, 0)
+  body.copy(frame, 4)
+  return frame
+}
+
+function killProcessTree() {
+  if (child.exitCode !== null || child.pid === undefined) return
+  spawnSync('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+}
 
 let stdout = Buffer.alloc(0)
 let stderr = ''
+const closed = new Promise((resolveClose) => {
+  child.once('close', (code) => resolveClose(code))
+})
 const response = await new Promise((resolveResponse, reject) => {
   const timeout = setTimeout(() => {
-    child.kill()
+    killProcessTree()
     reject(new Error(`Native Messaging ping timed out: ${stderr}`))
   }, 10_000)
   child.stdout.on('data', (chunk) => {
@@ -41,12 +55,27 @@ const response = await new Promise((resolveResponse, reject) => {
     reject(error)
   })
   child.once('close', (code) => {
-    if (code === 0) return
     clearTimeout(timeout)
-    reject(new Error(`Native Host exited ${String(code)}: ${stderr}`))
+    reject(new Error(`Native Host exited before pong (${String(code)}): ${stderr}`))
   })
-  child.stdin.end(frame)
+  child.stdin.write(encodeMessage({ type: 'ping' }))
 })
 
-if (response?.type !== 'pong') throw new Error(`Unexpected Native Messaging response: ${JSON.stringify(response)}`)
+if (response?.type !== 'pong') {
+  killProcessTree()
+  throw new Error(`Unexpected Native Messaging response: ${JSON.stringify(response)}`)
+}
+
+child.stdin.end(encodeMessage({ type: 'stop' }))
+const exitCode = await new Promise((resolveExit, reject) => {
+  const timeout = setTimeout(() => {
+    killProcessTree()
+    reject(new Error(`Native Host did not exit after stop: ${stderr}`))
+  }, 10_000)
+  closed.then((code) => {
+    clearTimeout(timeout)
+    resolveExit(code)
+  })
+})
+if (exitCode !== 0) throw new Error(`Native Host exited ${String(exitCode)} after pong: ${stderr}`)
 console.log('Native Messaging launcher answered pong.')

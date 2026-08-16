@@ -150,3 +150,11 @@ test('release CLI requires an explicit runtime input', () => {
   })
   assert.throws(() => parseWindowsReleaseArgs(['--runtime', 'C:\\harness-runtime']), /Unknown argument/)
 })
+
+test('Windows Native Messaging smoke stops and bounds the launched process tree', async () => {
+  const smoke = await readFile(path.resolve('release/windows-lite/native-message-smoke.mjs'), 'utf8')
+  assert.match(smoke, /child\.stdin\.write\(encodeMessage\(\{ type: 'ping' \}\)\)/)
+  assert.match(smoke, /child\.stdin\.end\(encodeMessage\(\{ type: 'stop' \}\)\)/)
+  assert.match(smoke, /taskkill\.exe/)
+  assert.match(smoke, /Native Host did not exit after stop/)
+})
