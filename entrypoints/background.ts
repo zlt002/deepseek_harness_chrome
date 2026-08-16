@@ -1427,8 +1427,14 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
     for (let index = 0; index < fingerprintSource.length; index += 1) {
       hash ^= fingerprintSource.charCodeAt(index); hash = Math.imul(hash, 16777619)
     }
-    const nodeType = [nodeRecord.nodeType, nodeRecord.fileType, nodeRecord.type, nodeRecord.format]
+    // Creation is deliberately limited to an existing catalog directory. A
+    // document-detail URL is resolved to its parent above; do not treat the
+    // document itself, or an untyped catalog response, as a creatable parent.
+    const nodeType = [nodeRecord.fileType, nodeRecord.nodeType, nodeRecord.type, nodeRecord.format]
       .find((value) => (typeof value === 'string' && value.trim().length > 0) || typeof value === 'number')
+    const isDirectory = nodeType === 11
+      || (typeof nodeType === 'string' && /^(11|directory|folder)$/i.test(nodeType.trim()))
+    if (!isDirectory) return { ok: false, error: 'team_doc_directory_required' }
     return { ok: true, parent: {
       parentId: resolvedCatalogId, bookId, parentName, canRead: true, canCreate: true,
       parentType: typeof nodeType === 'number' ? String(nodeType) : typeof nodeType === 'string' ? nodeType : 'catalog',
@@ -1535,6 +1541,12 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     if (!children.reply.response.ok || children.reply.payload?.errorCode !== '00000' || !match) {
       return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId, diagnostic: diagnostic(children.reply) }
     }
+    // team_doc_create predates child spreadsheet support. For the narrower
+    // item tool, make the rediscovered catalog entry prove that the server
+    // actually created the dynamically selected document type.
+    if (input.kind !== undefined && String(match.fileType ?? '') !== String(fileType)) {
+      return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId, diagnostic: diagnostic(children.reply) }
+    }
     const url = documentUrl(match, documentId, created.url)
     if (!url) return { ok: false, failedAt: 'rediscover', error: 'team_doc_document_url_invalid', documentId }
     return { ok: true, documentId, catalogId: documentId, kind: wantedKind, url }
@@ -1543,7 +1555,7 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
   }
 }
 
-async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string; documentId: string }): Promise<unknown> {
+async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string; documentId: string; kind?: TeamKnowledgeItemKind }): Promise<unknown> {
   if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com') {
     return { ok: false, failedAt: 'rediscover', error: 'team_doc_wrong_origin', documentId: input.documentId }
   }
@@ -1582,6 +1594,27 @@ async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string
     const diagnostic = { httpStatus: response.status, errorCode: typeof payload?.errorCode === 'string' ? payload.errorCode : null }
     if (!response.ok || payload?.errorCode !== '00000' || !match) {
       return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId: input.documentId, diagnostic }
+    }
+    if (input.kind !== undefined) {
+      const fileTypesResponse = await fetch('/g-kmp/team-knowledge-main/teamKnowledge/getAllFileType?createFlag=true', { credentials: 'include' })
+      const fileTypesText = await fileTypesResponse.text()
+      const fileTypesPayload = JSON.parse(fileTypesText) as { errorCode?: unknown; data?: unknown }
+      const fileTypes = Array.isArray(fileTypesPayload.data) ? fileTypesPayload.data : []
+      const expected = fileTypes.find((value) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+        const record = value as Record<string, unknown>
+        const descriptor = [record.value, record.name, record.icon, record.format].filter((item) => typeof item === 'string').join(' ')
+        return input.kind === 'light_document'
+          ? /newword|lightdoc|轻文档/i.test(descriptor)
+          : /newexcel|excel|spreadsheet|表格|xlsx/i.test(descriptor)
+      }) as Record<string, unknown> | undefined
+      const expectedFileType = expected?.type
+      if (!fileTypesResponse.ok || fileTypesPayload.errorCode !== '00000' || (typeof expectedFileType !== 'string' && typeof expectedFileType !== 'number')) {
+        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId: input.documentId }
+      }
+      if (String(match.fileType ?? '') !== String(expectedFileType)) {
+        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId: input.documentId, diagnostic }
+      }
     }
     const rawUrl = typeof match.url === 'string' ? match.url : `/teamKnowledge/detail/docOnline/${input.documentId}?id=${input.documentId}`
     const url = new URL(rawUrl, 'https://doc.midea.com').href
@@ -1828,7 +1861,7 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const parent = inspected.parent
   if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
   if (request.action === 'readback') {
-    const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: request.catalogId! }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown } | undefined
+    const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: request.catalogId!, kind: request.kind }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown } | undefined
     if (recovered?.ok !== true || recovered.documentId !== request.catalogId || typeof recovered.url !== 'string') return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_rediscover_mismatch' })
     let readback: Record<string, unknown>
     try {
@@ -1854,16 +1887,19 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const recoveryCatalogId = request.recovery?.catalogId ?? checkpoint?.catalogId
   const creatingNewItem = !recoveryCatalogId
   const resolution = recoveryCatalogId
-    ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId }] })
+    ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId, kind }] })
     : await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, name: request.name!, kind }] })
-  const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; catalogId?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
+  const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; catalogId?: unknown; kind?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   const catalogId = typeof created?.catalogId === 'string' ? created.catalogId : typeof created?.documentId === 'string' ? created.documentId : null
   if (creatingNewItem && catalogId && /^\d+$/.test(catalogId)) {
     try { await saveTeamKnowledgeCreateCheckpoint(request.idempotencyIdentity!, { contractHash: checkpointContractHash, catalogId, updatedAt: Date.now() }) } catch {
       return teamKnowledgeItemPartial({ stages, failedAt: 'create', error: 'team_knowledge_create_checkpoint_failed' })
     }
   }
-  if (created?.ok !== true || !catalogId || !/^\d+$/.test(catalogId) || typeof created.url !== 'string') {
+  if (created?.ok !== true || !catalogId || !/^\d+$/.test(catalogId) || typeof created.url !== 'string'
+    || (created.catalogId !== undefined && created.documentId !== undefined && created.catalogId !== created.documentId)
+    || (creatingNewItem && created.kind !== kind)
+    || (!creatingNewItem && created.kind !== undefined && created.kind !== kind)) {
     return teamKnowledgeItemPartial({ stages, failedAt: created?.failedAt === 'unsupported' ? 'unsupported' : created?.failedAt === 'rediscover' ? 'rediscover' : 'create', error: typeof created?.error === 'string' ? created.error : 'team_knowledge_create_failed', diagnostic: created?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
   }
   for (const stage of ['created', 'rediscovered']) if (!stages.includes(stage)) stages.push(stage)
