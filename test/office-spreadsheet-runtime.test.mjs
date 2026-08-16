@@ -25,6 +25,7 @@ function fakeApp() {
   let filterOperator = 'equals'
   let activeRow = 1; let activeColumn = 1; let freezePanes = false; let splitRow = 0; let splitColumn = 0
   const rowOutline = new Map(); const columnOutline = new Map()
+  const hiddenRows = new Map(); const hiddenColumns = new Map(); const rowSizes = new Map(); const columnSizes = new Map()
   const pageSetup = { PrintArea: '', PrintTitleRows: '', PrintTitleColumns: '', Orientation: 1, Zoom: 100, FitToPagesWide: 1, FitToPagesTall: 1, CenterHorizontally: false, CenterVertically: false, LeftMargin: 36, RightMargin: 36, TopMargin: 36, BottomMargin: 36, HeaderMargin: 18, FooterMargin: 18 }
   const comments = { Count: 0 }
   let nextHyperlink = 1; const hyperlinks = { Count: 0, items: [], Add: (_range, url, subAddress, screenTip, textToDisplay) => { hyperlinks.items.push({ Address: url, SubAddress: subAddress, ScreenTip: screenTip, TextToDisplay: textToDisplay, Name: `Link${nextHyperlink++}`, Type: 'hyperlink' }); hyperlinks.Count += 1 }, Delete: () => { hyperlinks.Count = 0; hyperlinks.items = [] }, Item: (index) => hyperlinks.items[index - 1] }
@@ -48,8 +49,14 @@ function fakeApp() {
     insertCellPictureUrl: () => { range.Formula = '=DISPIMG("image")' },
     ToImageDataURL: () => 'data:image/png;base64,AQID',
   }
+  const dimension = (axis, from, to) => {
+    const hidden = axis === 'row' ? hiddenRows : hiddenColumns; const sizes = axis === 'row' ? rowSizes : columnSizes; const sizeKey = axis === 'row' ? 'RowHeight' : 'ColumnWidth'; const defaultSize = axis === 'row' ? 15 : 8
+    const item = { AutoFit: () => { for (let index = from; index <= to; index += 1) sizes.set(index, defaultSize + 1) } }
+    Object.defineProperties(item, { Hidden: { configurable: true, get: () => hidden.get(from) ?? false, set: (value) => { for (let index = from; index <= to; index += 1) hidden.set(index, value) } }, [sizeKey]: { configurable: true, get: () => sizes.get(from) ?? defaultSize, set: (value) => { for (let index = from; index <= to; index += 1) sizes.set(index, value) } } })
+    return item
+  }
   const sheet = {
-    Name: 'Sheet1', getName: () => 'Sheet1', PageSetup: pageSetup, getRowOutlineLevel: (index) => rowOutline.get(index) ?? 0, getColOutlineLevel: (index) => columnOutline.get(index) ?? 0, getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); const rowMatch = String(address ?? '').match(/^(\d+):(\d+)$/); const columnMatch = String(address ?? '').match(/^([A-Z]+):([A-Z]+)$/i); if (rowMatch) { const from = Number(rowMatch[1]); const to = Number(rowMatch[2]); return Object.assign(Object.create(range), { Rows: { Group: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, (rowOutline.get(index) ?? 0) + 1) }, Ungroup: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, Math.max(0, (rowOutline.get(index) ?? 0) - 1)) } } }) }; if (columnMatch) { const index = (name) => name.toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); const from = index(columnMatch[1]); const to = index(columnMatch[2]); return Object.assign(Object.create(range), { Columns: { Group: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, (columnOutline.get(item) ?? 0) + 1) }, Ungroup: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, Math.max(0, (columnOutline.get(item) ?? 0) - 1)) } } }) }; return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
+    Name: 'Sheet1', getName: () => 'Sheet1', PageSetup: pageSetup, getRowOutlineLevel: (index) => rowOutline.get(index) ?? 0, getColOutlineLevel: (index) => columnOutline.get(index) ?? 0, getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); const rowMatch = String(address ?? '').match(/^(\d+):(\d+)$/); const columnMatch = String(address ?? '').match(/^([A-Z]+):([A-Z]+)$/i); if (rowMatch) { const from = Number(rowMatch[1]); const to = Number(rowMatch[2]); const member = dimension('row', from, to); return Object.assign(Object.create(range), { EntireRow: member, Rows: Object.assign(member, { Group: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, (rowOutline.get(index) ?? 0) + 1) }, Ungroup: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, Math.max(0, (rowOutline.get(index) ?? 0) - 1)) } }) }) }; if (columnMatch) { const index = (name) => name.toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); const from = index(columnMatch[1]); const to = index(columnMatch[2]); const member = dimension('column', from, to); return Object.assign(Object.create(range), { EntireColumn: member, Columns: Object.assign(member, { Group: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, (columnOutline.get(item) ?? 0) + 1) }, Ungroup: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, Math.max(0, (columnOutline.get(item) ?? 0) - 1)) } }) }) }; return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
     getPivotTables: () => pivots,
     addChart: (_style, type, _range, callback) => { const chart = { Id: charts.Count + 1, Name: `Chart ${charts.Count + 1}`, Type: type }; charts.items.push(chart); charts.Count += 1; callback(chart, 'ok') },
     ExportImage: () => ({ result: 'ok', data: { size: 3, type: 'image/png', arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } }),
@@ -57,7 +64,7 @@ function fakeApp() {
   range.createPivotTable = (options, callback) => { const pivot = { Id: pivots.Count + 1, Name: `Pivot ${pivots.Count + 1}`, Destination: options.destRangeText }; pivots.items.push(pivot); pivots.Count += 1; callback({ isOk: true, pivotTableId: pivot.Id }) }
   const workbook = { Name: 'Budget.xlsx', getName: () => 'Budget.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet }, ExportAsFixedFormat: () => ({ url: 'https://download.example.test/Budget.pdf?Expires=2000000000' }) }
   const activeWindow = { get FreezePanes() { return freezePanes }, set FreezePanes(value) { freezePanes = value; if (value) { splitRow = activeRow - 1; splitColumn = activeColumn - 1 } }, get SplitRow() { return splitRow }, get SplitColumn() { return splitColumn }, Zoom: 100, ScrollRow: 1, ScrollColumn: 1 }
-  const app = { ActiveWorkbook: workbook, ActiveSheet: sheet, ActiveWindow: activeWindow, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook, _activeWindow: activeWindow, _pageSetup: pageSetup, _rowOutline: rowOutline, _columnOutline: columnOutline }
+  const app = { ActiveWorkbook: workbook, ActiveSheet: sheet, ActiveWindow: activeWindow, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook, _activeWindow: activeWindow, _pageSetup: pageSetup, _rowOutline: rowOutline, _columnOutline: columnOutline, _hiddenRows: hiddenRows, _hiddenColumns: hiddenColumns, _rowSizes: rowSizes, _columnSizes: columnSizes }
   Object.defineProperty(app, 'ActiveCell', { get: () => ({ Row: activeRow, Column: activeColumn }) })
   return app
 }
@@ -491,6 +498,26 @@ test('outline fail-closes invalid axes, unavailable APIs, stale levels, and wron
   assert.equal((await forgedRun({ action: 'write', resource: forgedResource, operation: 'set_outline_group', payload: { range: '1:2', axis: 'row', grouped: true } })).error.code, 'readback_mismatch')
 })
 
+test('dimensions read each bounded item and verify hide/show and AutoFit without field drift', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const read = await run({ action: 'dimensions', range: '1:2', axis: 'row' }); assert.equal(JSON.stringify(read.result.dimensions.items), JSON.stringify([{ index: 1, hidden: false, size: 15 }, { index: 2, hidden: false, size: 15 }]))
+  const hidden = await run({ action: 'write', resource, operation: 'set_rows_hidden', payload: { range: '1:2', hidden: true } }); assert.equal(hidden.result.observed.dimensions.items.every((item) => item.hidden && item.size === 15), true)
+  const shown = await run({ action: 'write', resource, operation: 'set_rows_hidden', payload: { range: '1:2', hidden: false } }); assert.equal(shown.result.observed.dimensions.items.every((item) => !item.hidden && item.size === 15), true)
+  const fitted = await run({ action: 'write', resource, operation: 'auto_fit', payload: { range: 'A:B', axis: 'column' } }); assert.equal(fitted.result.observed.changed, true); assert.equal(fitted.result.observed.dimensions.items.every((item) => !item.hidden && item.size === 9), true)
+})
+
+test('dimensions fail closed for wrong axes, oversized targets, missing APIs, stale snapshots, and forged readback', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'set_rows_hidden', payload: { range: 'A:B', hidden: true } })).error.code, 'invalid_range')
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'auto_fit', payload: { range: '1:1001', axis: 'row' } })).error.code, 'invalid_range')
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'set_rows_hidden', payload: { range: '1:2', hidden: true } }); app._rowSizes.set(1, 22)
+  assert.equal((await run.raw({ action: 'write', resource, operation: 'set_rows_hidden', payload: { range: '1:2', hidden: true }, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
+  const missing = fakeApp(); const missingRun = await runtimeWith(missing); const missingResource = (await missingRun({ action: 'context' })).result.resource; const nativeRange = missing._sheet.getRange; missing._sheet.getRange = (address) => { const result = nativeRange(address); if (address === 'A:B') delete result.Columns.AutoFit; return result }
+  assert.equal((await missingRun({ action: 'write', resource: missingResource, operation: 'auto_fit', payload: { range: 'A:B', axis: 'column' } })).error.code, 'unsupported')
+  const forged = fakeApp(); const forgedRun = await runtimeWith(forged); const forgedResource = (await forgedRun({ action: 'context' })).result.resource; const getRange = forged._sheet.getRange; forged._sheet.getRange = (address) => { const result = getRange(address); if (address === '1:2') Object.defineProperty(result.Rows, 'Hidden', { configurable: true, get: () => false, set: () => {} }); return result }
+  assert.equal((await forgedRun({ action: 'write', resource: forgedResource, operation: 'set_rows_hidden', payload: { range: '1:2', hidden: true } })).error.code, 'readback_mismatch')
+})
+
 test('data validation fails closed for stale state, missing API, wrong property readback, changed range state, and oversized feature reads', async () => {
   const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const resource = (await stale({ action: 'context' })).result.resource; const payload = { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' }
   const inspected = await stale.raw({ action: 'inspect_write', operation: 'set_data_validation', payload }); staleApp._validation.Type = 3
@@ -545,7 +572,7 @@ test('unusable spreadsheet exports fail closed before invoking WebEdit export AP
 test('every unverified AccrUI spreadsheet family fails closed before mutation', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   let mutations = 0; app._range.copyRange = () => { mutations += 1 }
-  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
+  for (const operation of ['insert_cells', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
     const result = await run({ action: 'write', resource, operation, payload: { range: 'A1' } })
     assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
   }

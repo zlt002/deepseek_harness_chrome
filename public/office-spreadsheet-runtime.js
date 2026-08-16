@@ -31,6 +31,7 @@
   const VIEW_OPERATIONS = new Set(['set_zoom', 'set_freeze_panes'])
   const PRINT_OPERATIONS = new Set(['set_print_settings'])
   const OUTLINE_OPERATIONS = new Set(['set_outline_group'])
+  const DIMENSION_OPERATIONS = new Set(['set_rows_hidden', 'set_columns_hidden', 'auto_fit'])
   const PRINT_KEYS = ['printArea', 'printTitleRows', 'printTitleColumns', 'orientation', 'zoom', 'fitToPagesWide', 'fitToPagesTall', 'centerHorizontally', 'centerVertically', 'leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'headerMargin', 'footerMargin']
   const PRINT_PROPERTY = { printArea: 'PrintArea', printTitleRows: 'PrintTitleRows', printTitleColumns: 'PrintTitleColumns', orientation: 'Orientation', zoom: 'Zoom', fitToPagesWide: 'FitToPagesWide', fitToPagesTall: 'FitToPagesTall', centerHorizontally: 'CenterHorizontally', centerVertically: 'CenterVertically', leftMargin: 'LeftMargin', rightMargin: 'RightMargin', topMargin: 'TopMargin', bottomMargin: 'BottomMargin', headerMargin: 'HeaderMargin', footerMargin: 'FooterMargin' }
 
@@ -71,6 +72,27 @@
   function requestedOutlineOperation(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['sheetName', 'range', 'axis', 'grouped'].includes(key)) || typeof payload.axis !== 'string' || typeof payload.grouped !== 'boolean') return null
     const target = parseOutlineRange(payload.range, payload.axis); return target ? { ...target, axis: payload.axis, grouped: payload.grouped } : null
+  }
+  function requestedDimensionOperation(operation, payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+    const expectedAxis = operation === 'set_rows_hidden' ? 'row' : operation === 'set_columns_hidden' ? 'column' : payload.axis
+    if ((expectedAxis !== 'row' && expectedAxis !== 'column') || !Object.keys(payload).every((key) => ['sheetName', 'range', 'hidden', 'axis'].includes(key))) return null
+    if ((operation === 'set_rows_hidden' || operation === 'set_columns_hidden') && (Object.hasOwn(payload, 'axis') || typeof payload.hidden !== 'boolean')) return null
+    if (operation === 'auto_fit' && (payload.hidden !== undefined || !Object.hasOwn(payload, 'axis'))) return null
+    const target = parseOutlineRange(payload.range, expectedAxis)
+    return target ? { ...target, axis: expectedAxis, ...(operation === 'auto_fit' ? {} : { hidden: payload.hidden }) } : null
+  }
+  async function dimensionSnapshot(resolved, target) {
+    const items = []
+    for (let index = target.from; index <= target.to; index += 1) {
+      const address = target.axis === 'row' ? `${index}:${index}` : `${columnName(index)}:${columnName(index)}`
+      const range = await rangeFor(resolved.sheet, address)
+      const member = await property(range, target.axis === 'row' ? 'EntireRow' : 'EntireColumn') ?? range
+      const hidden = await property(member, 'Hidden'); const size = await property(member, target.axis === 'row' ? 'RowHeight' : 'ColumnWidth')
+      if (typeof hidden !== 'boolean' || typeof size !== 'number' || !Number.isFinite(size) || size < 0 || size > 10000) return { supported: false }
+      items.push({ index, hidden, size })
+    }
+    return { supported: true, dimensions: { sheetName: resolved.resource.sheetName, range: target.range, axis: target.axis, items } }
   }
   function validPrintTitle(value, axis) {
     if (value === '') return true
@@ -432,9 +454,9 @@
     // AccrUI exposes these tool names, but they are not evidence that the
     // current WebEdit frame can perform an auditable Harness Verified Write.
     const accruiMigrationMatrix = {
-      cellInsertDeleteHidden: { supported: false, reason: unavailable },
+      cellInsertDeleteHidden: { supported: false, rowColumnHidden: true, operations: ['set_rows_hidden', 'set_columns_hidden'], requiresInspectableTarget: true, reason: 'cell insertion/deletion remains unavailable; whole-row/column visibility uses per-item readback' },
       fillReplaceTextToColumnsRemoveDuplicates: { supported: false, replaceRangeText: typeof range?.Replace === 'function', textToColumns: !!(range && typeof range.TextToColumns === 'function' && parseAddress(address)?.colFrom === parseAddress(address)?.colTo), removeDuplicates: typeof range?.RemoveDuplicates === 'function', requiresInspectableTarget: true, reason: 'fill remains unavailable; enabled text operations require an inspected readable target' },
-      autoFit: { supported: false, reason: unavailable },
+      autoFit: { supported: true, operation: 'auto_fit', requiresInspectableTarget: true, reason: 'whole-row/column AutoFit requires per-item size and hidden-state readback' },
       conditionalFormatting: { supported: false, reason: unavailable },
       copyPasteMove: { supported: false, moveRange: typeof range?.Cut === 'function', requiresInspectableTarget: true, reason: 'copy and paste remain unavailable; move_range requires inspected source and destination state' },
       viewFreeze: { supported: false, reason: unavailable },
@@ -482,6 +504,12 @@
       const snapshot = await outlineSnapshot(resolved, { ...target, axis: request.axis })
       return { ok: true, result: { status: 'ok', resource: resolved.resource, outline: snapshot.supported ? { supported: true, ...snapshot.outline } : { supported: false } } }
     }
+    if (request.action === 'dimensions') {
+      const target = parseOutlineRange(request.range, request.axis)
+      if (!target) return fail('invalid_range', 'dimensions requires a bounded whole-row or whole-column range with matching axis')
+      const snapshot = await dimensionSnapshot(resolved, { ...target, axis: request.axis })
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, dimensions: snapshot.supported ? { supported: true, ...snapshot.dimensions } : { supported: false } } }
+    }
     if (request.action === 'range_features') {
       if (typeof request.range !== 'string' || request.range.length === 0 || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
       const range = await rangeFor(resolved.sheet, request.range); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
@@ -528,6 +556,16 @@
       if (!snapshot.supported || !member || typeof member[target.grouped ? 'Group' : 'Ungroup'] !== 'function') return fail('unsupported', 'WebEdit cannot fully inspect and mutate this outline target')
       if (snapshot.outline.levels.some((level) => target.grouped ? level >= 8 : level <= 0)) return fail('invalid_range', 'outline target is already at its bounded group or ungroup limit')
       return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 6, outline: snapshot.outline } } }
+    }
+    if (DIMENSION_OPERATIONS.has(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const target = requestedDimensionOperation(operation, payload)
+      if (!target) return fail('invalid_range', 'dimension write requires a bounded whole-row or whole-column range and matching operation axis')
+      const snapshot = await dimensionSnapshot(resolved, target)
+      const range = await rangeFor(resolved.sheet, target.range); const member = range && await property(range, target.axis === 'row' ? 'Rows' : 'Columns')
+      if (!snapshot.supported || !member) return fail('unsupported', 'WebEdit cannot read every target dimension before mutation')
+      if (operation === 'auto_fit' ? typeof member.AutoFit !== 'function' : !('Hidden' in Object(member))) return fail('unsupported', 'WebEdit does not expose a complete readable dimension mutation API')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 7, dimensions: snapshot.dimensions } } }
     }
     if (VIEW_OPERATIONS.has(operation)) {
       const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
@@ -608,6 +646,7 @@
     if (approved?.version === 4 && approved.view) { const current = await viewSnapshot(resolved); return current.supported && same(current.view, approved.view) ? null : fail('fingerprint_mismatch', 'The worksheet view changed since inspection; reread and inspect before writing') }
     if (approved?.version === 5 && approved.printSettings) { const current = await printSettingsSnapshot(resolved); return current.supported && same(current.settings, approved.printSettings) ? null : fail('fingerprint_mismatch', 'The print settings changed since inspection; reread and inspect before writing') }
     if (approved?.version === 6 && approved.outline) { const target = parseOutlineRange(approved.outline.range, approved.outline.axis); const current = target && await outlineSnapshot(resolved, { ...target, axis: approved.outline.axis }); return current?.supported && same(current.outline, approved.outline) ? null : fail('fingerprint_mismatch', 'The outline levels changed since inspection; reread and inspect before writing') }
+    if (approved?.version === 7 && approved.dimensions) { const target = parseOutlineRange(approved.dimensions.range, approved.dimensions.axis); const current = target && await dimensionSnapshot(resolved, { ...target, axis: approved.dimensions.axis }); return current?.supported && same(current.dimensions, approved.dimensions) ? null : fail('fingerprint_mismatch', 'The row or column dimensions changed since inspection; reread and inspect before writing') }
     if (approved?.version === 3 && Array.isArray(approved.sheets)) {
       const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets || !same(sheets.sheets, approved.sheets)) return fail('fingerprint_mismatch', 'The workbook sheet order or visibility changed since inspection')
       if (approved.definedNames !== undefined) { const names = await definedNamesSnapshot(resolved.workbook); if (!names || !same(names.names, approved.definedNames)) return fail('fingerprint_mismatch', 'The workbook defined names changed since inspection') }
@@ -1074,6 +1113,26 @@
     if (!after.supported || !same(after.outline.levels, expected)) return fail('readback_mismatch', 'WebEdit outline level readback differs from each requested target')
     return { requested: { range: target.range, axis: target.axis, grouped: target.grouped }, observed: { outline: after.outline, verified: true } }
   }
+  async function writeDimensions(resolved, request) {
+    const target = requestedDimensionOperation(request.operation, request.payload ?? {}); const before = request.precondition?.dimensions
+    if (!target || !before || before.range !== target.range || before.axis !== target.axis) return fail('fingerprint_mismatch', 'The dimension request no longer matches inspection')
+    const snapshot = await dimensionSnapshot(resolved, target)
+    if (!snapshot.supported || !same(snapshot.dimensions, before)) return fail('fingerprint_mismatch', 'The row or column dimensions changed since inspection; reread and inspect before writing')
+    const range = await rangeFor(resolved.sheet, target.range); const member = range && await property(range, target.axis === 'row' ? 'Rows' : 'Columns')
+    if (!member) return fail('unsupported', 'WebEdit does not expose the requested dimension collection')
+    if (request.operation === 'auto_fit') {
+      if (typeof member.AutoFit !== 'function') return fail('unsupported', 'WebEdit does not expose Rows/Columns.AutoFit')
+      try { await resolve(member.AutoFit()) } catch { return fail('runtime_error', 'WebEdit AutoFit failed') }
+      const after = await dimensionSnapshot(resolved, target)
+      if (!after.supported || !after.dimensions.items.every((item, index) => item.hidden === before.items[index]?.hidden)) return fail('readback_mismatch', 'WebEdit AutoFit changed hidden state or did not return every target size')
+      const changed = after.dimensions.items.some((item, index) => item.size !== before.items[index]?.size)
+      return { requested: { range: target.range, axis: target.axis }, observed: { dimensions: after.dimensions, changed, invocationObserved: true, verified: true } }
+    }
+    if (!await set(member, 'Hidden', target.hidden)) return fail('unsupported', 'WebEdit does not expose row/column hidden mutation')
+    const after = await dimensionSnapshot(resolved, target)
+    if (!after.supported || !after.dimensions.items.every((item, index) => item.hidden === target.hidden && item.size === before.items[index]?.size)) return fail('readback_mismatch', 'WebEdit hidden-state readback differs from every target or changed a size')
+    return { requested: { range: target.range, axis: target.axis, hidden: target.hidden }, observed: { dimensions: after.dimensions, verified: true } }
+  }
   async function write(request) {
     const resolved = await appAndSheet(request.resource?.sheetName); if (resolved.error) return resolved.error
     if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select'].includes(request.operation)) return fail('unsupported', 'WebEdit structural sheet mutation lacks a mutation-safe preflight and is unavailable')
@@ -1096,6 +1155,11 @@
     }
     if (OUTLINE_OPERATIONS.has(request.operation)) {
       const result = await writeOutline(resolved, request)
+      if (!result.ok && result.error) return result
+      return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
+    }
+    if (DIMENSION_OPERATIONS.has(request.operation)) {
+      const result = await writeDimensions(resolved, request)
       if (!result.ok && result.error) return result
       return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
     }
