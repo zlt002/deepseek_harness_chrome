@@ -70,22 +70,73 @@
   const documentApi = (current) => current?.openApi?.editor?.document
   const selectionApi = (current) => documentApi(current)?.selection
   const editorApi = (current) => current?.openApi?.editor
+  const normalizedSelectionText = (value) => String(value ?? '').replace(/\r\n?/g, '\n').replace(/\s+/g, ' ').trim()
+  const selectionHash = (value) => {
+    let hash = 2166136261
+    for (let index = 0; index < value.length; index += 1) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619) }
+    return `selection-v3-${(hash >>> 0).toString(16).padStart(8, '0')}`
+  }
+  const runtimeSelection = (current) => {
+    const raw = current?.OTL?.state?.selection
+    const canvas = current?.openApi?.editor?.canvas?.canvas
+    let info
+    try { info = canvas?.getSelectionInfo?.() } catch {}
+    const range = raw && Number.isFinite(raw.from) && Number.isFinite(raw.to)
+      ? { from: Number(raw.from), to: Number(raw.to), anchor: Number.isFinite(raw.anchor) ? Number(raw.anchor) : null, head: Number.isFinite(raw.head) ? Number(raw.head) : null }
+      : null
+    const ids = Array.isArray(info?.selected_tag_ids) ? info.selected_tag_ids.filter((id) => typeof id === 'string' && id.length > 0).slice(0, 50) : []
+    return { range, selectedTagIds: ids, isCollapsed: raw?.empty === true || (range !== null && range.from === range.to) }
+  }
+  const stableSelectionAnchor = (value) => {
+    if (!value || typeof value !== 'object') return null
+    const blockId = typeof value.blockId === 'string' && value.blockId ? value.blockId : null
+    const anchorId = typeof value.anchorId === 'string' && value.anchorId ? value.anchorId : null
+    const start = Number.isInteger(value.start) ? value.start : null
+    const end = Number.isInteger(value.end) ? value.end : null
+    if (!blockId && !anchorId && start === null) return null
+    return { blockId, anchorId, start, end }
+  }
   const readSelection = async (current, maxChars = 20_000) => {
     const selection = selectionApi(current)
     if (!selection || typeof selection.getSelectionContent !== 'function') return { supported: false, reason: 'selection_content_api_not_detected' }
-    // The public API gives content but no stable range, anchor, or block id.
-    // Do not issue a write from an ambiguous same-text selection.
-    if (typeof selection.getSelectionAnchor !== 'function') return { supported: false, reason: 'selection_anchor_api_not_detected' }
     const value = await selection.getSelectionContent()
-    const anchor = await selection.getSelectionAnchor()
-    if (!anchor || typeof anchor !== 'object' || (!anchor.blockId && !anchor.anchorId && !Number.isInteger(anchor.start))) return { supported: false, reason: 'selection_anchor_unreadable' }
     const source = value && typeof value === 'object' ? value : { text: value }
-    const content = {}; let remaining = Math.min(maxChars, 20_000)
-    for (const key of ['html', 'text', 'markdown']) if (typeof source[key] === 'string' && remaining > 0) { content[key] = source[key].slice(0, remaining); remaining -= content[key].length }
-    const serialized = JSON.stringify({ anchor, content })
-    let hash = 2166136261
-    for (let index = 0; index < serialized.length; index += 1) { hash ^= serialized.charCodeAt(index); hash = Math.imul(hash, 16777619) }
-    return { supported: true, content, anchor: { blockId: anchor.blockId ?? null, anchorId: anchor.anchorId ?? null, start: Number.isInteger(anchor.start) ? anchor.start : null, end: Number.isInteger(anchor.end) ? anchor.end : null }, hasSelection: Object.values(content).some((item) => String(item).length > 0), selectionFingerprint: `selection-v2-${(hash >>> 0).toString(16).padStart(8, '0')}`, truncated: remaining === 0 }
+    const limit = Math.min(Math.max(1, maxChars), 20_000); const content = {}; const truncated = {}
+    for (const key of ['html', 'text', 'markdown']) if (typeof source[key] === 'string') { content[key] = source[key].slice(0, limit); truncated[key] = source[key].length > limit }
+    const runtime = runtimeSelection(current)
+    let publicAnchor = null
+    try { if (typeof selection.getSelectionAnchor === 'function') publicAnchor = stableSelectionAnchor(await selection.getSelectionAnchor()) } catch {}
+    const range = runtime.range
+    const stableRange = range && range.from !== range.to ? range : null
+    const anchor = publicAnchor ?? (stableRange ? { blockId: runtime.selectedTagIds[0] ?? null, anchorId: null, start: stableRange.from, end: stableRange.to } : null)
+    const hasContent = Object.values(content).some((item) => String(item).length > 0)
+    const isCollapsed = runtime.isCollapsed === true || (anchor !== null && anchor.start !== null && anchor.end !== null && anchor.start === anchor.end)
+    const stable = !!anchor && isCollapsed === false
+    const serialized = JSON.stringify({ anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, isCollapsed, content })
+    return { supported: true, content, anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, hasSelection: hasContent || stableRange !== null, isCollapsed, stable, selectionFingerprint: selectionHash(serialized), truncated: Object.values(truncated).some(Boolean), truncatedFields: Object.keys(truncated).filter((key) => truncated[key]) }
+  }
+  const selectionPayload = (payload) => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+    const kinds = ['markdown', 'html', 'text'].filter((key) => typeof payload[key] === 'string')
+    if (kinds.length !== 1) return null
+    const kind = kinds[0]; const value = payload[kind]
+    if (!value.trim() || value.length > 20_000 || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint)) return null
+    if (!Object.keys(payload).every((key) => ['markdown', 'html', 'text', 'insertBelow', 'expectedSelectionFingerprint'].includes(key)) || (payload.insertBelow !== undefined && typeof payload.insertBelow !== 'boolean')) return null
+    return { kind, value, expectedSelectionFingerprint: payload.expectedSelectionFingerprint, insertBelow: payload.insertBelow === true }
+  }
+  const verificationFragments = (kind, value) => {
+    const plain = kind === 'html' ? decode(value) : kind === 'markdown' ? value.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[`*_#>~\-]/g, ' ') : value
+    return [...new Set(normalizedSelectionText(plain).split(/[^\p{L}\p{N}]+/u).filter((part) => part.length > 0))].slice(0, 100)
+  }
+  const verifySelectionInsert = (beforeXml, afterXml, requested) => {
+    if (typeof afterXml !== 'string' || afterXml === beforeXml) return null
+    const fragments = verificationFragments(requested.kind, requested.value)
+    if (!fragments.length) return null
+    const parsed = editableBlocks(afterXml)
+    if (!parsed) return null
+    const evidence = fragments.map((fragment) => ({ fragment, blockIds: parsed.list.filter((block) => normalizedSelectionText(block.text).includes(fragment)).map((block) => block.id).filter(Boolean) }))
+    if (evidence.some((item) => item.blockIds.length === 0)) return null
+    return { verifiedFragments: fragments, fragmentEvidence: evidence, observedBlocks: parsed.list.filter((block) => evidence.some((item) => item.blockIds.includes(block.id))).map((block) => ({ id: block.id, type: block.tag.toLowerCase(), text: block.text.slice(0, 500) })) }
   }
   const blockXml = (payload, preserveId = null) => {
     const items = Array.isArray(payload?.blocks) ? payload.blocks : [payload]
@@ -246,7 +297,26 @@
       }
       return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload, count: items.length }, observed: { verifiedBlocks, verified: true } } }
     }
-    if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'selection_insert' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'insert_drawing' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
+    if (input.operation === 'selection_insert') {
+      const requested = selectionPayload(input.payload)
+      const selection = selectionApi(current)
+      if (!requested || !selection || typeof selection.insertContent !== 'function') return fail('unsupported', 'Light-document selection insert requires one bounded content format, a stable selection fingerprint, and the public insertContent API')
+      // A content read is useful even on runtimes without selection coordinates,
+      // but a mutation is never safe unless the selected range is stable.
+      const snapshot = await readSelection(current, 20_000)
+      if (!snapshot.supported || snapshot.truncated || !snapshot.stable || snapshot.isCollapsed || !snapshot.anchor) return fail('invalid_range', 'Light-document selection insert requires a complete, stable, non-collapsed selection snapshot')
+      if (snapshot.selectionFingerprint !== requested.expectedSelectionFingerprint) return fail('fingerprint_mismatch', 'The light-document selection changed since inspect_write')
+      const insertContent = { [requested.kind]: requested.value, ...(requested.insertBelow ? { insertBlow: true } : {}) }
+      // Exactly one public mutation follows the final resource and selection
+      // checks. Any throw or failed readback is fenced by the Native side.
+      try { await selection.insertContent(insertContent) } catch { return fail('runtime_error', 'WebEdit rejected the light-document selection insert') }
+      let afterXml = await current.openApi.editor.canvas.getDocXml(); const deadline = Date.now() + 3_000
+      while (afterXml === beforeXml && Date.now() < deadline) { await sleep(50); afterXml = await current.openApi.editor.canvas.getDocXml() }
+      const observed = verifySelectionInsert(beforeXml, afterXml, requested)
+      if (!observed) return fail('readback_mismatch', 'WebEdit selection insert did not produce matching XML content and structural evidence')
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(afterXml, current), requested: { operation: 'selection_insert', payload: input.payload }, observed: { ...observed, verified: true } } }
+    }
+    if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'insert_drawing' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
     if (input.operation === 'set_title') {
       const document = documentApi(current); const title = typeof input.payload?.title === 'string' ? input.payload.title.trim() : ''
       if (!document || typeof document.getTitleContent !== 'function' || typeof document.setTitleContent !== 'function' || !title || title.length > 500) return fail('unsupported', 'WebEdit does not expose readable title APIs')

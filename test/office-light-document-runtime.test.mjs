@@ -14,7 +14,14 @@ async function runtime(options = {}) {
     async getDocXml() { return xml },
     async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
   }
-  const selection = { async insertContent({ markdown, html, text }) { xml = xml.replace('</apcanvas>', `<p id="inserted">${markdown ?? html ?? text}</p></apcanvas>`) }, ...(options.selection ?? {}) }
+  const selection = { async insertContent({ markdown, html, text }) {
+    if (state) state.selectionCalls = (state.selectionCalls ?? 0) + 1
+    if (options.selectionInsert === 'throws') throw new Error('insert failed')
+    if (options.selectionInsert === 'unchanged') return
+    const value = options.selectionInsert === 'mismatch' ? 'unrelated content' : markdown ?? html ?? text
+    xml = xml.replace('</apcanvas>', `<p id="inserted">${value}</p></apcanvas>`)
+    if (state) state.xml = xml
+  }, ...(options.selection ?? {}) }
   const documentApi = { selection, ...(options.documentApi ?? {}) }
   const editor = { canvas, document: documentApi, ...(options.editorApi ?? {}) }
   const context = vm.createContext({ window, globalThis: null, APP: { openApi: { editor } }, location: { href: 'https://webedit.midea.com/weboffice/office/o/1', origin: 'https://webedit.midea.com', pathname: '/weboffice/office/o/1' }, document: { title: '测试', createElement() { return { set innerHTML(value) { this.value = String(value).replace(/<[^>]+>/g, '') }, value: '' } } }, crypto: webcrypto, TextEncoder, Uint8Array, URL, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail } }, setTimeout, clearTimeout, Date })
@@ -55,6 +62,45 @@ test('light-document runtime fails closed for unanchored inserts and rejects an 
   assert.equal(failed.ok, false); assert.equal(failed.error.code, 'readback_mismatch')
 })
 
+test('light-document runtime verifies selection_insert only from a stable snapshot with XML evidence', async () => {
+  for (const [key, value] of [['markdown', '# 标题\n- 第一项'], ['html', '<strong>HTML内容</strong>'], ['text', '纯文本内容']]) {
+    const state = {}
+    const call = await runtime({ state, selection: {
+      async getSelectionContent() { return { text: '已选内容' } },
+      async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 5 } },
+    } })
+    const read = await call({ action: 'selection' })
+    const payload = { [key]: value, expectedSelectionFingerprint: read.result.document.selection.selectionFingerprint }
+    const result = await call({ action: 'write', operation: 'selection_insert', resource: read.result.resource, payload })
+    assert.equal(result.ok, true, key)
+    assert.equal(result.result.observed.verified, true)
+    assert.equal(result.result.requested.payload.expectedSelectionFingerprint, payload.expectedSelectionFingerprint)
+    assert.ok(result.result.observed.verifiedFragments.length > 0)
+    assert.equal(state.selectionCalls, 1)
+  }
+})
+
+test('light-document selection_insert rejects drift, ambiguity, runtime failure, and insufficient XML readback without replay', async () => {
+  const stable = { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 3 } } }
+  const driftState = {}; let content = '选区'
+  const drift = await runtime({ state: driftState, selection: { ...stable, async getSelectionContent() { return { text: content } } } })
+  const initial = await drift({ action: 'selection' }); content = '已漂移'
+  const drifted = await drift({ action: 'write', operation: 'selection_insert', resource: initial.result.resource, payload: { text: '新内容', expectedSelectionFingerprint: initial.result.document.selection.selectionFingerprint } })
+  assert.equal(drifted.ok, false); assert.equal(drifted.error.code, 'fingerprint_mismatch'); assert.equal(driftState.selectionCalls ?? 0, 0)
+
+  for (const selection of [{ async getSelectionContent() { return { text: '选区' } } }, { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 1 } } }]) {
+    const state = {}; const call = await runtime({ state, selection }); const read = await call({ action: 'selection' }); assert.equal(read.ok, true, JSON.stringify(read))
+    const rejected = await call({ action: 'write', operation: 'selection_insert', resource: read.result.resource, payload: { text: '新内容', expectedSelectionFingerprint: read.result.document.selection.selectionFingerprint } })
+    assert.equal(rejected.ok, false); assert.equal(rejected.error.code, 'invalid_range'); assert.equal(state.selectionCalls ?? 0, 0)
+  }
+
+  for (const mode of ['throws', 'unchanged', 'mismatch']) {
+    const state = {}; const call = await runtime({ state, selectionInsert: mode, selection: stable }); const read = await call({ action: 'selection' })
+    const rejected = await call({ action: 'write', operation: 'selection_insert', resource: read.result.resource, payload: { text: '新内容', expectedSelectionFingerprint: read.result.document.selection.selectionFingerprint } })
+    assert.equal(rejected.ok, false, mode); assert.equal(rejected.error.code, mode === 'throws' ? 'runtime_error' : 'readback_mismatch'); assert.equal(state.selectionCalls, 1)
+  }
+})
+
 test('light-document runtime rejects deleting a block without a stable id before CanvasPatch', async () => {
   const initialXml = '<apcanvas><outlineTitle id="title">旧标题</outlineTitle><p>不可验证删除</p></apcanvas>'
   const state = {}
@@ -88,7 +134,8 @@ test('light-document runtime pages rich reads and verifies public selection, blo
   assert.equal(capabilities.result.document.capabilities.selectionRichReplace, false)
   assert.deepEqual(Array.from(capabilities.result.document.capabilities.detectedButUnsupported), ['selectionRichReplace', 'exportPdf'])
   const selection = await call({ action: 'selection', payload: { maxChars: 100 } })
-  assert.equal(selection.result.document.selection.supported, false); assert.equal(selection.result.document.selection.reason, 'selection_anchor_api_not_detected')
+  assert.equal(selection.ok, true); assert.equal(selection.result.document.selection.supported, true)
+  assert.equal(selection.result.document.selection.stable, false)
   const words = await call({ action: 'read', payload: { kind: 'word_count' } })
   assert.equal(words.result.document.wordCount.words, 12)
   const comments = await call({ action: 'read', offset: 1, limit: 1, payload: { kind: 'comments' } })

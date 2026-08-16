@@ -282,3 +282,34 @@ test('never dispatches a historical pending checkpoint or two concurrent writes 
     assert.equal([one, two].filter((value) => value.result?.isError).length, 1)
   } finally { await connector.stop() }
 })
+
+test('selection_insert requires a stable fingerprint and attests payload-bound XML evidence without retrying an uncertain mutation', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 21, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/109?id=109' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
+  const payload = { text: '写入内容', expectedSelectionFingerprint: 'selection-v3-1234abcd', insertBelow: true }
+  let writes = 0; let validEvidence = true
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [] } } })
+    writes += 1
+    const observed = validEvidence
+      ? { verified: true, verifiedFragments: ['写入内容'], fragmentEvidence: [{ fragment: '写入内容', blockIds: ['inserted'] }], observedBlocks: [{ id: 'inserted', type: 'p', text: '写入内容' }] }
+      : { verified: true, verifiedFragments: [], fragmentEvidence: [], observedBlocks: [] }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed } })
+  }) })
+  connector.bindBrowserTarget('light-doc-selection-run', target); const endpoint = await connector.start()
+  const write = async (identity, id) => {
+    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload }, id)
+    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation: 'selection_insert', payload }, id + 1)
+  }
+  try {
+    const invalid = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: 'x' } })
+    assert.equal(invalid.error.code, -32602); assert.equal(writes, 0)
+    const succeeded = await write('selection-success', 2)
+    assert.equal(succeeded.result.structuredContent.status, 'verified_write'); assert.equal(writes, 1)
+    validEvidence = false
+    const rejected = await write('selection-invalid', 4)
+    assert.equal(rejected.result.isError, true); assert.equal(writes, 2)
+    const replay = await write('selection-invalid', 6)
+    assert.equal(replay.result.isError, true); assert.match(replay.result.content[0].text, /uncertain/i); assert.equal(writes, 2)
+  } finally { await connector.stop() }
+})

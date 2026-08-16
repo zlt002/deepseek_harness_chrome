@@ -16,7 +16,7 @@ const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
 const MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES = 128 * 1024
 // Operations without a stable public API and operation-specific readback are
 // deliberately absent. Accepting them and failing after a mutation is unsafe.
-const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format']
+const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'selection_insert']
 
 function spreadsheetArtifactSummary(result) {
   const artifact = result?.observed?.artifact
@@ -579,12 +579,32 @@ function lightDocumentBatchItems(operation, payload) {
   }
   return items
 }
-function validLightDocumentOperationPayload(operation, payload) { return !['blocks_delete', 'blocks_format'].includes(operation) || lightDocumentBatchItems(operation, payload) !== null }
+function selectionInsertFragments(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const kinds = ['markdown', 'html', 'text'].filter((key) => typeof payload[key] === 'string')
+  if (kinds.length !== 1 || !Object.keys(payload).every((key) => ['markdown', 'html', 'text', 'insertBelow', 'expectedSelectionFingerprint'].includes(key))) return null
+  const kind = kinds[0]; const value = payload[kind]
+  if (!value.trim() || value.length > 20_000 || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint) || (payload.insertBelow !== undefined && typeof payload.insertBelow !== 'boolean')) return null
+  const plain = kind === 'html' ? value.replace(/<[^>]*>/g, ' ') : kind === 'markdown' ? value.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[`*_#>~\-]/g, ' ') : value
+  const fragments = [...new Set(plain.match(/[\p{L}\p{N}]+/gu) ?? [])].slice(0, 100)
+  return fragments.length ? { kind, fragments } : null
+}
+function validLightDocumentOperationPayload(operation, payload) {
+  if (operation === 'selection_insert') return selectionInsertFragments(payload) !== null
+  return !['blocks_delete', 'blocks_format'].includes(operation) || lightDocumentBatchItems(operation, payload) !== null
+}
 function verifiedLightDocumentWriteMatches(result, request) {
   const matchesRequest = validOfficeDocumentWriteResult(result) && result.requested?.operation === request.operation
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
-  if (!matchesRequest || !['blocks_delete', 'blocks_format'].includes(request.operation)) return matchesRequest
+  if (!matchesRequest) return false
+  if (request.operation === 'selection_insert') {
+    const requested = selectionInsertFragments(request.payload); const observed = result.observed
+    if (!requested || !Array.isArray(observed?.verifiedFragments) || !Array.isArray(observed?.fragmentEvidence) || !Array.isArray(observed?.observedBlocks)) return false
+    if (canonicalJson(observed.verifiedFragments) !== canonicalJson(requested.fragments) || observed.fragmentEvidence.length !== requested.fragments.length || observed.observedBlocks.length < 1) return false
+    return observed.fragmentEvidence.every((evidence, index) => evidence && evidence.fragment === requested.fragments[index] && Array.isArray(evidence.blockIds) && evidence.blockIds.length > 0)
+  }
+  if (!['blocks_delete', 'blocks_format'].includes(request.operation)) return true
   const expected = lightDocumentBatchItems(request.operation, request.payload); const observed = result.observed?.verifiedBlocks
   if (!expected || result.requested?.count !== expected.length || !Array.isArray(observed) || observed.length !== expected.length) return false
   return expected.every((item, index) => request.operation === 'blocks_delete'
