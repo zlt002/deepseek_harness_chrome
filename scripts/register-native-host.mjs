@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
-import { chmod, cp, mkdir, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,12 +59,31 @@ for (const [name, value] of [
   if (value !== undefined && value !== '') launcherLines.splice(1, 0, `export ${name}=${shellQuote(value)}`)
 }
 const manifestPath = join(target, 'com.deepseek.harness.chrome.json')
+let existingManifest = {}
+if (existsSync(manifestPath)) {
+  try {
+    existingManifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  } catch (error) {
+    throw new Error(`Unable to read existing Native Messaging manifest ${manifestPath}: ${error.message}`)
+  }
+  if (existingManifest === null || typeof existingManifest !== 'object' || Array.isArray(existingManifest)) {
+    throw new Error(`Existing Native Messaging manifest ${manifestPath} must contain a JSON object`)
+  }
+}
+const existingOrigins = existingManifest.allowed_origins ?? []
+if (!Array.isArray(existingOrigins) || existingOrigins.some((origin) => typeof origin !== 'string')) {
+  throw new Error(`Existing Native Messaging manifest ${manifestPath} has invalid allowed_origins`)
+}
 const manifest = {
+  ...existingManifest,
   name: 'com.deepseek.harness.chrome',
   description: 'DeepSeek Harness Native Messaging host',
   path: launcher,
   type: 'stdio',
-  allowed_origins: extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`),
+  allowed_origins: [...new Set([
+    ...existingOrigins,
+    ...extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`),
+  ])],
 }
 
 await mkdir(target, { recursive: true })

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
+import { PmdDeliveryRecordStore } from './pmd-delivery-record-store.mjs'
 
 const REQUEST_TIMEOUT_MS = 15_000
 const KNOWLEDGE_REQUEST_TIMEOUT_MS = 30 * 60_000
@@ -199,11 +200,59 @@ const officeDocumentTool = {
   },
 }
 
+const officeSpreadsheetTool = {
+  name: 'office_spreadsheet', title: 'Read or edit spreadsheet',
+  description: 'Use only for a bound WebEdit spreadsheet. Reads return bounded context, ranges, searches, or sheet lists. Any mutation first obtains a one-time inspect_write challenge; its operation, payload, Browser Target, and workbook fingerprint are revalidated and the same frame is read back.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
+    action: { enum: ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
+    challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
+    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image'] }, payload: { type: 'object', additionalProperties: true },
+  } },
+}
+
 const teamDocCreateTool = {
   name: 'team_doc_create', title: 'Create Team Knowledge light document',
   description: 'Browser-authenticated and self-contained: inspect the bound Chrome Team Knowledge parent, then create exactly one approved light document with readback verification. Do not call local midea-knowledge auth.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['phase'], properties: { phase: { enum: ['inspect', 'create'] }, challenge: { type: 'string' }, idempotencyIdentity: { type: 'string' }, name: { type: 'string' }, body: { type: 'string' } } },
+}
+
+const teamKnowledgeItemTool = {
+  name: 'team_knowledge_item', title: 'Create or verify a Team Knowledge child item',
+  description: 'Use the bound Chrome Team Knowledge catalog only. Inspect the real parent first, preview one named light document or spreadsheet to obtain a one-time approval grant, then create exactly that item. Creation succeeds only after business success, parent rediscovery, and item readback.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['action'],
+    properties: {
+      action: { enum: ['inspect_parent', 'preview', 'create', 'readback'] },
+      parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 },
+      kind: { enum: ['light_document', 'spreadsheet'] }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 },
+      challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, catalogId: { type: 'string', pattern: '^\\d+$' },
+    },
+  },
+}
+
+const pmdPrdDeliveryTool = {
+  name: 'pmd_prd_delivery', title: 'Deliver the two approved PMD documents',
+  description: 'Fixed two-document delivery for /pmd-prd. Inspect the bound Team Knowledge parent, preview exactly the approved analysis and PRD light documents, obtain explicit user confirmation, then create or resume only unfinished items with persistent readback evidence.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['action'],
+    properties: {
+      action: { enum: ['inspect_parent', 'preview', 'create', 'status'] },
+      requirementId: { type: 'string', minLength: 1, maxLength: 64 },
+      deliveryRunId: { type: 'string', minLength: 1, maxLength: 80 },
+      parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 },
+      challenge: { type: 'string', minLength: 1, maxLength: 256 },
+      documents: {
+        type: 'array', minItems: 2, maxItems: 2,
+        items: { type: 'object', additionalProperties: false, required: ['kind', 'name', 'body'], properties: {
+          kind: { enum: ['analysis', 'prd'] }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', minLength: 1, maxLength: 100000 },
+        } },
+      },
+    },
+  },
 }
 
 const pageIdentitySchema = {
@@ -425,11 +474,111 @@ function validOfficeDocumentWriteResult(value) {
     && validLightDocumentResource(value.resource) && value.requested && typeof value.requested === 'object'
     && value.observed && typeof value.observed === 'object'
 }
+const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image']
+function validOfficeSpreadsheetArguments(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
+  const keys = Object.keys(value)
+  if (['context', 'sheets', 'inspect_write'].includes(value.action)) return keys.length === 1
+  if (value.action === 'capabilities') return keys.every((key) => ['action', 'range', 'sheetName'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && (value.sheetName === undefined || typeof value.sheetName === 'string')
+  if (value.action === 'range') return keys.every((key) => ['action', 'range', 'sheetName'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && (value.sheetName === undefined || typeof value.sheetName === 'string')
+  if (value.action === 'search') return keys.every((key) => ['action', 'range', 'sheetName', 'query', 'matchCase', 'matchEntireCell', 'searchBy', 'offset', 'limit'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && typeof value.query === 'string' && value.query.trim().length > 0 && value.query.length <= 500 && (value.searchBy === undefined || ['value', 'text', 'formula'].includes(value.searchBy)) && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000) && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
+  return value.action === 'write' && keys.length === 6 && typeof value.challenge === 'string' && value.challenge.length > 0 && typeof value.idempotencyIdentity === 'string' && value.idempotencyIdentity.length > 0 && value.idempotencyIdentity.length <= 128 && validOfficeResource(value.resource) && SPREADSHEET_OPERATIONS.includes(value.operation) && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000
+}
+function validOfficeSpreadsheetReadResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'ok' && validOfficeResource(value.resource) }
+function validOfficeSpreadsheetWriteResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write' && validOfficeResource(value.resource) && SPREADSHEET_OPERATIONS.includes(value.operation) && value.requested && typeof value.requested === 'object' && value.observed && typeof value.observed === 'object' }
+function spreadsheetWriteHash(operation, payload) { return hash(JSON.stringify({ operation, payload })) }
+function verifiedSpreadsheetWriteMatches(result, operation, payload) {
+  if (!validOfficeSpreadsheetWriteResult(result) || result.operation !== operation) return false
+  if (operation === 'set_values') return result.requested.range === payload.range && JSON.stringify(result.requested.values) === JSON.stringify(payload.values) && JSON.stringify(result.observed.values) === JSON.stringify(payload.values)
+  if (operation === 'set_formula') return result.requested.range === payload.range && JSON.stringify(result.requested.formulas) === JSON.stringify(payload.formulas) && JSON.stringify(result.observed.formulas) === JSON.stringify(payload.formulas)
+  if (operation === 'merge' || operation === 'unmerge') return result.requested.range === payload.range && result.observed.merged === (operation === 'merge')
+  if (operation === 'row_height') return result.requested.range === payload.range && result.observed.RowHeight === payload.value
+  if (operation === 'column_width') return result.requested.range === payload.range && result.observed.ColumnWidth === payload.value
+  if (['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image'].includes(operation)) return result.requested.range === payload.range && result.observed.range === payload.range && result.observed.verified === true
+  return true
+}
 
 function validTeamParent(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 6
+  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every((key) => ['parentId', 'bookId', 'parentName', 'parentType', 'fingerprint', 'canRead', 'canCreate'].includes(key))
     && ['parentId', 'bookId', 'parentName', 'fingerprint'].every((key) => typeof value[key] === 'string' && value[key].length > 0)
     && value.canRead === true && value.canCreate === true
+}
+function validTeamKnowledgeParent(value) {
+  return validTeamParent(value) && typeof value.parentType === 'string' && value.parentType.length > 0
+}
+const TEAM_KNOWLEDGE_LIGHT_STAGES = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
+const TEAM_KNOWLEDGE_SPREADSHEET_STAGES = ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified']
+function validTeamKnowledgeItem(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && typeof value.catalogId === 'string' && /^\d+$/.test(value.catalogId)
+    && ['light_document', 'spreadsheet'].includes(value.kind)
+    && typeof value.name === 'string' && value.name.length > 0
+    && typeof value.url === 'string' && value.url.startsWith('https://doc.midea.com/')
+    && typeof value.fingerprint === 'string' && value.fingerprint.length > 0
+}
+function validTeamKnowledgeStages(value, kind) {
+  const expected = kind === 'light_document' ? TEAM_KNOWLEDGE_LIGHT_STAGES : TEAM_KNOWLEDGE_SPREADSHEET_STAGES
+  if (!Array.isArray(value)) return false
+  let previous = -1
+  for (const stage of value) { const index = expected.indexOf(stage); if (index <= previous) return false; previous = index }
+  return true
+}
+function validTeamKnowledgeItemResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !['verified_write', 'partial_delivery', 'ok'].includes(value.status)) return false
+  if (value.status === 'ok') return validTeamKnowledgeParent(value.parent) || (validTeamKnowledgeItem(value.item) && value.readback && typeof value.readback === 'object')
+  if (value.status === 'verified_write') return validTeamKnowledgeItem(value.item)
+    && validTeamKnowledgeStages(value.stages, value.item.kind) && value.stages.length === (value.item.kind === 'light_document' ? 5 : 4)
+    && value.readback && typeof value.readback === 'object'
+  if ((value.item !== null && !validTeamKnowledgeItem(value.item)) || !Array.isArray(value.stages) || !['inspect', 'create', 'rediscover', 'write', 'readback', 'unsupported'].includes(value.failedAt)
+    || typeof value.error !== 'string' || value.error.length === 0) return false
+  return value.diagnostic === undefined || (value.diagnostic && typeof value.diagnostic === 'object' && Number.isInteger(value.diagnostic.httpStatus) && (typeof value.diagnostic.errorCode === 'string' || value.diagnostic.errorCode === null))
+}
+function teamKnowledgeTargetFingerprint(target, parent, kind) {
+  return hash(JSON.stringify({ browser: target.browser, windowId: target.windowId, tabId: target.tabId, url: target.url, parentFingerprint: parent.fingerprint, kind }))
+}
+function teamKnowledgeContentHash(kind, name, body) { return hash(JSON.stringify({ kind, name, body })) }
+function validTeamKnowledgeItemArguments(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
+  const keys = Object.keys(args)
+  if (args.action === 'inspect_parent') return keys.length === 1
+  if (args.action === 'preview') return keys.length === 5 && typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0
+    && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.name === 'string' && args.name.trim().length > 0 && args.name.length <= 120
+    && typeof args.body === 'string' && args.body.length <= 100000 && (args.kind === 'spreadsheet' || args.body.trim().length > 0)
+  if (args.action === 'create') return keys.length === 6 && typeof args.challenge === 'string' && args.challenge.length > 0
+    && typeof args.idempotencyIdentity === 'string' && args.idempotencyIdentity.length > 0 && args.idempotencyIdentity.length <= 128
+    && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.name === 'string' && args.name.trim().length > 0 && args.name.length <= 120
+    && typeof args.body === 'string' && args.body.length <= 100000 && (args.kind === 'spreadsheet' || args.body.trim().length > 0)
+  return args.action === 'readback' && keys.length === 3 && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.catalogId === 'string' && /^\d+$/.test(args.catalogId)
+}
+
+const PMD_DOCUMENT_KINDS = ['analysis', 'prd']
+function validPmdDocuments(value, requirementId) {
+  if (!Array.isArray(value) || value.length !== 2) return false
+  const byKind = new Map(value.map((item) => [item?.kind, item]))
+  if (byKind.size !== 2 || PMD_DOCUMENT_KINDS.some((kind) => !byKind.has(kind))) return false
+  return PMD_DOCUMENT_KINDS.every((kind) => {
+    const item = byKind.get(kind)
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== 3) return false
+    if (typeof item.name !== 'string' || item.name.length === 0 || item.name.length > 120 || typeof item.body !== 'string' || item.body.trim().length === 0 || item.body.length > 100000) return false
+    const suffix = kind === 'analysis' ? '_01_需求分析与研发交付' : '_02_PRD'
+    return item.name.startsWith(`${requirementId}_`) && item.name.endsWith(suffix)
+  })
+}
+function normalizedPmdDocuments(value) {
+  return PMD_DOCUMENT_KINDS.map((kind) => value.find((item) => item.kind === kind))
+}
+function pmdContentFingerprint(documents) {
+  return hash(JSON.stringify(normalizedPmdDocuments(documents).map((item) => ({ kind: item.kind, name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
+}
+function validPmdDeliveryArguments(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
+  const keys = Object.keys(args)
+  if (args.action === 'inspect_parent') return keys.length === 1
+  const validIdentity = typeof args.requirementId === 'string' && args.requirementId.trim().length > 0 && args.requirementId.length <= 64
+    && typeof args.deliveryRunId === 'string' && args.deliveryRunId.trim().length > 0 && args.deliveryRunId.length <= 80
+  if (args.action === 'status') return keys.length === 3 && validIdentity
+  if (args.action === 'preview') return keys.length === 5 && validIdentity && typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256 && validPmdDocuments(args.documents, args.requirementId)
+  return args.action === 'create' && keys.length === 5 && validIdentity && typeof args.challenge === 'string' && args.challenge.length > 0 && args.challenge.length <= 256 && validPmdDocuments(args.documents, args.requirementId)
 }
 const TEAM_DOC_STAGES = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
 function validTeamDocStages(value) {
@@ -555,7 +704,7 @@ function knowledgeProxyHeaders(entries, cookie) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
@@ -574,8 +723,14 @@ export class BrowserConnector {
     this.pending = new Map()
     this.teamDocChallenges = new Map()
     this.teamDocStore = options.teamDocStore ?? new TeamDocRecordStore()
+    this.teamKnowledgeItemChallenges = new Map()
+    this.pmdDeliveryStore = options.pmdDeliveryStore ?? new PmdDeliveryRecordStore()
+    this.pmdDeliveryChallenges = new Map()
+    this.pmdDeliveryLocks = new Map()
     this.officeDocumentChallenges = new Map()
     this.officeDocumentWrites = new Map()
+    this.officeSpreadsheetChallenges = new Map()
+    this.officeSpreadsheetWrites = new Map()
   }
 
   /** @returns {Promise<{ url: string, token: string, generation: string }>} */
@@ -612,6 +767,10 @@ export class BrowserConnector {
     this.pending.clear()
     this.officeDocumentChallenges.clear()
     this.officeDocumentWrites.clear()
+    this.officeSpreadsheetChallenges.clear()
+    this.officeSpreadsheetWrites.clear()
+    this.teamKnowledgeItemChallenges.clear()
+    this.pmdDeliveryChallenges.clear()
     this.browserTargets.clear()
     this.browserTargetSets.clear()
     this.unavailableBrowserTargets.clear()
@@ -632,6 +791,10 @@ export class BrowserConnector {
     if (this.currentRunId !== undefined && this.currentRunId !== runId) {
       this.officeDocumentChallenges.clear()
       this.officeDocumentWrites.clear()
+      this.officeSpreadsheetChallenges.clear()
+      this.officeSpreadsheetWrites.clear()
+      this.teamKnowledgeItemChallenges.clear()
+      this.pmdDeliveryChallenges.clear()
     }
     this.currentRunId = runId
     if (validBrowserTarget(browserTarget)) {
@@ -660,9 +823,11 @@ export class BrowserConnector {
     const isOfficeReadRangeRequest = pending.request.tool === 'office_read_range'
     const isOfficeWriteRangeRequest = pending.request.tool === 'office_write_range'
     const isOfficeDocumentRequest = pending.request.tool === 'office_document'
+    const isOfficeSpreadsheetRequest = pending.request.tool === 'office_spreadsheet'
     const isTeamDocRequest = pending.request.tool === 'team_doc_create'
+    const isTeamKnowledgeItemRequest = pending.request.tool === 'team_knowledge_item'
     const isKnowledgeRequest = pending.request.tool === 'knowledge_search' || pending.request.tool === 'code_search'
-    const isOfficeRequest = isOfficeContextRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isTeamDocRequest
+    const isOfficeRequest = isOfficeContextRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest || isTeamDocRequest || isTeamKnowledgeItemRequest
     const sameOpenIdentity = response.runId === pending.request.runId && response.generation === pending.request.generation
     const currentTarget = this.browserTargets.get(pending.request.runId)
     const currentTargets = this.browserTargetSets.get(pending.request.runId) ?? (currentTarget === undefined ? undefined : [currentTarget])
@@ -688,6 +853,13 @@ export class BrowserConnector {
     if (isTeamDocRequest) {
       if (!response.result || typeof response.result !== 'object' || Array.isArray(response.result)) { pending.reject(new Error('Extension peer returned an invalid Team Doc result')); return true }
       pending.resolve({ browserTarget: response.browserTarget, teamDoc: response.result }); return true
+    }
+    if (isTeamKnowledgeItemRequest) {
+      if (!validTeamKnowledgeItemResult(response.result)) { pending.reject(new Error('Extension peer returned an invalid Team Knowledge item result')); return true }
+      pending.resolve({ browserTarget: response.browserTarget, teamKnowledgeItem: response.result }); return true
+    }
+    if (isOfficeSpreadsheetRequest && ((pending.request.action === 'write' && !validOfficeSpreadsheetWriteResult(response.result)) || (pending.request.action !== 'write' && !validOfficeSpreadsheetReadResult(response.result)))) {
+      pending.reject(new Error('Extension peer returned an invalid spreadsheet result')); return true
     }
     if (isKnowledgeRequest) {
       if (!validKnowledgeResult(response.result)) { pending.reject(new Error('Extension peer returned an invalid Knowledge Platform result')); return true }
@@ -719,7 +891,7 @@ export class BrowserConnector {
       pending.resolve({ browserTarget: response.browserTarget, pageIdentity: response.result.pageIdentity })
       return true
     }
-    pending.resolve(isOfficeWriteRangeRequest ? {
+    pending.resolve(isOfficeSpreadsheetRequest ? { browserTarget: response.browserTarget, result: response.result } : isOfficeWriteRangeRequest ? {
       browserTarget: response.browserTarget, resource: response.result.resource, requested: response.result.requested, observed: response.result.observed,
     } : isOfficeReadRangeRequest ? {
       browserTarget: response.browserTarget,
@@ -790,7 +962,7 @@ export class BrowserConnector {
     }
     if (message.method === 'tools/list') {
       this.onToolsListed?.()
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, teamDocCreateTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool] } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, officeSpreadsheetTool, teamDocCreateTool, teamKnowledgeItemTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool] } })
       return
     }
     if (message.method !== 'tools/call') {
@@ -813,8 +985,20 @@ export class BrowserConnector {
       await this.#officeDocument(message, response)
       return
     }
+    if (message.params?.name === 'office_spreadsheet') {
+      await this.#officeSpreadsheet(message, response)
+      return
+    }
     if (message.params?.name === 'team_doc_create') {
       await this.#teamDoc(message, response)
+      return
+    }
+    if (message.params?.name === 'team_knowledge_item') {
+      await this.#teamKnowledgeItem(message, response)
+      return
+    }
+    if (message.params?.name === 'pmd_prd_delivery') {
+      await this.#pmdPrdDelivery(message, response)
       return
     }
     if (message.params?.name === 'knowledge_search' || message.params?.name === 'code_search') {
@@ -1076,6 +1260,49 @@ export class BrowserConnector {
     }
   }
 
+  async #officeSpreadsheet(message, response) {
+    const args = message.params?.arguments ?? {}
+    if (!validOfficeSpreadsheetArguments(args)) { this.#reply(response, errorResponse(message.id, -32602, 'office_spreadsheet requires a bounded read action, inspect_write, or challenged verified write')); return }
+    const runId = this.currentRunId; const browserTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
+    if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    if (args.action === 'write') {
+      const grant = this.officeSpreadsheetChallenges.get(args.challenge); this.officeSpreadsheetChallenges.delete(args.challenge)
+      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.browserTarget, browserTarget)) { this.#toolError(response, message.id, 'Spreadsheet approval challenge is missing, stale, or already used.'); return }
+      if (!validOfficeResource(args.resource) || args.resource.fingerprint !== grant.resource.fingerprint || args.resource.sheetName !== grant.resource.sheetName) { this.#toolError(response, message.id, 'Spreadsheet resource differs from the approved inspection.'); return }
+      const fingerprint = spreadsheetWriteHash(args.operation, args.payload)
+      const existing = this.officeSpreadsheetWrites.get(args.idempotencyIdentity)
+      if (existing) {
+        if (existing.fingerprint !== fingerprint || existing.resourceFingerprint !== grant.resource.fingerprint) { this.#toolError(response, message.id, 'Spreadsheet idempotency identity conflicts with the approved operation or payload.'); return }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(existing.result) }], structuredContent: existing.result } }); return
+      }
+      const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: 'write', resource: grant.resource, operation: args.operation, payload: args.payload }
+      try {
+        const resolved = await this.#requestExtension(correlation)
+        if (!verifiedSpreadsheetWriteMatches(resolved.result, args.operation, args.payload)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
+        if (this.officeSpreadsheetWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetWrites.delete(this.officeSpreadsheetWrites.keys().next().value)
+        this.officeSpreadsheetWrites.set(args.idempotencyIdentity, { fingerprint, resourceFingerprint: grant.resource.fingerprint, result })
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet write failed') }
+      return
+    }
+    const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: args.action, ...(args.range === undefined ? {} : { range: args.range }), ...(args.sheetName === undefined ? {} : { sheetName: args.sheetName }), ...(args.query === undefined ? {} : { query: args.query }), ...(args.matchCase === undefined ? {} : { matchCase: args.matchCase }), ...(args.matchEntireCell === undefined ? {} : { matchEntireCell: args.matchEntireCell }), ...(args.searchBy === undefined ? {} : { searchBy: args.searchBy }), ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }) }
+    try {
+      const resolved = await this.#requestExtension(correlation)
+      if (!validOfficeSpreadsheetReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded spreadsheet read')
+      if (args.action === 'inspect_write') {
+        const challenge = randomBytes(32).toString('base64url')
+        for (const [key, candidate] of this.officeSpreadsheetChallenges) if (candidate.expiresAt < Date.now()) this.officeSpreadsheetChallenges.delete(key)
+        if (this.officeSpreadsheetChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetChallenges.delete(this.officeSpreadsheetChallenges.keys().next().value)
+        this.officeSpreadsheetChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, challenge }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } }); return
+      }
+      const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet read failed') }
+  }
+
   async #teamDoc(message, response) {
     const args = message.params?.arguments ?? {}
     const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
@@ -1118,6 +1345,195 @@ export class BrowserConnector {
       await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, stages: result.stages, documentId: result.documentId, verified: result.status === 'verified_write', result })
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Doc create failed') }
+  }
+
+  async #teamKnowledgeItem(message, response) {
+    const args = message.params?.arguments ?? {}
+    if (!validTeamKnowledgeItemArguments(args)) {
+      this.#reply(response, errorResponse(message.id, -32602, 'team_knowledge_item requires a valid action-specific payload'))
+      return
+    }
+    const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
+    if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    const inspect = async () => {
+      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
+      const resolved = await this.#requestExtension(request)
+      const result = resolved.teamKnowledgeItem
+      if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge parent')
+      return { request, result }
+    }
+    try {
+      if (args.action === 'inspect_parent') {
+        const resolved = await inspect()
+        const result = { action: 'inspect_parent', browserTarget: target, parent: resolved.result.parent, capabilities: resolved.result.capabilities ?? {} }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+      if (args.action === 'preview') {
+        const resolved = await inspect(); const parent = resolved.result.parent
+        if (parent.fingerprint !== args.parentFingerprint) { this.#toolError(response, message.id, 'Team Knowledge parent changed; inspect and confirm the directory again.'); return }
+        const supported = resolved.result.capabilities?.[args.kind]
+        if (supported === false) { this.#toolError(response, message.id, `team_knowledge_${args.kind}_unsupported`); return }
+        for (const [key, grant] of this.teamKnowledgeItemChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeItemChallenges.delete(key)
+        const challenge = randomBytes(32).toString('base64url')
+        const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
+        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target, parent, kind: args.kind, name: args.name, contentHash, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { action: 'preview', browserTarget: target, parent, kind: args.kind, name: args.name, contentHash, challenge }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+      if (args.action === 'readback') {
+        const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'readback', kind: args.kind, catalogId: args.catalogId }
+        const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
+        if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok') throw new Error('Extension peer returned an invalid Team Knowledge item readback')
+        const content = { runId, requestId: request.requestId, generation: request.generation, browserTarget: resolved.browserTarget, ...result }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent: content } })
+        return
+      }
+      const grant = this.teamKnowledgeItemChallenges.get(args.challenge)
+      this.teamKnowledgeItemChallenges.delete(args.challenge)
+      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)) {
+        this.#toolError(response, message.id, 'Team Knowledge approval challenge is missing, stale, or already used.'); return
+      }
+      const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
+      if (grant.kind !== args.kind || grant.name !== args.name || grant.contentHash !== contentHash) {
+        this.#toolError(response, message.id, 'Team Knowledge approval challenge conflicts with the confirmed kind, name, or body.'); return
+      }
+      const targetFingerprint = teamKnowledgeTargetFingerprint(grant.target, grant.parent, args.kind)
+      const existing = await this.teamDocStore.load(args.idempotencyIdentity)
+      if (existing) {
+        if (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== contentHash || existing.kind !== args.kind || existing.name !== args.name) {
+          this.#toolError(response, message.id, 'Team Knowledge idempotency identity conflicts with the parent, kind, name, or body.'); return
+        }
+        if (existing.verified) { this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(existing.result) }], structuredContent: existing.result } }); return }
+      }
+      const recovery = existing ? { catalogId: existing.catalogId ?? null, stages: existing.stages ?? [] } : undefined
+      await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, kind: args.kind, name: args.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
+      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: args.kind, name: args.name, body: args.body, idempotencyIdentity: args.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
+      const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
+      if (!validTeamKnowledgeItemResult(result) || !['verified_write', 'partial_delivery'].includes(result.status)) throw new Error('Extension peer returned an invalid Team Knowledge item create result')
+      await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, kind: args.kind, name: args.name, stages: result.stages, catalogId: result.item?.catalogId ?? null, verified: result.status === 'verified_write', result })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge item operation failed') }
+  }
+
+  async #withPmdDeliveryLock(key, work) {
+    const previous = this.pmdDeliveryLocks.get(key) ?? Promise.resolve()
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const queued = previous.catch(() => undefined).then(() => gate)
+    this.pmdDeliveryLocks.set(key, queued)
+    await previous.catch(() => undefined)
+    try { return await work() } finally {
+      release()
+      if (this.pmdDeliveryLocks.get(key) === queued) this.pmdDeliveryLocks.delete(key)
+    }
+  }
+
+  async #pmdPrdDelivery(message, response) {
+    const args = message.params?.arguments ?? {}
+    if (!validPmdDeliveryArguments(args)) {
+      this.#reply(response, errorResponse(message.id, -32602, 'pmd_prd_delivery requires a valid fixed two-document action payload'))
+      return
+    }
+    if (args.action === 'status') {
+      try {
+        const record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
+        if (!record) throw new Error('pmd_delivery_run_not_found')
+        const result = { action: 'status', delivery: record }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'PMD delivery status failed') }
+      return
+    }
+    const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
+    if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    const inspectParent = async () => {
+      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
+      const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
+      if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid PMD delivery parent')
+      if (result.capabilities?.light_document === false) throw new Error('team_knowledge_light_document_unsupported')
+      return result
+    }
+    try {
+      if (args.action === 'inspect_parent') {
+        const inspected = await inspectParent()
+        const result = { action: 'inspect_parent', browserTarget: target, parent: inspected.parent, capabilities: inspected.capabilities ?? {} }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+      const documents = normalizedPmdDocuments(args.documents)
+      const contentFingerprint = pmdContentFingerprint(documents)
+      if (args.action === 'preview') {
+        const inspected = await inspectParent(); const parent = inspected.parent
+        if (parent.fingerprint !== args.parentFingerprint) throw new Error('PMD delivery parent changed; inspect and confirm the directory again.')
+        const targetFingerprint = teamKnowledgeTargetFingerprint(target, parent, 'light_document')
+        const record = await this.pmdDeliveryStore.create({
+          requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, targetFingerprint, contentFingerprint,
+          documents: documents.map((item) => ({ kind: item.kind, name: item.name, idempotencyIdentity: `pmd:${hash(`${args.requirementId}:${args.deliveryRunId}`).slice(0, 48)}:${item.kind}`, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) })),
+        })
+        if (record.status === 'completed') {
+          const result = { action: 'preview', status: 'already_completed', browserTarget: target, parent, delivery: record }
+          this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+          return
+        }
+        for (const [key, grant] of this.pmdDeliveryChallenges) if (grant.expiresAt < Date.now()) this.pmdDeliveryChallenges.delete(key)
+        const challenge = randomBytes(32).toString('base64url')
+        this.pmdDeliveryChallenges.set(challenge, { runId, generation: this.generation, target, parent, requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { action: 'preview', status: record.status, browserTarget: target, parent, delivery: record, challenge }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+
+      const grant = this.pmdDeliveryChallenges.get(args.challenge)
+      this.pmdDeliveryChallenges.delete(args.challenge)
+      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)
+        || grant.requirementId !== args.requirementId || grant.deliveryRunId !== args.deliveryRunId || grant.contentFingerprint !== contentFingerprint) {
+        throw new Error('PMD delivery approval challenge is missing, stale, changed, or already used.')
+      }
+      const inspected = await inspectParent()
+      if (inspected.parent.fingerprint !== grant.parent.fingerprint) throw new Error('PMD delivery parent changed after confirmation.')
+      const targetFingerprint = teamKnowledgeTargetFingerprint(target, grant.parent, 'light_document')
+      const result = await this.#withPmdDeliveryLock(JSON.stringify([args.requirementId, args.deliveryRunId]), async () => {
+        let record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
+        if (!record || record.targetFingerprint !== targetFingerprint || record.contentFingerprint !== contentFingerprint) throw new Error('pmd_delivery_run_conflict')
+        let failedAt = null; let failure = null
+        for (const item of record.documents.filter((candidate) => candidate.status !== 'created')) {
+          const document = documents.find((candidate) => candidate.kind === item.kind)
+          const existing = await this.teamDocStore.load(item.idempotencyIdentity)
+          if (existing && (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== item.contentHash || existing.kind !== 'light_document' || existing.name !== item.name)) {
+            failedAt = item.kind; failure = 'PMD document idempotency identity conflicts with the approved parent or content.'
+            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'failed', error: failure })
+            break
+          }
+          if (existing?.verified && validTeamKnowledgeItemResult(existing.result) && existing.result.status === 'verified_write') {
+            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'created', catalogId: existing.result.item.catalogId, stages: existing.result.stages, error: null })
+            continue
+          }
+          const recovery = existing ? { catalogId: existing.catalogId ?? null, stages: existing.stages ?? [] } : undefined
+          await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'creating', error: null })
+          await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
+          try {
+            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: item.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
+            const resolved = await this.#requestExtension(request); const itemResult = resolved.teamKnowledgeItem
+            if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid PMD document result')
+            await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
+            if (itemResult.status !== 'verified_write') {
+              failedAt = item.kind; failure = itemResult.error
+              await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'failed', catalogId: itemResult.item?.catalogId ?? null, stages: itemResult.stages, error: itemResult.error })
+              break
+            }
+            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'created', catalogId: itemResult.item.catalogId, stages: itemResult.stages, error: null })
+          } catch (error) {
+            failedAt = item.kind; failure = error instanceof Error ? error.message : 'PMD document creation failed'
+            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'failed', error: failure })
+            break
+          }
+        }
+        record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
+        return { action: 'create', status: record.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: target, parent: grant.parent, delivery: record, ...(failedAt ? { failedAt, error: failure } : {}) }
+      })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'PMD delivery failed') }
   }
 
   async #openBrowserTab(message, response) {

@@ -28,7 +28,7 @@ function assertBusinessSystemHeader(options) {
   assert.equal(headers.businesssystem, 'TEAM_KNOWLEDGE_BOOK')
 }
 
-async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, initialTab = target } = {}) {
+async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, sendMessage = async () => ({ ok: false }), initialTab = target } = {}) {
   const source = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   let runtimeListener; const nativeMessages = []; const nativeListeners = new Set(); const executions = []
@@ -46,6 +46,7 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
     tabs: {
       query: async () => [tab], get: async (tabId) => { if (tabId !== tab.id) throw new Error('tab not found'); return { ...tab } },
       update: async (tabId, update) => { if (tabId !== tab.id) throw new Error('tab not found'); if (typeof update.url === 'string') tab.url = update.url; tab.status = 'complete'; return { ...tab } },
+      sendMessage,
       onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} },
     },
     scripting: { executeScript: async (request) => { executions.push(request); return [{ result: await execute(request, tab) }] } },
@@ -61,6 +62,8 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
 
 const inspectRequest = (overrides = {}) => ({ type: 'connector_request', requestId: 'inspect-1', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_doc_create', phase: 'inspect', ...overrides })
 const createRequest = (overrides = {}) => ({ type: 'connector_request', requestId: 'create-1', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_doc_create', phase: 'create', parent, idempotencyIdentity: 'delivery-1', name: 'Migrated document', body: '# Migrated document\n', ...overrides })
+const teamKnowledgeParent = { ...parent, parentType: 'directory' }
+const itemRequest = (overrides = {}) => ({ type: 'connector_request', requestId: 'item-1', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_knowledge_item', action: 'create', parent: teamKnowledgeParent, kind: 'light_document', idempotencyIdentity: 'item-1', name: 'Child', body: '# Child', ...overrides })
 
 test('validates Native team-doc requests and rejects Run/Browser Target drift before MAIN-world execution', async () => {
   const harness = await loadBackground()
@@ -69,6 +72,80 @@ test('validates Native team-doc requests and rejects Run/Browser Target drift be
     assert.equal(harness.executions.length, 0)
     const drifted = await harness.sendNative(inspectRequest({ requestId: 'drift', browserTarget: { ...target, tabId: 99 } }))
     assert.ok(drifted?.error); assert.equal(harness.executions.length, 0)
+  } finally { harness.cleanup() }
+})
+
+test('creates a child light document only after the verified parent, rediscovery, and same-WebEdit body readback', async () => {
+  const harness = await loadBackground({ execute: async ({ func }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+    if (func.name === 'createTeamDocInPage') return { ok: true, catalogId: '9007199254740995', documentId: '9007199254740995', kind: 'light_document', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995' }
+    if (func.name === 'writeTeamDocInWebEdit') return { ok: true, readbackMatches: true, observedBody: 'Child' }
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(itemRequest())
+    assert.equal(response.result.status, 'verified_write')
+    assert.equal(response.result.item.catalogId, '9007199254740995')
+    assert.deepEqual(response.result.stages, ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'])
+    assert.equal(response.result.readback.body, 'Child')
+  } finally { harness.cleanup() }
+})
+
+test('creates a child spreadsheet only when its default sheet identity can be read back', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const originalDocument = globalThis.document
+  let listCalls = 0
+  let createPayload
+  globalThis.location = new URL(target.url)
+  globalThis.document = { referrer: '' }
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId')) {
+      listCalls += 1
+      return new Response(JSON.stringify({ errorCode: '00000', data: listCalls === 1 ? [] : [{ catalogId: '9007199254740996', name: 'Child sheet', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740996?id=9007199254740996' }] }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledge/getAllFileType')) return new Response(JSON.stringify({ errorCode: '00000', data: [{ type: 4, value: 'newword' }, { type: 8, value: 'newexcel' }] }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledge/add')) {
+      createPayload = JSON.parse(options.body)
+      return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: '9007199254740996' } }), { status: 200 })
+    }
+    throw new Error(`unexpected fetch ${parsed.pathname}`)
+  }
+  const harness = await loadBackground({
+    execute: async ({ func }) => {
+      if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+      if (func.name === 'createTeamDocInPage') return func({ bookId: parent.bookId, parentId: parent.parentId, name: 'Child sheet', kind: 'spreadsheet' })
+      throw new Error(`unexpected function ${func.name}`)
+    },
+    sendMessage: async (_tabId, message) => {
+      assert.deepEqual(message, { type: 'office-read-range/v1', range: 'A1' })
+      return { ok: true, result: { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Child.xlsx', sheetName: 'Sheet1', fingerprint: 'sheet-1' }, range: { address: 'Sheet1!A1' } } }
+    },
+  })
+  try {
+    const response = await harness.sendNative(itemRequest({ requestId: 'item-sheet', kind: 'spreadsheet', name: 'Child sheet', body: '' }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.deepEqual(response.result.stages, ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified'])
+    assert.equal(response.result.readback.resource.sheetName, 'Sheet1')
+    assert.deepEqual(createPayload, { bookId: parent.bookId, parentId: parent.parentId, fileName: 'Child sheet', fileType: 8 })
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
+  }
+})
+
+test('keeps a generic child item partial when the create API returns HTTP 200 with a business error', async () => {
+  const harness = await loadBackground({ execute: async ({ func }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+    if (func.name === 'createTeamDocInPage') return { ok: false, failedAt: 'create', error: 'team_knowledge_create_failed', diagnostic: { httpStatus: 200, errorCode: '20001' } }
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(itemRequest({ requestId: 'item-business-failure', kind: 'spreadsheet', name: 'Child sheet', body: '' }))
+    assert.deepEqual(response.result, { status: 'partial_delivery', item: null, stages: ['parent_inspected'], failedAt: 'create', error: 'team_knowledge_create_failed', diagnostic: { httpStatus: 200, errorCode: '20001' } })
   } finally { harness.cleanup() }
 })
 

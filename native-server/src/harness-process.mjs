@@ -80,7 +80,10 @@ function connectorPatch(url, token) {
         headers:
           Authorization: 'Bearer ${token}'
         forwardSessionIdentity: true
-        toolScope: continuable-child
+        # Office/browser operations must be reachable by the active Web
+        # profile. Selected-source subagents remain constrained by their own
+        # explicit allow-lists below.
+        toolScope: global
         toolCallTimeoutMs: 1800000
         failOnStartupError: true
         reconnect:
@@ -132,6 +135,7 @@ function yamlString(value) {
 export function claudeSkillsPatch(env = process.env) {
   const home = env.HOME?.trim() || homedir()
   const claudeSkillsDir = resolve(home, '.claude/skills')
+  const harnessChromeSkillsDir = resolve(THIS_DIR, '../../skills')
   return `- insert:
     - id: deepseek-harness-chrome-claude-skills
       name: '@deepseek-ai/dsh-skill-filesystem'
@@ -139,6 +143,7 @@ export function claudeSkillsPatch(env = process.env) {
         includeDefaultRoots: false
         customSkillDirs:
           - ${yamlString(claudeSkillsDir)}
+          - ${yamlString(harnessChromeSkillsDir)}
 `
 }
 

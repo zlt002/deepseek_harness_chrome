@@ -668,6 +668,9 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
 }
 
 async function main() {
+  // The package exports resolve to generated lib/ files. Refresh them before
+  // bundling so a source change cannot silently ship an older Harness runtime.
+  run('pnpm', ['run', 'build:lib:host'], { cwd: HARNESS_ROOT })
   const result = await buildMacProductionPackage()
   console.log(JSON.stringify(result, null, 2))
 }

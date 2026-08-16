@@ -7,6 +7,7 @@ export default defineContentScript({
     const responseEvent = 'deepseek-harness-office-read-response/v1'
     let runtimeReady: Promise<void> | undefined
     let documentRuntimeReady: Promise<void> | undefined
+    let spreadsheetRuntimeReady: Promise<void> | undefined
 
     function loadRuntime(): Promise<void> {
       if (runtimeReady !== undefined) return runtimeReady
@@ -76,6 +77,37 @@ export default defineContentScript({
       })
     }
 
+    function loadSpreadsheetRuntime(): Promise<void> {
+      if (spreadsheetRuntimeReady !== undefined) return spreadsheetRuntimeReady
+      spreadsheetRuntimeReady = new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = chrome.runtime.getURL('/office-spreadsheet-runtime.js')
+        script.onload = () => { script.remove(); resolve() }
+        script.onerror = () => { script.remove(); reject(new Error('unsupported: spreadsheet runtime adapter could not load')) }
+        ;(document.head ?? document.documentElement).append(script)
+      })
+      return spreadsheetRuntimeReady
+    }
+
+    function invokeSpreadsheetRuntime(request: Record<string, unknown>): Promise<unknown> {
+      return new Promise((resolve, reject) => {
+        const id = crypto.randomUUID()
+        const requestEvent = 'deepseek-harness-office-spreadsheet-request/v1'
+        const responseEvent = 'deepseek-harness-office-spreadsheet-response/v1'
+        const timeout = setTimeout(() => { window.removeEventListener(responseEvent, receive); reject({ code: 'timeout', message: 'Timed out waiting for the WebEdit spreadsheet runtime.' }) }, 8_000)
+        const receive = (event: Event): void => {
+          const detail = (event as CustomEvent<unknown>).detail
+          if (!detail || typeof detail !== 'object' || (detail as { id?: unknown }).id !== id) return
+          clearTimeout(timeout); window.removeEventListener(responseEvent, receive)
+          const payload = detail as { ok?: unknown; result?: unknown; error?: unknown }
+          if (payload.ok === true) resolve(payload.result)
+          else reject(payload.error ?? { code: 'runtime_error', message: 'WebEdit spreadsheet operation failed' })
+        }
+        window.addEventListener(responseEvent, receive)
+        window.dispatchEvent(new CustomEvent(requestEvent, { detail: { id, ...request } }))
+      })
+    }
+
     void loadRuntime()
     chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
       if (!message || typeof message !== 'object') return false
@@ -91,6 +123,21 @@ export default defineContentScript({
         })).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
           const typed = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
             ? error : { code: 'runtime_error', message: error instanceof Error ? error.message : 'WebEdit light-document operation failed' }
+          sendResponse({ ok: false, error: typed })
+        })
+        return true
+      }
+      if ((message as { type?: unknown }).type === 'office-spreadsheet/v1') {
+        const input = message as { action?: unknown; range?: unknown; sheetName?: unknown; query?: unknown; matchCase?: unknown; matchEntireCell?: unknown; searchBy?: unknown; offset?: unknown; limit?: unknown; resource?: unknown; operation?: unknown; payload?: unknown }
+        if (!['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'].includes(String(input.action))) {
+          sendResponse({ ok: false, error: { code: 'invalid_range', message: 'a valid spreadsheet action is required' } }); return false
+        }
+        void loadSpreadsheetRuntime().then(() => invokeSpreadsheetRuntime({
+          action: input.action, ...(input.range === undefined ? {} : { range: input.range }), ...(input.sheetName === undefined ? {} : { sheetName: input.sheetName }),
+          ...(input.query === undefined ? {} : { query: input.query }), ...(input.matchCase === undefined ? {} : { matchCase: input.matchCase }), ...(input.matchEntireCell === undefined ? {} : { matchEntireCell: input.matchEntireCell }), ...(input.searchBy === undefined ? {} : { searchBy: input.searchBy }), ...(input.offset === undefined ? {} : { offset: input.offset }), ...(input.limit === undefined ? {} : { limit: input.limit }),
+          ...(input.resource === undefined ? {} : { resource: input.resource }), ...(input.operation === undefined ? {} : { operation: input.operation }), ...(input.payload === undefined ? {} : { payload: input.payload }),
+        })).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
+          const typed = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? error : { code: 'runtime_error', message: error instanceof Error ? error.message : 'WebEdit spreadsheet operation failed' }
           sendResponse({ ok: false, error: typed })
         })
         return true

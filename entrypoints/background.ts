@@ -327,6 +327,29 @@ interface OfficeDocumentRequest {
   resource?: LightDocumentResourceIdentity
 }
 
+type OfficeSpreadsheetAction = 'context' | 'range' | 'search' | 'sheets' | 'capabilities' | 'inspect_write' | 'write'
+type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'insert_rows' | 'delete_rows' | 'insert_columns' | 'delete_columns' | 'row_height' | 'column_width' | 'sheet_add' | 'sheet_rename' | 'sheet_delete' | 'sheet_select' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'set_data_validation' | 'clear_data_validation' | 'add_hyperlink' | 'delete_hyperlinks' | 'add_comment' | 'delete_comments' | 'create_chart' | 'create_pivot_table' | 'insert_cell_image' | 'export_pdf' | 'export_range_image'
+interface OfficeSpreadsheetRequest {
+  type: 'connector_request'
+  requestId: string
+  runId: string
+  generation: string
+  browserTarget: BrowserTarget
+  tool: 'office_spreadsheet'
+  action: OfficeSpreadsheetAction
+  range?: string
+  sheetName?: string
+  query?: string
+  matchCase?: boolean
+  matchEntireCell?: boolean
+  searchBy?: 'value' | 'text' | 'formula'
+  offset?: number
+  limit?: number
+  resource?: OfficeResourceIdentity
+  operation?: OfficeSpreadsheetOperation
+  payload?: Record<string, unknown>
+}
+
 interface OfficeReadFailure {
   code: 'unsupported' | 'preview' | 'readonly' | 'invalid_range' | 'navigation' | 'iframe_replaced' | 'timeout' | 'cancelled' | 'fingerprint_mismatch' | 'readback_mismatch' | 'runtime_error'
   message: string
@@ -339,6 +362,28 @@ interface TeamDocParent {
   canRead: true
   canCreate: true
   fingerprint: string
+}
+
+type TeamKnowledgeItemKind = 'light_document' | 'spreadsheet'
+type TeamKnowledgeItemAction = 'inspect_parent' | 'create' | 'readback'
+
+interface TeamKnowledgeParent extends TeamDocParent { parentType: string }
+
+interface TeamKnowledgeItemRequest {
+  type: 'connector_request'
+  requestId: string
+  runId: string
+  generation: string
+  browserTarget: BrowserTarget
+  tool: 'team_knowledge_item'
+  action: TeamKnowledgeItemAction
+  parent?: TeamKnowledgeParent
+  kind?: TeamKnowledgeItemKind
+  name?: string
+  body?: string
+  catalogId?: string
+  idempotencyIdentity?: string
+  recovery?: { catalogId: string | null; stages: string[] }
 }
 
 interface TeamDocRequest {
@@ -475,6 +520,18 @@ function isOfficeDocumentRequest(message: NativeMessage): message is OfficeDocum
     && JSON.stringify(message.payload).length <= 100000 && isLightDocumentResourceIdentity(message.resource)
 }
 
+function isOfficeSpreadsheetRequest(message: NativeMessage): message is OfficeSpreadsheetRequest {
+  const candidate = message as NativeMessage & Partial<OfficeSpreadsheetRequest>
+  if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
+    && message.tool === 'office_spreadsheet' && isBrowserTarget(message.browserTarget)
+    && ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
+  if (candidate.action === 'context' || candidate.action === 'sheets' || candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined
+  if (candidate.action === 'range') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
+  if (candidate.action === 'capabilities') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
+  if (candidate.action === 'search') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128 && typeof candidate.query === 'string' && candidate.query.trim().length > 0 && candidate.query.length <= 500
+  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000
+}
+
 function isTeamDocParent(value: unknown): value is TeamDocParent {
   if (!value || typeof value !== 'object') return false
   const parent = value as Partial<TeamDocParent>
@@ -503,6 +560,25 @@ function isTeamDocRequest(message: NativeMessage): message is TeamDocRequest {
     && typeof message.idempotencyIdentity === 'string' && message.idempotencyIdentity.length > 0 && message.idempotencyIdentity.length <= 128
     && typeof message.name === 'string' && message.name.trim().length > 0 && message.name.length <= 120
     && typeof message.body === 'string' && message.body.trim().length > 0 && message.body.length <= 100_000
+}
+
+function isTeamKnowledgeParent(value: unknown): value is TeamKnowledgeParent {
+  return isTeamDocParent(value) && typeof (value as TeamKnowledgeParent).parentType === 'string' && (value as TeamKnowledgeParent).parentType.length > 0
+}
+
+function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnowledgeItemRequest {
+  const candidate = message as NativeMessage & Partial<TeamKnowledgeItemRequest>
+  if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
+    && typeof message.generation === 'string' && message.tool === 'team_knowledge_item' && isBrowserTarget(message.browserTarget)
+    && ['inspect_parent', 'create', 'readback'].includes(String(candidate.action)))) return false
+  if (candidate.action === 'inspect_parent') return candidate.parent === undefined && candidate.kind === undefined && candidate.name === undefined && candidate.body === undefined && candidate.catalogId === undefined
+  if (candidate.action === 'readback') return (candidate.kind === 'light_document' || candidate.kind === 'spreadsheet') && typeof candidate.catalogId === 'string' && /^\d+$/.test(candidate.catalogId)
+  const recovery = candidate.recovery
+  return isTeamKnowledgeParent(candidate.parent) && (candidate.kind === 'light_document' || candidate.kind === 'spreadsheet')
+    && typeof candidate.name === 'string' && candidate.name.trim().length > 0 && candidate.name.length <= 120
+    && typeof candidate.body === 'string' && candidate.body.length <= 100_000 && (candidate.kind === 'spreadsheet' || candidate.body.trim().length > 0)
+    && typeof candidate.idempotencyIdentity === 'string' && candidate.idempotencyIdentity.length > 0 && candidate.idempotencyIdentity.length <= 128
+    && (recovery === undefined || (typeof recovery === 'object' && recovery !== null && ((recovery.catalogId === null) || (typeof recovery.catalogId === 'string' && /^\d+$/.test(recovery.catalogId))) && Array.isArray(recovery.stages)))
 }
 
 const TEAM_DOC_STAGES: TeamDocStage[] = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
@@ -1017,6 +1093,37 @@ function respondToOfficeDocument(port: chrome.runtime.Port, request: OfficeDocum
     .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
 }
 
+async function readOfficeSpreadsheet(request: OfficeSpreadsheetRequest): Promise<Record<string, unknown>> {
+  const binding = boundBrowserTargets.get(request.runId)
+  if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) throw { code: 'navigation', message: 'The trusted Browser Target changed before the spreadsheet operation.' } satisfies OfficeReadFailure
+  const tab = await chrome.tabs.get(request.browserTarget.tabId)
+  if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) throw { code: 'navigation', message: 'The trusted Browser Target navigated before the spreadsheet operation.' } satisfies OfficeReadFailure
+  const frames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
+  const frame = frames.find((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+  if (frame === undefined) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
+  try {
+    const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, {
+      type: 'office-spreadsheet/v1', action: request.action,
+      ...(request.range === undefined ? {} : { range: request.range }), ...(request.sheetName === undefined ? {} : { sheetName: request.sheetName }), ...(request.query === undefined ? {} : { query: request.query }), ...(request.matchCase === undefined ? {} : { matchCase: request.matchCase }), ...(request.matchEntireCell === undefined ? {} : { matchEntireCell: request.matchEntireCell }), ...(request.searchBy === undefined ? {} : { searchBy: request.searchBy }), ...(request.offset === undefined ? {} : { offset: request.offset }), ...(request.limit === undefined ? {} : { limit: request.limit }), ...(request.resource === undefined ? {} : { resource: request.resource }), ...(request.operation === undefined ? {} : { operation: request.operation }), ...(request.payload === undefined ? {} : { payload: request.payload }),
+    }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+    if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while handling the spreadsheet.' }
+    const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
+    if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while handling the spreadsheet.' } satisfies OfficeReadFailure
+    return reply.result as Record<string, unknown>
+  } catch (error) { throw officeReadFailure(error) }
+}
+
+function respondToOfficeSpreadsheet(port: chrome.runtime.Port, request: OfficeSpreadsheetRequest): void {
+  const execute = async () => {
+    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
+    const result = request.action === 'write' && request.resource ? await queueResourceWrite(request.resource, () => readOfficeSpreadsheet(request)) : await readOfficeSpreadsheet(request)
+    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
+    return result
+  }
+  void queueNativeLifecycle(execute).then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
+    .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
+}
+
 async function queueResourceWrite<T>(resource: OfficeResourceIdentity, action: () => Promise<T>): Promise<T> {
   const key = `${resource.origin}|${resource.fingerprint}`
   const prior = resourceWriteQueues.get(key) ?? Promise.resolve()
@@ -1205,13 +1312,19 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
     for (let index = 0; index < fingerprintSource.length; index += 1) {
       hash ^= fingerprintSource.charCodeAt(index); hash = Math.imul(hash, 16777619)
     }
-    return { ok: true, parent: { parentId: resolvedCatalogId, bookId, parentName, canRead: true, canCreate: true, fingerprint: `team-doc-parent-v1-${(hash >>> 0).toString(16).padStart(8, '0')}` } }
+    const nodeType = [nodeRecord.nodeType, nodeRecord.fileType, nodeRecord.type, nodeRecord.format]
+      .find((value) => (typeof value === 'string' && value.trim().length > 0) || typeof value === 'number')
+    return { ok: true, parent: {
+      parentId: resolvedCatalogId, bookId, parentName, canRead: true, canCreate: true,
+      parentType: typeof nodeType === 'number' ? String(nodeType) : typeof nodeType === 'string' ? nodeType : 'catalog',
+      fingerprint: `team-doc-parent-v2-${(hash >>> 0).toString(16).padStart(8, '0')}`,
+    } }
   } catch {
     return { ok: false, error: 'team_doc_parent_inspection_failed' }
   }
 }
 
-async function createTeamDocInPage(input: { bookId: string; parentId: string; name: string }): Promise<unknown> {
+async function createTeamDocInPage(input: { bookId: string; parentId: string; name: string; kind?: TeamKnowledgeItemKind }): Promise<unknown> {
   if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com') {
     return { ok: false, failedAt: 'create', error: 'team_doc_wrong_origin' }
   }
@@ -1278,14 +1391,18 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     }
     const fileTypes = await parse(await fetch('/g-kmp/team-knowledge-main/teamKnowledge/getAllFileType?createFlag=true', { credentials: 'include' }))
     const fileTypeRecords = Array.isArray(fileTypes.payload?.data) ? fileTypes.payload.data : []
-    const lightDoc = fileTypeRecords.find((value) => {
+    const wantedKind = input.kind ?? 'light_document'
+    const selectedType = fileTypeRecords.find((value) => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return false
       const record = value as Record<string, unknown>
-      return /newword|lightdoc|轻文档/i.test([record.value, record.name, record.icon, record.format].filter((item) => typeof item === 'string').join(' '))
+      const descriptor = [record.value, record.name, record.icon, record.format].filter((item) => typeof item === 'string').join(' ')
+      return wantedKind === 'light_document'
+        ? /newword|lightdoc|轻文档/i.test(descriptor)
+        : /newexcel|excel|spreadsheet|表格|xlsx/i.test(descriptor)
     }) as Record<string, unknown> | undefined
-    const fileType = lightDoc?.type
+    const fileType = selectedType?.type
     if (!fileTypes.response.ok || fileTypes.payload?.errorCode !== '00000' || (typeof fileType !== 'number' && typeof fileType !== 'string')) {
-      return { ok: false, failedAt: 'create', error: 'team_doc_file_type_unavailable', diagnostic: diagnostic(fileTypes) }
+      return { ok: false, failedAt: wantedKind === 'spreadsheet' ? 'unsupported' : 'create', error: wantedKind === 'spreadsheet' ? 'team_knowledge_spreadsheet_unsupported' : 'team_doc_file_type_unavailable', diagnostic: diagnostic(fileTypes) }
     }
     const createReply = await parse(await fetch('https://apiprod.midea.com/g-kmp/team-knowledge-main/teamKnowledge/add', {
       method: 'POST', credentials: 'include',
@@ -1305,7 +1422,7 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     }
     const url = documentUrl(match, documentId, created.url)
     if (!url) return { ok: false, failedAt: 'rediscover', error: 'team_doc_document_url_invalid', documentId }
-    return { ok: true, documentId, url }
+    return { ok: true, documentId, catalogId: documentId, kind: wantedKind, url }
   } catch {
     return { ok: false, failedAt: 'create', error: 'team_doc_create_failed' }
   }
@@ -1405,7 +1522,7 @@ async function writeTeamDocInWebEdit(body: string): Promise<unknown> {
   }
 }
 
-async function assertTeamDocTarget(request: TeamDocRequest): Promise<void> {
+async function assertTeamDocTarget(request: { runId: string; browserTarget: BrowserTarget }): Promise<void> {
   const binding = boundBrowserTargets.get(request.runId)
   if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) {
     throw new Error('The trusted Browser Target changed before Team Doc execution.')
@@ -1508,11 +1625,134 @@ async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
   return { status: 'verified_write', documentId: created.documentId, stages, readbackMatches: true, observedBody: writeResult.observedBody }
 }
 
+function teamKnowledgeItemPartial(input: {
+  failedAt: 'inspect' | 'create' | 'rediscover' | 'write' | 'readback' | 'unsupported'
+  error: string
+  stages?: string[]
+  item?: { catalogId: string; kind: TeamKnowledgeItemKind; name: string; url: string; fingerprint: string }
+  diagnostic?: TeamDocPartialDelivery['diagnostic']
+}): object {
+  return {
+    status: 'partial_delivery', item: input.item ?? null, stages: input.stages ?? [], failedAt: input.failedAt, error: input.error,
+    ...(input.diagnostic ? { diagnostic: input.diagnostic } : {}),
+  }
+}
+
+function teamKnowledgeItemFingerprint(kind: TeamKnowledgeItemKind, catalogId: string, url: string): string {
+  let hash = 2166136261
+  const source = `${kind}|${catalogId}|${url}`
+  for (let index = 0; index < source.length; index += 1) { hash ^= source.charCodeAt(index); hash = Math.imul(hash, 16777619) }
+  return `team-knowledge-item-v1-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+async function teamKnowledgeItemFrame(tabId: number): Promise<chrome.webNavigation.GetAllFrameResultDetails | undefined> {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId }) ?? []
+    const frame = frames.find((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+    if (frame) return frame
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return undefined
+}
+
+async function readCreatedTeamKnowledgeItem(request: TeamKnowledgeItemRequest, item: { catalogId: string; kind: TeamKnowledgeItemKind; name: string; url: string }): Promise<Record<string, unknown>> {
+  const frame = await teamKnowledgeItemFrame(request.browserTarget.tabId)
+  if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
+  if (item.kind === 'spreadsheet') {
+    const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, { type: 'office-read-range/v1', range: 'A1' }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+    const result = reply?.result as { status?: unknown; resource?: unknown; range?: unknown } | undefined
+    if (reply?.ok !== true || result?.status !== 'ok' || !isOfficeResourceIdentity(result.resource)) throw new Error('team_knowledge_spreadsheet_identity_unavailable')
+    return { resource: result.resource, range: result.range }
+  }
+  const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, { type: 'office-document/v1', action: 'read', offset: 0, limit: 200 }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+  const result = reply?.result as { status?: unknown; resource?: unknown; document?: unknown } | undefined
+  if (reply?.ok !== true || result?.status !== 'ok' || !isLightDocumentResourceIdentity(result.resource) || !result.document || typeof result.document !== 'object') throw new Error('team_knowledge_document_readback_unavailable')
+  return { resource: result.resource, document: result.document }
+}
+
+async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): Promise<object> {
+  await assertTeamDocTarget(request)
+  const parentId = extractTeamDocParentId(request.browserTarget.url)
+  if (!parentId) return teamKnowledgeItemPartial({ failedAt: 'inspect', error: 'team_knowledge_parent_id_missing' })
+  const documentDetail = /\/teamKnowledge\/detail\/docOnline\//i.test(request.browserTarget.url)
+  const inspected = (await chrome.scripting.executeScript({
+    target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail],
+  }))[0]?.result as { ok?: unknown; parent?: unknown; error?: unknown; diagnostic?: unknown } | undefined
+  if (inspected?.ok !== true || !isTeamKnowledgeParent(inspected.parent)) {
+    return teamKnowledgeItemPartial({ failedAt: 'inspect', error: typeof inspected?.error === 'string' ? inspected.error : 'team_knowledge_parent_inspection_failed', diagnostic: inspected?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
+  }
+  const parent = inspected.parent
+  if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
+  if (request.action === 'readback') {
+    const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: request.catalogId! }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown } | undefined
+    if (recovered?.ok !== true || recovered.documentId !== request.catalogId || typeof recovered.url !== 'string') return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_rediscover_mismatch' })
+    let readback: Record<string, unknown>
+    try {
+      await chrome.tabs.update(request.browserTarget.tabId, { url: recovered.url }); await waitForTeamDocTab(request.browserTarget.tabId, recovered.url)
+      readback = await readCreatedTeamKnowledgeItem(request, { catalogId: request.catalogId!, kind: request.kind!, name: '', url: recovered.url })
+    } catch (error) { return teamKnowledgeItemPartial({ failedAt: 'readback', error: error instanceof Error ? error.message : 'team_knowledge_item_readback_failed' }) }
+    finally { try { await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url) } catch {} }
+    const item = { catalogId: request.catalogId!, kind: request.kind!, name: '', url: recovered.url, fingerprint: teamKnowledgeItemFingerprint(request.kind!, request.catalogId!, recovered.url) }
+    return { status: 'ok', item, readback }
+  }
+  if (!request.parent || parent.fingerprint !== request.parent.fingerprint || parent.parentId !== request.parent.parentId || parent.bookId !== request.parent.bookId || parent.parentType !== request.parent.parentType) {
+    return teamKnowledgeItemPartial({ failedAt: 'inspect', error: 'team_knowledge_parent_fingerprint_mismatch' })
+  }
+  const kind = request.kind
+  if (kind !== 'light_document' && kind !== 'spreadsheet') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
+  const priorStages = request.recovery?.stages ?? []
+  const stages = ['parent_inspected', ...priorStages.filter((stage) => stage !== 'parent_inspected')]
+  const recoveryCatalogId = request.recovery?.catalogId
+  const resolution = recoveryCatalogId
+    ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId }] })
+    : await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, name: request.name!, kind }] })
+  const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; catalogId?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
+  const catalogId = typeof created?.catalogId === 'string' ? created.catalogId : typeof created?.documentId === 'string' ? created.documentId : null
+  if (created?.ok !== true || !catalogId || !/^\d+$/.test(catalogId) || typeof created.url !== 'string') {
+    return teamKnowledgeItemPartial({ stages, failedAt: created?.failedAt === 'unsupported' ? 'unsupported' : created?.failedAt === 'rediscover' ? 'rediscover' : 'create', error: typeof created?.error === 'string' ? created.error : 'team_knowledge_create_failed', diagnostic: created?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
+  }
+  for (const stage of ['created', 'rediscovered']) if (!stages.includes(stage)) stages.push(stage)
+  const item = { catalogId, kind, name: request.name!, url: created.url, fingerprint: teamKnowledgeItemFingerprint(kind, catalogId, created.url) }
+  let readback: Record<string, unknown>
+  try {
+    await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
+    if (kind === 'light_document') {
+      const frame = await teamKnowledgeItemFrame(request.browserTarget.tabId)
+      if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
+      const write = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [frame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!] }))[0]?.result as { ok?: unknown; readbackMatches?: unknown; observedBody?: unknown; error?: unknown } | undefined
+      if (write?.ok !== true || write.readbackMatches !== true || typeof write.observedBody !== 'string') throw new Error(typeof write?.error === 'string' ? write.error : 'team_knowledge_document_readback_mismatch')
+      readback = { body: write.observedBody }
+      for (const stage of ['body_written', 'readback_verified']) if (!stages.includes(stage)) stages.push(stage)
+    } else {
+      readback = await readCreatedTeamKnowledgeItem(request, { catalogId, kind, name: request.name!, url: created.url })
+      if (!stages.includes('identity_readback_verified')) stages.push('identity_readback_verified')
+    }
+  } catch (error) {
+    return teamKnowledgeItemPartial({ item, stages, failedAt: kind === 'spreadsheet' && error instanceof Error && error.message === 'team_knowledge_spreadsheet_identity_unavailable' ? 'unsupported' : 'readback', error: error instanceof Error ? error.message : 'team_knowledge_item_readback_failed' })
+  } finally { try { await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url) } catch {} }
+  const expected = kind === 'light_document'
+    ? ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
+    : ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified']
+  stages.sort((left, right) => expected.indexOf(left) - expected.indexOf(right))
+  return { status: 'verified_write', item, stages, readback }
+}
+
 function respondToTeamDoc(port: chrome.runtime.Port, request: TeamDocRequest): void {
   void queueNativeLifecycle(async () => {
     if (nativePort !== port) throw new Error('Team Doc request belongs to a stale Native connection.')
     const result = await runTeamDocRequest(request)
     if (nativePort !== port) throw new Error('Team Doc request became stale before completion.')
+    return result
+  }).then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
+    .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
+}
+
+function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnowledgeItemRequest): void {
+  void queueNativeLifecycle(async () => {
+    if (nativePort !== port) throw new Error('Team Knowledge item request belongs to a stale Native connection.')
+    const result = await runTeamKnowledgeItemRequest(request)
+    if (nativePort !== port) throw new Error('Team Knowledge item request became stale before completion.')
     return result
   }).then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
     .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
@@ -1607,8 +1847,16 @@ function connectNativePort(): chrome.runtime.Port {
       respondToOfficeDocument(port, message)
       return
     }
+    if (isOfficeSpreadsheetRequest(message)) {
+      respondToOfficeSpreadsheet(port, message)
+      return
+    }
     if (isTeamDocRequest(message)) {
       respondToTeamDoc(port, message)
+      return
+    }
+    if (isTeamKnowledgeItemRequest(message)) {
+      respondToTeamKnowledgeItem(port, message)
       return
     }
     if (isKnowledgeQueryRequest(message)) {

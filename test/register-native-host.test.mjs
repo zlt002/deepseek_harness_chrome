@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -102,6 +102,33 @@ test('allows production and development extension ids together', async () => {
   try {
     const result = await runRegister(home, {
       DEEPSEEK_HARNESS_EXTENSION_ID: `${extensionId},${devExtensionId}`,
+    })
+    assert.equal(result.code, 0, result.stderr)
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    assert.deepEqual(manifest.allowed_origins, [
+      `chrome-extension://${extensionId}/`,
+      `chrome-extension://${devExtensionId}/`,
+    ])
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('merges a previously registered extension origin instead of replacing it', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
+  const manifestPath = join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')
+  try {
+    await mkdir(dirname(manifestPath), { recursive: true })
+    await writeFile(manifestPath, JSON.stringify({
+      name: 'com.deepseek.harness.chrome',
+      description: 'existing host',
+      path: '/existing/launcher',
+      type: 'stdio',
+      allowed_origins: [`chrome-extension://${extensionId}/`],
+    }))
+
+    const result = await runRegister(home, {
+      DEEPSEEK_HARNESS_EXTENSION_ID: devExtensionId,
     })
     assert.equal(result.code, 0, result.stderr)
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))

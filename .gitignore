@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 .DS_Store
 .output/
 .wxt/
@@ -16,6 +17,10 @@ release/accr-ui-windows-lite-x64/
 release/accr-ui-windows-lite-x64.zip
 release/windows-lite/harness-runtime-win32-x64/
 release/windows-lite/harness-runtime-win32-x64.staging/
+
+# Generated macOS production POC artifacts are reproducible release outputs.
+release/accr-ui-mac-production-poc/
+release/accr-ui-mac-production-poc.zip
 
 # Generated native-host manifests contain machine-specific absolute paths.
 native-host/com.deepseek.harness.chrome.json

@@ -1,4 +1,10 @@
 import { defineConfig } from 'wxt'
+import { execFile } from 'node:child_process'
+import { resolve, sep } from 'node:path'
+import { promisify } from 'node:util'
+
+const isDevCommand = !process.argv.some((argument) => ['build', 'zip', 'submit'].includes(argument))
+const execFileAsync = promisify(execFile)
 
 /**
  * The first browser surface is a sidepanel shell around the locally served
@@ -7,6 +13,43 @@ import { defineConfig } from 'wxt'
  */
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
+  publicDir: isDevCommand ? '.wxt-public' : 'public',
+  webExt: { disabled: true },
+  hooks: {
+    async 'build:done'(wxt) {
+      if (wxt.config.command !== 'serve') return
+      // WXT copies public assets serially. Copy the generated Harness tree in
+      // a fresh process after the extension shell and manifest are ready.
+      await execFileAsync(process.execPath, [
+        resolve(wxt.config.root, 'scripts/copy-dev-public.mjs'),
+        resolve(wxt.config.root, 'public'),
+        wxt.config.outDir,
+      ])
+    },
+    'vite:devServer:extendConfig'(config) {
+      const root = resolve(config.root ?? '.')
+      const watched = [
+        resolve(root, 'entrypoints'),
+        resolve(root, 'src'),
+        resolve(root, '.wxt-public'),
+        resolve(root, 'wxt.config.ts'),
+      ]
+      config.optimizeDeps = {
+        ...config.optimizeDeps,
+        noDiscovery: true,
+        include: ['react', 'react-dom', 'react-dom/client'],
+      }
+      config.server ??= {}
+      config.server.watch = {
+        followSymlinks: false,
+        ignored: (candidate) => {
+          const path = resolve(candidate)
+          if (path === root) return false
+          return !watched.some((allowed) => path === allowed || path.startsWith(`${allowed}${sep}`))
+        },
+      }
+    },
+  },
   dev: {
     server: {
       strictPort: true,

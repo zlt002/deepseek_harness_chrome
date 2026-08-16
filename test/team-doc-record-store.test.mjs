@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TeamDocRecordStore, resolveTeamDocStatePath } from '../native-server/src/team-doc-record-store.mjs'
@@ -31,4 +31,24 @@ test('retains confirmed stages and service identity when a partial record advanc
   assert.deepEqual(advanced.stages, ['parent_inspected', 'created', 'rediscovered', 'body_written'])
   assert.equal(advanced.documentId, '9007199254740993')
   assert.equal(advanced.verified, false)
+})
+
+test('strips document bodies from nested recovery results', async () => {
+  const path = join(await mkdtemp(join(tmpdir(), 'dsh-team-doc-body-free-')), 'records.json')
+  const store = new TeamDocRecordStore({ recordPath: path })
+  await store.save({
+    idempotencyIdentity: 'doc-body-free', targetFingerprint: 'target', contentHash: 'sha256:body',
+    stages: ['readback_verified'], verified: true,
+    result: { status: 'verified_write', observedBody: '# secret', readback: { body: '# secret', title: 'Safe title' } },
+  })
+  const raw = await readFile(path, 'utf8')
+  assert.doesNotMatch(raw, /# secret|observedBody|"body"/)
+  assert.equal((await store.load('doc-body-free')).result.readback.title, 'Safe title')
+})
+
+test('serializes concurrent records without losing a different identity', async () => {
+  const path = join(await mkdtemp(join(tmpdir(), 'dsh-team-doc-concurrent-')), 'records.json')
+  const store = new TeamDocRecordStore({ recordPath: path })
+  await Promise.all(['one', 'two', 'three'].map((identity) => store.save({ idempotencyIdentity: identity, targetFingerprint: 'target', contentHash: `hash-${identity}`, stages: [] })))
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(path, 'utf8'))).sort(), ['one', 'three', 'two'])
 })
