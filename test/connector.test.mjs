@@ -175,6 +175,8 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_rows_hidden'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_columns_hidden'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('auto_fit'))
+    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('fill_range'))
+    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('batch_write'))
     const codeSearch = tools.tools.find((tool) => tool.name === 'code_search')
     assert.deepEqual(codeSearch?.inputSchema, {
       type: 'object', additionalProperties: false, required: ['question'],

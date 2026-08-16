@@ -38,6 +38,7 @@ function fakeApp() {
     setValue2: (next) => { cells.splice(0, cells.length, ...next.map((row) => [...row])) },
     setFormula: (next) => { formulas.splice(0, formulas.length, ...next.map((row) => [...row])) },
     clear: () => { cells.forEach((row, rowIndex) => row.forEach((_cell, columnIndex) => { cells[rowIndex][columnIndex] = null; formulas[rowIndex][columnIndex] = '' })) },
+    fillDown: (callback) => { for (let row = 1; row < cells.length; row += 1) cells[row] = [...cells[0]]; callback?.({ isOk: true }) }, fillUp: (callback) => { for (let row = 0; row < cells.length - 1; row += 1) cells[row] = [...cells.at(-1)]; callback?.({ isOk: true }) }, fillRight: (callback) => { cells.forEach((row) => { for (let column = 1; column < row.length; column += 1) row[column] = row[0] }); callback?.({ isOk: true }) }, fillLeft: (callback) => { cells.forEach((row) => { for (let column = 0; column < row.length - 1; column += 1) row[column] = row.at(-1) }); callback?.({ isOk: true }) },
     Font: { Bold: false, Italic: false, Underline: false, Size: 11, Name: 'Arial', Color: '#000000' }, Interior: { Color: '#FFFFFF' }, MergeCells: false, NumberFormat: 'General', HorizontalAlignment: 'general', WrapText: false, EntireRow: { RowHeight: 15 }, EntireColumn: { ColumnWidth: 8 },
     merge: () => { range.MergeCells = true }, unmerge: () => { range.MergeCells = false },
     sort: (key) => { const column = Number(key) - 1; cells.sort((left, right) => Number(left[column]) - Number(right[column])) },
@@ -516,6 +517,26 @@ test('dimensions fail closed for wrong axes, oversized targets, missing APIs, st
   assert.equal((await missingRun({ action: 'write', resource: missingResource, operation: 'auto_fit', payload: { range: 'A:B', axis: 'column' } })).error.code, 'unsupported')
   const forged = fakeApp(); const forgedRun = await runtimeWith(forged); const forgedResource = (await forgedRun({ action: 'context' })).result.resource; const getRange = forged._sheet.getRange; forged._sheet.getRange = (address) => { const result = getRange(address); if (address === '1:2') Object.defineProperty(result.Rows, 'Hidden', { configurable: true, get: () => false, set: () => {} }); return result }
   assert.equal((await forgedRun({ action: 'write', resource: forgedResource, operation: 'set_rows_hidden', payload: { range: '1:2', hidden: true } })).error.code, 'readback_mismatch')
+})
+
+test('directional fill and atomic rectangular batch write use exact formula-free readback', async () => {
+  const fillApp = fakeApp(); const fill = await runtimeWith(fillApp); const fillResource = (await fill({ action: 'context' })).result.resource
+  const filled = await fill({ action: 'write', resource: fillResource, operation: 'fill_range', payload: { range: 'A1:B2', direction: 'down' } }); assert.equal(JSON.stringify(filled.result.observed.values), JSON.stringify([[3, 2], [3, 2]])); assert.equal(JSON.stringify(filled.result.observed.formulas), JSON.stringify([['', ''], ['', '']]))
+  const batchApp = fakeApp(); const batch = await runtimeWith(batchApp); const batchResource = (await batch({ action: 'context' })).result.resource
+  const written = await batch({ action: 'write', resource: batchResource, operation: 'batch_write', payload: { cells: [{ cell: 'A1', value: 'title' }, { cell: 'B1', value: 2 }, { cell: 'A2', value: true }, { cell: 'B2', value: null }] } }); assert.equal(JSON.stringify(written.result.observed.values), JSON.stringify([['title', 2], [true, null]]))
+})
+
+test('fill and batch writes fail closed for formulas, noops, missing APIs, stale snapshots, and ambiguous batches', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource; app._range.getFormula = () => [['=A1', ''], ['', '']]
+  assert.equal((await run({ action: 'write', resource, operation: 'fill_range', payload: { range: 'A1:B2', direction: 'down' } })).error.code, 'unsupported')
+  const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const staleResource = (await stale({ action: 'context' })).result.resource; const payload = { cells: [{ cell: 'A1', value: 1 }, { cell: 'B1', value: 2 }, { cell: 'A2', value: 3 }, { cell: 'B2', value: 4 }] }; const inspected = await stale.raw({ action: 'inspect_write', operation: 'batch_write', payload }); staleApp._range.setValue2([[7, 8], [9, 10]])
+  assert.equal((await stale.raw({ action: 'write', resource: staleResource, operation: 'batch_write', payload, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
+  const driftApp = fakeApp(); const drift = await runtimeWith(driftApp); const driftResource = (await drift({ action: 'context' })).result.resource; const setValues = driftApp._range.setValue2; driftApp._range.setValue2 = (values) => { setValues(values); driftApp._range.NumberFormat = '0.00' }
+  assert.equal((await drift({ action: 'write', resource: driftResource, operation: 'batch_write', payload })).error.code, 'readback_mismatch')
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'batch_write', payload: { cells: [{ cell: 'A1', value: 1 }, { cell: 'B2', value: 2 }] } })).error.code, 'invalid_range')
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'batch_write', payload: { cells: [{ cell: 'XFE1', value: 1 }] } })).error.code, 'invalid_range')
+  const missingApp = fakeApp(); delete missingApp._range.setValue2; delete missingApp._range.setValue; Object.preventExtensions(missingApp._range); const missing = await runtimeWith(missingApp); const missingResource = (await missing({ action: 'context' })).result.resource
+  assert.equal((await missing({ action: 'write', resource: missingResource, operation: 'fill_range', payload: { range: 'A1:B2', direction: 'down' } })).error.code, 'unsupported')
 })
 
 test('data validation fails closed for stale state, missing API, wrong property readback, changed range state, and oversized feature reads', async () => {

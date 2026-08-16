@@ -216,7 +216,27 @@
     const match = typeof address === 'string' && address.match(/^([A-Z]{1,3})(\d+)(?::([A-Z]{1,3})(\d+))?$/i)
     if (!match) return null
     const rowFrom = Number(match[2]); const colFrom = columnNumber(match[1]); const rowTo = Number(match[4] ?? match[2]); const colTo = columnNumber(match[3] ?? match[1])
-    return rowFrom > 0 && rowTo >= rowFrom && colTo >= colFrom ? { rowFrom, rowTo, colFrom, colTo } : null
+    return rowFrom > 0 && rowTo >= rowFrom && rowTo <= 1048576 && colFrom > 0 && colTo >= colFrom && colTo <= 16384 ? { rowFrom, rowTo, colFrom, colTo } : null
+  }
+  function requestedBatchWrite(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['sheetName', 'cells'].includes(key)) || !Array.isArray(payload.cells) || payload.cells.length < 1 || payload.cells.length > 500) return null
+    const entries = []; const seen = new Set()
+    for (const item of payload.cells) { const parsed = parseAddress(item?.cell); if (!item || typeof item !== 'object' || Array.isArray(item) || !Object.keys(item).every((key) => ['cell', 'value'].includes(key)) || !parsed || parsed.rowFrom !== parsed.rowTo || parsed.colFrom !== parsed.colTo || seen.has(String(item.cell).toUpperCase()) || !(typeof item.value === 'string' || typeof item.value === 'number' || typeof item.value === 'boolean' || item.value === null)) return null; seen.add(String(item.cell).toUpperCase()); entries.push({ cell: String(item.cell).toUpperCase(), value: item.value, ...parsed }) }
+    const rowFrom = Math.min(...entries.map((entry) => entry.rowFrom)); const rowTo = Math.max(...entries.map((entry) => entry.rowTo)); const colFrom = Math.min(...entries.map((entry) => entry.colFrom)); const colTo = Math.max(...entries.map((entry) => entry.colTo)); const count = (rowTo - rowFrom + 1) * (colTo - colFrom + 1)
+    if (count !== entries.length || count > 500) return null
+    const values = Array.from({ length: rowTo - rowFrom + 1 }, () => Array(colTo - colFrom + 1).fill(null)); for (const entry of entries) values[entry.rowFrom - rowFrom][entry.colFrom - colFrom] = entry.value
+    return { range: addressFor({ rowFrom, rowTo, colFrom, colTo }), cells: entries.map(({ cell, value }) => ({ cell, value })), values }
+  }
+  function directionalFillExpected(values, direction) {
+    if (!Array.isArray(values) || values.length === 0 || !values.every((row) => Array.isArray(row) && row.length === values[0].length) || !['down', 'up', 'left', 'right'].includes(direction)) return null
+    const expected = values.map((row) => row.slice()); const height = expected.length; const width = expected[0].length
+    if ((direction === 'down' || direction === 'up') && height < 2) return null
+    if ((direction === 'left' || direction === 'right') && width < 2) return null
+    if (direction === 'down') for (let row = 1; row < height; row += 1) expected[row] = expected[0].slice()
+    if (direction === 'up') for (let row = 0; row < height - 1; row += 1) expected[row] = expected[height - 1].slice()
+    if (direction === 'right') for (const row of expected) for (let column = 1; column < width; column += 1) row[column] = row[0]
+    if (direction === 'left') for (const row of expected) for (let column = 0; column < width - 1; column += 1) row[column] = row[width - 1]
+    return same(expected, values) ? null : expected
   }
   function matrixMatchesAddress(value, address) {
     const parsed = parseAddress(address)
@@ -455,7 +475,7 @@
     // current WebEdit frame can perform an auditable Harness Verified Write.
     const accruiMigrationMatrix = {
       cellInsertDeleteHidden: { supported: false, rowColumnHidden: true, operations: ['set_rows_hidden', 'set_columns_hidden'], requiresInspectableTarget: true, reason: 'cell insertion/deletion remains unavailable; whole-row/column visibility uses per-item readback' },
-      fillReplaceTextToColumnsRemoveDuplicates: { supported: false, replaceRangeText: typeof range?.Replace === 'function', textToColumns: !!(range && typeof range.TextToColumns === 'function' && parseAddress(address)?.colFrom === parseAddress(address)?.colTo), removeDuplicates: typeof range?.RemoveDuplicates === 'function', requiresInspectableTarget: true, reason: 'fill remains unavailable; enabled text operations require an inspected readable target' },
+      fillReplaceTextToColumnsRemoveDuplicates: { supported: false, directionalFill: true, fillStrategy: 'atomic_set_values_formula_free', autoFill: false, batchWrite: true, replaceRangeText: typeof range?.Replace === 'function', textToColumns: !!(range && typeof range.TextToColumns === 'function' && parseAddress(address)?.colFrom === parseAddress(address)?.colTo), removeDuplicates: typeof range?.RemoveDuplicates === 'function', requiresInspectableTarget: true, reason: 'directional fill and complete-rectangle batch writes require exact formula-free state; WPS Fill/AutoFill remain unavailable because their format/formula side effects cannot be fully enumerated' },
       autoFit: { supported: true, operation: 'auto_fit', requiresInspectableTarget: true, reason: 'whole-row/column AutoFit requires per-item size and hidden-state readback' },
       conditionalFormatting: { supported: false, reason: unavailable },
       copyPasteMove: { supported: false, moveRange: typeof range?.Cut === 'function', requiresInspectableTarget: true, reason: 'copy and paste remain unavailable; move_range requires inspected source and destination state' },
@@ -585,6 +605,13 @@
       const precondition = { version: 3, sheets: sheets.sheets, ...(names ? { definedNames: names.names } : {}), ...(sourceContent ? { sourceContent } : {}) }
       return JSON.stringify(precondition).length <= 96_000 ? { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } } : fail('unsupported', 'WebEdit workbook precondition exceeds its safe bound')
     }
+    if (operation === 'batch_write') {
+      const batch = requestedBatchWrite(payload); const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      if (!batch) return fail('invalid_range', 'batch_write requires a non-overlapping complete rectangle of 1 to 500 scalar cells')
+      const range = await rangeFor(resolved.sheet, batch.range); const precondition = await writePrecondition(range, batch.range)
+      if (!precondition || precondition.state.formulas.some((row) => row.some((formula) => !blankCell(formula)))) return fail('unsupported', 'batch_write requires a complete formula-free target snapshot for atomic exact readback')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
+    }
     const address = payload.range
     if (typeof address !== 'string' || !address || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
     const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
@@ -662,7 +689,7 @@
       return null
     }
     if (!approved || approved.version !== 1 || typeof approved.range !== 'string' || !approved.state || typeof approved.state !== 'object' || Array.isArray(approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet write is missing its inspected precondition')
-    const address = request.payload?.range
+    const address = request.operation === 'batch_write' ? requestedBatchWrite(request.payload ?? {})?.range : request.payload?.range
     if (approved.range !== address) return fail('fingerprint_mismatch', 'The spreadsheet write range differs from its inspected precondition')
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
     const featureWrite = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats'].includes(request.operation); const hyperlinkWrite = ['add_hyperlink', 'delete_hyperlinks'].includes(request.operation); const conditionalFormatWrite = ['add_conditional_format', 'clear_conditional_formats'].includes(request.operation)
@@ -848,10 +875,27 @@
     return fail('unsupported', `WebEdit ${operation} is intentionally unavailable until an operation-specific readback contract is confirmed`)
   }
   async function writeRange(resolved, request) {
-    const payload = request.payload ?? {}; const address = payload.range
+    const payload = request.payload ?? {}; const batch = request.operation === 'batch_write' ? requestedBatchWrite(payload) : null; const address = batch?.range ?? payload.range
     if (typeof address !== 'string' || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
     const advanced = await advancedWrite(resolved, request, range, address); if (advanced) return advanced
+    if (request.operation === 'batch_write') {
+      if (!batch || !await setValues(range, batch.values)) return fail('unsupported', 'WebEdit does not expose an atomic rectangular value write API')
+      const after = await rangeSnapshot(resolved.sheet, batch.range)
+      const state = await writePrecondition(range, batch.range)
+      if (after.error || !state || !same(after.snapshot.values, batch.values) || !blankMatrix(after.snapshot.formulas) || !same({ ...state.state, values: request.precondition?.state?.values, formulas: request.precondition?.state?.formulas }, request.precondition?.state)) return fail('readback_mismatch', 'batch_write readback differs from every requested cell, formula state, or non-value target state')
+      return { requested: { range: batch.range, cells: batch.cells }, observed: { range: batch.range, values: after.snapshot.values, formulas: after.snapshot.formulas, state: state.state, verified: true } }
+    }
+    if (request.operation === 'fill_range') {
+      const before = await rangeSnapshot(resolved.sheet, address); const direction = payload.direction; const expected = before.error ? null : directionalFillExpected(before.snapshot.values, direction)
+      if (before.error) return before.error
+      if (!expected || before.snapshot.formulas.some((row) => row.some((formula) => !blankCell(formula)))) return fail('unsupported', 'fill_range supports only a changing, formula-free rectangular value range with deterministic directional output')
+      if (!await setValues(range, expected)) return fail('unsupported', 'WebEdit does not expose an atomic rectangular value write API for deterministic directional fill')
+      const after = await rangeSnapshot(resolved.sheet, address); if (after.error) return after.error
+      const state = await writePrecondition(range, address)
+      if (!state || !same(after.snapshot.values, expected) || !blankMatrix(after.snapshot.formulas) || !same({ ...state.state, values: request.precondition?.state?.values, formulas: request.precondition?.state?.formulas }, request.precondition?.state)) return fail('readback_mismatch', 'deterministic directional fill readback differs from expected values, formula state, or non-value target state')
+      return { requested: { range: address, direction, strategy: 'atomic_set_values' }, observed: { range: address, values: after.snapshot.values, formulas: after.snapshot.formulas, state: state.state, verified: true } }
+    }
     if (request.operation === 'replace_range_text') {
       const what = payload.what; const replacement = payload.replacement ?? ''
       if (typeof what !== 'string' || !what || what.length > 1000 || typeof replacement !== 'string' || replacement.length > 4000 || typeof range.Replace !== 'function') return fail('unsupported', 'WebEdit does not expose a bounded Range.Replace contract')
