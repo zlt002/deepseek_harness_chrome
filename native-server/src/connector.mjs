@@ -263,7 +263,7 @@ const officeSpreadsheetTool = {
   inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
     action: { enum: ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
     challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
-    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters'] }, payload: { type: 'object', additionalProperties: true },
+    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'] }, payload: { type: 'object', additionalProperties: true },
   } },
 }
 
@@ -563,11 +563,14 @@ function verifiedLightDocumentWriteMatches(result, request) {
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
 }
-const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters']
+const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range']
+function validSpreadsheetMatrix(value) { return Array.isArray(value) && value.every((row) => Array.isArray(row)) }
+function spreadsheetMatrixMatchesAddress(value, address) { const parsed = parseSpreadsheetAddress(address); const rows = parsed ? parsed.rowTo - parsed.rowFrom + 1 : 0; const columns = parsed ? parsed.colTo - parsed.colFrom + 1 : 0; return rows > 0 && columns > 0 && validSpreadsheetMatrix(value) && value.length === rows && value.every((row) => row.length === columns) }
 function validSpreadsheetPrecondition(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 2 && Array.isArray(value.targets) && value.targets.length >= 1 && value.targets.length <= 2) return value.targets.every((target) => validSpreadsheetPrecondition({ version: 1, range: target?.range, state: target?.state })) && JSON.stringify(value).length <= 100_000
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !value.state || typeof value.state !== 'object' || Array.isArray(value.state)) return false
   const state = value.state
-  if (!['values', 'formulas', 'merged', 'filter', 'rowHeight', 'columnWidth', 'format'].every((key) => Object.hasOwn(state, key)) || !Array.isArray(state.values) || !Array.isArray(state.formulas)) return false
+  if (!['values', 'formulas', 'merged', 'filter', 'rowHeight', 'columnWidth', 'format'].every((key) => Object.hasOwn(state, key)) || !spreadsheetMatrixMatchesAddress(state.values, value.range) || !spreadsheetMatrixMatchesAddress(state.formulas, value.range)) return false
   if (!(state.merged === null || typeof state.merged === 'boolean') || !(state.rowHeight === null || typeof state.rowHeight === 'number') || !(state.columnWidth === null || typeof state.columnWidth === 'number')) return false
   if (!(state.filter === null || typeof state.filter === 'object' && !Array.isArray(state.filter) && typeof state.filter.operator === 'string' && state.filter.operator.length <= 64)) return false
   if (!state.format || typeof state.format !== 'object' || Array.isArray(state.format)) return false
@@ -600,7 +603,75 @@ function observedFormatMatches(observed, payload) {
     && (payload.alignment === undefined || jsonMatches(observed.alignment, payload.alignment))
     && (payload.wrap === undefined || jsonMatches(observed.wrap, payload.wrap))
 }
-function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedResource) {
+function spreadsheetColumnNumber(name) { return name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0) }
+function spreadsheetColumnName(value) { let output = ''; for (let current = value; current > 0; current = Math.floor((current - 1) / 26)) output = String.fromCharCode(65 + ((current - 1) % 26)) + output; return output }
+function parseSpreadsheetAddress(address) {
+  const match = typeof address === 'string' && address.match(/^([A-Z]{1,3})(\d+)(?::([A-Z]{1,3})(\d+))?$/i)
+  if (!match) return null
+  const rowFrom = Number(match[2]); const colFrom = spreadsheetColumnNumber(match[1]); const rowTo = Number(match[4] ?? match[2]); const colTo = spreadsheetColumnNumber(match[3] ?? match[1])
+  return rowFrom > 0 && rowTo >= rowFrom && colTo >= colFrom ? { rowFrom, rowTo, colFrom, colTo } : null
+}
+function spreadsheetAddressFor(parsed) { return `${spreadsheetColumnName(parsed.colFrom)}${parsed.rowFrom}:${spreadsheetColumnName(parsed.colTo)}${parsed.rowTo}` }
+function spreadsheetRangesOverlap(left, right) { return left.rowFrom <= right.rowTo && left.rowTo >= right.rowFrom && left.colFrom <= right.colTo && left.colTo >= right.colFrom }
+function spreadsheetCanonicalTarget(address, expected) { const parsed = parseSpreadsheetAddress(address); return !!parsed && address === address.toUpperCase() && parsed.rowFrom === expected.rowFrom && parsed.rowTo === expected.rowTo && parsed.colFrom === expected.colFrom && parsed.colTo === expected.colTo }
+function spreadsheetBlank(value) { return value === null || value === undefined || value === '' }
+function spreadsheetBlankMatrix(value) { return Array.isArray(value) && value.every((row) => Array.isArray(row) && row.every(spreadsheetBlank)) }
+function spreadsheetSameShape(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((row, index) => Array.isArray(row) && Array.isArray(right[index]) && row.length === right[index].length) }
+const SPREADSHEET_MOVE_DEFAULT_FORMATS = {
+  bold: [false, 0], italic: [false, 0], underline: [false, 0, 'none'], size: [10, 11, 12],
+  name: ['Arial', 'Calibri', '宋体', '等线'], color: ['#000000', '#FF000000', 0, -16777216, 'rgb(0,0,0)'],
+  fill: ['#FFFFFF', '#FFFFFFFF', 16777215, -1, 'rgb(255,255,255)'], numberFormat: ['General', '通用格式', '常规'],
+  alignment: ['general', 'General', 0, -4105], wrap: [false, 0],
+}
+function spreadsheetSplitDelimited(value, delimiter, consecutive) {
+  if (typeof value !== 'string') return [value]
+  const output = []; let current = ''; let quoted = false
+  for (let index = 0; index < value.length; index += 1) { const character = value[index]; if (character === '"') { if (quoted && value[index + 1] === '"') { current += '"'; index += 1 } else quoted = !quoted; continue }; if (!quoted && character === delimiter) { output.push(current); current = ''; if (consecutive) while (value[index + 1] === delimiter) index += 1; continue }; current += character }
+  output.push(current); return output
+}
+function spreadsheetHasUnclosedQuote(value) { let quoted = false; for (let index = 0; index < String(value).length; index += 1) { if (value[index] !== '"') continue; if (quoted && value[index + 1] === '"') { index += 1; continue }; quoted = !quoted }; return quoted }
+function spreadsheetTypeAmbiguous(value) { return typeof value === 'string' && /^(?:[+-]?\d+(?:\.\d+)?|\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4})$/.test(value.trim()) }
+function spreadsheetReplacement(value, what, replacement, whole, matchCase) {
+  if (typeof value !== 'string') return { value, count: 0 }
+  if (whole) { const matched = matchCase ? value === what : value.toLocaleLowerCase() === what.toLocaleLowerCase(); return { value: matched ? replacement : value, count: matched ? 1 : 0 } }
+  const expression = new RegExp(what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), matchCase ? 'g' : 'gi'); let count = 0
+  return { value: value.replace(expression, () => { count += 1; return replacement }), count }
+}
+function spreadsheetDuplicateKey(value) { return spreadsheetBlank(value) ? 'blank:' : typeof value === 'string' ? `string:${value.toLocaleLowerCase()}` : `${typeof value}:${String(value)}` }
+function spreadsheetDefaultMoveState(state) { return state?.merged === false && state?.format && typeof state.format === 'object' && !Array.isArray(state.format) && Object.entries(SPREADSHEET_MOVE_DEFAULT_FORMATS).every(([key, allowed]) => Object.hasOwn(state.format, key) && allowed.some((value) => jsonMatches(value, state.format[key]))) }
+function spreadsheetP0Plan(operation, payload, precondition) {
+  if (!precondition || precondition.version !== 2 || !Array.isArray(precondition.targets)) return null
+  const source = parseSpreadsheetAddress(payload?.range); if (!source || !precondition.targets[0] || precondition.targets[0].range !== payload.range) return null
+  if (operation === 'replace_range_text' || operation === 'remove_duplicates') return precondition.targets.length === 1 ? { source, sourceState: precondition.targets[0].state, targets: [payload.range] } : null
+  if (operation === 'text_to_columns') {
+    const delimiter = ({ comma: ',', tab: '\t', semicolon: ';', space: ' ', other: payload.otherDelimiter })[payload.delimiter ?? 'comma']
+    const sourceState = precondition.targets[0].state
+    if (source.colFrom !== source.colTo || typeof delimiter !== 'string' || delimiter.length !== 1 || !Array.isArray(sourceState.values) || !Array.isArray(sourceState.formulas) || sourceState.values.some((row) => !Array.isArray(row) || row.length !== 1) || sourceState.formulas.some((row) => !Array.isArray(row) || row.length !== 1 || !spreadsheetBlank(row[0])) || sourceState.values.some((row) => spreadsheetHasUnclosedQuote(row[0]) || spreadsheetSplitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true).some(spreadsheetTypeAmbiguous))) return null
+    const split = sourceState.values.map((row) => spreadsheetSplitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true)); const width = split.reduce((maximum, row) => Math.max(maximum, row.length), 1)
+    if (width > 50 || split.length * width > 20_000) return null
+    const output = spreadsheetAddressFor({ ...source, colTo: source.colFrom + width - 1 }); const outputState = precondition.targets[1]?.state
+    if (precondition.targets.length !== 2 || precondition.targets[1]?.range !== output || !validSpreadsheetMatrix(outputState?.values) || !validSpreadsheetMatrix(outputState?.formulas) || outputState.values.length !== sourceState.values.length) return null
+    const outputMatchesSource = outputState.values.every((row, index) => row.length === width && outputState.formulas[index]?.length === width && row[0] === sourceState.values[index][0] && spreadsheetBlank(outputState.formulas[index][0]))
+    const outputIsSafe = payload.overwrite === true || outputState.values.every((row, index) => row.slice(1).every(spreadsheetBlank) && outputState.formulas[index].slice(1).every(spreadsheetBlank))
+    if (!outputMatchesSource || !outputIsSafe) return null
+    return { source, sourceState, delimiter, split, width, output, targets: [payload.range, output] }
+  }
+  if (operation === 'move_range') {
+    const requested = parseSpreadsheetAddress(payload.destination); if (!requested) return null
+    const rows = source.rowTo - source.rowFrom + 1; const columns = source.colTo - source.colFrom + 1
+    if (!((requested.rowTo === requested.rowFrom && requested.colTo === requested.colFrom) || (requested.rowTo - requested.rowFrom + 1 === rows && requested.colTo - requested.colFrom + 1 === columns))) return null
+    const outputRange = { rowFrom: requested.rowFrom, colFrom: requested.colFrom, rowTo: requested.rowFrom + rows - 1, colTo: requested.colFrom + columns - 1 }
+    const output = spreadsheetAddressFor(outputRange)
+    const sourceState = precondition.targets[0].state; const destinationState = precondition.targets[1]?.state
+    if (precondition.targets.length !== 2 || !spreadsheetCanonicalTarget(precondition.targets[0]?.range, source) || !spreadsheetCanonicalTarget(precondition.targets[1]?.range, outputRange) || precondition.targets[0].range === precondition.targets[1].range || spreadsheetRangesOverlap(source, outputRange) || !spreadsheetDefaultMoveState(sourceState) || !spreadsheetDefaultMoveState(destinationState) || (payload.overwrite !== true && (!spreadsheetBlankMatrix(destinationState.values) || !spreadsheetBlankMatrix(destinationState.formulas)))) return null
+    return { source, sourceState, destinationState, output, targets: [payload.range, output] }
+  }
+  return null
+}
+function validSpreadsheetOperationPrecondition(operation, payload, precondition) {
+  return !['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation) || spreadsheetP0Plan(operation, payload, precondition) !== null
+}
+function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedResource, precondition) {
   if (!validOfficeSpreadsheetWriteResult(result) || result.operation !== operation || !sameOfficeResource(result.resource, approvedResource)) return false
   if (operation === 'set_values') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.values, payload.values) && jsonMatches(result.observed.values, payload.values)
   if (operation === 'set_formula') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.formulas, payload.formulas) && jsonMatches(result.observed.formulas, payload.formulas)
@@ -612,6 +683,31 @@ function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedRes
   if (operation === 'sort') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.sorts, payload.sorts) && result.requested.hasHeader === (payload.hasHeader !== false) && Array.isArray(result.observed.values)
   if (operation === 'set_auto_filter') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.enabled === payload.enabled && result.observed.enabled === payload.enabled
   if (operation === 'clear_filters') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.after?.operator === 'none'
+  if (operation === 'replace_range_text') {
+    const plan = spreadsheetP0Plan(operation, payload, precondition); const what = payload.what; const replacement = payload.replacement ?? ''
+    if (!plan || typeof what !== 'string' || !what || typeof replacement !== 'string') return false
+    let count = 0; const expectedValues = plan.sourceState.values.map((row) => row.map((value) => { const next = spreadsheetReplacement(value, what, replacement, payload.matchEntireCell === true, payload.matchCase === true); count += next.count; return next.value }))
+    const expectedFormulas = plan.sourceState.formulas.map((row) => row.map((formula) => typeof formula === 'string' && formula.startsWith('=') ? spreadsheetReplacement(formula, what, replacement, payload.matchEntireCell === true, payload.matchCase === true).value : formula))
+    const formulaChanged = !jsonMatches(expectedFormulas, plan.sourceState.formulas)
+    return hasVerifiedSpreadsheetRange(result, payload) && result.requested.what === what && result.requested.replacement === replacement && result.requested.matchEntireCell === (payload.matchEntireCell === true) && result.requested.matchCase === (payload.matchCase === true) && result.requested.allowFormulaChanges === (payload.allowFormulaChanges === true) && (!formulaChanged || payload.allowFormulaChanges === true) && jsonMatches(result.observed.values, expectedValues) && jsonMatches(result.observed.formulas, expectedFormulas) && result.observed.replacementCount === count
+  }
+  if (operation === 'text_to_columns') {
+    const plan = spreadsheetP0Plan(operation, payload, precondition); if (!plan) return false
+    const expectedValues = plan.split.map((row) => [...row, ...Array(plan.width - row.length).fill(null)])
+    return result.requested.range === payload.range && result.requested.outputRange === plan.output && result.requested.delimiter === (payload.delimiter ?? 'comma') && result.requested.consecutiveDelimiter === (payload.consecutiveDelimiter === true) && result.observed.range === payload.range && result.observed.outputRange === plan.output && jsonMatches(result.observed.values, expectedValues) && spreadsheetSameShape(result.observed.formulas, expectedValues) && spreadsheetBlankMatrix(result.observed.formulas) && result.observed.verified === true
+  }
+  if (operation === 'remove_duplicates') {
+    const plan = spreadsheetP0Plan(operation, payload, precondition); const columns = payload.columns; const hasHeader = payload.hasHeader !== false
+    if (!plan || !Array.isArray(columns) || columns.length === 0 || columns.some((column) => !Number.isInteger(column) || column < 1 || column > plan.sourceState.values[0]?.length) || new Set(columns).size !== columns.length) return false
+    const expectedValues = hasHeader ? [plan.sourceState.values[0].slice()] : []; const expectedFormulas = hasHeader ? [plan.sourceState.formulas[0].slice()] : []; const seen = new Set(); let removed = 0
+    for (let index = hasHeader ? 1 : 0; index < plan.sourceState.values.length; index += 1) { const value = plan.sourceState.values[index]; const key = columns.map((column) => spreadsheetDuplicateKey(value[column - 1])).join('\u001f'); if (seen.has(key)) removed += 1; else { seen.add(key); expectedValues.push(value.slice()); expectedFormulas.push(plan.sourceState.formulas[index].slice()) } }
+    while (expectedValues.length < plan.sourceState.values.length) { expectedValues.push(Array(plan.sourceState.values[0].length).fill(null)); expectedFormulas.push(Array(plan.sourceState.values[0].length).fill('')) }
+    return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.columns, columns) && result.requested.hasHeader === hasHeader && jsonMatches(result.observed.values, expectedValues) && jsonMatches(result.observed.formulas, expectedFormulas) && result.observed.duplicateRowsRemoved === removed
+  }
+  if (operation === 'move_range') {
+    const plan = spreadsheetP0Plan(operation, payload, precondition); if (!plan) return false
+    return result.requested.range === payload.range && result.requested.destination === payload.destination && result.requested.outputRange === plan.output && result.observed.range === payload.range && result.observed.outputRange === plan.output && result.observed.sourceBlank === true && spreadsheetSameShape(result.observed.sourceValues, plan.sourceState.values) && spreadsheetSameShape(result.observed.sourceFormulas, plan.sourceState.formulas) && spreadsheetBlankMatrix(result.observed.sourceValues) && spreadsheetBlankMatrix(result.observed.sourceFormulas) && jsonMatches(result.observed.values, plan.sourceState.values) && jsonMatches(result.observed.formulas, plan.sourceState.formulas) && jsonMatches(result.observed.format, plan.sourceState.format) && result.observed.merged === plan.sourceState.merged && result.observed.verified === true
+  }
   return false
 }
 
@@ -1470,7 +1566,7 @@ export class BrowserConnector {
       const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: 'write', resource: grant.resource, operation: args.operation, payload: args.payload, precondition: grant.precondition }
       try {
         const resolved = await this.#requestExtension(correlation)
-        if (!verifiedSpreadsheetWriteMatches(resolved.result, args.operation, args.payload, grant.resource)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
+        if (!verifiedSpreadsheetWriteMatches(resolved.result, args.operation, args.payload, grant.resource, grant.precondition)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
         await this.officeSpreadsheetWriteStore.setState(args.idempotencyIdentity, 'verified')
         if (this.officeSpreadsheetWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetWrites.delete(this.officeSpreadsheetWrites.keys().next().value)
@@ -1484,7 +1580,7 @@ export class BrowserConnector {
       const resolved = await this.#requestExtension(correlation)
       if (!validOfficeSpreadsheetReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded spreadsheet read')
       if (args.action === 'inspect_write') {
-        if (!validSpreadsheetPrecondition(resolved.result.precondition)) throw new Error('Browser Connector produced an invalid spreadsheet write precondition')
+        if (!validSpreadsheetPrecondition(resolved.result.precondition) || !validSpreadsheetOperationPrecondition(args.operation, args.payload, resolved.result.precondition)) throw new Error('Browser Connector produced an invalid spreadsheet write precondition')
         const challenge = randomBytes(32).toString('base64url')
         for (const [key, candidate] of this.officeSpreadsheetChallenges) if (candidate.expiresAt < Date.now()) this.officeSpreadsheetChallenges.delete(key)
         if (this.officeSpreadsheetChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetChallenges.delete(this.officeSpreadsheetChallenges.keys().next().value)

@@ -15,6 +15,15 @@
   const VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
   const ALERT_STYLES = { stop: 1, warning: 2, information: 3 }
   const VALIDATION_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
+  // Range.Cut is permitted only when every formatting property is explicitly
+  // readable and one of WebEdit's known unstyled defaults. null means the API
+  // did not prove the value, never a default.
+  const MOVE_DEFAULT_FORMATS = {
+    bold: [false, 0], italic: [false, 0], underline: [false, 0, 'none'], size: [10, 11, 12],
+    name: ['Arial', 'Calibri', '宋体', '等线'], color: ['#000000', '#FF000000', 0, -16777216, 'rgb(0,0,0)'],
+    fill: ['#FFFFFF', '#FFFFFFFF', 16777215, -1, 'rgb(255,255,255)'], numberFormat: ['General', '通用格式', '常规'],
+    alignment: ['general', 'General', 0, -4105], wrap: [false, 0],
+  }
 
   async function appAndSheet(requestedSheet) {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
@@ -34,6 +43,7 @@
     const values = matrix(await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value'))
     const formulas = matrix(await call(range, 'getFormula') ?? await property(range, 'Formula'))
     const text = matrix(await call(range, 'getText') ?? await property(range, 'Text'))
+    if (!matrixMatchesAddress(values, address) || !matrixMatchesAddress(formulas, address)) return { error: fail('readback_mismatch', 'WebEdit returned a non-rectangular or wrong-sized values/formulas matrix') }
     const rows = values.map((row, rowIndex) => row.map((cell, columnIndex) => ({ value: cell ?? null, text: valueOf(text, rowIndex, columnIndex) == null ? (cell == null ? '' : String(cell)) : String(valueOf(text, rowIndex, columnIndex)), formula: typeof valueOf(formulas, rowIndex, columnIndex) === 'string' ? valueOf(formulas, rowIndex, columnIndex) : null })))
     return { range, snapshot: { address, values, formulas, text, rows } }
   }
@@ -72,8 +82,46 @@
     if (!range) return null
     const values = matrix(await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value'))
     const formulas = matrix(await call(range, 'getFormula') ?? await property(range, 'Formula'))
-    return { address, values, formulas }
+    return matrixMatchesAddress(values, address) && matrixMatchesAddress(formulas, address) ? { address, values, formulas } : null
   }
+  function blankMatrix(matrix) { return Array.isArray(matrix) && matrix.every((row) => Array.isArray(row) && row.every(blankCell)) }
+  function columnNumber(name) { return name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0) }
+  function columnName(value) { let output = ''; for (let current = value; current > 0; current = Math.floor((current - 1) / 26)) output = String.fromCharCode(65 + ((current - 1) % 26)) + output; return output }
+  function parseAddress(address) {
+    const match = typeof address === 'string' && address.match(/^([A-Z]{1,3})(\d+)(?::([A-Z]{1,3})(\d+))?$/i)
+    if (!match) return null
+    const rowFrom = Number(match[2]); const colFrom = columnNumber(match[1]); const rowTo = Number(match[4] ?? match[2]); const colTo = columnNumber(match[3] ?? match[1])
+    return rowFrom > 0 && rowTo >= rowFrom && colTo >= colFrom ? { rowFrom, rowTo, colFrom, colTo } : null
+  }
+  function matrixMatchesAddress(value, address) {
+    const parsed = parseAddress(address)
+    const rows = parsed ? parsed.rowTo - parsed.rowFrom + 1 : 0; const columns = parsed ? parsed.colTo - parsed.colFrom + 1 : 0
+    return rows > 0 && columns > 0 && Array.isArray(value) && value.length === rows && value.every((row) => Array.isArray(row) && row.length === columns)
+  }
+  function defaultMoveFormat(format) { return !!format && typeof format === 'object' && Object.entries(MOVE_DEFAULT_FORMATS).every(([key, allowed]) => Object.hasOwn(format, key) && allowed.some((value) => same(value, format[key]))) }
+  function defaultMoveState(state) { return state?.merged === false && defaultMoveFormat(state.format) }
+  function addressFor(parsed) { return `${columnName(parsed.colFrom)}${parsed.rowFrom}:${columnName(parsed.colTo)}${parsed.rowTo}` }
+  function overlap(left, right) { return left.rowFrom <= right.rowTo && left.rowTo >= right.rowFrom && left.colFrom <= right.colTo && left.colTo >= right.colFrom }
+  function splitDelimited(value, delimiter, consecutive) {
+    if (typeof value !== 'string') return [value]
+    const output = []; let current = ''; let quoted = false
+    for (let index = 0; index < value.length; index += 1) {
+      const character = value[index]
+      if (character === '"') { if (quoted && value[index + 1] === '"') { current += '"'; index += 1 } else quoted = !quoted; continue }
+      if (!quoted && character === delimiter) { output.push(current); current = ''; if (consecutive) while (value[index + 1] === delimiter) index += 1; continue }
+      current += character
+    }
+    output.push(current); return output
+  }
+  function hasUnclosedQuote(value) { let quoted = false; for (let index = 0; index < String(value).length; index += 1) { if (value[index] !== '"') continue; if (quoted && value[index + 1] === '"') { index += 1; continue } quoted = !quoted } return quoted }
+  function textTokenIsTypeAmbiguous(value) { return typeof value === 'string' && /^(?:[+-]?\d+(?:\.\d+)?|\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4})$/.test(value.trim()) }
+  function replacementValue(value, what, replacement, whole, matchCase) {
+    if (typeof value !== 'string') return { value, count: 0 }
+    if (whole) { const match = matchCase ? value === what : value.toLocaleLowerCase() === what.toLocaleLowerCase(); return { value: match ? replacement : value, count: match ? 1 : 0 } }
+    const expression = new RegExp(what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), matchCase ? 'g' : 'gi'); let count = 0
+    return { value: value.replace(expression, () => { count += 1; return replacement }), count }
+  }
+  function duplicateValue(value) { return blankCell(value) ? 'blank:' : typeof value === 'string' ? `string:${value.toLocaleLowerCase()}` : `${typeof value}:${String(value)}` }
   function blankCell(value) { return value === null || value === undefined || value === '' }
   function blankSnapshot(snapshot) {
     return snapshot.values.every((row) => row.every(blankCell)) && snapshot.formulas.every((row) => row.every(blankCell))
@@ -200,10 +248,10 @@
     // current WebEdit frame can perform an auditable Harness Verified Write.
     const accruiMigrationMatrix = {
       cellInsertDeleteHidden: { supported: false, reason: unavailable },
-      fillReplaceTextToColumnsRemoveDuplicates: { supported: false, reason: unavailable },
+      fillReplaceTextToColumnsRemoveDuplicates: { supported: false, replaceRangeText: typeof range?.Replace === 'function', textToColumns: !!(range && typeof range.TextToColumns === 'function' && parseAddress(address)?.colFrom === parseAddress(address)?.colTo), removeDuplicates: typeof range?.RemoveDuplicates === 'function', requiresInspectableTarget: true, reason: 'fill remains unavailable; enabled text operations require an inspected readable target' },
       autoFit: { supported: false, reason: unavailable },
       conditionalFormatting: { supported: false, reason: unavailable },
-      copyPasteMove: { supported: false, reason: unavailable },
+      copyPasteMove: { supported: false, moveRange: typeof range?.Cut === 'function', requiresInspectableTarget: true, reason: 'copy and paste remain unavailable; move_range requires inspected source and destination state' },
       viewFreeze: { supported: false, reason: unavailable },
       definedNames: { supported: false, reason: unavailable },
       printSettings: { supported: false, reason: unavailable },
@@ -268,12 +316,59 @@
     if (typeof address !== 'string' || !address || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
     const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
-    const precondition = await writePrecondition(range, address)
-    if (!precondition) return fail('unsupported', 'WebEdit cannot create a bounded writable-range precondition')
+    const operation = request.operation
+    if (!['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) {
+      const precondition = await writePrecondition(range, address)
+      if (!precondition) return fail('unsupported', 'WebEdit cannot create a bounded writable-range precondition')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
+    }
+    const parsed = parseAddress(address); const snapshot = await rangeSnapshot(resolved.sheet, address)
+    if (!parsed || snapshot.error) return fail('unsupported', 'WebEdit operation requires a simple readable A1 range')
+    let targets = [address]
+    if (operation === 'replace_range_text' && typeof range.Replace !== 'function') return fail('unsupported', 'WebEdit does not expose Range.Replace')
+    if (operation === 'remove_duplicates' && typeof range.RemoveDuplicates !== 'function') return fail('unsupported', 'WebEdit does not expose Range.RemoveDuplicates')
+    if (operation === 'text_to_columns') {
+      if (typeof range.TextToColumns !== 'function' || parsed.colFrom !== parsed.colTo) return fail('unsupported', 'WebEdit does not expose a readable single-column TextToColumns API')
+      const delimiter = ({ comma: ',', tab: '\t', semicolon: ';', space: ' ', other: payload.otherDelimiter })[payload.delimiter ?? 'comma']
+      if (typeof delimiter !== 'string' || delimiter.length !== 1) return fail('invalid_range', 'text_to_columns requires a supported one-character delimiter')
+      const width = snapshot.snapshot.values.reduce((maximum, row) => Math.max(maximum, splitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true).length), 1)
+      if (width > 50 || snapshot.snapshot.values.length * width > 20_000 || snapshot.snapshot.formulas.some((row) => row.some((formula) => !blankCell(formula))) || snapshot.snapshot.values.some((row) => hasUnclosedQuote(row[0]) || splitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true).some(textTokenIsTypeAmbiguous))) return fail('unsupported', 'text_to_columns formulas, unclosed quotes, or type-ambiguous tokens lack a safe exact readback contract')
+      const output = { ...parsed, colTo: parsed.colFrom + width - 1 }; const outputAddress = addressFor(output)
+      const outputRange = await rangeFor(resolved.sheet, outputAddress); if (!outputRange) return fail('unsupported', 'WebEdit cannot read the complete text_to_columns output footprint')
+      const outputSnapshot = await rangeSnapshot(resolved.sheet, outputAddress); if (outputSnapshot.error) return outputSnapshot.error
+      for (let row = 0; row < outputSnapshot.snapshot.values.length; row += 1) for (let column = 0; column < outputSnapshot.snapshot.values[row].length; column += 1) if (column > 0 && (!blankCell(outputSnapshot.snapshot.values[row][column]) || !blankCell(outputSnapshot.snapshot.formulas[row][column])) && payload.overwrite !== true) return fail('invalid_range', 'text_to_columns destination contains nonblank cells outside the source')
+      targets = [address, outputAddress]
+    }
+    if (operation === 'move_range') {
+      if (typeof range.Cut !== 'function' || typeof payload.destination !== 'string') return fail('unsupported', 'WebEdit does not expose a bounded Range.Cut destination API')
+      const requested = parseAddress(payload.destination); if (!requested) return fail('invalid_range', 'move_range destination must be a simple A1 range')
+      const rows = parsed.rowTo - parsed.rowFrom + 1; const columns = parsed.colTo - parsed.colFrom + 1
+      if (!((requested.rowTo === requested.rowFrom && requested.colTo === requested.colFrom) || (requested.rowTo - requested.rowFrom + 1 === rows && requested.colTo - requested.colFrom + 1 === columns))) return fail('invalid_range', 'move_range destination must be one cell or match source dimensions')
+      const output = { rowFrom: requested.rowFrom, colFrom: requested.colFrom, rowTo: requested.rowFrom + rows - 1, colTo: requested.colFrom + columns - 1 }
+      if (overlap(parsed, output)) return fail('invalid_range', 'move_range source and destination must not overlap')
+      const outputAddress = addressFor(output); const destination = await rangeFor(resolved.sheet, outputAddress); if (!destination) return fail('unsupported', 'WebEdit cannot read the complete move destination')
+      const destinationSnapshot = await rangeSnapshot(resolved.sheet, outputAddress); if (destinationSnapshot.error) return destinationSnapshot.error
+      if ((!blankMatrix(destinationSnapshot.snapshot.values) || !blankMatrix(destinationSnapshot.snapshot.formulas)) && payload.overwrite !== true) return fail('invalid_range', 'move_range destination must be blank unless overwrite is explicit')
+      const sourceCondition = await writePrecondition(range, address); const destinationCondition = await writePrecondition(destination, outputAddress)
+      if (!sourceCondition || !destinationCondition || !defaultMoveState(sourceCondition.state) || !defaultMoveState(destinationCondition.state)) return fail('unsupported', 'move_range requires explicitly readable unmerged default formatting before mutation')
+      targets = [address, outputAddress]
+    }
+    const conditions = []
+    for (const target of [...new Set(targets)]) { const targetRange = await rangeFor(resolved.sheet, target); const condition = await writePrecondition(targetRange, target); if (!condition) return fail('unsupported', 'WebEdit cannot create a bounded multi-range write precondition'); conditions.push({ range: target, state: condition.state }) }
+    const precondition = { version: 2, targets: conditions }
+    if (JSON.stringify(precondition).length > 96_000) return fail('unsupported', 'WebEdit multi-range precondition exceeds its safe bound')
     return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
   }
   async function preconditionMatches(resolved, request) {
     const approved = request.precondition
+    if (approved?.version === 2 && Array.isArray(approved.targets) && approved.targets.length >= 1 && approved.targets.length <= 2) {
+      for (const target of approved.targets) {
+        if (!target || typeof target.range !== 'string' || !target.state || typeof target.state !== 'object') return fail('fingerprint_mismatch', 'The spreadsheet write has an invalid inspected multi-range precondition')
+        const range = await rangeFor(resolved.sheet, target.range); const current = await writePrecondition(range, target.range)
+        if (!current || !same(current.state, target.state)) return fail('fingerprint_mismatch', 'A spreadsheet source or destination range changed since inspection; reread and inspect before writing')
+      }
+      return null
+    }
     if (!approved || approved.version !== 1 || typeof approved.range !== 'string' || !approved.state || typeof approved.state !== 'object' || Array.isArray(approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet write is missing its inspected precondition')
     const address = request.payload?.range
     if (approved.range !== address) return fail('fingerprint_mismatch', 'The spreadsheet write range differs from its inspected precondition')
@@ -443,6 +538,67 @@
     if (typeof address !== 'string' || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
     const advanced = await advancedWrite(resolved, request, range, address); if (advanced) return advanced
+    if (request.operation === 'replace_range_text') {
+      const what = payload.what; const replacement = payload.replacement ?? ''
+      if (typeof what !== 'string' || !what || what.length > 1000 || typeof replacement !== 'string' || replacement.length > 4000 || typeof range.Replace !== 'function') return fail('unsupported', 'WebEdit does not expose a bounded Range.Replace contract')
+      const before = await rangeSnapshot(resolved.sheet, address); if (before.error) return before.error
+      let replacements = 0; let formulaMatch = false
+      const expected = before.snapshot.values.map((row) => row.map((value) => { const next = replacementValue(value, what, replacement, payload.matchEntireCell === true, payload.matchCase === true); replacements += next.count; return next.value }))
+      const expectedFormulas = before.snapshot.formulas.map((row) => row.map((formula) => typeof formula === 'string' && formula.startsWith('=') ? replacementValue(formula, what, replacement, payload.matchEntireCell === true, payload.matchCase === true).value : formula))
+      before.snapshot.formulas.forEach((row) => row.forEach((formula) => { if (typeof formula === 'string' && formula.startsWith('=') && replacementValue(formula, what, replacement, payload.matchEntireCell === true, payload.matchCase === true).count > 0) formulaMatch = true }))
+      if (formulaMatch && payload.allowFormulaChanges !== true) return fail('invalid_range', 'replace_range_text would change formulas without explicit confirmation')
+      if (replacements === 0 && payload.allowNoop !== true) return fail('invalid_range', 'replace_range_text requires at least one matching value')
+      await resolve(range.Replace(what, replacement, payload.matchEntireCell === true ? 'etWhole' : 'etPart', payload.searchOrder === 'columns' ? 'etByColumns' : 'etByRows', payload.matchCase === true))
+      const after = await rangeSnapshot(resolved.sheet, address); if (after.error) return after.error
+      if (!same(after.snapshot.values, expected) || !same(after.snapshot.formulas, expectedFormulas)) return fail('readback_mismatch', 'WebEdit Replace readback differs from the exact expected matrix or formulas')
+      return { requested: { range: address, what, replacement, matchEntireCell: payload.matchEntireCell === true, matchCase: payload.matchCase === true, allowFormulaChanges: payload.allowFormulaChanges === true }, observed: { range: address, values: after.snapshot.values, formulas: after.snapshot.formulas, replacementCount: replacements, verified: true } }
+    }
+    if (request.operation === 'text_to_columns') {
+      const parsed = parseAddress(address); const delimiter = ({ comma: ',', tab: '\t', semicolon: ';', space: ' ', other: payload.otherDelimiter })[payload.delimiter ?? 'comma']
+      if (!parsed || parsed.colFrom !== parsed.colTo || typeof delimiter !== 'string' || delimiter.length !== 1 || typeof range.TextToColumns !== 'function') return fail('unsupported', 'WebEdit does not expose a bounded single-column TextToColumns contract')
+      const source = await rangeSnapshot(resolved.sheet, address); if (source.error) return source.error
+      const split = source.snapshot.values.map((row) => splitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true)); const width = split.reduce((maximum, row) => Math.max(maximum, row.length), 1)
+      if (width > 50 || split.length * width > 20_000 || source.snapshot.formulas.some((row) => row.some((formula) => !blankCell(formula))) || source.snapshot.values.some((row) => hasUnclosedQuote(row[0]) || splitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true).some(textTokenIsTypeAmbiguous))) return fail('unsupported', 'text_to_columns formulas, unclosed quotes, or type-ambiguous tokens lack a safe exact readback contract')
+      const outputAddress = addressFor({ ...parsed, colTo: parsed.colFrom + width - 1 }); const output = await rangeFor(resolved.sheet, outputAddress); const beforeOutput = await rangeSnapshot(resolved.sheet, outputAddress)
+      if (!output || beforeOutput.error) return fail('unsupported', 'WebEdit cannot read the complete text_to_columns output footprint')
+      for (let row = 0; row < beforeOutput.snapshot.values.length; row += 1) for (let column = 1; column < beforeOutput.snapshot.values[row].length; column += 1) if ((!blankCell(beforeOutput.snapshot.values[row][column]) || !blankCell(beforeOutput.snapshot.formulas[row][column])) && payload.overwrite !== true) return fail('invalid_range', 'text_to_columns destination contains nonblank cells outside the source')
+      const expected = split.map((row) => [...row, ...Array(width - row.length).fill(null)])
+      await resolve(range.TextToColumns(range, 1, 1, payload.consecutiveDelimiter === true, payload.delimiter === 'tab', payload.delimiter === 'semicolon', !payload.delimiter || payload.delimiter === 'comma', payload.delimiter === 'space', payload.delimiter === 'other', payload.delimiter === 'other' ? delimiter : undefined))
+      const after = await rangeSnapshot(resolved.sheet, outputAddress); if (after.error) return after.error
+      if (!same(after.snapshot.values, expected) || !blankMatrix(after.snapshot.formulas)) return fail('readback_mismatch', 'WebEdit TextToColumns readback differs from the exact expected matrix or blank formulas')
+      return { requested: { range: address, outputRange: outputAddress, delimiter: payload.delimiter ?? 'comma', consecutiveDelimiter: payload.consecutiveDelimiter === true }, observed: { range: address, outputRange: outputAddress, values: after.snapshot.values, formulas: after.snapshot.formulas, verified: true } }
+    }
+    if (request.operation === 'remove_duplicates') {
+      const columns = Array.isArray(payload.columns) ? payload.columns : []; const hasHeader = payload.hasHeader !== false
+      const before = await rangeSnapshot(resolved.sheet, address); if (before.error) return before.error
+      if (typeof range.RemoveDuplicates !== 'function' || columns.length === 0 || columns.length > before.snapshot.values[0]?.length || columns.some((column) => !Number.isInteger(column) || column < 1 || column > before.snapshot.values[0].length) || new Set(columns).size !== columns.length) return fail('unsupported', 'WebEdit does not expose a bounded RemoveDuplicates contract')
+      const expected = hasHeader ? [before.snapshot.values[0].slice()] : []; const expectedFormulas = hasHeader ? [before.snapshot.formulas[0].slice()] : []; const seen = new Set(); let removed = 0
+      for (let row = hasHeader ? 1 : 0; row < before.snapshot.values.length; row += 1) { const value = before.snapshot.values[row]; const key = columns.map((column) => duplicateValue(value[column - 1])).join('\u001f'); if (seen.has(key)) removed += 1; else { seen.add(key); expected.push(value.slice()); expectedFormulas.push(before.snapshot.formulas[row].slice()) } }
+      if (removed === 0 && payload.allowNoop !== true) return fail('invalid_range', 'remove_duplicates requires at least one duplicate row')
+      while (expected.length < before.snapshot.values.length) { expected.push(Array(before.snapshot.values[0].length).fill(null)); expectedFormulas.push(Array(before.snapshot.values[0].length).fill('')) }
+      await resolve(range.RemoveDuplicates(columns, hasHeader ? 1 : 2))
+      const after = await rangeSnapshot(resolved.sheet, address); if (after.error) return after.error
+      if (!same(after.snapshot.values, expected) || !same(after.snapshot.formulas, expectedFormulas)) return fail('readback_mismatch', 'WebEdit RemoveDuplicates readback differs from the exact expected values or formulas')
+      return { requested: { range: address, columns, hasHeader }, observed: { range: address, values: after.snapshot.values, formulas: after.snapshot.formulas, duplicateRowsRemoved: removed, verified: true } }
+    }
+    if (request.operation === 'move_range') {
+      const sourceParsed = parseAddress(address); const requested = parseAddress(payload.destination)
+      if (!sourceParsed || !requested || typeof range.Cut !== 'function') return fail('unsupported', 'WebEdit does not expose a bounded Range.Cut contract')
+      const source = await rangeSnapshot(resolved.sheet, address); if (source.error) return source.error
+      const rows = sourceParsed.rowTo - sourceParsed.rowFrom + 1; const columns = sourceParsed.colTo - sourceParsed.colFrom + 1
+      if (!((requested.rowFrom === requested.rowTo && requested.colFrom === requested.colTo) || (requested.rowTo - requested.rowFrom + 1 === rows && requested.colTo - requested.colFrom + 1 === columns))) return fail('invalid_range', 'move_range destination must be one cell or match source dimensions')
+      const outputParsed = { rowFrom: requested.rowFrom, colFrom: requested.colFrom, rowTo: requested.rowFrom + rows - 1, colTo: requested.colFrom + columns - 1 }; if (overlap(sourceParsed, outputParsed)) return fail('invalid_range', 'move_range source and destination must not overlap')
+      const outputAddress = addressFor(outputParsed); const destination = await rangeFor(resolved.sheet, outputAddress); const beforeDestination = await rangeSnapshot(resolved.sheet, outputAddress)
+      if (!destination || beforeDestination.error) return fail('unsupported', 'WebEdit cannot read the complete move destination')
+      if ((!blankMatrix(beforeDestination.snapshot.values) || !blankMatrix(beforeDestination.snapshot.formulas)) && payload.overwrite !== true) return fail('invalid_range', 'move_range destination must be blank unless overwrite is explicit')
+      const sourceCondition = await writePrecondition(range, address); const destinationCondition = await writePrecondition(destination, outputAddress)
+      if (!sourceCondition || !destinationCondition || !defaultMoveState(sourceCondition.state) || !defaultMoveState(destinationCondition.state)) return fail('unsupported', 'move_range requires explicitly readable unmerged default formatting before mutation')
+      const result = await resolve(range.Cut(destination)); if (result !== true) return fail('readback_mismatch', 'WebEdit did not confirm Range.Cut completion')
+      const sourceAfter = await rangeSnapshot(resolved.sheet, address); const destinationAfter = await rangeSnapshot(resolved.sheet, outputAddress); const destinationFormat = await writePrecondition(destination, outputAddress)
+      if (sourceAfter.error || destinationAfter.error || !destinationFormat) return fail('readback_mismatch', 'WebEdit could not read move_range results')
+      if (!blankMatrix(sourceAfter.snapshot.values) || !blankMatrix(sourceAfter.snapshot.formulas) || !same(destinationAfter.snapshot.values, source.snapshot.values) || !same(destinationAfter.snapshot.formulas, source.snapshot.formulas) || destinationFormat.state.merged !== sourceCondition.state.merged || !same(destinationFormat.state.format, sourceCondition.state.format)) return fail('readback_mismatch', 'WebEdit move_range readback does not prove values, formulas, and format moved')
+      return { requested: { range: address, destination: payload.destination, outputRange: outputAddress }, observed: { range: address, outputRange: outputAddress, sourceBlank: true, sourceValues: sourceAfter.snapshot.values, sourceFormulas: sourceAfter.snapshot.formulas, values: destinationAfter.snapshot.values, formulas: destinationAfter.snapshot.formulas, format: destinationFormat.state.format, merged: destinationFormat.state.merged, verified: true } }
+    }
     if (request.operation === 'set_values') {
       if (!Array.isArray(payload.values) || !await setValues(range, payload.values)) return fail('unsupported', 'WebEdit does not expose a range value write API')
       const readback = await rangeSnapshot(resolved.sheet, address); if (readback.error) return readback.error

@@ -55,6 +55,29 @@ function fakeApp() {
   return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
 }
 
+function p0App(values, options = {}) {
+  const grid = values.map((row) => [...row]); const formulas = grid.map((row) => row.map(() => ''))
+  const defaultFont = { Bold: false, Italic: false, Underline: false, Size: 11, Name: 'Arial', Color: '#000000' }
+  const defaultInterior = { Color: '#FFFFFF' }
+  const parse = (address) => { const match = address.match(/^([A-Z])(\d+)(?::([A-Z])(\d+))?$/); const column = (name) => name.charCodeAt(0) - 65; return { left: column(match[1]), top: Number(match[2]) - 1, right: column(match[3] ?? match[1]), bottom: Number(match[4] ?? match[2]) - 1 } }
+  const matrix = (data, area) => data.slice(area.top, area.bottom + 1).map((row) => row.slice(area.left, area.right + 1))
+  const write = (data, area, next) => next.forEach((row, rowIndex) => row.forEach((value, columnIndex) => { data[area.top + rowIndex][area.left + columnIndex] = value }))
+  const range = (address) => {
+    const area = parse(address)
+    return {
+      getValue2: () => options.valuesOverride ?? matrix(grid, area), getValue: () => options.valuesOverride ?? matrix(grid, area), getFormula: () => options.formulasOverride ?? matrix(formulas, area), getText: () => options.textOverride ?? matrix(grid, area).map((row) => row.map((value) => value == null ? '' : String(value))), Font: options.font ?? defaultFont, Interior: options.interior ?? defaultInterior, MergeCells: Object.hasOwn(options, 'merged') ? options.merged : false, NumberFormat: Object.hasOwn(options, 'numberFormat') ? options.numberFormat : 'General', HorizontalAlignment: Object.hasOwn(options, 'alignment') ? options.alignment : 'general', WrapText: Object.hasOwn(options, 'wrap') ? options.wrap : false,
+      Replace: (what, replacement, whole, _order, matchCase) => { const replace = (value) => typeof value !== 'string' ? value : whole === 'etWhole' ? ((matchCase ? value === what : value.toLowerCase() === what.toLowerCase()) ? replacement : value) : value.replace(new RegExp(what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), matchCase ? 'g' : 'gi'), replacement); write(grid, area, matrix(grid, area).map((row) => row.map(replace))); write(formulas, area, matrix(formulas, area).map((row) => row.map(replace))) },
+      TextToColumns: () => { const source = matrix(grid, area); source.forEach((row, rowIndex) => String(row[0]).split(',').forEach((value, columnIndex) => { grid[area.top + rowIndex][area.left + columnIndex] = value })) },
+      RemoveDuplicates: (columns, header) => { const source = matrix(grid, area); const sourceFormulas = matrix(formulas, area); const kept = header === 1 ? [source[0]] : []; const keptFormulas = header === 1 ? [sourceFormulas[0]] : []; const seen = new Set(); source.forEach((row, index) => { if (header === 1 && index === 0) return; const key = columns.map((column) => String(row[column - 1]).toLowerCase()).join('|'); if (!seen.has(key)) { seen.add(key); kept.push(row); keptFormulas.push(sourceFormulas[index]) } }); while (kept.length < source.length) { kept.push(Array(source[0].length).fill(null)); keptFormulas.push(Array(source[0].length).fill('')) }; write(grid, area, kept); write(formulas, area, keptFormulas) },
+      Cut: (destination) => { if (options.cutNoop) return true; const source = matrix(grid, area); const sourceFormulas = matrix(formulas, area); const destinationArea = destination._area; write(grid, destinationArea, source); write(formulas, destinationArea, sourceFormulas); write(grid, area, Array(source.length).fill(null).map(() => Array(source[0].length).fill(null))); write(formulas, area, Array(source.length).fill(null).map(() => Array(source[0].length).fill(''))); return true },
+      _area: area,
+    }
+  }
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getRange: range, Range: range }
+  const workbook = { Name: 'P0.xlsx', getName: () => 'P0.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _grid: grid, _formulas: formulas }
+}
+
 function sheetApp() {
   const sheets = []
   let active
@@ -100,7 +123,7 @@ test('spreadsheet runtime reads formulas and performs verified values, formulas,
 test('spreadsheet runtime rejects a stale resource and unsupported structural API without reporting success', async () => {
   const app = fakeApp(); const run = await runtimeWith(app)
   const resource = (await run({ action: 'context' })).result.resource
-  const stale = await run({ action: 'write', resource: { ...resource, fingerprint: 'stale' }, operation: 'set_values', payload: { range: 'A1', values: [[1]] } })
+  const stale = await run({ action: 'write', resource: { ...resource, fingerprint: 'stale' }, operation: 'set_values', payload: { range: 'A1:B2', values: [[1, 2], [3, 4]] } })
   assert.equal(stale.error.code, 'fingerprint_mismatch')
   const unsupported = await run({ action: 'write', resource, operation: 'insert_rows', payload: { range: '1:1', count: 1 } })
   assert.equal(unsupported.error.code, 'unsupported')
@@ -116,6 +139,108 @@ test('spreadsheet write rereads its inspected precondition before mutation', asy
   let writes = 0; app._range.setValue2 = (value) => { writes += 1; setValues(value) }
   const result = await run.raw({ action: 'write', resource, operation: 'set_values', payload, precondition: inspected.result.precondition })
   assert.equal(result.error.code, 'fingerprint_mismatch'); assert.equal(writes, 0)
+})
+
+test('P0 spreadsheet operations use multi-range preconditions and exact matrix readback', async () => {
+  const replaceApp = p0App([['alpha', 'beta'], ['alpha', 'gamma']]); const replace = await runtimeWith(replaceApp); const replaceResource = (await replace({ action: 'context' })).result.resource
+  const replaceResult = await replace({ action: 'write', resource: replaceResource, operation: 'replace_range_text', payload: { range: 'A1:B2', what: 'alpha', replacement: 'omega' } })
+  assert.equal(replaceResult.result.observed.replacementCount, 2); assert.deepEqual(replaceApp._grid.slice(0, 2).map((row) => row.slice(0, 2)), [['omega', 'beta'], ['omega', 'gamma']])
+
+  const splitApp = p0App([['a,b', null, null], ['c,d', null, null]]); const split = await runtimeWith(splitApp); const splitResource = (await split({ action: 'context' })).result.resource
+  const splitInspection = await split.raw({ action: 'inspect_write', operation: 'text_to_columns', payload: { range: 'A1:A2', delimiter: 'comma' } })
+  assert.equal(splitInspection.result.precondition.version, 2); assert.equal(splitInspection.result.precondition.targets.length, 2)
+  const splitResult = await split.raw({ action: 'write', resource: splitResource, operation: 'text_to_columns', payload: { range: 'A1:A2', delimiter: 'comma' }, precondition: splitInspection.result.precondition })
+  assert.deepEqual(splitResult.result.observed.values, [['a', 'b'], ['c', 'd']])
+
+  const dedupeApp = p0App([['name', 'id'], ['A', 1], ['A', 1], ['B', 2]]); const dedupe = await runtimeWith(dedupeApp); const dedupeResource = (await dedupe({ action: 'context' })).result.resource
+  const dedupeResult = await dedupe({ action: 'write', resource: dedupeResource, operation: 'remove_duplicates', payload: { range: 'A1:B4', columns: [1, 2], hasHeader: true } })
+  assert.equal(dedupeResult.result.observed.duplicateRowsRemoved, 1); assert.deepEqual(dedupeApp._grid.slice(0, 4).map((row) => row.slice(0, 2)), [['name', 'id'], ['A', 1], ['B', 2], [null, null]])
+
+  const moveApp = p0App([['A', 'B', null, null], ['C', 'D', null, null]]); const move = await runtimeWith(moveApp); const moveResource = (await move({ action: 'context' })).result.resource
+  const moveInspection = await move.raw({ action: 'inspect_write', operation: 'move_range', payload: { range: 'A1:B2', destination: 'C1' } })
+  const moveResult = await move.raw({ action: 'write', resource: moveResource, operation: 'move_range', payload: { range: 'A1:B2', destination: 'C1' }, precondition: moveInspection.result.precondition })
+  assert.equal(moveResult.result.observed.sourceBlank, true); assert.deepEqual(moveApp._grid.slice(0, 2), [[null, null, 'A', 'B'], [null, null, 'C', 'D']])
+})
+
+test('P0 spreadsheet operations reject stale multi-range preconditions and unsafe destinations before mutation', async () => {
+  const app = p0App([['a,b', 'occupied', null], ['c,d', null, null]]); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const conflict = await run.raw({ action: 'inspect_write', operation: 'text_to_columns', payload: { range: 'A1:A2', delimiter: 'comma' } })
+  assert.equal(conflict.error.code, 'invalid_range')
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'move_range', payload: { range: 'A1:A2', destination: 'C1' } })
+  app._grid[0][2] = 'changed'
+  const stale = await run.raw({ action: 'write', resource, operation: 'move_range', payload: { range: 'A1:A2', destination: 'C1' }, precondition: inspected.result.precondition })
+  assert.equal(stale.error.code, 'fingerprint_mismatch'); assert.equal(app._grid[0][0], 'a,b')
+  const overlap = await run.raw({ action: 'inspect_write', operation: 'move_range', payload: { range: 'A1:A2', destination: 'A2' } })
+  assert.equal(overlap.error.code, 'invalid_range')
+})
+
+test('P0 text and formula operations fail closed for ambiguous parsing and formula mutations', async () => {
+  for (const value of ['"a,b', '001,2']) {
+    const run = await runtimeWith(p0App([[value, null]]))
+    const inspected = await run.raw({ action: 'inspect_write', operation: 'text_to_columns', payload: { range: 'A1', delimiter: 'comma' } })
+    assert.equal(inspected.error.code, 'unsupported')
+  }
+  const app = p0App([['alpha']]); app._formulas[0][0] = '=IF(A1="alpha",1,0)'
+  const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const blocked = await run({ action: 'write', resource, operation: 'replace_range_text', payload: { range: 'A1', what: 'alpha', replacement: 'omega' } })
+  assert.equal(blocked.error.code, 'invalid_range'); assert.equal(app._formulas[0][0], '=IF(A1="alpha",1,0)')
+  const allowed = await run({ action: 'write', resource, operation: 'replace_range_text', payload: { range: 'A1', what: 'alpha', replacement: 'omega', allowFormulaChanges: true } })
+  assert.equal(allowed.result.observed.formulas[0][0], '=IF(A1="omega",1,0)')
+})
+
+test('P0 remove_duplicates keeps formulas with retained rows and clears formula tail', async () => {
+  const app = p0App([['name'], ['A'], ['A'], ['B']]); app._formulas[1][0] = '=1'; app._formulas[2][0] = '=2'; app._formulas[3][0] = '=3'
+  const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const result = await run({ action: 'write', resource, operation: 'remove_duplicates', payload: { range: 'A1:A4', columns: [1], hasHeader: true } })
+  assert.equal(result.result.observed.formulas[1][0], '=1'); assert.equal(result.result.observed.formulas[2][0], '=3'); assert.equal(result.result.observed.formulas[3][0], '')
+})
+
+test('P0 move_range rejects non-default formats and merged source before mutation', async () => {
+  const safe = await runtimeWith(p0App([['A', null]]))
+  assert.equal((await safe.raw({ action: 'inspect_write', operation: 'move_range', payload: { range: 'A1', destination: 'B1' } })).ok, true)
+  for (const options of [{ merged: null }, { merged: true }, { font: { Bold: null } }, { font: { Bold: true, Italic: false, Underline: false, Size: 11, Name: 'Arial', Color: '#000000' } }]) {
+    const run = await runtimeWith(p0App([['A', null]], options))
+    const inspected = await run.raw({ action: 'inspect_write', operation: 'move_range', payload: { range: 'A1', destination: 'B1' } })
+    assert.equal(inspected.error.code, 'unsupported')
+  }
+})
+
+test('P0 move_range rejects a write whose explicit default-state readback disagrees', async () => {
+  const app = p0App([['A', null]], { cutNoop: true }); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const result = await run({ action: 'write', resource, operation: 'move_range', payload: { range: 'A1', destination: 'B1' } })
+  assert.equal(result.error.code, 'readback_mismatch')
+})
+
+test('spreadsheet preconditions reject ragged, undersized, and empty matrices before mutation', async () => {
+  for (const options of [
+    { valuesOverride: [[1, 2], [3]], formulasOverride: [['', ''], ['', '']] },
+    { valuesOverride: [[1]], formulasOverride: [['']] },
+    { valuesOverride: [], formulasOverride: [] },
+  ]) {
+    const run = await runtimeWith(p0App([[1, 2], [3, 4]], options))
+    const result = await run.raw({ action: 'inspect_write', operation: 'set_values', payload: { range: 'A1:B2', values: [[5, 6], [7, 8]] } })
+    assert.equal(result.ok, false)
+  }
+})
+
+test('P0 spreadsheet operations fail before mutation when their WebEdit API is absent', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app)
+  const operations = [
+    ['replace_range_text', { range: 'A1', what: 'a', replacement: 'b' }],
+    ['text_to_columns', { range: 'A1', delimiter: 'comma' }],
+    ['remove_duplicates', { range: 'A1:B2', columns: [1] }],
+    ['move_range', { range: 'A1', destination: 'C1' }],
+  ]
+  for (const [operation, payload] of operations) {
+    const result = await run.raw({ action: 'inspect_write', operation, payload })
+    assert.equal(result.error.code, 'unsupported')
+  }
+  const capabilities = await run({ action: 'capabilities', range: 'A1' })
+  const migration = capabilities.result.capabilities.accruiMigrationMatrix
+  assert.equal(migration.fillReplaceTextToColumnsRemoveDuplicates.replaceRangeText, false)
+  assert.equal(migration.fillReplaceTextToColumnsRemoveDuplicates.textToColumns, false)
+  assert.equal(migration.fillReplaceTextToColumnsRemoveDuplicates.removeDuplicates, false)
+  assert.equal(migration.copyPasteMove.moveRange, false)
 })
 
 test('spreadsheet runtime fails closed for sheet lifecycle mutations without preflight contracts', async () => {
@@ -173,7 +298,7 @@ test('unusable spreadsheet exports fail closed before invoking WebEdit export AP
   app._sheet.ExportImage = () => { exports += 1; return {} }
   app._workbook.ExportAsFixedFormat = () => { exports += 1; return {} }
   for (const operation of ['export_pdf', 'export_range_image', 'export_worksheet_image']) {
-    const payload = { range: 'A1' }; const inspected = await run.raw({ action: 'inspect_write', operation, payload })
+    const payload = { range: 'A1:B2' }; const inspected = await run.raw({ action: 'inspect_write', operation, payload })
     const result = await run.raw({ action: 'write', resource, operation, payload, precondition: inspected.result.precondition })
     assert.equal(result.error.code, 'unsupported')
   }
