@@ -15,6 +15,7 @@
   const VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
   const ALERT_STYLES = { stop: 1, warning: 2, information: 3 }
   const VALIDATION_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
+  const VALIDATION_PROPERTY_NAMES = ['AlertStyle', 'Operator', 'Formula1', 'Formula2', 'IgnoreBlank', 'ShowError', 'ErrorTitle', 'ErrorMessage']
   // Range.Cut is permitted only when every formatting property is explicitly
   // readable and one of WebEdit's known unstyled defaults. null means the API
   // did not prove the value, never a default.
@@ -48,14 +49,34 @@
     const rows = values.map((row, rowIndex) => row.map((cell, columnIndex) => ({ value: cell ?? null, text: valueOf(text, rowIndex, columnIndex) == null ? (cell == null ? '' : String(cell)) : String(valueOf(text, rowIndex, columnIndex)), formula: typeof valueOf(formulas, rowIndex, columnIndex) === 'string' ? valueOf(formulas, rowIndex, columnIndex) : null })))
     return { range, snapshot: { address, values, formulas, text, rows } }
   }
+  function hasProperty(target, name) { try { return !!target && name in Object(target) } catch { return false } }
+  async function validationSnapshot(range) {
+    const validation = await property(range, 'Validation')
+    if (!validation) return { supported: false, validation: null }
+    const type = await property(validation, 'Type')
+    if (!Number.isInteger(type) || type < 0 || type > 7) return { supported: false, validation: null }
+    if (type === 0) return { supported: true, validation: null }
+    const [alertStyle, operator, formula1, formula2, ignoreBlank, showError, errorTitle, errorMessage] = await Promise.all(VALIDATION_PROPERTY_NAMES.map((name) => property(validation, name)))
+    if (!Number.isInteger(alertStyle) || !Number.isInteger(operator) || typeof formula1 !== 'string' || formula1.length > 1024 || typeof formula2 !== 'string' || formula2.length > 1024 || typeof ignoreBlank !== 'boolean' || typeof showError !== 'boolean' || typeof errorTitle !== 'string' || errorTitle.length > 255 || typeof errorMessage !== 'string' || errorMessage.length > 1024) return { supported: false, validation: null }
+    return { supported: true, validation: { type, alertStyle, operator, formula1, formula2, ignoreBlank, showError, errorTitle, errorMessage } }
+  }
+  function requestedValidation(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['range', 'sheetName', 'validationType', 'alertStyle', 'operator', 'formula1', 'formula2', 'ignoreBlank', 'showError', 'errorTitle', 'errorMessage'].includes(key))) return null
+    const type = VALIDATION_TYPES[payload.validationType]; const alertStyle = ALERT_STYLES[payload.alertStyle ?? 'stop']; const operator = VALIDATION_OPERATORS[payload.operator ?? 'between']
+    const formula1 = payload.formula1; const formula2 = payload.formula2 ?? ''
+    if (!type || !alertStyle || !operator || typeof formula1 !== 'string' || formula1.length > 1024 || typeof formula2 !== 'string' || formula2.length > 1024 || ((operator === 1 || operator === 2) && payload.formula2 === undefined) || (payload.ignoreBlank !== undefined && typeof payload.ignoreBlank !== 'boolean') || (payload.showError !== undefined && typeof payload.showError !== 'boolean') || (payload.errorTitle !== undefined && (typeof payload.errorTitle !== 'string' || payload.errorTitle.length > 255)) || (payload.errorMessage !== undefined && (typeof payload.errorMessage !== 'string' || payload.errorMessage.length > 1024))) return null
+    return { type, alertStyle, operator, formula1, formula2, ignoreBlank: payload.ignoreBlank ?? true, showError: payload.showError ?? true, errorTitle: payload.errorTitle ?? '', errorMessage: payload.errorMessage ?? '' }
+  }
   // A write approval is bound to the smallest readable state that can be
   // affected by the supported operation.  Keep it bounded because this
   // object crosses the page -> extension -> native-host boundary twice.
-  async function writePrecondition(range, address) {
+  async function writePrecondition(range, address, includeValidation = false) {
     const snapshot = await rangeSnapshotFromRange(range, address)
     if (!snapshot) return null
     const font = await property(range, 'Font') ?? {}
     const interior = await property(range, 'Interior') ?? {}
+    const validation = includeValidation ? await validationSnapshot(range) : null
+    if (includeValidation && !validation.supported) return null
     const state = {
       values: snapshot.values,
       formulas: snapshot.formulas,
@@ -75,9 +96,15 @@
         alignment: await property(range, 'alignment') ?? await property(range, 'HorizontalAlignment') ?? null,
         wrap: await property(range, 'wrap') ?? await property(range, 'WrapText') ?? null,
       },
+      ...(includeValidation ? { validation: validation.validation } : {}),
     }
     const precondition = { version: 1, range: address, state }
     return JSON.stringify(precondition).length <= 96_000 ? precondition : null
+  }
+  function completeDataValidationState(state) {
+    const format = state?.format
+    return !!state && typeof state === 'object' && typeof state.merged === 'boolean' && !!state.filter && typeof state.filter.operator === 'string' && typeof state.rowHeight === 'number' && Number.isFinite(state.rowHeight) && typeof state.columnWidth === 'number' && Number.isFinite(state.columnWidth)
+      && !!format && typeof format === 'object' && ['bold', 'italic', 'underline', 'size', 'name', 'color', 'fill', 'numberFormat', 'alignment', 'wrap'].every((key) => Object.hasOwn(format, key) && format[key] !== null)
   }
   async function rangeSnapshotFromRange(range, address) {
     if (!range) return null
@@ -243,6 +270,7 @@
     const range = typeof address === 'string' ? await rangeFor(resolved.sheet, address) : null
     if (typeof address === 'string' && !range) return fail('invalid_range', 'WebEdit could not resolve the requested capability range')
     const validation = await property(range, 'Validation')
+    const validationState = range ? await validationSnapshot(range) : { supported: false }
     const hyperlinks = await property(range, 'Hyperlinks')
     const comments = await property(resolved.sheet, 'Comments')
     const charts = await chartCollection(resolved.sheet)
@@ -252,7 +280,7 @@
     const detected = {
       sort: !!(range && (typeof range.sort === 'function' || typeof range.Sort === 'function')),
       autoFilter: !!(range && (typeof range.setAutoFilter === 'function' || typeof range.SetAutoFilter === 'function') && filterState !== undefined),
-      dataValidation: false,
+      dataValidation: !!(range && validationState.supported && validation && typeof validation.Delete === 'function' && typeof validation.Add === 'function' && VALIDATION_PROPERTY_NAMES.every((name) => hasProperty(validation, name))),
       hyperlinks: false,
       comments: false,
       charts: false, pivots: false, cellImages: false,
@@ -302,6 +330,12 @@
       return { ok: true, result: { status: 'ok', resource: resolved.resource, definedNames: names.names } }
     }
     if (request.action === 'capabilities') return capabilities(resolved, request.range)
+    if (request.action === 'range_features') {
+      if (typeof request.range !== 'string' || request.range.length === 0 || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
+      const range = await rangeFor(resolved.sheet, request.range); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
+      const validation = await validationSnapshot(range)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, rangeFeatures: { range: request.range, supported: validation.supported, validation: validation.validation } } }
+    }
     if (request.action === 'range') {
       if (typeof request.range !== 'string' || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
       const read = await rangeSnapshot(resolved.sheet, request.range); if (read.error) return read.error
@@ -342,9 +376,13 @@
     if (typeof address !== 'string' || !address || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
     const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
+    if (operation === 'set_data_validation' && !requestedValidation(payload)) return fail('invalid_range', 'set_data_validation requires a complete bounded validation schema')
+    if (operation === 'clear_data_validation' && !Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))) return fail('invalid_range', 'clear_data_validation accepts only a bounded range')
     if (!['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) {
-      const precondition = await writePrecondition(range, address)
+      const requiresValidation = ['set_data_validation', 'clear_data_validation'].includes(operation)
+      const precondition = await writePrecondition(range, address, requiresValidation)
       if (!precondition) return fail('unsupported', 'WebEdit cannot create a bounded writable-range precondition')
+      if (['set_data_validation', 'clear_data_validation'].includes(operation) && !completeDataValidationState(precondition.state)) return fail('unsupported', 'WebEdit cannot fully read all non-validation range state before a data-validation write')
       return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
     }
     const parsed = parseAddress(address); const snapshot = await rangeSnapshot(resolved.sheet, address)
@@ -404,8 +442,9 @@
     const address = request.payload?.range
     if (approved.range !== address) return fail('fingerprint_mismatch', 'The spreadsheet write range differs from its inspected precondition')
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
-    const current = await writePrecondition(range, address)
+    const current = await writePrecondition(range, address, ['set_data_validation', 'clear_data_validation'].includes(request.operation))
     if (!current || !same(current.state, approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet range changed since inspection; reread and inspect before writing')
+    if (['set_data_validation', 'clear_data_validation'].includes(request.operation) && !completeDataValidationState(current.state)) return fail('unsupported', 'WebEdit cannot fully reread all non-validation range state before a data-validation write')
     return null
   }
   async function setValues(range, values) { if (typeof range.setValue2 === 'function') { await call(range, 'setValue2', [values]); return true } if (typeof range.setValue === 'function') { await call(range, 'setValue', [values]); return true } return set(range, 'Value2', values) }
@@ -431,7 +470,7 @@
   }
   async function advancedWrite(resolved, request, range, address) {
     const payload = request.payload ?? {}; const operation = request.operation
-    if (['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return fail('unsupported', 'WebEdit operation lacks a mutation-safe preflight and deliverable-artifact contract and is unavailable')
+    if (['add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return fail('unsupported', 'WebEdit operation lacks a mutation-safe preflight and deliverable-artifact contract and is unavailable')
     if (!ADVANCED_OPERATIONS.has(operation)) return null
     if (operation === 'sort') {
       const sorts = Array.isArray(payload.sorts) ? payload.sorts.filter((item) => item && typeof item === 'object').slice(0, 3) : []
@@ -464,21 +503,21 @@
       return { requested: { range: address, clear: true }, observed: { range: address, before, after, verified: true } }
     }
     if (operation === 'set_data_validation' || operation === 'clear_data_validation') {
-      const validation = await property(range, 'Validation'); const beforeType = await property(validation, 'Type')
-      if (!validation || beforeType === undefined || typeof validation.Add !== 'function' || typeof validation.Delete !== 'function') return fail('unsupported', 'WebEdit does not expose readable data-validation APIs')
+      const validation = await property(range, 'Validation'); const before = await validationSnapshot(range)
+      if (!validation || !before.supported || typeof validation.Delete !== 'function' || (operation === 'set_data_validation' && typeof validation.Add !== 'function')) return fail('unsupported', 'WebEdit does not expose complete readable data-validation APIs')
       if (operation === 'clear_data_validation') {
-        await resolve(validation.Delete()); const afterType = await property(validation, 'Type')
-        if (afterType !== null && afterType !== undefined && afterType !== 0) return fail('readback_mismatch', 'WebEdit did not clear data validation')
-        return { requested: { range: address, clear: true }, observed: { range: address, type: afterType ?? null, verified: true } }
+        await resolve(validation.Delete()); const after = await validationSnapshot(range); const state = await writePrecondition(range, address, true)
+        if (!after.supported || after.validation !== null || !state || !same({ ...state.state, validation: before.validation }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit did not clear data validation without changing the range')
+        return { requested: { range: address, clear: true, validation: null }, observed: { range: address, validation: null, state: state.state, verified: true } }
       }
-      const type = VALIDATION_TYPES[payload.validationType]; const alertStyle = ALERT_STYLES[payload.alertStyle ?? 'stop']; const operator = VALIDATION_OPERATORS[payload.operator ?? 'between']
-      if (!type || !alertStyle || !operator || (payload.formula1 !== undefined && typeof payload.formula1 !== 'string') || (payload.formula2 !== undefined && typeof payload.formula2 !== 'string')) return fail('invalid_range', 'set_data_validation requires a supported validation type and bounded formulas')
-      await resolve(validation.Delete()); await resolve(validation.Add(type, alertStyle, operator, payload.formula1, payload.formula2))
-      const afterType = await property(validation, 'Type'); const afterFormula1 = await property(validation, 'Formula1') ?? await property(validation, 'formula1'); const afterFormula2 = await property(validation, 'Formula2') ?? await property(validation, 'formula2')
-      if (afterType !== type) return fail('readback_mismatch', 'WebEdit data-validation type differs from request')
-      if ((payload.formula1 !== undefined && afterFormula1 === undefined) || (payload.formula2 !== undefined && afterFormula2 === undefined)) return fail('unsupported', 'WebEdit data-validation readback does not expose requested formulas')
-      if ((payload.formula1 !== undefined && !same(afterFormula1, payload.formula1)) || (payload.formula2 !== undefined && !same(afterFormula2, payload.formula2))) return fail('readback_mismatch', 'WebEdit data-validation formula readback differs from request')
-      return { requested: { range: address, validationType: payload.validationType, formula1: payload.formula1, formula2: payload.formula2 }, observed: { range: address, type: afterType, formula1: afterFormula1 ?? null, formula2: afterFormula2 ?? null, verified: true } }
+      const expected = requestedValidation(payload)
+      if (!expected) return fail('invalid_range', 'set_data_validation requires a complete bounded validation schema')
+      if (!VALIDATION_PROPERTY_NAMES.every((name) => hasProperty(validation, name))) return fail('unsupported', 'WebEdit does not expose every requested data-validation property before mutation')
+      await resolve(validation.Delete()); await resolve(validation.Add(expected.type, expected.alertStyle, expected.operator, expected.formula1, expected.formula2))
+      for (const [name, value] of [['IgnoreBlank', expected.ignoreBlank], ['ShowError', expected.showError], ['ErrorTitle', expected.errorTitle], ['ErrorMessage', expected.errorMessage]]) if (!await set(validation, name, value)) return fail('readback_mismatch', 'WebEdit rejected a requested data-validation property')
+      const after = await validationSnapshot(range); const state = await writePrecondition(range, address, true)
+      if (!after.supported || !same(after.validation, expected) || !state || !same({ ...state.state, validation: before.validation }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit data-validation readback differs from request or changed the range')
+      return { requested: { range: address, validation: expected }, observed: { range: address, validation: after.validation, state: state.state, verified: true } }
     }
     if (operation === 'add_hyperlink' || operation === 'delete_hyperlinks') {
       const links = await property(range, 'Hyperlinks'); const before = await collectionCount(links)

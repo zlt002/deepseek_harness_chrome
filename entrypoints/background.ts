@@ -328,8 +328,8 @@ interface OfficeDocumentRequest {
   resource?: LightDocumentResourceIdentity
 }
 
-type OfficeSpreadsheetAction = 'context' | 'range' | 'search' | 'sheets' | 'defined_names' | 'capabilities' | 'inspect_write' | 'write'
-type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range' | 'create_defined_name' | 'delete_defined_name' | 'copy_worksheet' | 'move_worksheet' | 'set_worksheet_visibility'
+type OfficeSpreadsheetAction = 'context' | 'range' | 'range_features' | 'search' | 'sheets' | 'defined_names' | 'capabilities' | 'inspect_write' | 'write'
+type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'set_data_validation' | 'clear_data_validation' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range' | 'create_defined_name' | 'delete_defined_name' | 'copy_worksheet' | 'move_worksheet' | 'set_worksheet_visibility'
 interface OfficeSpreadsheetPreconditionTarget {
   range: string
   state: {
@@ -340,6 +340,7 @@ interface OfficeSpreadsheetPreconditionTarget {
     rowHeight: number | null
     columnWidth: number | null
     format: Record<string, unknown>
+    validation?: { type: number; alertStyle: number; operator: number; formula1: string; formula2: string; ignoreBlank: boolean; showError: boolean; errorTitle: string; errorMessage: string } | null
   }
 }
 interface OfficeSpreadsheetPreconditionV1 extends OfficeSpreadsheetPreconditionTarget {
@@ -556,6 +557,12 @@ function isOfficeSpreadsheetPrecondition(value: unknown): value is OfficeSpreads
     && (state.rowHeight === null || typeof state.rowHeight === 'number')
     && (state.columnWidth === null || typeof state.columnWidth === 'number')
     && !!state.format && typeof state.format === 'object' && !Array.isArray(state.format)
+    && (state.validation === undefined || state.validation === null || !!state.validation && typeof state.validation === 'object' && !Array.isArray(state.validation)
+      && Object.keys(state.validation).length === 8 && Number.isInteger(state.validation.type) && state.validation.type >= 1 && state.validation.type <= 7
+      && Number.isInteger(state.validation.alertStyle) && Number.isInteger(state.validation.operator)
+      && typeof state.validation.formula1 === 'string' && state.validation.formula1.length <= 1024 && typeof state.validation.formula2 === 'string' && state.validation.formula2.length <= 1024
+      && typeof state.validation.ignoreBlank === 'boolean' && typeof state.validation.showError === 'boolean'
+      && typeof state.validation.errorTitle === 'string' && state.validation.errorTitle.length <= 255 && typeof state.validation.errorMessage === 'string' && state.validation.errorMessage.length <= 1024)
   }
   const candidate = value as { version?: unknown; range?: unknown; state?: unknown; targets?: unknown }
   const workbook = value as Partial<OfficeSpreadsheetPreconditionV3>
@@ -564,17 +571,43 @@ function isOfficeSpreadsheetPrecondition(value: unknown): value is OfficeSpreads
     && JSON.stringify(value).length <= 100_000
 }
 
+function isOfficeSpreadsheetDataValidationPayload(operation: unknown, payload: unknown): boolean {
+  if (operation !== 'set_data_validation' && operation !== 'clear_data_validation') return true
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+  const value = payload as Record<string, unknown>; const keys = Object.keys(value)
+  if (typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !keys.every((key) => ['range', 'sheetName', 'validationType', 'alertStyle', 'operator', 'formula1', 'formula2', 'ignoreBlank', 'showError', 'errorTitle', 'errorMessage'].includes(key))) return false
+  if (operation === 'clear_data_validation') return keys.every((key) => ['range', 'sheetName'].includes(key))
+  const type = ({ wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 } as Record<string, number>)[String(value.validationType)]
+  const alertStyle = ({ stop: 1, warning: 2, information: 3 } as Record<string, number>)[String(value.alertStyle ?? 'stop')]
+  const operator = ({ between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 } as Record<string, number>)[String(value.operator ?? 'between')]
+  return !!type && !!alertStyle && !!operator && typeof value.formula1 === 'string' && value.formula1.length <= 1024 && typeof (value.formula2 ?? '') === 'string' && String(value.formula2 ?? '').length <= 1024
+    && ((operator !== 1 && operator !== 2) || typeof value.formula2 === 'string')
+    && (value.ignoreBlank === undefined || typeof value.ignoreBlank === 'boolean') && (value.showError === undefined || typeof value.showError === 'boolean')
+    && (value.errorTitle === undefined || typeof value.errorTitle === 'string' && value.errorTitle.length <= 255) && (value.errorMessage === undefined || typeof value.errorMessage === 'string' && value.errorMessage.length <= 1024)
+}
+
+function hasCompleteDataValidationRangeState(precondition: unknown): boolean {
+  if (!precondition || typeof precondition !== 'object' || Array.isArray(precondition)) return false
+  const state = (precondition as { state?: unknown }).state
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return false
+  const value = state as Record<string, unknown>; const format = value.format as Record<string, unknown> | null
+  const validation = value.validation as Record<string, unknown> | null
+  return Object.hasOwn(value, 'validation') && (validation === null || !!validation && typeof validation === 'object' && !Array.isArray(validation) && Object.keys(validation).length === 8 && Number.isInteger(validation.type) && Number.isInteger(validation.alertStyle) && Number.isInteger(validation.operator) && typeof validation.formula1 === 'string' && typeof validation.formula2 === 'string' && typeof validation.ignoreBlank === 'boolean' && typeof validation.showError === 'boolean' && typeof validation.errorTitle === 'string' && typeof validation.errorMessage === 'string')
+    && typeof value.merged === 'boolean' && !!value.filter && typeof (value.filter as { operator?: unknown }).operator === 'string' && typeof value.rowHeight === 'number' && Number.isFinite(value.rowHeight) && typeof value.columnWidth === 'number' && Number.isFinite(value.columnWidth)
+    && !!format && typeof format === 'object' && ['bold', 'italic', 'underline', 'size', 'name', 'color', 'fill', 'numberFormat', 'alignment', 'wrap'].every((key) => Object.hasOwn(format, key) && format[key] !== null)
+}
+
 function isOfficeSpreadsheetRequest(message: NativeMessage): message is OfficeSpreadsheetRequest {
   const candidate = message as NativeMessage & Partial<OfficeSpreadsheetRequest>
   if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
     && message.tool === 'office_spreadsheet' && isBrowserTarget(message.browserTarget)
-    && ['context', 'range', 'search', 'sheets', 'defined_names', 'capabilities', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
+    && ['context', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
   if (candidate.action === 'context' || candidate.action === 'sheets' || candidate.action === 'defined_names') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined
-  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000
-  if (candidate.action === 'range') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
+  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload)
+  if (candidate.action === 'range' || candidate.action === 'range_features') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'capabilities') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'search') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128 && typeof candidate.query === 'string' && candidate.query.trim().length > 0 && candidate.query.length <= 500
-  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetPrecondition(candidate.precondition)
+  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload) && isOfficeSpreadsheetPrecondition(candidate.precondition) && (!['set_data_validation', 'clear_data_validation'].includes(candidate.operation) || hasCompleteDataValidationRangeState(candidate.precondition))
 }
 
 function isTeamDocParent(value: unknown): value is TeamDocParent {

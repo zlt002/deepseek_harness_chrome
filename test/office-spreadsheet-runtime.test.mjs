@@ -25,7 +25,7 @@ function fakeApp() {
   let filterOperator = 'equals'
   const comments = { Count: 0 }
   const hyperlinks = { Count: 0, items: [], Add: (_range, url, subAddress) => { hyperlinks.items.push({ Address: url, SubAddress: subAddress }); hyperlinks.Count += 1 }, Delete: () => { hyperlinks.Count = 0; hyperlinks.items = [] }, Item: (index) => hyperlinks.items[index - 1] }
-  const validation = { Type: 0, Formula1: undefined, Formula2: undefined, Add: (type, _alertStyle, _operator, formula1, formula2) => { validation.Type = type; validation.Formula1 = formula1; validation.Formula2 = formula2 }, Delete: () => { validation.Type = 0; validation.Formula1 = undefined; validation.Formula2 = undefined } }
+  const validation = { Type: 0, AlertStyle: 1, Operator: 1, Formula1: '', Formula2: '', IgnoreBlank: true, ShowError: true, ErrorTitle: '', ErrorMessage: '', Add: (type, alertStyle, operator, formula1, formula2) => { validation.Type = type; validation.AlertStyle = alertStyle; validation.Operator = operator; validation.Formula1 = formula1 ?? ''; validation.Formula2 = formula2 ?? '' }, Delete: () => { validation.Type = 0; validation.Formula1 = ''; validation.Formula2 = '' } }
   const charts = { Count: 0, Item: (index) => charts.items[index - 1], items: [] }
   const pivots = { Count: 0, Item: (index) => pivots.items[index - 1], items: [] }
   const range = {
@@ -33,7 +33,7 @@ function fakeApp() {
     setValue2: (next) => { cells.splice(0, cells.length, ...next.map((row) => [...row])) },
     setFormula: (next) => { formulas.splice(0, formulas.length, ...next.map((row) => [...row])) },
     clear: () => { cells.forEach((row, rowIndex) => row.forEach((_cell, columnIndex) => { cells[rowIndex][columnIndex] = null; formulas[rowIndex][columnIndex] = '' })) },
-    Font: {}, Interior: {},
+    Font: { Bold: false, Italic: false, Underline: false, Size: 11, Name: 'Arial', Color: '#000000' }, Interior: { Color: '#FFFFFF' }, MergeCells: false, NumberFormat: 'General', HorizontalAlignment: 'general', WrapText: false, EntireRow: { RowHeight: 15 }, EntireColumn: { ColumnWidth: 8 },
     merge: () => { range.MergeCells = true }, unmerge: () => { range.MergeCells = false },
     sort: (key) => { const column = Number(key) - 1; cells.sort((left, right) => Number(left[column]) - Number(right[column])) },
     AutoFilter: false, setAutoFilter: (enabled) => { range.AutoFilter = enabled },
@@ -52,11 +52,12 @@ function fakeApp() {
   }
   range.createPivotTable = (options, callback) => { const pivot = { Id: pivots.Count + 1, Name: `Pivot ${pivots.Count + 1}`, Destination: options.destRangeText }; pivots.items.push(pivot); pivots.Count += 1; callback({ isOk: true, pivotTableId: pivot.Id }) }
   const workbook = { Name: 'Budget.xlsx', getName: () => 'Budget.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet }, ExportAsFixedFormat: () => ({ url: 'https://download.example.test/Budget.pdf?Expires=2000000000' }) }
-  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
+  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook }
 }
 
 function p0App(values, options = {}) {
   const grid = values.map((row) => [...row]); const formulas = grid.map((row) => row.map(() => ''))
+  const validation = { Type: 0, AlertStyle: 1, Operator: 1, Formula1: '', Formula2: '', IgnoreBlank: true, ShowError: true, ErrorTitle: '', ErrorMessage: '', Add: () => {}, Delete: () => {} }
   const defaultFont = { Bold: false, Italic: false, Underline: false, Size: 11, Name: 'Arial', Color: '#000000' }
   const defaultInterior = { Color: '#FFFFFF' }
   const parse = (address) => { const match = address.match(/^([A-Z])(\d+)(?::([A-Z])(\d+))?$/); const column = (name) => name.charCodeAt(0) - 65; return { left: column(match[1]), top: Number(match[2]) - 1, right: column(match[3] ?? match[1]), bottom: Number(match[4] ?? match[2]) - 1 } }
@@ -65,7 +66,7 @@ function p0App(values, options = {}) {
   const range = (address) => {
     const area = parse(address)
     return {
-      getValue2: () => options.valuesOverride ?? matrix(grid, area), getValue: () => options.valuesOverride ?? matrix(grid, area), getFormula: () => options.formulasOverride ?? matrix(formulas, area), getText: () => options.textOverride ?? matrix(grid, area).map((row) => row.map((value) => value == null ? '' : String(value))), Font: options.font ?? defaultFont, Interior: options.interior ?? defaultInterior, MergeCells: Object.hasOwn(options, 'merged') ? options.merged : false, NumberFormat: Object.hasOwn(options, 'numberFormat') ? options.numberFormat : 'General', HorizontalAlignment: Object.hasOwn(options, 'alignment') ? options.alignment : 'general', WrapText: Object.hasOwn(options, 'wrap') ? options.wrap : false,
+      getValue2: () => options.valuesOverride ?? matrix(grid, area), getValue: () => options.valuesOverride ?? matrix(grid, area), getFormula: () => options.formulasOverride ?? matrix(formulas, area), getText: () => options.textOverride ?? matrix(grid, area).map((row) => row.map((value) => value == null ? '' : String(value))), Font: options.font ?? defaultFont, Interior: options.interior ?? defaultInterior, MergeCells: Object.hasOwn(options, 'merged') ? options.merged : false, NumberFormat: Object.hasOwn(options, 'numberFormat') ? options.numberFormat : 'General', HorizontalAlignment: Object.hasOwn(options, 'alignment') ? options.alignment : 'general', WrapText: Object.hasOwn(options, 'wrap') ? options.wrap : false, Validation: validation,
       Replace: (what, replacement, whole, _order, matchCase) => { const replace = (value) => typeof value !== 'string' ? value : whole === 'etWhole' ? ((matchCase ? value === what : value.toLowerCase() === what.toLowerCase()) ? replacement : value) : value.replace(new RegExp(what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), matchCase ? 'g' : 'gi'), replacement); write(grid, area, matrix(grid, area).map((row) => row.map(replace))); write(formulas, area, matrix(formulas, area).map((row) => row.map(replace))) },
       TextToColumns: () => { const source = matrix(grid, area); source.forEach((row, rowIndex) => String(row[0]).split(',').forEach((value, columnIndex) => { grid[area.top + rowIndex][area.left + columnIndex] = value })) },
       RemoveDuplicates: (columns, header) => { const source = matrix(grid, area); const sourceFormulas = matrix(formulas, area); const kept = header === 1 ? [source[0]] : []; const keptFormulas = header === 1 ? [sourceFormulas[0]] : []; const seen = new Set(); source.forEach((row, index) => { if (header === 1 && index === 0) return; const key = columns.map((column) => String(row[column - 1]).toLowerCase()).join('|'); if (!seen.has(key)) { seen.add(key); kept.push(row); keptFormulas.push(sourceFormulas[index]) } }); while (kept.length < source.length) { kept.push(Array(source[0].length).fill(null)); keptFormulas.push(Array(source[0].length).fill('')) }; write(grid, area, kept); write(formulas, area, keptFormulas) },
@@ -180,7 +181,7 @@ test('P0 spreadsheet operations use multi-range preconditions and exact matrix r
 
   const splitApp = p0App([['a,b', null, null], ['c,d', null, null]]); const split = await runtimeWith(splitApp); const splitResource = (await split({ action: 'context' })).result.resource
   const splitInspection = await split.raw({ action: 'inspect_write', operation: 'text_to_columns', payload: { range: 'A1:A2', delimiter: 'comma' } })
-  assert.equal(splitInspection.result.precondition.version, 2); assert.equal(splitInspection.result.precondition.targets.length, 2)
+  assert.equal(splitInspection.result.precondition.version, 2); assert.equal(splitInspection.result.precondition.targets.length, 2); assert.equal(splitInspection.result.precondition.targets[0].state.validation, undefined)
   const splitResult = await split.raw({ action: 'write', resource: splitResource, operation: 'text_to_columns', payload: { range: 'A1:A2', delimiter: 'comma' }, precondition: splitInspection.result.precondition })
   assert.deepEqual(splitResult.result.observed.values, [['a', 'b'], ['c', 'd']])
 
@@ -297,6 +298,7 @@ test('spreadsheet runtime probes and verifies AccrUI-derived advanced range oper
   const resource = (await run({ action: 'context' })).result.resource
   const capabilities = await run({ action: 'capabilities', range: 'A1:B2' })
   assert.equal(capabilities.result.capabilities.sort, true)
+  assert.equal(capabilities.result.capabilities.dataValidation, true)
   assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.cellInsertDeleteHidden.supported, false)
   assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.chartManagement.create, false)
   assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.pivotManagement.refresh, false)
@@ -306,10 +308,58 @@ test('spreadsheet runtime probes and verifies AccrUI-derived advanced range oper
   assert.equal(filtered.result.observed.enabled, true)
   const filtersCleared = await run({ action: 'write', resource, operation: 'clear_filters', payload: { range: 'A1:B2' } })
   assert.equal(filtersCleared.result.observed.after.operator, 'none')
-  for (const operation of ['set_data_validation', 'add_hyperlink', 'insert_cell_image', 'create_chart', 'create_pivot_table']) assert.equal((await run({ action: 'write', resource, operation, payload: { range: 'A1:B2' } })).error.code, 'unsupported')
+  for (const operation of ['add_hyperlink', 'insert_cell_image', 'create_chart', 'create_pivot_table']) assert.equal((await run({ action: 'write', resource, operation, payload: { range: 'A1:B2' } })).error.code, 'unsupported')
+  assert.equal((await run({ action: 'write', resource, operation: 'set_data_validation', payload: { range: 'A1:B2' } })).error.code, 'invalid_range')
   assert.equal(capabilities.result.capabilities.exportPdf, false)
   assert.equal(capabilities.result.capabilities.exportRangeImage, false)
   assert.equal(capabilities.result.capabilities.exportWorksheetImage, false)
+})
+
+test('data validation reads bounded features and verifies all requested fields without changing range state', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const features = await run({ action: 'range_features', range: 'A1:B2' })
+  assert.equal(features.result.rangeFeatures.range, 'A1:B2'); assert.equal(features.result.rangeFeatures.supported, true); assert.equal(features.result.rangeFeatures.validation, null)
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'set_data_validation', payload: { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1' } })).error.code, 'invalid_range')
+  const payload = { range: 'A1:B2', validationType: 'list', formula1: '"A,B"', formula2: '', ignoreBlank: false, showError: false, errorTitle: '无效', errorMessage: '请选择 A 或 B' }
+  const written = await run({ action: 'write', resource, operation: 'set_data_validation', payload })
+  assert.equal(JSON.stringify(written.result.observed.validation), JSON.stringify({ type: 3, alertStyle: 1, operator: 1, formula1: '"A,B"', formula2: '', ignoreBlank: false, showError: false, errorTitle: '无效', errorMessage: '请选择 A 或 B' }))
+  assert.deepEqual(written.result.observed.state.values, [[3, 2], [1, 4]])
+  assert.equal(written.result.observed.state.format.numberFormat, 'General')
+  const cleared = await run({ action: 'write', resource, operation: 'clear_data_validation', payload: { range: 'A1:B2' } })
+  assert.equal(cleared.result.observed.validation, null)
+})
+
+test('ordinary range writes do not require Validation, while validation writes fail before mutation when it is unavailable', async () => {
+  const app = fakeApp(); delete app._range.Validation; const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const values = await run({ action: 'write', resource, operation: 'set_values', payload: { range: 'A1:B2', values: [[10, 20], [30, 40]] } })
+  assert.equal(values.result.observed.verified, true)
+  assert.equal((await run({ action: 'write', resource, operation: 'set_data_validation', payload: { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' } })).error.code, 'unsupported')
+})
+
+test('data validation fails closed for stale state, missing API, wrong property readback, changed range state, and oversized feature reads', async () => {
+  const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const resource = (await stale({ action: 'context' })).result.resource; const payload = { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' }
+  const inspected = await stale.raw({ action: 'inspect_write', operation: 'set_data_validation', payload }); staleApp._validation.Type = 3
+  let deletes = 0; const remove = staleApp._validation.Delete; staleApp._validation.Delete = () => { deletes += 1; remove() }
+  assert.equal((await stale.raw({ action: 'write', resource, operation: 'set_data_validation', payload, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch'); assert.equal(deletes, 0)
+
+  const missingApp = fakeApp(); const missing = await runtimeWith(missingApp); const missingResource = (await missing({ action: 'context' })).result.resource; let adds = 0; delete missingApp._validation.Delete; const add = missingApp._validation.Add; missingApp._validation.Add = (...args) => { adds += 1; add(...args) }
+  assert.equal((await missing({ action: 'write', resource: missingResource, operation: 'set_data_validation', payload })).error.code, 'unsupported'); assert.equal(adds, 0)
+
+  const noAddApp = fakeApp(); const noAdd = await runtimeWith(noAddApp); const noAddResource = (await noAdd({ action: 'context' })).result.resource; let noAddDeletes = 0; delete noAddApp._validation.Add; const noAddDelete = noAddApp._validation.Delete; noAddApp._validation.Delete = () => { noAddDeletes += 1; noAddDelete() }
+  assert.equal((await noAdd({ action: 'write', resource: noAddResource, operation: 'set_data_validation', payload })).error.code, 'unsupported'); assert.equal(noAddDeletes, 0)
+
+  const incompleteApp = fakeApp(); const incomplete = await runtimeWith(incompleteApp); const incompleteResource = (await incomplete({ action: 'context' })).result.resource; let incompleteDeletes = 0; const incompleteDelete = incompleteApp._validation.Delete; incompleteApp._validation.Delete = () => { incompleteDeletes += 1; incompleteDelete() }; delete incompleteApp._range.EntireRow
+  assert.equal((await incomplete({ action: 'write', resource: incompleteResource, operation: 'set_data_validation', payload })).error.code, 'unsupported'); assert.equal(incompleteDeletes, 0)
+
+  const wrongApp = fakeApp(); const wrong = await runtimeWith(wrongApp); const wrongResource = (await wrong({ action: 'context' })).result.resource
+  Object.defineProperty(wrongApp._validation, 'ErrorTitle', { configurable: true, get: () => '', set: () => {} })
+  assert.equal((await wrong({ action: 'write', resource: wrongResource, operation: 'set_data_validation', payload: { ...payload, errorTitle: 'expected' } })).error.code, 'readback_mismatch')
+
+  const changedApp = fakeApp(); const changed = await runtimeWith(changedApp); const changedResource = (await changed({ action: 'context' })).result.resource; const changedAdd = changedApp._validation.Add; changedApp._validation.Add = (...args) => { changedAdd(...args); changedApp._range.NumberFormat = '0.00' }
+  assert.equal((await changed({ action: 'write', resource: changedResource, operation: 'set_data_validation', payload })).error.code, 'readback_mismatch')
+
+  const oversizedApp = fakeApp(); oversizedApp._validation.Type = 3; oversizedApp._validation.ErrorMessage = 'x'.repeat(1025); const oversized = await runtimeWith(oversizedApp)
+  const features = (await oversized({ action: 'range_features', range: 'A1:B2' })).result.rangeFeatures; assert.equal(features.range, 'A1:B2'); assert.equal(features.supported, false); assert.equal(features.validation, null)
 })
 
 test('chart creation is unavailable before callback-driven mutation', async () => {

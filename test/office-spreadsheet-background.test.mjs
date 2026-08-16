@@ -29,6 +29,10 @@ test('routes office_spreadsheet writes only to the WebEdit iframe and forwards r
     listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-write-1', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'write', resource, operation: 'replace_range_text', payload: { range: 'A1', what: 'a', replacement: 'b' }, precondition }))
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.deepEqual(sent, [{ tabId: 42, message: { type: 'office-spreadsheet/v1', action: 'write', resource, operation: 'replace_range_text', payload: { range: 'A1', what: 'a', replacement: 'b' }, precondition }, options: { frameId: 17 } }])
+    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-validation-invalid', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'inspect_write', operation: 'set_data_validation', payload: { range: 'A1', validationType: 'unknown', formula1: 'x' } }))
+    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'sheet-validation-missing-formula2', runId: 'spreadsheet-background-run', generation: 'g-1', browserTarget: target, tool: 'office_spreadsheet', action: 'inspect_write', operation: 'set_data_validation', payload: { range: 'A1', validationType: 'wholeNumber', formula1: '1' } }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(sent.length, 1)
     const response = nativeMessages.find((message) => message.type === 'connector_response')
     assert.deepEqual(response.error, { code: 'readback_mismatch', message: 'readback differs' })
   } finally { delete globalThis.chrome; delete globalThis.defineBackground }

@@ -249,3 +249,40 @@ test('keeps oversized verified spreadsheet writes successful with a bounded resp
     assert.ok(Buffer.byteLength(JSON.stringify(oversized), 'utf8') <= 128 * 1024)
   } finally { await connector.stop() }
 })
+
+test('validates data-validation schema, range features, and independently rejects forged validation readback', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 34, url: 'https://doc.midea.com/sheets/validation' }
+  const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Validation.xlsx', sheetName: 'Sheet1', fingerprint: 'validation-sheet' }
+  const payload = { range: 'A1', validationType: 'list', formula1: '"A,B"', formula2: '', showError: false, errorTitle: 'Invalid' }
+  const expected = { type: 3, alertStyle: 1, operator: 1, formula1: '"A,B"', formula2: '', ignoreBlank: true, showError: false, errorTitle: 'Invalid', errorMessage: '' }
+  let forge = false
+  const connector = new BrowserConnector({
+    officeSpreadsheetWriteStore: writeStore(),
+    requestExtension: (request) => queueMicrotask(() => {
+      const baseline = writePrecondition('A1'); const precondition = { ...baseline, state: { ...baseline.state, validation: null, merged: false, filter: { operator: 'none' }, rowHeight: 15, columnWidth: 8, format: { bold: false, italic: false, underline: false, size: 11, name: 'Arial', color: '#000000', fill: '#FFFFFF', numberFormat: 'General', alignment: 'general', wrap: false } } }
+      const result = request.action === 'write'
+        ? { status: 'verified_write', resource, operation: request.operation, requested: { range: 'A1', validation: expected }, observed: { range: 'A1', validation: forge ? { ...expected, showError: true } : expected, state: { ...precondition.state, validation: expected }, verified: true } }
+        : request.action === 'range_features'
+          ? { status: 'ok', resource, rangeFeatures: { range: 'A1', supported: true, validation: null } }
+          : { status: 'ok', resource, precondition }
+      connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result })
+    }),
+  })
+  connector.bindBrowserTarget('spreadsheet-validation-run', target); const endpoint = await connector.start()
+  try {
+    const invalid = await call(endpoint, { action: 'inspect_write', operation: 'set_data_validation', payload: { range: 'A1', validationType: 'unknown', formula1: 'x' } })
+    assert.equal(invalid.error.code, -32602)
+    const missingSecondFormula = await call(endpoint, { action: 'inspect_write', operation: 'set_data_validation', payload: { range: 'A1', validationType: 'wholeNumber', formula1: '1' } })
+    assert.equal(missingSecondFormula.error.code, -32602)
+    const features = await call(endpoint, { action: 'range_features', range: 'A1' })
+    assert.deepEqual(features.result.structuredContent.rangeFeatures, { range: 'A1', supported: true, validation: null })
+    const inspected = await call(endpoint, { action: 'inspect_write', operation: 'set_data_validation', payload })
+    const success = await call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'validation-success', resource, operation: 'set_data_validation', payload })
+    assert.equal(success.result.structuredContent.status, 'verified_write')
+    forge = true
+    const second = await call(endpoint, { action: 'inspect_write', operation: 'set_data_validation', payload })
+    const rejected = await call(endpoint, { action: 'write', challenge: second.result.structuredContent.challenge, idempotencyIdentity: 'validation-forged', resource, operation: 'set_data_validation', payload })
+    assert.equal(rejected.result.isError, true)
+    assert.match(rejected.result.content[0].text, /invalid verified spreadsheet write/i)
+  } finally { await connector.stop() }
+})
