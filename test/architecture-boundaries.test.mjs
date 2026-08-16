@@ -70,3 +70,11 @@ test('Harness product checkout pins LF before applying portable patches', async 
   assert.ok(clone >= 0)
   assert.ok(clone < autocrlf && autocrlf < eol && eol < checkout && checkout < apply)
 })
+
+test('Harness client plugins execute the portable tsdown JavaScript entrypoint', async () => {
+  const script = await readFile(resolve(root, 'scripts/build-harness-client-plugins.mjs'), 'utf8')
+
+  assert.match(script, /node_modules', 'tsdown', 'dist', 'run\.mjs'/)
+  assert.match(script, /spawnSync\(process\.execPath, \[tsdown/)
+  assert.doesNotMatch(script, /tsdown\.cmd/)
+})

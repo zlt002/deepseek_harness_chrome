@@ -21,15 +21,16 @@ const selected = process.argv.slice(2)
 const unknown = selected.filter(name => !packageNames.includes(name))
 if (unknown.length > 0) throw new Error(`Unknown Harness client plugin: ${unknown.join(', ')}`)
 
-const executable = process.platform === 'win32' ? 'tsdown.cmd' : 'tsdown'
-const tsdown = join(harnessRoot, 'node_modules', '.bin', executable)
+const tsdown = join(harnessRoot, 'node_modules', 'tsdown', 'dist', 'run.mjs')
 if (!existsSync(tsdown)) {
   throw new Error(`Official Harness build dependency is missing: ${tsdown}. Run pnpm install in ${harnessRoot}.`)
 }
 
 for (const name of selected.length > 0 ? selected : packageNames) {
   const cwd = join(projectRoot, 'packages', name)
-  const result = spawnSync(tsdown, ['--config', 'tsdown.config.ts'], {
+  // Execute the real JS entrypoint instead of a platform-specific .bin shim;
+  // Node cannot spawn Windows .cmd shims directly without a command shell.
+  const result = spawnSync(process.execPath, [tsdown, '--config', 'tsdown.config.ts'], {
     cwd,
     env: { ...process.env, DSH_BUILD_FACE: '' },
     encoding: 'utf8',
