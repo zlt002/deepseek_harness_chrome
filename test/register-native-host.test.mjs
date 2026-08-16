@@ -76,7 +76,10 @@ test('installs the native host into a stable macOS location', async () => {
   const installRoot = join(home, 'Library/Application Support/DeepSeekHarness')
   const launcher = join(installRoot, 'com.deepseek.harness.chrome')
   const nativeServer = join(installRoot, 'native-server')
-  const manifestPath = join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')
+  const manifestPaths = [
+    join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
+    join(home, 'Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
+  ]
   try {
     const result = await runRegister(home)
     assert.equal(result.code, 0, result.stderr)
@@ -84,13 +87,16 @@ test('installs the native host into a stable macOS location', async () => {
     await stat(join(nativeServer, 'bin.mjs'))
     await stat(join(nativeServer, 'src/native-host.mjs'))
 
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-    assert.equal(manifest.path, launcher)
+    const manifests = await Promise.all(manifestPaths.map(async (manifestPath) => JSON.parse(await readFile(manifestPath, 'utf8'))))
+    for (const manifest of manifests) {
+      assert.equal(manifest.path, launcher)
+      assert.ok(manifest.allowed_origins.includes(`chrome-extension://${extensionId}/`))
+    }
 
     const launcherSource = await readFile(launcher, 'utf8')
     assert.match(launcherSource, new RegExp(`exec .*${nativeServer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/bin\\.mjs`))
     assert.doesNotMatch(launcherSource, new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-    assert.doesNotMatch(JSON.stringify(manifest), new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.doesNotMatch(JSON.stringify(manifests), new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   } finally {
     await rm(home, { recursive: true, force: true })
   }
@@ -135,6 +141,25 @@ test('merges a previously registered extension origin instead of replacing it', 
     assert.deepEqual(manifest.allowed_origins, [
       `chrome-extension://${extensionId}/`,
       `chrome-extension://${devExtensionId}/`,
+    ])
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('merges existing Edge origins and adds the current extension id', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
+  const manifestPath = join(home, 'Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.deepseek.harness.chrome.json')
+  try {
+    await mkdir(dirname(manifestPath), { recursive: true })
+    await writeFile(manifestPath, JSON.stringify({ allowed_origins: [`chrome-extension://${devExtensionId}/`] }))
+
+    const result = await runRegister(home)
+    assert.equal(result.code, 0, result.stderr)
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    assert.deepEqual(manifest.allowed_origins, [
+      `chrome-extension://${devExtensionId}/`,
+      `chrome-extension://${extensionId}/`,
     ])
   } finally {
     await rm(home, { recursive: true, force: true })

@@ -17,6 +17,10 @@ export function extensionIdsFromManifest(manifest) {
   }))]
 }
 
+export function extensionIdsFromManifests(manifests) {
+  return [...new Set(manifests.flatMap(extensionIdsFromManifest))]
+}
+
 export function processTree(processes, commandFragment) {
   const roots = processes.filter((entry) => entry.command.includes(commandFragment)).map((entry) => entry.pid)
   const selected = new Set(roots)
@@ -60,13 +64,15 @@ function capture(command, args) {
 }
 
 async function installedPaths() {
-  if (platform() !== 'darwin') throw new Error('dev:restart currently supports the macOS Chrome development setup.')
+  if (platform() !== 'darwin') throw new Error('dev:restart currently supports the macOS Chrome/Edge development setup.')
   const installRoot = join(homedir(), 'Library/Application Support/DeepSeekHarness')
-  const manifestPath = join(homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')
-  if (!existsSync(manifestPath)) throw new Error('Native Host is not registered yet. Run pnpm run register-native-host once with the extension id.')
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-  const extensionIds = extensionIdsFromManifest(manifest)
-  if (extensionIds.length === 0) throw new Error(`No Chrome extension id was found in ${manifestPath}.`)
+  const manifestPaths = [
+    join(homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
+    join(homedir(), 'Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
+  ].filter(existsSync)
+  if (manifestPaths.length === 0) throw new Error('Native Host is not registered yet. Run pnpm run register-native-host once with the extension id.')
+  const extensionIds = extensionIdsFromManifests(await Promise.all(manifestPaths.map(async (manifestPath) => JSON.parse(await readFile(manifestPath, 'utf8')))))
+  if (extensionIds.length === 0) throw new Error(`No extension id was found in ${manifestPaths.join(', ')}.`)
   return { installRoot, extensionIds }
 }
 

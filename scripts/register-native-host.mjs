@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
-import { chmod, cp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,11 +34,14 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
-const target = platform() === 'darwin'
-  ? join(homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts')
+const targets = platform() === 'darwin'
+  ? [
+      join(homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts'),
+      join(homedir(), 'Library/Application Support/Microsoft Edge/NativeMessagingHosts'),
+    ]
   : platform() === 'win32'
-    ? join(process.env.APPDATA ?? join(homedir(), 'AppData/Roaming'), 'Google/Chrome/NativeMessagingHosts')
-    : join(homedir(), '.config/google-chrome/NativeMessagingHosts')
+    ? [join(process.env.APPDATA ?? join(homedir(), 'AppData/Roaming'), 'Google/Chrome/NativeMessagingHosts')]
+    : [join(homedir(), '.config/google-chrome/NativeMessagingHosts')]
 const installRoot = platform() === 'darwin'
   ? join(homedir(), 'Library/Application Support/DeepSeekHarness')
   : platform() === 'win32'
@@ -58,40 +61,50 @@ for (const [name, value] of [
 ]) {
   if (value !== undefined && value !== '') launcherLines.splice(1, 0, `export ${name}=${shellQuote(value)}`)
 }
-const manifestPath = join(target, 'com.deepseek.harness.chrome.json')
-let existingManifest = {}
-if (existsSync(manifestPath)) {
-  try {
-    existingManifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-  } catch (error) {
-    throw new Error(`Unable to read existing Native Messaging manifest ${manifestPath}: ${error.message}`)
+async function mergedManifest(manifestPath) {
+  let existingManifest = {}
+  if (existsSync(manifestPath)) {
+    try {
+      existingManifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    } catch (error) {
+      throw new Error(`Unable to read existing Native Messaging manifest ${manifestPath}: ${error.message}`)
+    }
+    if (existingManifest === null || typeof existingManifest !== 'object' || Array.isArray(existingManifest)) {
+      throw new Error(`Existing Native Messaging manifest ${manifestPath} must contain a JSON object`)
+    }
   }
-  if (existingManifest === null || typeof existingManifest !== 'object' || Array.isArray(existingManifest)) {
-    throw new Error(`Existing Native Messaging manifest ${manifestPath} must contain a JSON object`)
+  const existingOrigins = existingManifest.allowed_origins ?? []
+  if (!Array.isArray(existingOrigins) || existingOrigins.some((origin) => typeof origin !== 'string')) {
+    throw new Error(`Existing Native Messaging manifest ${manifestPath} has invalid allowed_origins`)
   }
-}
-const existingOrigins = existingManifest.allowed_origins ?? []
-if (!Array.isArray(existingOrigins) || existingOrigins.some((origin) => typeof origin !== 'string')) {
-  throw new Error(`Existing Native Messaging manifest ${manifestPath} has invalid allowed_origins`)
-}
-const manifest = {
-  ...existingManifest,
-  name: 'com.deepseek.harness.chrome',
-  description: 'DeepSeek Harness Native Messaging host',
-  path: launcher,
-  type: 'stdio',
-  allowed_origins: [...new Set([
-    ...existingOrigins,
-    ...extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`),
-  ])],
+  return {
+    ...existingManifest,
+    name: 'com.deepseek.harness.chrome',
+    description: 'DeepSeek Harness Native Messaging host',
+    path: launcher,
+    type: 'stdio',
+    allowed_origins: [...new Set([
+      ...existingOrigins,
+      ...extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`),
+    ])],
+  }
 }
 
-await mkdir(target, { recursive: true })
+async function writeManifestAtomically(manifestPath, manifest) {
+  const temporaryPath = `${manifestPath}.${process.pid}.tmp`
+  await writeFile(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  await rename(temporaryPath, manifestPath)
+}
+
 await mkdir(installRoot, { recursive: true })
 await cp(nativeServerSource, nativeServer, { recursive: true })
 await writeFile(launcher, `${launcherLines.join('\n')}\n`, 'utf8')
 await chmod(launcher, 0o755)
-await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-console.log(`Registered ${manifest.name}`)
-console.log(`Manifest: ${manifestPath}`)
+for (const target of targets) {
+  await mkdir(target, { recursive: true })
+  const manifestPath = join(target, 'com.deepseek.harness.chrome.json')
+  await writeManifestAtomically(manifestPath, await mergedManifest(manifestPath))
+  console.log(`Manifest: ${manifestPath}`)
+}
+console.log('Registered com.deepseek.harness.chrome')
 console.log(`Launcher: ${launcher}`)

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { extensionIdsFromManifest, processTree } from '../scripts/restart-dev.mjs'
+import { extensionIdsFromManifest, extensionIdsFromManifests, processTree } from '../scripts/restart-dev.mjs'
 
 test('reuses all valid Chrome extension ids from the installed manifest', () => {
   assert.deepEqual(extensionIdsFromManifest({ allowed_origins: [
@@ -9,6 +9,19 @@ test('reuses all valid Chrome extension ids from the installed manifest', () => 
     'chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/',
     'chrome-extension://abcdefghijklmnopabcdefghijklmnop/',
   ] }), [
+    'abcdefghijklmnopabcdefghijklmnop',
+    'ponmlkjihgfedcbaponmlkjihgfedcba',
+  ])
+})
+
+test('deduplicates extension ids collected from Chrome and Edge manifests', () => {
+  assert.deepEqual(extensionIdsFromManifests([
+    { allowed_origins: ['chrome-extension://abcdefghijklmnopabcdefghijklmnop/'] },
+    { allowed_origins: [
+      'chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/',
+      'chrome-extension://abcdefghijklmnopabcdefghijklmnop/',
+    ] },
+  ]), [
     'abcdefghijklmnopabcdefghijklmnop',
     'ponmlkjihgfedcbaponmlkjihgfedcba',
   ])
