@@ -162,19 +162,32 @@ test('workbook operations use bounded snapshots and exact readback', async () =>
   assert.equal(created.result.observed.refersTo, '=Sheet1!A1')
   assert.equal((await run({ action: 'defined_names' })).result.definedNames.length, 1)
   const deleted = await run({ action: 'write', resource, operation: 'delete_defined_name', payload: { name: 'Budget' } }); assert.equal(deleted.result.observed.deleted, true)
-  const copied = await run({ action: 'write', resource, operation: 'copy_worksheet', payload: { sourceName: 'Sheet1', newName: 'Copied' } }); assert.equal(copied.result.observed.sheetName, 'Copied')
   const moved = await run({ action: 'write', resource, operation: 'move_worksheet', payload: { sourceName: 'Sheet2', index: 1 } }); assert.equal(moved.result.observed.order[0], 'Sheet2')
-  const hidden = await run({ action: 'write', resource, operation: 'set_worksheet_visibility', payload: { sheetName: 'Sheet1', visible: false } }); assert.equal(hidden.result.observed.visible, false)
+  const hidden = await run({ action: 'write', resource, operation: 'set_worksheet_visibility', payload: { sheetName: 'Sheet2', visible: false } }); assert.equal(hidden.result.observed.visible, false)
+  const activationApp = workbookFixture(); const activationRun = await runtimeWith(activationApp)
+  const activationInspection = await activationRun.raw({ action: 'inspect_write', operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' } })
+  const activated = await activationRun.raw({ action: 'write', resource: activationInspection.result.resource, operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' }, precondition: activationInspection.result.precondition }); assert.equal(activated.ok, true, JSON.stringify(activated)); assert.equal(activated.result.observed.sheets.find((sheet) => sheet.name === 'Sheet2').active, true)
 })
 
 test('workbook operations reject stale snapshots, last-visible hides, and unreadable APIs', async () => {
   const app = workbookFixture(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
-  const inspected = await run.raw({ action: 'inspect_write', operation: 'copy_worksheet', payload: { sourceName: 'Sheet1', newName: 'Copied' } }); app._sheets[0]._values[0][0] = 'changed'
-  assert.equal((await run.raw({ action: 'write', resource, operation: 'copy_worksheet', payload: { sourceName: 'Sheet1', newName: 'Copied' }, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' } }); app._sheets[1].Activate()
+  assert.equal((await run.raw({ action: 'write', resource, operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' }, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
   app._sheets[1].Visible = false
   assert.equal((await run({ action: 'write', resource, operation: 'set_worksheet_visibility', payload: { sheetName: 'Sheet1', visible: false } })).error.code, 'invalid_range')
   delete app.ActiveWorkbook.Names.Add
   assert.equal((await run({ action: 'write', resource, operation: 'create_defined_name', payload: { name: 'NoApi', refersTo: '=Sheet1!A1' } })).error.code, 'unsupported')
+})
+
+test('worksheet activation rejects missing APIs and mismatched whole-workbook readback', async () => {
+  const unavailable = workbookFixture(); delete unavailable._sheets[1].Activate
+  const unavailableRun = await runtimeWith(unavailable)
+  const unavailableInspection = await unavailableRun.raw({ action: 'inspect_write', operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' } })
+  assert.equal((await unavailableRun.raw({ action: 'write', resource: unavailableInspection.result.resource, operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' }, precondition: unavailableInspection.result.precondition })).error.code, 'unsupported')
+  const mismatch = workbookFixture(); mismatch._sheets[1].Activate = () => { mismatch._sheets[0].Visible = false }
+  const mismatchRun = await runtimeWith(mismatch)
+  const mismatchInspection = await mismatchRun.raw({ action: 'inspect_write', operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' } })
+  assert.equal((await mismatchRun.raw({ action: 'write', resource: mismatchInspection.result.resource, operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' }, precondition: mismatchInspection.result.precondition })).error.code, 'readback_mismatch')
 })
 
 test('spreadsheet write rereads its inspected precondition before mutation', async () => {
@@ -295,6 +308,8 @@ test('spreadsheet runtime fails closed for sheet lifecycle mutations without pre
   const app = sheetApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   const added = await run.raw({ action: 'write', resource, operation: 'sheet_add', payload: { name: 'Plan' } })
   assert.equal(added.error.code, 'unsupported')
+  const copied = await run.raw({ action: 'write', resource, operation: 'copy_worksheet', payload: { sourceName: 'Sheet1', newName: 'Copied' } })
+  assert.equal(copied.error.code, 'unsupported')
 })
 
 test('spreadsheet runtime fail-closes clear and filter clearing when the observable readback disagrees', async () => {

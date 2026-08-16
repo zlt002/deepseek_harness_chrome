@@ -27,7 +27,7 @@
     fill: ['#FFFFFF', '#FFFFFFFF', 16777215, -1, 'rgb(255,255,255)'], numberFormat: ['General', '通用格式', '常规'],
     alignment: ['general', 'General', 0, -4105], wrap: [false, 0],
   }
-  const WORKBOOK_OPERATIONS = new Set(['create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'])
+  const WORKBOOK_OPERATIONS = new Set(['create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility'])
   const VIEW_OPERATIONS = new Set(['set_zoom', 'set_freeze_panes'])
   const PRINT_OPERATIONS = new Set(['set_print_settings'])
   const OUTLINE_OPERATIONS = new Set(['set_outline_group'])
@@ -382,13 +382,13 @@
     const collection = workbook?.Worksheets ?? workbook?.Sheets
     const count = await collectionCount(collection)
     if (!collection || count === null || count > 200) return null
-    const names = []; const active = await call(workbook, 'getActiveSheet') ?? await property(workbook, 'ActiveSheet')
+    const names = []; const active = await call(workbook, 'getActiveSheet') ?? await property(workbook, 'ActiveSheet'); const activeName = await call(active, 'getName') ?? await property(active, 'Name')
     for (let index = 1; index <= count; index += 1) {
       const sheet = await collectionItem(collection, index)
       const name = await call(sheet, 'getName') ?? await property(sheet, 'Name')
       if (typeof name !== 'string' || !name) return null
       const visible = await property(sheet, 'Visible') ?? await property(sheet, 'visible')
-      names.push({ index, name, visible: typeof visible === 'boolean' ? visible : null, active: sheet === active ? true : null })
+      names.push({ index, name, visible: typeof visible === 'boolean' ? visible : null, active: typeof activeName === 'string' ? name === activeName : sheet === active ? true : null })
     }
     return { collection, count, sheets: names }
   }
@@ -402,11 +402,6 @@
       names.push({ name, refersTo, visible: typeof visible === 'boolean' ? visible : null, scope: typeof scope === 'string' || typeof scope === 'number' ? scope : null })
     }
     return { collection, names }
-  }
-  async function worksheetContentIdentity(sheet) {
-    const range = await call(sheet, 'getUsedRange') ?? await property(sheet, 'UsedRange')
-    const address = await readableAddress(range); if (!range || !address) return null
-    const snapshot = await rangeSnapshotFromRange(range, address); return snapshot ? { address, values: snapshot.values, formulas: snapshot.formulas } : null
   }
   async function filterCondition(range) {
     if (!range || typeof range.queryAutoFilterListItems !== 'function') return null
@@ -640,9 +635,7 @@
       const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets) return fail('unsupported', 'WebEdit cannot create a bounded worksheet precondition')
       const names = ['create_defined_name', 'delete_defined_name'].includes(operation) ? await definedNamesSnapshot(resolved.workbook) : null
       if (['create_defined_name', 'delete_defined_name'].includes(operation) && !names) return fail('unsupported', 'WebEdit cannot create a bounded defined-name precondition')
-      let sourceContent
-      if (operation === 'copy_worksheet') { const sourceName = typeof payload.sourceName === 'string' ? payload.sourceName : typeof payload.sheetName === 'string' ? payload.sheetName : ''; const source = await call(sheets.collection, 'Item', [sourceName]) ?? await call(resolved.workbook, 'getWorksheet', [sourceName]); sourceContent = await worksheetContentIdentity(source); if (!sourceContent) return fail('unsupported', 'WebEdit cannot prove worksheet copy content with a bounded used-range readback') }
-      const precondition = { version: 3, sheets: sheets.sheets, ...(names ? { definedNames: names.names } : {}), ...(sourceContent ? { sourceContent } : {}) }
+      const precondition = { version: 3, sheets: sheets.sheets, ...(names ? { definedNames: names.names } : {}) }
       return JSON.stringify(precondition).length <= 96_000 ? { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } } : fail('unsupported', 'WebEdit workbook precondition exceeds its safe bound')
     }
     if (operation === 'batch_write') {
@@ -717,7 +710,6 @@
     if (approved?.version === 3 && Array.isArray(approved.sheets)) {
       const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets || !same(sheets.sheets, approved.sheets)) return fail('fingerprint_mismatch', 'The workbook sheet order or visibility changed since inspection')
       if (approved.definedNames !== undefined) { const names = await definedNamesSnapshot(resolved.workbook); if (!names || !same(names.names, approved.definedNames)) return fail('fingerprint_mismatch', 'The workbook defined names changed since inspection') }
-      if (approved.sourceContent !== undefined) { const sourceName = request.payload?.sourceName ?? request.payload?.sheetName; const sheet = await call(sheets.collection, 'Item', [sourceName]) ?? await call(resolved.workbook, 'getWorksheet', [sourceName]); const content = await worksheetContentIdentity(sheet); if (!content || !same(content, approved.sourceContent)) return fail('fingerprint_mismatch', 'The worksheet content changed since inspection') }
       return null
     }
     if (approved?.version === 2 && Array.isArray(approved.targets) && approved.targets.length >= 1 && approved.targets.length <= 2) {
@@ -1122,32 +1114,29 @@
     const sourceName = typeof payload.sourceName === 'string' ? payload.sourceName : typeof payload.sheetName === 'string' ? payload.sheetName : ''
     const source = await call(before.collection, 'Item', [sourceName]) ?? await call(resolved.workbook, 'getWorksheet', [sourceName])
     if (!source || !sheetsByName.has(sourceName)) return fail('invalid_range', 'WebEdit could not resolve the requested worksheet')
+    if (request.operation === 'activate_worksheet') {
+      if (!Object.keys(payload).every((key) => key === 'sheetName') || typeof payload.sheetName !== 'string' || payload.sheetName !== sourceName || before.sheets.filter((sheet) => sheet.active === true).length !== 1 || before.sheets.some((sheet) => sheet.active === null)) return fail('unsupported', 'WebEdit cannot prove a complete active-worksheet transition')
+      if (typeof source.Activate === 'function') await resolve(source.Activate()); else if (typeof source.activate === 'function') await resolve(source.activate()); else if (typeof source.Select === 'function') await resolve(source.Select()); else return fail('unsupported', 'WebEdit does not expose worksheet activation')
+      const after = await worksheetSnapshot(resolved.workbook); const expected = before.sheets.map((sheet) => ({ ...sheet, active: sheet.name === sourceName }))
+      if (!after || after.sheets.filter((sheet) => sheet.active === true).length !== 1 || !same(after.sheets, expected)) return fail('readback_mismatch', 'WebEdit worksheet activation changed workbook state or did not activate the requested sheet')
+      return { requested: { sheetName: sourceName }, observed: { sheetName: sourceName, sheets: after.sheets, verified: true } }
+    }
     if (request.operation === 'set_worksheet_visibility') {
-      const visible = payload.visible; if (typeof visible !== 'boolean' || (visible === false && before.sheets.filter((sheet) => sheet.visible === true).length <= 1)) return fail('invalid_range', 'cannot hide the last visible worksheet')
+      const visible = payload.visible; if (typeof visible !== 'boolean' || before.sheets.some((sheet) => sheet.visible === null) || (visible === false && (before.sheets.filter((sheet) => sheet.visible === true).length <= 1 || sheetsByName.get(sourceName)?.active === true))) return fail('invalid_range', 'cannot hide the last or active worksheet')
       if (typeof source.setVisible === 'function') await resolve(source.setVisible(visible)); else if (!await set(source, 'Visible', visible)) return fail('unsupported', 'WebEdit does not expose worksheet visibility write/readback')
       const after = await worksheetSnapshot(resolved.workbook); const observed = after?.sheets.find((sheet) => sheet.name === sourceName)
-      if (!after || !observed || observed.visible !== visible) return fail('readback_mismatch', 'WebEdit worksheet visibility readback differs from request')
-      if (!same(after.sheets.filter((sheet) => sheet.name !== sourceName), before.sheets.filter((sheet) => sheet.name !== sourceName))) return fail('readback_mismatch', 'WebEdit worksheet visibility changed another sheet')
+      const expected = before.sheets.map((sheet) => sheet.name === sourceName ? { ...sheet, visible } : sheet)
+      if (!after || !observed || observed.visible !== visible || !same(after.sheets, expected)) return fail('readback_mismatch', 'WebEdit worksheet visibility readback changed workbook state')
       return { requested: { sheetName: sourceName, visible }, observed: { sheetName: sourceName, visible: observed.visible, sheets: after.sheets, verified: true } }
-    }
-    if (request.operation === 'copy_worksheet') {
-      const newName = typeof payload.newName === 'string' ? payload.newName.trim() : ''; if (payload.index !== undefined || !validName(newName) || sheetsByName.has(newName) || typeof before.collection.copy !== 'function') return fail('unsupported', 'WebEdit cannot copy and uniquely read back this worksheet')
-      const active = before.sheets.find((sheet) => sheet.active === true); const previous = active ? await call(before.collection, 'Item', [active.index]) : null
-      if (!active || typeof source.Activate !== 'function' || (previous && typeof previous.Activate !== 'function')) return fail('unsupported', 'WebEdit cannot prove the source worksheet used by copy')
-      await resolve(source.Activate()); await resolve(before.collection.copy(false)); if (previous && previous !== source) await resolve(previous.Activate()); const interim = await worksheetSnapshot(resolved.workbook); const added = interim?.sheets.find((sheet) => !sheetsByName.has(sheet.name)); const copied = added ? await call(before.collection, 'Item', [added.name]) ?? await call(resolved.workbook, 'getWorksheet', [added.name]) : null
-      if (!interim || !added || !copied || (typeof copied.setName !== 'function' && !await set(copied, 'Name', newName))) return fail('readback_mismatch', 'WebEdit copy did not expose a uniquely readable worksheet')
-      if (typeof copied.setName === 'function') await resolve(copied.setName(newName)); const after = await worksheetSnapshot(resolved.workbook); const observed = after?.sheets.find((sheet) => sheet.name === newName)
-      const copiedContent = await worksheetContentIdentity(copied)
-      if (!after || after.count !== before.count + 1 || !observed || !copiedContent || !same(copiedContent, request.precondition?.sourceContent)) return fail('readback_mismatch', 'WebEdit worksheet copy readback differs from request')
-      return { requested: { sourceName, newName, index: payload.index ?? null }, observed: { sheetName: newName, count: after.count, order: after.sheets.map((sheet) => sheet.name), content: copiedContent, verified: true } }
     }
     if (request.operation === 'move_worksheet') {
       const index = payload.index; if (!Number.isInteger(index) || index < 1 || index > before.count || typeof before.collection.move !== 'function') return fail('invalid_range', 'move_worksheet requires a bounded target index and readable move API')
       const sourceId = await call(source, 'getObjID') ?? await property(source, 'Id'); const target = before.sheets.find((sheet) => sheet.index === index); const targetSheet = target ? await call(before.collection, 'Item', [target.index]) : null; const targetId = await call(targetSheet, 'getObjID') ?? await property(targetSheet, 'Id')
       if (sourceId == null || targetId == null) return fail('unsupported', 'WebEdit does not expose stable worksheet move identities')
       await resolve(before.collection.move(sourceId, targetId, null, false)); const after = await worksheetSnapshot(resolved.workbook)
-      if (!after || after.sheets.find((sheet) => sheet.name === sourceName)?.index !== index) return fail('readback_mismatch', 'WebEdit worksheet move order differs from request')
-      return { requested: { sourceName, index }, observed: { order: after.sheets.map((sheet) => sheet.name), active: after.sheets.find((sheet) => sheet.active === true)?.name ?? null, verified: true } }
+      const expected = before.sheets.filter((sheet) => sheet.name !== sourceName); expected.splice(index - 1, 0, sheetsByName.get(sourceName)); const expectedSnapshot = expected.map((sheet, sheetIndex) => ({ ...sheet, index: sheetIndex + 1 }))
+      if (!after || !same(after.sheets, expectedSnapshot)) return fail('readback_mismatch', 'WebEdit worksheet move order or non-target state differs from request')
+      return { requested: { sourceName, index }, observed: { order: after.sheets.map((sheet) => sheet.name), sheets: after.sheets, verified: true } }
     }
     return fail('unsupported', 'unsupported workbook operation')
   }
@@ -1219,7 +1208,7 @@
   }
   async function write(request) {
     const resolved = await appAndSheet(request.resource?.sheetName); if (resolved.error) return resolved.error
-    if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select'].includes(request.operation)) return fail('unsupported', 'WebEdit structural sheet mutation lacks a mutation-safe preflight and is unavailable')
+    if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'copy_worksheet'].includes(request.operation)) return fail('unsupported', 'WebEdit structural sheet mutation lacks a mutation-safe preflight and is unavailable')
     const denied = await writable(resolved, request); if (denied) return denied
     const stale = await preconditionMatches(resolved, request); if (stale) return stale
     if (WORKBOOK_OPERATIONS.has(request.operation)) {
