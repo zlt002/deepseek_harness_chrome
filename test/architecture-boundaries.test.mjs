@@ -65,6 +65,8 @@ test('Harness product checkout pins LF before applying portable patches', async 
   const apply = script.indexOf("runVisible('git', ['apply', '--check'")
 
   assert.match(attributes, /^\*\.patch text eol=lf$/m)
+  assert.match(script, /process\.env\.npm_execpath/)
+  assert.doesNotMatch(script, /spawnSync\('pnpm'/)
   assert.ok(clone >= 0)
   assert.ok(clone < autocrlf && autocrlf < eol && eol < checkout && checkout < apply)
 })

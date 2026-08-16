@@ -26,8 +26,24 @@ function runVisible(command, args, cwd, env = process.env) {
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed with exit code ${result.status}`)
 }
 
+function pnpmInvocation(args) {
+  // npm_execpath points at the exact pnpm CLI that launched this lifecycle
+  // script. Invoking it through Node also avoids Windows spawnSync treating the
+  // pnpm command shim as a missing executable.
+  if (process.env.npm_execpath) {
+    return { command: process.execPath, args: [process.env.npm_execpath, ...args] }
+  }
+  return { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', args }
+}
+
+function runPnpmVisible(args, cwd, env = process.env) {
+  const invocation = pnpmInvocation(args)
+  runVisible(invocation.command, invocation.args, cwd, env)
+}
+
 function emitClientTypesAllowingPinnedFixtureConflicts(cwd, env) {
-  const result = spawnSync('pnpm', ['exec', 'tsc', '-b', 'tsconfig.client.json', '--pretty', 'false'], {
+  const invocation = pnpmInvocation(['exec', 'tsc', '-b', 'tsconfig.client.json', '--pretty', 'false'])
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd,
     env,
     encoding: 'utf8',
@@ -114,7 +130,7 @@ const manifest = {
 }
 await writeFile(resolve(target, '.harness-product.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
-if (shouldInstall) runVisible('pnpm', ['install', '--frozen-lockfile'], target)
+if (shouldInstall) runPnpmVisible(['install', '--frozen-lockfile'], target)
 if (shouldBuild) {
   // The pinned official revision currently has five pre-existing React 18/19
   // test-fixture type conflicts in `tsc -b tsconfig.client.json`. They do not
@@ -122,13 +138,13 @@ if (shouldBuild) {
   // compiling the full Host graph, bundling the full Client graph, and building
   // the Web app, while the separate upstream typecheck remains a visible gate.
   const buildEnv = { ...process.env, DSH_BUILD_FACE: '' }
-  runVisible('pnpm', ['run', 'build:lib:host'], target, buildEnv)
+  runPnpmVisible(['run', 'build:lib:host'], target, buildEnv)
   // Client bundles consume `lib/types/*.js`. The pinned upstream emits those
   // files despite five React 18/19 test-fixture diagnostics; accept exactly
   // that known set and fail closed on any new production or fixture error.
   emitClientTypesAllowingPinnedFixtureConflicts(target, buildEnv)
-  runVisible('pnpm', ['exec', 'tsdown', '--env.DSH_BUILD_FACE', 'client'], target, buildEnv)
-  runVisible('pnpm', ['run', 'build:web'], target, buildEnv)
+  runPnpmVisible(['exec', 'tsdown', '--env.DSH_BUILD_FACE', 'client'], target, buildEnv)
+  runPnpmVisible(['run', 'build:web'], target, buildEnv)
 }
 
 console.log(`Materialized Harness product tree at ${target}`)
