@@ -1,1 +1,1 @@
-release/windows-lite/harness-ui.patch -diff
+*.patch text eol=lf

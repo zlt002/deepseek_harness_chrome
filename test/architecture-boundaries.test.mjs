@@ -56,6 +56,7 @@ test('root orchestrates apps while product code stays outside the clean upstream
 })
 
 test('Harness product checkout pins LF before applying portable patches', async () => {
+  const attributes = await readFile(resolve(root, '.gitattributes'), 'utf8')
   const script = await readFile(resolve(root, 'scripts/materialize-harness-product.mjs'), 'utf8')
   const clone = script.indexOf("runVisible('git', ['clone'")
   const autocrlf = script.indexOf("runVisible('git', ['config', 'core.autocrlf', 'false']")
@@ -63,6 +64,7 @@ test('Harness product checkout pins LF before applying portable patches', async 
   const checkout = script.indexOf("runVisible('git', ['checkout'")
   const apply = script.indexOf("runVisible('git', ['apply', '--check'")
 
+  assert.match(attributes, /^\*\.patch text eol=lf$/m)
   assert.ok(clone >= 0)
   assert.ok(clone < autocrlf && autocrlf < eol && eol < checkout && checkout < apply)
 })
