@@ -17,7 +17,7 @@ test('requires a bound one-time spreadsheet inspection grant and returns the ver
     requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
       type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
       result: request.action === 'write'
-        ? { status: 'verified_write', resource: { ...resource, fingerprint: 'sheet-after' }, operation: request.operation, requested: { range: 'A1', values: [[42]] }, observed: { range: 'A1', values: [[42]] } }
+        ? { status: 'verified_write', resource: { ...resource, fingerprint: 'sheet-after' }, operation: request.operation, requested: { range: 'A1', values: [[42]] }, observed: { range: 'A1', values: [[42]], verified: true } }
         : { status: 'ok', resource, context: { workbookName: 'Budget.xlsx' } },
     })),
   })
@@ -29,7 +29,7 @@ test('requires a bound one-time spreadsheet inspection grant and returns the ver
     const write = { action: 'write', challenge: grant, idempotencyIdentity: 'spreadsheet-1', resource, operation: 'set_values', payload: { range: 'A1', values: [[42]] } }
     const written = await call(endpoint, write, 2)
     assert.equal(written.result.structuredContent.status, 'verified_write')
-    assert.deepEqual(written.result.structuredContent.observed, { range: 'A1', values: [[42]] })
+    assert.deepEqual(written.result.structuredContent.observed, { range: 'A1', values: [[42]], verified: true })
 
     const replay = await call(endpoint, write, 3)
     assert.equal(replay.result.isError, true)
@@ -53,6 +53,33 @@ test('rejects an invalid or mismatched spreadsheet extension readback instead of
     const response = await call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'spreadsheet-mismatch', resource, operation: 'set_values', payload: { range: 'A1', values: [[1]] } }, 2)
     assert.equal(response.result.isError, true)
     assert.match(response.result.content[0].text, /invalid verified spreadsheet write/i)
+  } finally { await connector.stop() }
+})
+
+test('rejects generic spreadsheet write attestations for structural and filter-clear operations', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 24, url: 'https://doc.midea.com/sheets/budget' }
+  const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Budget.xlsx', sheetName: 'Summary', fingerprint: 'sheet-before' }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+      result: request.action === 'write'
+        ? { status: 'verified_write', resource, operation: request.operation, requested: { range: request.payload.range, clear: true }, observed: { range: request.payload.range, verified: true, after: { operator: 'equals' } } }
+        : { status: 'ok', resource, context: {} },
+    })),
+  })
+  connector.bindBrowserTarget('spreadsheet-generic-attestation-run', target)
+  const endpoint = await connector.start()
+  const write = async (operation, payload, id) => {
+    const inspected = await call(endpoint, { action: 'inspect_write' }, id)
+    return call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: `generic-${operation}`, resource, operation, payload }, id + 1)
+  }
+  try {
+    const structural = await write('insert_rows', { range: '1:1' }, 1)
+    assert.equal(structural.result.isError, true)
+    assert.match(structural.result.content[0].text, /invalid verified spreadsheet write/i)
+    const unclearedFilters = await write('clear_filters', { range: 'A1:B2' }, 3)
+    assert.equal(unclearedFilters.result.isError, true)
+    assert.match(unclearedFilters.result.content[0].text, /invalid verified spreadsheet write/i)
   } finally { await connector.stop() }
 })
 

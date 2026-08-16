@@ -507,15 +507,49 @@ function validOfficeSpreadsheetArguments(value) {
 function validOfficeSpreadsheetReadResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'ok' && validOfficeResource(value.resource) }
 function validOfficeSpreadsheetWriteResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write' && validOfficeResource(value.resource) && SPREADSHEET_OPERATIONS.includes(value.operation) && value.requested && typeof value.requested === 'object' && value.observed && typeof value.observed === 'object' }
 function spreadsheetWriteHash(operation, payload) { return hash(JSON.stringify({ operation, payload })) }
+function jsonMatches(left, right) { return JSON.stringify(left) === JSON.stringify(right) }
+function hasVerifiedSpreadsheetRange(result, payload) { return result.requested.range === payload.range && result.observed.range === payload.range && result.observed.verified === true }
+function requestedFormatMatches(requested, payload) {
+  return requested && jsonMatches(requested.format, payload)
+}
+function observedFormatMatches(observed, payload) {
+  if (!observed || typeof observed !== 'object') return false
+  if (payload.font !== undefined && (!observed.font || typeof observed.font !== 'object' || !Object.entries(payload.font).every(([key, value]) => jsonMatches(observed.font[key], value)))) return false
+  return (payload.fill === undefined || jsonMatches(observed.fill, payload.fill))
+    && (payload.numberFormat === undefined || jsonMatches(observed.numberFormat, payload.numberFormat))
+    && (payload.alignment === undefined || jsonMatches(observed.alignment, payload.alignment))
+    && (payload.wrap === undefined || jsonMatches(observed.wrap, payload.wrap))
+}
 function verifiedSpreadsheetWriteMatches(result, operation, payload) {
   if (!validOfficeSpreadsheetWriteResult(result) || result.operation !== operation) return false
-  if (operation === 'set_values') return result.requested.range === payload.range && JSON.stringify(result.requested.values) === JSON.stringify(payload.values) && JSON.stringify(result.observed.values) === JSON.stringify(payload.values)
-  if (operation === 'set_formula') return result.requested.range === payload.range && JSON.stringify(result.requested.formulas) === JSON.stringify(payload.formulas) && JSON.stringify(result.observed.formulas) === JSON.stringify(payload.formulas)
-  if (operation === 'merge' || operation === 'unmerge') return result.requested.range === payload.range && result.observed.merged === (operation === 'merge')
-  if (operation === 'row_height') return result.requested.range === payload.range && result.observed.RowHeight === payload.value
-  if (operation === 'column_width') return result.requested.range === payload.range && result.observed.ColumnWidth === payload.value
-  if (['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return result.requested.range === payload.range && result.observed.range === payload.range && result.observed.verified === true
-  return true
+  if (operation === 'set_values') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.values, payload.values) && jsonMatches(result.observed.values, payload.values)
+  if (operation === 'set_formula') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.formulas, payload.formulas) && jsonMatches(result.observed.formulas, payload.formulas)
+  if (operation === 'clear') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.isBlank === true && Array.isArray(result.observed.values) && Array.isArray(result.observed.formulas)
+  if (operation === 'format') return hasVerifiedSpreadsheetRange(result, payload) && requestedFormatMatches(result.requested, payload) && observedFormatMatches(result.observed.format, payload)
+  if (operation === 'merge' || operation === 'unmerge') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.merged === (operation === 'merge') && result.observed.merged === (operation === 'merge')
+  if (operation === 'row_height') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.RowHeight === payload.value && result.observed.RowHeight === payload.value
+  if (operation === 'column_width') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.ColumnWidth === payload.value && result.observed.ColumnWidth === payload.value
+  if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns'].includes(operation)) return false
+  if (operation === 'sheet_add') return result.requested.name === payload.name && result.observed.name === payload.name && Number.isInteger(result.observed.beforeCount) && result.observed.afterCount === result.observed.beforeCount + 1 && result.observed.verified === true
+  if (operation === 'sheet_rename') return result.requested.name === (payload.name ?? payload.sheetName) && result.requested.newName === payload.newName && result.observed.name === payload.newName && result.observed.afterCount === result.observed.beforeCount && result.observed.verified === true
+  if (operation === 'sheet_delete') return result.requested.name === (payload.name ?? payload.sheetName) && result.requested.deleted === true && result.observed.name === (payload.name ?? payload.sheetName) && result.observed.deleted === true && result.observed.afterCount === result.observed.beforeCount - 1 && result.observed.verified === true
+  if (operation === 'sheet_select') return result.requested.name === (payload.name ?? payload.sheetName) && result.observed.name === (payload.name ?? payload.sheetName) && result.observed.verified === true
+  if (operation === 'sort') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.sorts, payload.sorts) && result.requested.hasHeader === (payload.hasHeader !== false) && Array.isArray(result.observed.values)
+  if (operation === 'set_auto_filter') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.enabled === payload.enabled && result.observed.enabled === payload.enabled
+  if (operation === 'clear_filters') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.after?.operator === 'none'
+  if (operation === 'set_data_validation') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.validationType === payload.validationType && result.requested.formula1 === payload.formula1 && result.requested.formula2 === payload.formula2 && Number.isInteger(result.observed.type) && result.observed.formula1 === (payload.formula1 ?? null) && result.observed.formula2 === (payload.formula2 ?? null)
+  if (operation === 'clear_data_validation') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && [null, 0].includes(result.observed.type)
+  if (operation === 'add_hyperlink') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.url === (payload.url ?? null) && result.requested.subAddress === (payload.subAddress ?? null) && result.observed.url === (payload.url ?? null) && result.observed.subAddress === (payload.subAddress ?? null) && Number.isInteger(result.observed.count) && result.observed.count >= 1
+  if (operation === 'delete_hyperlinks') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.delete === true && result.observed.count === 0
+  if (operation === 'add_comment') return false
+  if (operation === 'delete_comments') return false
+  if (operation === 'create_chart') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.chartType === (payload.chartType ?? 'columnClustered') && result.requested.chartStyle === (Number.isInteger(payload.chartStyle) ? payload.chartStyle : 0) && Number.isInteger(result.observed.beforeCount) && result.observed.afterCount > result.observed.beforeCount && result.observed.chart && result.observed.chart.type === result.requested.chartType && (typeof result.observed.chart.id === 'string' || typeof result.observed.chart.id === 'number' || typeof result.observed.chart.name === 'string')
+  if (operation === 'create_pivot_table') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.destination === payload.destination && result.requested.isNewSheet === false && Number.isInteger(result.observed.beforeCount) && result.observed.afterCount > result.observed.beforeCount && result.observed.destination === String(payload.destination).replace(/^.*!/, '').replace(/\$/g, '').toUpperCase() && result.observed.pivot && (typeof result.observed.pivot.id === 'string' || typeof result.observed.pivot.id === 'number')
+  if (operation === 'insert_cell_image') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.url === payload.url && typeof result.observed.formula === 'string' && /^=DISPIMG\(/i.test(result.observed.formula)
+  if (operation === 'export_pdf') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.scope === (payload.scope ?? 'workbook') && result.observed.artifact?.kind === 'pdf' && result.observed.artifact?.mimeType === 'application/pdf' && typeof result.observed.artifact?.sourceOrigin === 'string'
+  if (operation === 'export_range_image') return hasVerifiedSpreadsheetRange(result, payload) && result.observed.artifact?.kind === 'range_image' && /^image\//.test(result.observed.artifact?.mimeType ?? '') && Number.isInteger(result.observed.artifact?.byteLength)
+  if (operation === 'export_worksheet_image') return hasVerifiedSpreadsheetRange(result, payload) && result.observed.artifact?.kind === 'worksheet_image' && /^image\//.test(result.observed.artifact?.mimeType ?? '') && Number.isInteger(result.observed.artifact?.byteLength)
+  return false
 }
 
 function validTeamParent(value) {

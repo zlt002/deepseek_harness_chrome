@@ -37,11 +37,36 @@
     const rows = values.map((row, rowIndex) => row.map((cell, columnIndex) => ({ value: cell ?? null, text: valueOf(text, rowIndex, columnIndex) == null ? (cell == null ? '' : String(cell)) : String(valueOf(text, rowIndex, columnIndex)), formula: typeof valueOf(formulas, rowIndex, columnIndex) === 'string' ? valueOf(formulas, rowIndex, columnIndex) : null })))
     return { range, snapshot: { address, values, formulas, text, rows } }
   }
+  function blankCell(value) { return value === null || value === undefined || value === '' }
+  function blankSnapshot(snapshot) {
+    return snapshot.values.every((row) => row.every(blankCell)) && snapshot.formulas.every((row) => row.every(blankCell))
+  }
   async function collectionCount(collection) {
     const count = Number(await property(collection, 'Count'))
     return Number.isInteger(count) && count >= 0 && count <= 100000 ? count : null
   }
   async function collectionItem(collection, index) { return await call(collection, 'Item', [index]) ?? await call(collection, 'getItemAt', [index - 1]) }
+  async function worksheetSnapshot(workbook) {
+    const collection = workbook?.Worksheets ?? workbook?.Sheets
+    const count = await collectionCount(collection)
+    if (!collection || count === null || count > 200) return null
+    const names = []
+    for (let index = 1; index <= count; index += 1) {
+      const sheet = await collectionItem(collection, index)
+      const name = await call(sheet, 'getName') ?? await property(sheet, 'Name')
+      if (typeof name !== 'string' || !name) return null
+      names.push(name)
+    }
+    return { collection, count, names }
+  }
+  async function filterCondition(range) {
+    if (!range || typeof range.queryAutoFilterListItems !== 'function') return null
+    const callback = await callbackResult((done) => range.queryAutoFilterListItems('auto', null, done))
+    if (!callback.callbackInvoked || callback.callbackError) return null
+    const condition = callback.args?.[0]?.result?.fieldData?.condition
+    if (!condition || typeof condition !== 'object' || typeof condition.operator !== 'string') return null
+    return { operator: condition.operator.toLowerCase() }
+  }
   function callbackFailure(args) {
     for (const value of args) {
       if (value instanceof Error) return value.message || 'WebEdit callback returned an error'
@@ -76,6 +101,16 @@
     const name = await call(value, 'getName') ?? await property(value, 'Name') ?? await property(value, 'name')
     const type = await call(value, 'getType') ?? await property(value, 'Type') ?? await property(value, 'type')
     return { id: id ?? null, name: name ?? null, type: type ?? null }
+  }
+  async function readableAddress(value) {
+    const candidate = await call(value, 'getAddress') ?? await call(value, 'getRangeAddress') ?? await property(value, 'Address') ?? await property(value, 'address') ?? value
+    if (typeof candidate !== 'string' || !candidate.trim() || candidate.length > 256) return null
+    const normalized = candidate.trim().replace(/^.*!/, '')
+    return /^[A-Z]{1,3}\$?\d+(?::[A-Z]{1,3}\$?\d+)?$/i.test(normalized) ? normalized.replace(/\$/g, '').toUpperCase() : null
+  }
+  async function pivotDestination(pivot) {
+    const destination = await call(pivot, 'getDestination') ?? await call(pivot, 'getDestinationRange') ?? await property(pivot, 'Destination') ?? await property(pivot, 'DestinationRange')
+    return readableAddress(destination)
   }
   function hasReadableIdentity(identity) { return identity.id !== null || identity.name !== null }
   function identityMatches(callbackIdentity, collectionIdentity) {
@@ -115,7 +150,7 @@
       autoFilter: !!(range && (typeof range.setAutoFilter === 'function' || typeof range.SetAutoFilter === 'function') && filterState !== undefined),
       dataValidation: !!(validation && typeof validation.Add === 'function' && await property(validation, 'Type') !== undefined),
       hyperlinks: !!(hyperlinks && typeof hyperlinks.Add === 'function' && await collectionCount(hyperlinks) !== null),
-      comments: !!(range && typeof range.AddComment === 'function' && comments && await collectionCount(comments) !== null),
+      comments: false,
       charts: !!(resolved.sheet && typeof resolved.sheet.addChart === 'function' && charts && await collectionCount(charts) !== null),
       pivots: !!(range && typeof range.createPivotTable === 'function' && pivots && await collectionCount(pivots) !== null),
       cellImages: !!(range && typeof range.insertCellPictureUrl === 'function'),
@@ -123,7 +158,9 @@
       exportRangeImage: !!(range && typeof range.ToImageDataURL === 'function'),
       exportWorksheetImage: !!(resolved.sheet && typeof resolved.sheet.ExportImage === 'function'),
     }
-    return { ok: true, result: { status: 'ok', resource: resolved.resource, capabilities: { ...detected, detectedButUnsupported: [] } } }
+    const detectedButUnsupported = []
+    if (range && (typeof range.AddComment === 'function' || typeof range.ClearComments === 'function') && comments && await collectionCount(comments) !== null) detectedButUnsupported.push('comments')
+    return { ok: true, result: { status: 'ok', resource: resolved.resource, capabilities: { ...detected, detectedButUnsupported } } }
   }
   async function context() {
     const resolved = await appAndSheet()
@@ -219,6 +256,15 @@
       if (enabled !== payload.enabled) return fail('readback_mismatch', 'WebEdit auto-filter readback differs from request')
       return { requested: { range: address, enabled: payload.enabled }, observed: { range: address, enabled, verified: true } }
     }
+    if (operation === 'clear_filters') {
+      const before = await filterCondition(range)
+      if (!before || typeof range.autoFilterShowAll !== 'function') return fail('unsupported', 'WebEdit does not expose readable auto-filter clearing APIs')
+      const callback = await callbackResult((done) => range.autoFilterShowAll(done))
+      if (!callback.callbackInvoked || callback.callbackError) return fail('readback_mismatch', callback.callbackError ?? 'WebEdit did not confirm filter clearing by callback')
+      const after = await filterCondition(range)
+      if (!after || after.operator !== 'none') return fail('readback_mismatch', 'WebEdit filter-state readback does not prove filters were cleared')
+      return { requested: { range: address, clear: true }, observed: { range: address, before, after, verified: true } }
+    }
     if (operation === 'set_data_validation' || operation === 'clear_data_validation') {
       const validation = await property(range, 'Validation'); const beforeType = await property(validation, 'Type')
       if (!validation || beforeType === undefined || typeof validation.Add !== 'function' || typeof validation.Delete !== 'function') return fail('unsupported', 'WebEdit does not expose readable data-validation APIs')
@@ -230,8 +276,11 @@
       const type = VALIDATION_TYPES[payload.validationType]; const alertStyle = ALERT_STYLES[payload.alertStyle ?? 'stop']; const operator = VALIDATION_OPERATORS[payload.operator ?? 'between']
       if (!type || !alertStyle || !operator || (payload.formula1 !== undefined && typeof payload.formula1 !== 'string') || (payload.formula2 !== undefined && typeof payload.formula2 !== 'string')) return fail('invalid_range', 'set_data_validation requires a supported validation type and bounded formulas')
       await resolve(validation.Delete()); await resolve(validation.Add(type, alertStyle, operator, payload.formula1, payload.formula2))
-      const afterType = await property(validation, 'Type'); if (afterType !== type) return fail('readback_mismatch', 'WebEdit data-validation type differs from request')
-      return { requested: { range: address, validationType: payload.validationType, formula1: payload.formula1, formula2: payload.formula2 }, observed: { range: address, type: afterType, verified: true } }
+      const afterType = await property(validation, 'Type'); const afterFormula1 = await property(validation, 'Formula1') ?? await property(validation, 'formula1'); const afterFormula2 = await property(validation, 'Formula2') ?? await property(validation, 'formula2')
+      if (afterType !== type) return fail('readback_mismatch', 'WebEdit data-validation type differs from request')
+      if ((payload.formula1 !== undefined && afterFormula1 === undefined) || (payload.formula2 !== undefined && afterFormula2 === undefined)) return fail('unsupported', 'WebEdit data-validation readback does not expose requested formulas')
+      if ((payload.formula1 !== undefined && !same(afterFormula1, payload.formula1)) || (payload.formula2 !== undefined && !same(afterFormula2, payload.formula2))) return fail('readback_mismatch', 'WebEdit data-validation formula readback differs from request')
+      return { requested: { range: address, validationType: payload.validationType, formula1: payload.formula1, formula2: payload.formula2 }, observed: { range: address, type: afterType, formula1: afterFormula1 ?? null, formula2: afterFormula2 ?? null, verified: true } }
     }
     if (operation === 'add_hyperlink' || operation === 'delete_hyperlinks') {
       const links = await property(range, 'Hyperlinks'); const before = await collectionCount(links)
@@ -239,21 +288,16 @@
       if (operation === 'add_hyperlink') {
         if ((typeof payload.url !== 'string' || !/^https:\/\//i.test(payload.url) || payload.url.length > 2048) && (typeof payload.subAddress !== 'string' || !payload.subAddress.trim() || payload.subAddress.length > 128)) return fail('invalid_range', 'add_hyperlink requires a bounded https URL or workbook subAddress')
         await resolve(links.Add(range, payload.url ?? '', payload.subAddress ?? '', typeof payload.screenTip === 'string' ? payload.screenTip.slice(0, 500) : '', typeof payload.textToDisplay === 'string' ? payload.textToDisplay.slice(0, 500) : undefined))
-        const after = await collectionCount(await property(range, 'Hyperlinks')); if (after !== before + 1) return fail('readback_mismatch', 'WebEdit did not add the requested hyperlink')
-        return { requested: { range: address, url: payload.url ?? null, subAddress: payload.subAddress ?? null }, observed: { range: address, count: after, verified: true } }
+        const afterLinks = await property(range, 'Hyperlinks'); const after = await collectionCount(afterLinks); if (after !== before + 1) return fail('readback_mismatch', 'WebEdit did not add the requested hyperlink')
+        const created = await collectionItem(afterLinks, after); const observedUrl = await property(created, 'Address') ?? await property(created, 'address'); const observedSubAddress = await property(created, 'SubAddress') ?? await property(created, 'subAddress')
+        if ((payload.url !== undefined && observedUrl === undefined) || (payload.subAddress !== undefined && observedSubAddress === undefined)) return fail('unsupported', 'WebEdit hyperlink readback does not expose the requested target')
+        if ((payload.url !== undefined && !same(observedUrl, payload.url)) || (payload.subAddress !== undefined && !same(observedSubAddress, payload.subAddress))) return fail('readback_mismatch', 'WebEdit hyperlink target readback differs from request')
+        return { requested: { range: address, url: payload.url ?? null, subAddress: payload.subAddress ?? null }, observed: { range: address, count: after, url: observedUrl ?? null, subAddress: observedSubAddress ?? null, verified: true } }
       }
       await resolve(links.Delete()); const after = await collectionCount(await property(range, 'Hyperlinks')); if (after !== 0) return fail('readback_mismatch', 'WebEdit did not delete range hyperlinks')
       return { requested: { range: address, delete: true }, observed: { range: address, count: after, verified: true } }
     }
-    if (operation === 'add_comment' || operation === 'delete_comments') {
-      const comments = await property(resolved.sheet, 'Comments'); const before = await collectionCount(comments)
-      const method = operation === 'add_comment' ? 'AddComment' : 'ClearComments'
-      if (!comments || before === null || typeof range[method] !== 'function') return fail('unsupported', 'WebEdit does not expose readable cell-comment APIs')
-      if (operation === 'add_comment' && (typeof payload.text !== 'string' || !payload.text.trim() || payload.text.length > 4000)) return fail('invalid_range', 'add_comment requires bounded text')
-      await resolve(range[method](operation === 'add_comment' ? payload.text : undefined)); const after = await collectionCount(await property(resolved.sheet, 'Comments'))
-      if (after === null || (operation === 'add_comment' ? after !== before + 1 : after > before)) return fail('readback_mismatch', 'WebEdit cell-comment readback differs from request')
-      return { requested: { range: address, [operation === 'add_comment' ? 'text' : 'delete']: operation === 'add_comment' ? payload.text : true }, observed: { range: address, count: after, verified: true } }
-    }
+    if (operation === 'add_comment' || operation === 'delete_comments') return fail('unsupported', 'WebEdit cell-comment APIs do not expose range-scoped content readback, so Harness will not mutate comments')
     if (operation === 'insert_cell_image') {
       if (typeof payload.url !== 'string' || !/^https:\/\//i.test(payload.url) || payload.url.length > 2048 || typeof range.insertCellPictureUrl !== 'function') return fail('unsupported', 'WebEdit does not expose a bounded cell-image API')
       await resolve(range.insertCellPictureUrl(payload.url)); const after = await property(range, 'Formula') ?? await call(range, 'getFormula')
@@ -272,6 +316,8 @@
       const callbackChart = callback.callbackInvoked ? callback.args?.[0] : null
       const callbackIdentity = await objectIdentity(callbackChart)
       if (!hasReadableIdentity(collectionIdentity) || !hasReadableIdentity(callbackIdentity) || !identityMatches(callbackIdentity, collectionIdentity)) return fail('readback_mismatch', 'WebEdit chart callback and collection readback do not identify the same created chart')
+      if (collectionIdentity.type === null) return fail('unsupported', 'WebEdit chart readback does not expose a chart type')
+      if (!same(collectionIdentity.type, chartType)) return fail('readback_mismatch', 'WebEdit chart type readback differs from request')
       return { requested: { range: address, chartType, chartStyle }, observed: { range: address, beforeCount: before, afterCount: after, chart: collectionIdentity, callbackInvoked: true, verified: true } }
     }
     if (operation === 'create_pivot_table') {
@@ -285,7 +331,11 @@
       const collectionIdentity = await objectIdentity(pivot); const callbackIdentity = await objectIdentity(runtime)
       const callbackId = runtime && typeof runtime === 'object' ? await property(runtime, 'pivotTableId') ?? callbackIdentity.id : null
       if (!hasReadableIdentity(collectionIdentity) || callbackId === null || collectionIdentity.id === null || callbackId !== collectionIdentity.id) return fail('readback_mismatch', 'WebEdit pivot callback and collection readback do not identify the same created pivot table')
-      return { requested: { range: address, destination: payload.destination, isNewSheet: false }, observed: { range: address, beforeCount: before, afterCount: after, pivot: collectionIdentity, callbackInvoked: true, verified: true } }
+      const destination = await pivotDestination(pivot); const expectedDestination = await readableAddress(payload.destination)
+      if (!expectedDestination) return fail('invalid_range', 'create_pivot_table destination must be a bounded cell address')
+      if (!destination) return fail('unsupported', 'WebEdit pivot readback does not expose the destination')
+      if (destination !== expectedDestination) return fail('readback_mismatch', 'WebEdit pivot destination readback differs from request')
+      return { requested: { range: address, destination: payload.destination, isNewSheet: false }, observed: { range: address, beforeCount: before, afterCount: after, pivot: collectionIdentity, destination, callbackInvoked: true, verified: true } }
     }
     if (operation === 'export_pdf') {
       const scope = payload.scope === 'worksheet' ? 'worksheet' : payload.scope === 'workbook' || payload.scope === undefined ? 'workbook' : null
@@ -320,61 +370,103 @@
     const advanced = await advancedWrite(resolved, request, range, address); if (advanced) return advanced
     if (request.operation === 'set_values') {
       if (!Array.isArray(payload.values) || !await setValues(range, payload.values)) return fail('unsupported', 'WebEdit does not expose a range value write API')
-      const observed = (await rangeSnapshot(resolved.sheet, address)).snapshot; if (!same(observed.values, payload.values)) return fail('readback_mismatch', 'WebEdit readback differs from requested values')
-      return { requested: { range: address, values: payload.values }, observed: { range: address, values: observed.values } }
+      const readback = await rangeSnapshot(resolved.sheet, address); if (readback.error) return readback.error
+      const observed = readback.snapshot; if (!same(observed.values, payload.values)) return fail('readback_mismatch', 'WebEdit readback differs from requested values')
+      return { requested: { range: address, values: payload.values }, observed: { range: address, values: observed.values, verified: true } }
     }
     if (request.operation === 'set_formula') {
       if (!Array.isArray(payload.formulas) || !await setFormula(range, payload.formulas)) return fail('unsupported', 'WebEdit does not expose a range formula write API')
-      const observed = (await rangeSnapshot(resolved.sheet, address)).snapshot; if (!same(observed.formulas, payload.formulas)) return fail('readback_mismatch', 'WebEdit formula readback differs from request')
-      return { requested: { range: address, formulas: payload.formulas }, observed: { range: address, formulas: observed.formulas } }
+      const readback = await rangeSnapshot(resolved.sheet, address); if (readback.error) return readback.error
+      const observed = readback.snapshot; if (!same(observed.formulas, payload.formulas)) return fail('readback_mismatch', 'WebEdit formula readback differs from request')
+      return { requested: { range: address, formulas: payload.formulas }, observed: { range: address, formulas: observed.formulas, verified: true } }
     }
     if (request.operation === 'clear') {
-      const cleared = await call(range, 'clear', []) ?? await call(range, 'Clear', []) ?? await call(range, 'clearContents', [])
-      if (cleared === undefined && !await setValues(range, [[null]])) return fail('unsupported', 'WebEdit does not expose a clear API')
-      const observed = (await rangeSnapshot(resolved.sheet, address)).snapshot
-      return { requested: { range: address, clear: true }, observed: { range: address, values: observed.values } }
+      const hasClear = typeof range.clear === 'function' || typeof range.Clear === 'function' || typeof range.clearContents === 'function' || typeof range.ClearContents === 'function'
+      if (!hasClear) return fail('unsupported', 'WebEdit does not expose a bounded clear API')
+      if (typeof range.clear === 'function') await resolve(range.clear())
+      else if (typeof range.Clear === 'function') await resolve(range.Clear())
+      else if (typeof range.clearContents === 'function') await resolve(range.clearContents())
+      else await resolve(range.ClearContents())
+      const readback = await rangeSnapshot(resolved.sheet, address); if (readback.error) return readback.error
+      const observed = readback.snapshot
+      if (!blankSnapshot(observed)) return fail('readback_mismatch', 'WebEdit clear readback still contains values or formulas')
+      return { requested: { range: address, clear: true }, observed: { range: address, values: observed.values, formulas: observed.formulas, isBlank: true, verified: true } }
     }
     if (request.operation === 'format') {
+      const allowed = new Set(['range', 'font', 'fill', 'numberFormat', 'alignment', 'wrap'])
+      const fontKeys = new Set(['bold', 'italic', 'underline', 'size', 'name', 'color'])
+      const hasUnsupportedFormatField = !Object.keys(payload).every((key) => allowed.has(key))
+      const hasUnsupportedFontField = payload.font !== undefined && (!payload.font || typeof payload.font !== 'object' || Array.isArray(payload.font) || !Object.keys(payload.font).every((key) => fontKeys.has(key)))
+      if (hasUnsupportedFormatField || hasUnsupportedFontField) return fail('unsupported', 'WebEdit format request includes fields without a readable verification contract')
       const font = await property(range, 'Font') ?? {}; const interior = await property(range, 'Interior') ?? {}; const requested = payload
       let applied = false
       if (requested.font && typeof requested.font === 'object') for (const [key, value] of Object.entries(requested.font)) { const mapped = ({ bold: 'Bold', italic: 'Italic', underline: 'Underline', size: 'Size', name: 'Name', color: 'Color' })[key] ?? key; applied = await set(font, mapped, value) || applied; await set(font, key, value) }
       if (typeof requested.fill === 'string') { applied = await set(interior, 'Color', requested.fill) || applied; await set(interior, 'color', requested.fill) }
       for (const [key, value] of [['NumberFormat', requested.numberFormat], ['HorizontalAlignment', requested.alignment], ['WrapText', requested.wrap]]) if (value !== undefined) { applied = await set(range, key, value) || applied; await set(range, key === 'NumberFormat' ? 'numberFormat' : key === 'WrapText' ? 'wrap' : 'alignment', value) }
-      if (requested.borders && typeof requested.borders === 'object') { applied = await set(range, 'Borders', requested.borders) || applied; await set(range, 'borders', requested.borders) }
       if (!applied) return fail('unsupported', 'WebEdit does not expose requested formatting APIs')
-      const observed = { font: { bold: await property(font, 'bold') ?? await property(font, 'Bold'), italic: await property(font, 'italic') ?? await property(font, 'Italic') }, fill: await property(interior, 'color') ?? await property(interior, 'Color'), numberFormat: await property(range, 'numberFormat') ?? await property(range, 'NumberFormat'), alignment: await property(range, 'alignment') ?? await property(range, 'HorizontalAlignment'), wrap: await property(range, 'wrap') ?? await property(range, 'WrapText'), borders: await property(range, 'borders') ?? await property(range, 'Borders') }
-      return { requested: { range: address, format: payload }, observed: { range: address, format: observed } }
+      const observed = { font: { bold: await property(font, 'bold') ?? await property(font, 'Bold'), italic: await property(font, 'italic') ?? await property(font, 'Italic'), underline: await property(font, 'underline') ?? await property(font, 'Underline'), size: await property(font, 'size') ?? await property(font, 'Size'), name: await property(font, 'name') ?? await property(font, 'Name'), color: await property(font, 'color') ?? await property(font, 'Color') }, fill: await property(interior, 'color') ?? await property(interior, 'Color'), numberFormat: await property(range, 'numberFormat') ?? await property(range, 'NumberFormat'), alignment: await property(range, 'alignment') ?? await property(range, 'HorizontalAlignment'), wrap: await property(range, 'wrap') ?? await property(range, 'WrapText') }
+      const fontMatches = !requested.font || Object.entries(requested.font).every(([key, value]) => same(observed.font[key], value))
+      if (!fontMatches || (requested.fill !== undefined && !same(observed.fill, requested.fill)) || (requested.numberFormat !== undefined && !same(observed.numberFormat, requested.numberFormat)) || (requested.alignment !== undefined && !same(observed.alignment, requested.alignment)) || (requested.wrap !== undefined && !same(observed.wrap, requested.wrap))) return fail('readback_mismatch', 'WebEdit format readback differs from the requested fields')
+      return { requested: { range: address, format: payload }, observed: { range: address, format: observed, verified: true } }
     }
     if (request.operation === 'merge' || request.operation === 'unmerge') {
       const merged = request.operation === 'merge'; const method = merged ? (await call(range, 'merge', []) ?? await call(range, 'Merge', [])) : (await call(range, 'unmerge', []) ?? await call(range, 'UnMerge', []))
       if (method === undefined && !await set(range, 'MergeCells', merged)) return fail('unsupported', 'WebEdit does not expose merge APIs')
       const observed = await property(range, 'MergeCells')
-      if (observed !== undefined && observed !== merged) return fail('readback_mismatch', 'WebEdit merge readback differs from request')
-      return { requested: { range: address, merged }, observed: { range: address, merged: observed === undefined ? merged : observed } }
+      if (typeof observed !== 'boolean' || observed !== merged) return fail('readback_mismatch', 'WebEdit merge readback differs from request')
+      return { requested: { range: address, merged }, observed: { range: address, merged: observed, verified: true } }
     }
     const dimension = request.operation.includes('columns') || request.operation === 'column_width' ? await property(range, 'EntireColumn') : await property(range, 'EntireRow')
     if (['insert_rows', 'insert_columns', 'delete_rows', 'delete_columns'].includes(request.operation)) {
-      const deleting = request.operation.startsWith('delete'); const result = deleting ? await call(dimension, 'Delete', []) ?? await call(dimension, 'delete', []) : await call(dimension, 'Insert', []) ?? await call(dimension, 'insert', [])
-      if (result === undefined) return fail('unsupported', 'WebEdit does not expose requested structural API')
-      return { requested: { range: address, operation: request.operation }, observed: { range: address, operation: request.operation } }
+      return fail('unsupported', 'WebEdit structural row and column APIs have no stable non-mutating readback contract yet')
     }
     if (request.operation === 'row_height' || request.operation === 'column_width') {
       const key = request.operation === 'row_height' ? 'RowHeight' : 'ColumnWidth'; const amount = payload.value
-      if (typeof amount !== 'number' || !await set(dimension ?? range, key, amount)) return fail('unsupported', 'WebEdit does not expose requested dimension API')
+      const method = request.operation === 'row_height' ? 'setRowHeight' : 'setColumnWidth'
+      if (typeof amount !== 'number' || !Number.isFinite(amount) || (!(dimension ?? range) || (typeof (dimension ?? range)[method] !== 'function' && !await set(dimension ?? range, key, amount)))) return fail('unsupported', 'WebEdit does not expose requested dimension API')
+      if (typeof (dimension ?? range)[method] === 'function') await resolve((dimension ?? range)[method](amount))
       const observed = await property(dimension ?? range, key); if (observed !== amount) return fail('readback_mismatch', 'WebEdit dimension readback differs from request')
-      return { requested: { range: address, [key]: amount }, observed: { range: address, [key]: observed } }
+      return { requested: { range: address, [key]: amount }, observed: { range: address, [key]: observed, verified: true } }
     }
     return fail('unsupported', 'unsupported spreadsheet range operation')
   }
   async function writeSheet(resolved, request) {
-    const payload = request.payload ?? {}; const collection = resolved.workbook?.Worksheets ?? resolved.workbook?.Sheets
-    if (!collection) return fail('unsupported', 'WebEdit does not expose worksheet APIs')
-    if (request.operation === 'sheet_add') { const sheet = await call(collection, 'Add', [payload.name]) ?? await call(collection, 'add', [payload.name]); const name = await property(sheet, 'Name') ?? payload.name; if (!sheet || typeof name !== 'string') return fail('unsupported', 'WebEdit cannot add a worksheet'); return { requested: { name: payload.name }, observed: { name } } }
-    const name = payload.name ?? payload.sheetName; const sheet = await call(collection, 'Item', [name]) ?? await call(resolved.workbook, 'getWorksheet', [name])
-    if (!sheet) return fail('invalid_range', 'WebEdit could not resolve the requested worksheet')
-    if (request.operation === 'sheet_rename') { if (typeof payload.newName !== 'string' || !await set(sheet, 'Name', payload.newName)) return fail('unsupported', 'WebEdit cannot rename this worksheet'); return { requested: { name, newName: payload.newName }, observed: { name: await property(sheet, 'Name') } } }
-    if (request.operation === 'sheet_delete') { const result = await call(sheet, 'Delete', []) ?? await call(sheet, 'delete', []); if (result === undefined) return fail('unsupported', 'WebEdit cannot delete this worksheet'); return { requested: { name, deleted: true }, observed: { name, deleted: true } } }
-    if (request.operation === 'sheet_select') { const result = await call(sheet, 'Activate', []) ?? await call(sheet, 'Select', []); if (result === undefined) return fail('unsupported', 'WebEdit cannot select this worksheet'); return { requested: { name }, observed: { name: await property(resolved.app, 'ActiveSheet')?.Name ?? name } } }
+    const payload = request.payload ?? {}; const before = await worksheetSnapshot(resolved.workbook)
+    if (!before) return fail('unsupported', 'WebEdit does not expose readable worksheet enumeration')
+    const validName = (value) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 31
+    if (request.operation === 'sheet_add') {
+      const name = payload.name?.trim()
+      if (!validName(payload.name) || before.names.includes(name)) return fail('invalid_range', 'sheet_add requires a unique bounded worksheet name')
+      const created = await call(before.collection, 'Add', [name]) ?? await call(before.collection, 'add', [name])
+      if (created && (await property(created, 'Name')) !== name && !await set(created, 'Name', name)) return fail('unsupported', 'WebEdit cannot name a newly-created worksheet')
+      const after = await worksheetSnapshot(resolved.workbook)
+      if (!after || after.count !== before.count + 1 || after.names.filter((item) => item === name).length !== 1) return fail('readback_mismatch', 'WebEdit worksheet add readback differs from request')
+      return { requested: { name }, observed: { name, beforeCount: before.count, afterCount: after.count, verified: true } }
+    }
+    const name = payload.name ?? payload.sheetName; const sheet = await call(before.collection, 'Item', [name]) ?? await call(resolved.workbook, 'getWorksheet', [name])
+    if (typeof name !== 'string' || !sheet || !before.names.includes(name)) return fail('invalid_range', 'WebEdit could not resolve the requested worksheet')
+    if (request.operation === 'sheet_rename') {
+      const newName = payload.newName?.trim()
+      if (!validName(payload.newName) || before.names.includes(newName)) return fail('invalid_range', 'sheet_rename requires a unique bounded worksheet name')
+      if (typeof sheet.setName === 'function') await resolve(sheet.setName(newName)); else if (!await set(sheet, 'Name', newName)) return fail('unsupported', 'WebEdit cannot rename this worksheet')
+      const after = await worksheetSnapshot(resolved.workbook)
+      if (!after || after.count !== before.count || after.names.includes(name) || after.names.filter((item) => item === newName).length !== 1) return fail('readback_mismatch', 'WebEdit worksheet rename readback differs from request')
+      return { requested: { name, newName }, observed: { name: newName, beforeCount: before.count, afterCount: after.count, verified: true } }
+    }
+    if (request.operation === 'sheet_delete') {
+      if (before.count <= 1) return fail('unsupported', 'WebEdit will not delete the last worksheet')
+      if (typeof sheet.Delete === 'function') await resolve(sheet.Delete()); else if (typeof sheet.delete === 'function') await resolve(sheet.delete()); else return fail('unsupported', 'WebEdit cannot delete this worksheet')
+      const after = await worksheetSnapshot(resolved.workbook)
+      if (!after || after.count !== before.count - 1 || after.names.includes(name)) return fail('readback_mismatch', 'WebEdit worksheet delete readback differs from request')
+      return { requested: { name, deleted: true }, observed: { name, deleted: true, beforeCount: before.count, afterCount: after.count, verified: true } }
+    }
+    if (request.operation === 'sheet_select') {
+      if (typeof sheet.Activate === 'function') await resolve(sheet.Activate()); else if (typeof sheet.Select === 'function') await resolve(sheet.Select()); else if (typeof sheet.activate === 'function') await resolve(sheet.activate()); else return fail('unsupported', 'WebEdit cannot select this worksheet')
+      const active = await call(resolved.app, 'getActiveSheet') ?? await property(resolved.app, 'ActiveSheet')
+      const activeName = await call(active, 'getName') ?? await property(active, 'Name')
+      if (activeName !== name) return fail('readback_mismatch', 'WebEdit active worksheet readback differs from request')
+      return { requested: { name }, observed: { name: activeName, verified: true } }
+    }
     return fail('unsupported', 'unsupported spreadsheet sheet operation')
   }
   async function write(request) {
