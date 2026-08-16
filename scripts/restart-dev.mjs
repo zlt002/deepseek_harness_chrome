@@ -9,11 +9,13 @@ import { spawn } from 'node:child_process'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
-const harnessRoot = process.env.DSH_ROOT?.trim()
-  ? resolve(process.env.DSH_ROOT.trim())
-  : existsSync(join(generatedHarnessRoot, '.harness-product.json'))
-    ? generatedHarnessRoot
-    : resolve(projectRoot, 'upstream/deepseek-harness')
+const explicitHarnessRoot = process.env.DSH_ROOT?.trim()
+const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim()
+const harnessRoot = explicitHarnessRoot
+  ? resolve(explicitHarnessRoot)
+  : explicitHarnessCli
+    ? resolve(dirname(explicitHarnessCli), '../../..')
+    : generatedHarnessRoot
 
 export function extensionIdsFromManifest(manifest) {
   const origins = Array.isArray(manifest?.allowed_origins) ? manifest.allowed_origins : []
@@ -138,6 +140,10 @@ async function stopInstalledHost(installRoot) {
 export async function main(args = process.argv.slice(2)) {
   const skipHarnessBuild = args.includes('--skip-harness-build')
   const { installRoot, extensionIds } = await installedPaths()
+
+  if (!explicitHarnessRoot && !explicitHarnessCli && !existsSync(join(generatedHarnessRoot, '.harness-product.json'))) {
+    throw new Error(`Generated product Harness is missing: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set DSH_ROOT/DSH_CLI_PATH explicitly for a different Harness checkout.`)
+  }
 
   if (!skipHarnessBuild) {
     if (!existsSync(join(harnessRoot, 'package.json'))) throw new Error(`Harness checkout not found: ${harnessRoot}`)

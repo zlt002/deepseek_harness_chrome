@@ -90,3 +90,32 @@ test('Harness client plugins execute the portable tsdown JavaScript entrypoint',
     assert.doesNotMatch(config, /upstream\/deepseek-harness/)
   }
 })
+
+test('product commands never silently fall back to the clean upstream checkout', async () => {
+  for (const relativePath of [
+    'scripts/build-harness-client-plugins.mjs',
+    'scripts/sync-harness-assets.mjs',
+    'scripts/load-harness-client-bundle.mjs',
+    'scripts/register-native-host.mjs',
+    'scripts/restart-dev.mjs',
+    'apps/native-server/src/harness-process.mjs',
+    'release/mac-lite/build-mac-production.mjs',
+    'release/windows-lite/materialize-harness-runtime.mjs',
+  ]) {
+    const source = await readFile(resolve(root, relativePath), 'utf8')
+    assert.doesNotMatch(source, /upstream\/deepseek-harness/, `${relativePath} still falls back to the clean upstream checkout`)
+  }
+
+  for (const relativePath of [
+    'scripts/build-harness-client-plugins.mjs',
+    'scripts/sync-harness-assets.mjs',
+    'scripts/load-harness-client-bundle.mjs',
+    'scripts/register-native-host.mjs',
+    'scripts/restart-dev.mjs',
+    'apps/native-server/src/harness-process.mjs',
+    'release/mac-lite/build-mac-production.mjs',
+  ]) {
+    const source = await readFile(resolve(root, relativePath), 'utf8')
+    assert.match(source, /pnpm build:harness-product/, `${relativePath} does not explain how to create the required product Harness`)
+  }
+})

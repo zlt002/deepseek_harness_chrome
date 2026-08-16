@@ -35,5 +35,8 @@ test('Windows CI builds from the recursive upstream submodule and materialized p
   const releaseTarget = workflow.indexOf("--target '${{ github.sha }}'", editRelease)
   const uploadRelease = workflow.indexOf('gh release upload $env:RELEASE_TAG')
   assert.ok(editRelease >= 0 && editRelease < releaseTarget && releaseTarget < uploadRelease)
+  assert.match(workflow, /Windows runner verified install, Chrome\/Edge Native Messaging registration, ping\/pong, upgrade, rollback, and user-data retention/)
+  assert.match(workflow, /Visual Chrome\/Edge sidepanel UAT on a target Windows machine remains required/)
+  assert.doesNotMatch(workflow, /Real Windows installation, Native Messaging, upgrade, and rollback acceptance are still required/)
   await assert.rejects(access(resolve(projectRoot, 'release/windows-lite/harness-ui.patch')))
 })

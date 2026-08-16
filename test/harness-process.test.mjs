@@ -36,6 +36,17 @@ test('resolves the CLI from DSH_ROOT when no explicit CLI path is set', () => {
   )
 })
 
+test('resolves an explicit DSH_CLI_PATH without consulting the product tree', () => {
+  assert.equal(resolveHarnessCli({ DSH_CLI_PATH: '/opt/custom-dsh.mjs' }), '/opt/custom-dsh.mjs')
+})
+
+test('defaults to the generated product Harness CLI', () => {
+  assert.equal(
+    resolveHarnessCli({}),
+    resolve(projectRoot, '.generated/harness-product/apps/cli/lib/bin.js'),
+  )
+})
+
 test('resolves the product-owned Harness runtime plugin outside the upstream checkout', () => {
   assert.equal(
     resolveHarnessRuntimePlugin({}),

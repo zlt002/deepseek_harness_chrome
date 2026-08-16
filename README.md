@@ -145,8 +145,10 @@ pnpm test:windows-release
 
 GitHub Actions 的 `Build Windows Lite` 工作流会在 `windows-latest` 上构建。ZIP 和自动化测试
 会递归检出固定版本的官方 submodule，构建 `.generated/harness-product`，再从该产品树物化
-Windows Runtime。它不再检出第二份 Harness，也不再应用产品级大补丁。自动化只能证明静态
-闭包与安装器契约；发布前仍需真实 Windows 安装、Native Messaging、升级和回滚验收。
+Windows Runtime。它不再检出第二份 Harness，也不再应用产品级大补丁。Windows Runner 会
+在隔离的用户目录中执行安装、Chrome/Edge Native Messaging 注册、`ping`/`pong`、升级、
+回滚和用户数据保留验收。自动化不包含真实浏览器侧边栏的可视化操作，因此候选包交付前仍需
+在目标 Windows 机器完成 Chrome/Edge 侧边栏人工 UAT。
 
 ## 上游升级
 

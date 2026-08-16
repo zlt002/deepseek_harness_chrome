@@ -17,14 +17,11 @@ const nativeServerSource = resolve(projectRoot, 'apps', 'native-server')
 const skillsSource = resolve(projectRoot, 'skills')
 const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined
 const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim() || undefined
-const upstreamHarnessRoot = resolve(projectRoot, 'upstream/deepseek-harness')
 const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
-const defaultHarnessRoot = existsSync(join(generatedHarnessRoot, '.harness-product.json'))
-  ? generatedHarnessRoot
-  : upstreamHarnessRoot
 const inferredHarnessRoot = !explicitHarnessRoot && !explicitHarnessCli
-  && existsSync(join(defaultHarnessRoot, 'apps/cli/lib/bin.js'))
-  ? defaultHarnessRoot
+  && existsSync(join(generatedHarnessRoot, '.harness-product.json'))
+  && existsSync(join(generatedHarnessRoot, 'apps/cli/lib/bin.js'))
+  ? generatedHarnessRoot
   : undefined
 if (extensionIds.length === 0) {
   console.error('Set DEEPSEEK_HARNESS_EXTENSION_ID to one or more comma-separated Chrome extension ids.')
@@ -33,6 +30,10 @@ if (extensionIds.length === 0) {
 const invalidExtensionId = extensionIds.find((value) => !/^[a-p]{32}$/.test(value))
 if (invalidExtensionId !== undefined) {
   console.error(`Invalid Chrome extension id: ${invalidExtensionId}`)
+  process.exit(2)
+}
+if (!explicitHarnessRoot && !explicitHarnessCli && inferredHarnessRoot === undefined) {
+  console.error(`Generated product Harness is missing or not built: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set DSH_ROOT/DSH_CLI_PATH explicitly for a different Harness checkout.`)
   process.exit(2)
 }
 

@@ -104,7 +104,7 @@ jobs:
               --draft `
               --target '${{ github.sha }}' `
               --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
-              --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Real Windows installation, Native Messaging, upgrade, and rollback acceptance are still required."
+              --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. The Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention. Visual Chrome/Edge sidepanel UAT on a target Windows machine remains required."
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
@@ -112,7 +112,7 @@ jobs:
             --repo $repo `
             --target '${{ github.sha }}' `
             --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
-            --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Real Windows installation, Native Messaging, upgrade, and rollback acceptance are still required."
+            --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. The Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention. Visual Chrome/Edge sidepanel UAT on a target Windows machine remains required."
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           gh release upload $env:RELEASE_TAG $zip $checksum --repo $repo --clobber

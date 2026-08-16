@@ -16,11 +16,8 @@ import { bundleHarnessRuntimePlugin } from '../../scripts/bundle-harness-runtime
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
 const GENERATED_HARNESS_ROOT = path.join(PROJECT_ROOT, '.generated', 'harness-product')
-const HARNESS_ROOT = path.resolve(process.env.DSH_ROOT?.trim() || (
-  existsSync(path.join(GENERATED_HARNESS_ROOT, '.harness-product.json'))
-    ? GENERATED_HARNESS_ROOT
-    : path.join(PROJECT_ROOT, 'upstream', 'deepseek-harness')
-))
+const EXPLICIT_HARNESS_ROOT = process.env.DSH_ROOT?.trim()
+const HARNESS_ROOT = path.resolve(EXPLICIT_HARNESS_ROOT || GENERATED_HARNESS_ROOT)
 const PACKAGE_NAME = 'accr-ui-mac-production-poc'
 const EXTENSION_VERSION = '1.1.63'
 const EXTENSION_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtjVzlR9cE9zV44l999YtraoKbQ77NfaFgwJmpeABPL2HxUK82pD0DFRSv/7FfZ4nEZRDlgZz1zj1yIF4HLnftCZyf/xYIrwhXDojQfYULE8miIGufKEJf/IUBkpFdFKHgfKgowV0M72wNzqaYd27MdR6DczCR5PQKwi5G2JKUJxx4xc2+KD3GOUjpE8DrhzliD3gYcwEZ8lphtOuCUIx5kI97etKEiixqrwFGRoUbHFLXT14+Fqg7jmSu/HaUVWbl/Dx1VbI1hgVZdnJI//UJY+T0qMLV8hcfHPpwBum0lf1rfP+FQwnqoV2wf4k+6f70dE/Xrlckddpkl0IWDSEdwIDAQAB'
@@ -36,6 +33,12 @@ const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
   '@deepseek-ai/dsh-client-ui-directory-picker-browse',
   '@deepseek-ai/dsh-mcp-client',
 ]
+
+function assertHarnessProductAvailable() {
+  if (!EXPLICIT_HARNESS_ROOT && !existsSync(path.join(GENERATED_HARNESS_ROOT, '.harness-product.json'))) {
+    throw new Error(`Generated product Harness is missing: ${GENERATED_HARNESS_ROOT}. Run pnpm build:harness-product first, or set DSH_ROOT explicitly for a different Harness checkout.`)
+  }
+}
 const PRODUCT_UI_PACKAGE_NAMES = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
@@ -587,6 +590,7 @@ async function validatePackage({ packageDir, payloadDir, zipPath }) {
 
 /** Build the no-node_modules Mac package PoC from existing built artifacts. */
 export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT_ROOT, 'release') } = {}) {
+  assertHarnessProductAvailable()
   const cliEntry = path.join(HARNESS_ROOT, 'apps', 'cli', 'lib', 'bin.js')
   const webDist = path.join(HARNESS_ROOT, 'apps', 'web', 'dist')
   const cliConfig = path.join(HARNESS_ROOT, 'apps', 'cli', 'config')
@@ -710,6 +714,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
 }
 
 async function main() {
+  assertHarnessProductAvailable()
   // The package exports resolve to generated lib/ files. Refresh them before
   // bundling so a source change cannot silently ship an older Harness runtime.
   run('pnpm', ['run', 'build:lib:host'], { cwd: HARNESS_ROOT })

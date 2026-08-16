@@ -57,6 +57,10 @@ test('Windows materializer refuses to manufacture a target runtime from macOS or
   assert.doesNotThrow(() => assertWindowsMaterializationHost({ platform: 'win32', arch: 'x64' }))
 })
 
+test('Windows materializer requires an explicit built Harness source', async () => {
+  await assert.rejects(materializeHarnessRuntime({ platform: 'win32', arch: 'x64' }), /requires an explicit sourceDir/)
+})
+
 test('materializer deploys a production closure, runs smoke, and only then writes the marker', async () => {
   const sourceDir = await createCheckoutFixture()
   const outputDir = path.join(await mkdtemp(path.join(tmpdir(), 'harness-materializer-output-')), 'runtime')
@@ -143,5 +147,8 @@ test('materializer CLI only accepts explicit source, output, and revision inputs
   assert.deepEqual(parseMaterializerArgs(['--source', 'D:\\harness', '--out', 'D:\\runtime', '--revision', 'abc123']), {
     sourceDir: 'D:\\harness', outputDir: 'D:\\runtime', revision: 'abc123',
   })
+  assert.throws(() => parseMaterializerArgs([]), /Missing required option: --source/)
+  assert.throws(() => parseMaterializerArgs(['--source', 'D:\\harness']), /Missing required option: --out/)
+  assert.throws(() => parseMaterializerArgs(['--source', 'D:\\harness', '--out', 'D:\\runtime']), /Missing required option: --revision/)
   assert.throws(() => parseMaterializerArgs(['--platform', 'win32']), /Unknown argument/)
 })

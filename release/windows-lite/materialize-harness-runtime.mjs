@@ -11,7 +11,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
-const DEFAULT_SOURCE_DIR = path.resolve(PROJECT_ROOT, 'upstream', 'deepseek-harness')
 const DEFAULT_OUTPUT_DIR = path.join(PROJECT_ROOT, 'release', 'windows-lite', 'harness-runtime-win32-x64')
 const MARKER_FILE = 'harness-runtime.json'
 const FRONTEND_DIST = 'node_modules/@deepseek-ai/dsh-web-frontend/dist'
@@ -226,7 +225,7 @@ async function assembleRuntime({ sourceDir, deployedDir, outputDir, revision, sm
 
 /** Materialize and verify a portable Windows x64 runtime without touching the sibling checkout. */
 export async function materializeHarnessRuntime({
-  sourceDir = DEFAULT_SOURCE_DIR,
+  sourceDir,
   outputDir = DEFAULT_OUTPUT_DIR,
   revision,
   platform = process.platform,
@@ -236,6 +235,7 @@ export async function materializeHarnessRuntime({
   resolveRevision = sourceRevision,
 } = {}) {
   assertWindowsMaterializationHost({ platform, arch })
+  if (!sourceDir) throw new Error('Harness runtime materialization requires an explicit sourceDir. Build .generated/harness-product with pnpm build:harness-product, or pass another built Harness checkout explicitly.')
   const sourceRoot = await validateBuiltHarnessCheckout(sourceDir)
   const resolvedRevision = resolveRevision(sourceRoot, revision)
   const absoluteOutput = path.resolve(outputDir)
@@ -262,6 +262,9 @@ export function parseMaterializerArgs(argv) {
     if (!value) throw new Error(`Missing value for ${argument}`)
     options[{ '--source': 'sourceDir', '--out': 'outputDir', '--revision': 'revision' }[argument]] = value
     index += 1
+  }
+  for (const [option, property] of [['--source', 'sourceDir'], ['--out', 'outputDir'], ['--revision', 'revision']]) {
+    if (!options[property]) throw new Error(`Missing required option: ${option}`)
   }
   return options
 }

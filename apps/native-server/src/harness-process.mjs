@@ -21,9 +21,10 @@ export function resolveHarnessCli(env = process.env) {
   if (explicit) return resolve(explicit)
   const root = env.DSH_ROOT?.trim()
   if (root) return resolve(root, 'apps/cli/lib/bin.js')
-  const upstream = resolve(THIS_DIR, '../../../upstream/deepseek-harness/apps/cli/lib/bin.js')
-  if (existsSync(upstream)) return upstream
-  return upstream
+  const generatedRoot = resolve(THIS_DIR, '../../../.generated/harness-product')
+  const generatedCli = resolve(generatedRoot, 'apps/cli/lib/bin.js')
+  if (existsSync(resolve(generatedRoot, '.harness-product.json')) && existsSync(generatedCli)) return generatedCli
+  throw new Error(`Generated product Harness is missing or not built: ${generatedRoot}. Run pnpm build:harness-product first, or set DSH_ROOT/DSH_CLI_PATH explicitly for a different Harness checkout.`)
 }
 
 /** Resolve the product-owned out-of-tree MCP plugin in source and packages. */

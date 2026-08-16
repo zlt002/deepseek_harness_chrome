@@ -6,11 +6,11 @@ import { fileURLToPath } from 'node:url'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const generatedHarness = join(projectRoot, '.generated', 'harness-product')
-const harnessRoot = resolve(process.env.DSH_ROOT?.trim() || (
-  existsSync(join(generatedHarness, '.harness-product.json'))
-    ? generatedHarness
-    : join(projectRoot, 'upstream', 'deepseek-harness')
-))
+const explicitHarnessRoot = process.env.DSH_ROOT?.trim()
+const harnessRoot = resolve(explicitHarnessRoot || generatedHarness)
+if (!explicitHarnessRoot && !existsSync(join(generatedHarness, '.harness-product.json'))) {
+  throw new Error(`Generated product Harness is missing: ${generatedHarness}. Run pnpm build:harness-product first, or set DSH_ROOT explicitly for a different Harness checkout.`)
+}
 const packageNames = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
