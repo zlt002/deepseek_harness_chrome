@@ -55,3 +55,34 @@ test('rejects an invalid or mismatched spreadsheet extension readback instead of
     assert.match(response.result.content[0].text, /invalid verified spreadsheet write/i)
   } finally { await connector.stop() }
 })
+
+test('keeps spreadsheet artifact text compact and rejects an oversized final MCP response', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 23, url: 'https://doc.midea.com/sheets/budget' }
+  const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Budget.xlsx', sheetName: 'Summary', fingerprint: 'sheet-before' }
+  let artifactBytes = 16 * 1024
+  const connector = new BrowserConnector({
+    requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+      result: request.action === 'write'
+        ? { status: 'verified_write', resource, operation: request.operation, requested: { range: 'A1' }, observed: { range: 'A1', verified: true, artifact: { kind: 'range_image', mimeType: 'image/png', byteLength: artifactBytes, delivery: 'inline', dataUrl: `data:image/png;base64,${Buffer.alloc(artifactBytes, 1).toString('base64')}` } } }
+        : { status: 'ok', resource, context: {} },
+    })),
+  })
+  connector.bindBrowserTarget('spreadsheet-artifact-run', target)
+  const endpoint = await connector.start()
+  const write = async (identity, id) => {
+    const inspected = await call(endpoint, { action: 'inspect_write' }, id)
+    return call(endpoint, { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, resource, operation: 'export_range_image', payload: { range: 'A1' } }, id + 1)
+  }
+  try {
+    const compact = await write('spreadsheet-artifact-small', 1)
+    assert.equal(compact.result.isError, undefined)
+    assert.equal(compact.result.content[0].text.includes('data:image'), false)
+    assert.match(compact.result.structuredContent.observed.artifact.dataUrl, /^data:image\/png;base64,/)
+
+    artifactBytes = 128 * 1024
+    const oversized = await write('spreadsheet-artifact-large', 3)
+    assert.equal(oversized.result.isError, true)
+    assert.match(oversized.result.content[0].text, /response limit/i)
+  } finally { await connector.stop() }
+})

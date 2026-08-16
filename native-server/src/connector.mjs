@@ -9,6 +9,26 @@ const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
 const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 60_000
 const OFFICE_DOCUMENT_MAX_RECORDS = 256
 const MCP_PATH = '/mcp'
+const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
+
+function spreadsheetArtifactSummary(result) {
+  const artifact = result?.observed?.artifact
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) return result
+  const { dataUrl: _dataUrl, ...artifactMetadata } = artifact
+  return {
+    status: result.status,
+    operation: result.operation,
+    requested: result.requested,
+    observed: { range: result.observed?.range, verified: result.observed?.verified, artifact: artifactMetadata },
+  }
+}
+
+function spreadsheetToolResponse(id, structuredContent) {
+  const content = spreadsheetArtifactSummary(structuredContent)
+  const body = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent } }
+  if (Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_SPREADSHEET_TOOL_RESPONSE_BYTES) return body
+  return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Spreadsheet result exceeds the ${MAX_SPREADSHEET_TOOL_RESPONSE_BYTES}-byte response limit; no artifact payload was returned.` }], isError: true } }
+}
 
 const knowledgeSearchTool = {
   name: 'knowledge_search',
@@ -207,7 +227,7 @@ const officeSpreadsheetTool = {
   inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
     action: { enum: ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
     challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
-    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image'] }, payload: { type: 'object', additionalProperties: true },
+    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'] }, payload: { type: 'object', additionalProperties: true },
   } },
 }
 
@@ -474,7 +494,7 @@ function validOfficeDocumentWriteResult(value) {
     && validLightDocumentResource(value.resource) && value.requested && typeof value.requested === 'object'
     && value.observed && typeof value.observed === 'object'
 }
-const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image']
+const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'row_height', 'column_width', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image']
 function validOfficeSpreadsheetArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
   const keys = Object.keys(value)
@@ -494,7 +514,7 @@ function verifiedSpreadsheetWriteMatches(result, operation, payload) {
   if (operation === 'merge' || operation === 'unmerge') return result.requested.range === payload.range && result.observed.merged === (operation === 'merge')
   if (operation === 'row_height') return result.requested.range === payload.range && result.observed.RowHeight === payload.value
   if (operation === 'column_width') return result.requested.range === payload.range && result.observed.ColumnWidth === payload.value
-  if (['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image'].includes(operation)) return result.requested.range === payload.range && result.observed.range === payload.range && result.observed.verified === true
+  if (['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return result.requested.range === payload.range && result.observed.range === payload.range && result.observed.verified === true
   return true
 }
 
@@ -1273,7 +1293,7 @@ export class BrowserConnector {
       const existing = this.officeSpreadsheetWrites.get(args.idempotencyIdentity)
       if (existing) {
         if (existing.fingerprint !== fingerprint || existing.resourceFingerprint !== grant.resource.fingerprint) { this.#toolError(response, message.id, 'Spreadsheet idempotency identity conflicts with the approved operation or payload.'); return }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(existing.result) }], structuredContent: existing.result } }); return
+        this.#reply(response, spreadsheetToolResponse(message.id, existing.result)); return
       }
       const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: 'write', resource: grant.resource, operation: args.operation, payload: args.payload }
       try {
@@ -1282,7 +1302,7 @@ export class BrowserConnector {
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
         if (this.officeSpreadsheetWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetWrites.delete(this.officeSpreadsheetWrites.keys().next().value)
         this.officeSpreadsheetWrites.set(args.idempotencyIdentity, { fingerprint, resourceFingerprint: grant.resource.fingerprint, result })
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        this.#reply(response, spreadsheetToolResponse(message.id, result))
       } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet write failed') }
       return
     }
@@ -1296,10 +1316,10 @@ export class BrowserConnector {
         if (this.officeSpreadsheetChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetChallenges.delete(this.officeSpreadsheetChallenges.keys().next().value)
         this.officeSpreadsheetChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, challenge }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } }); return
+        this.#reply(response, spreadsheetToolResponse(message.id, result)); return
       }
       const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      this.#reply(response, spreadsheetToolResponse(message.id, result))
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet read failed') }
   }
 

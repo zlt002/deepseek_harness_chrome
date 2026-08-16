@@ -9,7 +9,9 @@
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
   const matrix = (source) => Array.isArray(source) ? source : [[source ?? null]]
   const resourceFingerprint = (workbookName, sheetName) => `webedit:${location.origin}${location.pathname}|${workbookName ?? ''}|${sheetName ?? ''}`
-  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image'])
+  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'])
+  const MAX_IMAGE_ARTIFACT_BYTES = 256 * 1024
+  const MAX_INLINE_IMAGE_ARTIFACT_BYTES = 8 * 1024
   const VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
   const ALERT_STYLES = { stop: 1, warning: 2, information: 3 }
   const VALIDATION_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
@@ -39,13 +41,74 @@
     const count = Number(await property(collection, 'Count'))
     return Number.isInteger(count) && count >= 0 && count <= 100000 ? count : null
   }
+  async function collectionItem(collection, index) { return await call(collection, 'Item', [index]) ?? await call(collection, 'getItemAt', [index - 1]) }
+  function callbackFailure(args) {
+    for (const value of args) {
+      if (value instanceof Error) return value.message || 'WebEdit callback returned an error'
+      if (!value || typeof value !== 'object') continue
+      if (value.error instanceof Error) return value.error.message || 'WebEdit callback returned an error'
+      if (typeof value.error === 'string' && value.error.length > 0) return value.error
+      if (typeof value.err === 'string' && value.err.length > 0) return value.err
+      if (typeof value.errorCode === 'string' && value.errorCode.length > 0 && value.errorCode !== '0') return value.errorCode
+      if (typeof value.errorCode === 'number' && value.errorCode !== 0) return String(value.errorCode)
+      if (value.isOk === false || value.ok === false || value.success === false || value.rejected === true) return typeof value.message === 'string' ? value.message : 'WebEdit callback reported failure'
+    }
+    const failureText = args.find((value) => typeof value === 'string' && /^(?:error|failed|failure|rejected)\b/i.test(value))
+    return typeof failureText === 'string' ? failureText : null
+  }
+  async function callbackResult(invoke, timeoutMs = 5000) {
+    return new Promise((resolveResult) => {
+      let settled = false
+      const finish = (value) => { if (!settled) { settled = true; clearTimeout(timer); resolveResult(value) } }
+      const timer = setTimeout(() => finish({ callbackInvoked: false }), timeoutMs)
+      try {
+        const returned = invoke((...args) => finish({ callbackInvoked: true, args, callbackError: callbackFailure(args) }))
+        // A resolved promise can mean only that WebEdit accepted the request.
+        // Completion remains callback-only; a rejected promise is fail-closed.
+        if (returned && typeof returned.then === 'function') returned.then(undefined, () => finish({ callbackInvoked: false, rejected: true }))
+      } catch { finish({ callbackInvoked: false, rejected: true }) }
+    })
+  }
+  async function pivotCollection(sheet) { return await call(sheet, 'getPivotTables') ?? await property(sheet, 'PivotTables') }
+  async function chartCollection(sheet) { return await property(sheet, 'Shapes') ?? await property(sheet, 'Charts') }
+  async function objectIdentity(value) {
+    const id = await call(value, 'getId') ?? await property(value, 'Id') ?? await property(value, 'id')
+    const name = await call(value, 'getName') ?? await property(value, 'Name') ?? await property(value, 'name')
+    const type = await call(value, 'getType') ?? await property(value, 'Type') ?? await property(value, 'type')
+    return { id: id ?? null, name: name ?? null, type: type ?? null }
+  }
+  function hasReadableIdentity(identity) { return identity.id !== null || identity.name !== null }
+  function identityMatches(callbackIdentity, collectionIdentity) {
+    const comparable = ['id', 'name'].filter((key) => callbackIdentity[key] !== null && collectionIdentity[key] !== null)
+    return comparable.length > 0 && comparable.every((key) => callbackIdentity[key] === collectionIdentity[key])
+  }
+  async function artifactUrl(value) {
+    const url = await property(value, 'url')
+    if (typeof url !== 'string' || url.length === 0 || url.length > 4096) return null
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'https:') return null
+      const rawFilename = parsed.pathname.split('/').pop() || ''
+      let filename = rawFilename
+      try { filename = decodeURIComponent(rawFilename) } catch {}
+      return { origin: parsed.origin, filename, expiresAt: Number(parsed.searchParams.get('Expires')) || null, queryRedacted: parsed.search.length > 0 }
+    } catch { return null }
+  }
+  function dataUrlMetadata(dataUrl, maxBytes = MAX_IMAGE_ARTIFACT_BYTES) {
+    const match = typeof dataUrl === 'string' && dataUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i)
+    if (!match) return null
+    const byteLength = Math.floor(match[2].length * 3 / 4) - (match[2].endsWith('==') ? 2 : match[2].endsWith('=') ? 1 : 0)
+    if (byteLength > maxBytes) return { mimeType: match[1], byteLength, tooLarge: true }
+    return byteLength <= MAX_INLINE_IMAGE_ARTIFACT_BYTES ? { dataUrl, mimeType: match[1], byteLength, delivery: 'inline' } : { mimeType: match[1], byteLength, delivery: 'metadata_only' }
+  }
   async function capabilities(resolved, address) {
     const range = typeof address === 'string' ? await rangeFor(resolved.sheet, address) : null
     if (typeof address === 'string' && !range) return fail('invalid_range', 'WebEdit could not resolve the requested capability range')
     const validation = await property(range, 'Validation')
     const hyperlinks = await property(range, 'Hyperlinks')
     const comments = await property(resolved.sheet, 'Comments')
-    const chartCollection = await property(resolved.sheet, 'Shapes') ?? await property(resolved.sheet, 'Charts')
+    const charts = await chartCollection(resolved.sheet)
+    const pivots = await pivotCollection(resolved.sheet)
     const filterState = await property(range, 'AutoFilter') ?? await property(resolved.sheet, 'AutoFilter')
     const detected = {
       sort: !!(range && (typeof range.sort === 'function' || typeof range.Sort === 'function')),
@@ -53,16 +116,14 @@
       dataValidation: !!(validation && typeof validation.Add === 'function' && await property(validation, 'Type') !== undefined),
       hyperlinks: !!(hyperlinks && typeof hyperlinks.Add === 'function' && await collectionCount(hyperlinks) !== null),
       comments: !!(range && typeof range.AddComment === 'function' && comments && await collectionCount(comments) !== null),
-      charts: !!(resolved.sheet && typeof resolved.sheet.addChart === 'function' && chartCollection && await collectionCount(chartCollection) !== null),
-      pivots: !!(range && typeof range.createPivotTable === 'function'),
+      charts: !!(resolved.sheet && typeof resolved.sheet.addChart === 'function' && charts && await collectionCount(charts) !== null),
+      pivots: !!(range && typeof range.createPivotTable === 'function' && pivots && await collectionCount(pivots) !== null),
       cellImages: !!(range && typeof range.insertCellPictureUrl === 'function'),
       exportPdf: !!(resolved.workbook && typeof resolved.workbook.ExportAsFixedFormat === 'function'),
       exportRangeImage: !!(range && typeof range.ToImageDataURL === 'function'),
+      exportWorksheetImage: !!(resolved.sheet && typeof resolved.sheet.ExportImage === 'function'),
     }
-    return { ok: true, result: { status: 'ok', resource: resolved.resource, capabilities: {
-      ...detected, charts: false, pivots: false, exportPdf: false, exportRangeImage: false,
-      detectedButUnsupported: Object.entries(detected).filter(([name, available]) => available && ['charts', 'pivots', 'exportPdf', 'exportRangeImage'].includes(name)).map(([name]) => name),
-    } } }
+    return { ok: true, result: { status: 'ok', resource: resolved.resource, capabilities: { ...detected, detectedButUnsupported: [] } } }
   }
   async function context() {
     const resolved = await appAndSheet()
@@ -198,6 +259,57 @@
       await resolve(range.insertCellPictureUrl(payload.url)); const after = await property(range, 'Formula') ?? await call(range, 'getFormula')
       if (!/^=DISPIMG\(/i.test(String(valueOf(after, 0, 0) ?? after))) return fail('readback_mismatch', 'WebEdit did not expose an inserted cell-image formula')
       return { requested: { range: address, url: payload.url }, observed: { range: address, formula: valueOf(after, 0, 0) ?? after, verified: true } }
+    }
+    if (operation === 'create_chart') {
+      const charts = await chartCollection(resolved.sheet); const before = await collectionCount(charts)
+      if (!charts || before === null || typeof resolved.sheet.addChart !== 'function') return fail('unsupported', 'WebEdit does not expose a readable Worksheet.addChart API')
+      const chartType = typeof payload.chartType === 'string' || typeof payload.chartType === 'number' ? payload.chartType : 'columnClustered'
+      const chartStyle = Number.isInteger(payload.chartStyle) ? payload.chartStyle : 0
+      const callback = await callbackResult((done) => resolved.sheet.addChart(chartStyle, chartType, range, done, {}))
+      if (!callback.callbackInvoked || callback.callbackError) return fail('readback_mismatch', callback.callbackError ?? 'WebEdit did not confirm chart creation by callback')
+      const after = await collectionCount(await chartCollection(resolved.sheet)); if (after === null || after <= before) return fail('readback_mismatch', 'WebEdit did not expose a newly-created chart')
+      const created = await collectionItem(await chartCollection(resolved.sheet), after); const collectionIdentity = await objectIdentity(created)
+      const callbackChart = callback.callbackInvoked ? callback.args?.[0] : null
+      const callbackIdentity = await objectIdentity(callbackChart)
+      if (!hasReadableIdentity(collectionIdentity) || !hasReadableIdentity(callbackIdentity) || !identityMatches(callbackIdentity, collectionIdentity)) return fail('readback_mismatch', 'WebEdit chart callback and collection readback do not identify the same created chart')
+      return { requested: { range: address, chartType, chartStyle }, observed: { range: address, beforeCount: before, afterCount: after, chart: collectionIdentity, callbackInvoked: true, verified: true } }
+    }
+    if (operation === 'create_pivot_table') {
+      if (payload.isNewSheet !== false || typeof payload.destination !== 'string' || !payload.destination.trim() || payload.destination.length > 128) return fail('invalid_range', 'create_pivot_table requires an explicit same-sheet destination and isNewSheet:false')
+      const pivots = await pivotCollection(resolved.sheet); const before = await collectionCount(pivots)
+      if (!pivots || before === null || typeof range.createPivotTable !== 'function') return fail('unsupported', 'WebEdit does not expose readable Range.createPivotTable APIs')
+      const callback = await callbackResult((done) => range.createPivotTable({ destRangeText: payload.destination, isNewSheet: false, autoFitColumnWidth: payload.autoFitColumnWidth !== false, styleId: Number.isInteger(payload.styleId) ? payload.styleId : -1, layout: payload.layout }, done))
+      if (!callback.callbackInvoked || callback.callbackError) return fail('readback_mismatch', callback.callbackError ?? 'WebEdit did not confirm pivot-table creation by callback')
+      const after = await collectionCount(await pivotCollection(resolved.sheet)); if (after === null || after <= before) return fail('readback_mismatch', 'WebEdit did not expose a newly-created pivot table')
+      const pivot = await collectionItem(await pivotCollection(resolved.sheet), after); const runtime = callback.args?.[0] ?? null
+      const collectionIdentity = await objectIdentity(pivot); const callbackIdentity = await objectIdentity(runtime)
+      const callbackId = runtime && typeof runtime === 'object' ? await property(runtime, 'pivotTableId') ?? callbackIdentity.id : null
+      if (!hasReadableIdentity(collectionIdentity) || callbackId === null || collectionIdentity.id === null || callbackId !== collectionIdentity.id) return fail('readback_mismatch', 'WebEdit pivot callback and collection readback do not identify the same created pivot table')
+      return { requested: { range: address, destination: payload.destination, isNewSheet: false }, observed: { range: address, beforeCount: before, afterCount: after, pivot: collectionIdentity, callbackInvoked: true, verified: true } }
+    }
+    if (operation === 'export_pdf') {
+      const scope = payload.scope === 'worksheet' ? 'worksheet' : payload.scope === 'workbook' || payload.scope === undefined ? 'workbook' : null
+      const target = scope === 'worksheet' ? resolved.sheet : resolved.workbook
+      if (!scope) return fail('invalid_range', 'export_pdf scope must be workbook or worksheet')
+      if (!target || typeof target.ExportAsFixedFormat !== 'function') return fail('unsupported', 'WebEdit does not expose an auditable PDF export API')
+      const artifact = await artifactUrl(await resolve(target.ExportAsFixedFormat(0)))
+      if (!artifact) return fail('readback_mismatch', 'WebEdit PDF export did not return an auditable https artifact URL')
+      return { requested: { range: address, scope }, observed: { range: address, artifact: { kind: 'pdf', mimeType: 'application/pdf', filename: artifact.filename || null, sourceOrigin: artifact.origin, expiresAt: artifact.expiresAt ? new Date(artifact.expiresAt * 1000).toISOString() : null, queryRedacted: artifact.queryRedacted, delivery: 'browser_session_only' }, verified: true } }
+    }
+    if (operation === 'export_range_image') {
+      if (typeof range.ToImageDataURL !== 'function') return fail('unsupported', 'WebEdit does not expose Range.ToImageDataURL')
+      const artifact = dataUrlMetadata(await resolve(range.ToImageDataURL()))
+      if (!artifact || artifact.tooLarge) return fail('readback_mismatch', 'WebEdit range image export did not return a bounded image artifact')
+      return { requested: { range: address }, observed: { range: address, artifact: { kind: 'range_image', mimeType: artifact.mimeType, byteLength: artifact.byteLength, delivery: artifact.delivery, ...(artifact.dataUrl ? { dataUrl: artifact.dataUrl } : {}) }, verified: true } }
+    }
+    if (operation === 'export_worksheet_image') {
+      if (typeof resolved.sheet.ExportImage !== 'function') return fail('unsupported', 'WebEdit does not expose Worksheet.ExportImage')
+      const result = await resolve(resolved.sheet.ExportImage({})); const status = await property(result, 'result'); const blob = await property(result, 'data')
+      const byteLength = Number(await property(blob, 'size')); const mimeType = await property(blob, 'type')
+      if (status !== 'ok' || !blob || typeof blob.arrayBuffer !== 'function' || !/^image\//i.test(String(mimeType)) || !Number.isFinite(byteLength) || byteLength < 1 || byteLength > MAX_IMAGE_ARTIFACT_BYTES) return fail('readback_mismatch', 'WebEdit worksheet image export returned an invalid or too_large image artifact')
+      if (byteLength > MAX_INLINE_IMAGE_ARTIFACT_BYTES) return { requested: { range: address }, observed: { range: address, artifact: { kind: 'worksheet_image', mimeType, byteLength, delivery: 'metadata_only' }, verified: true } }
+      const bytes = new Uint8Array(await blob.arrayBuffer()); let binary = ''; for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
+      return { requested: { range: address }, observed: { range: address, artifact: { kind: 'worksheet_image', mimeType, byteLength, delivery: 'inline', dataUrl: `data:${mimeType};base64,${btoa(binary)}` }, verified: true } }
     }
     return fail('unsupported', `WebEdit ${operation} is intentionally unavailable until an operation-specific readback contract is confirmed`)
   }
