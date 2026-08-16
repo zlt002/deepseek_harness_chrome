@@ -24,6 +24,8 @@ function fakeApp() {
   const formulas = [['', ''], ['', '']]
   let filterOperator = 'equals'
   let activeRow = 1; let activeColumn = 1; let freezePanes = false; let splitRow = 0; let splitColumn = 0
+  const rowOutline = new Map(); const columnOutline = new Map()
+  const pageSetup = { PrintArea: '', PrintTitleRows: '', PrintTitleColumns: '', Orientation: 1, Zoom: 100, FitToPagesWide: 1, FitToPagesTall: 1, CenterHorizontally: false, CenterVertically: false, LeftMargin: 36, RightMargin: 36, TopMargin: 36, BottomMargin: 36, HeaderMargin: 18, FooterMargin: 18 }
   const comments = { Count: 0 }
   let nextHyperlink = 1; const hyperlinks = { Count: 0, items: [], Add: (_range, url, subAddress, screenTip, textToDisplay) => { hyperlinks.items.push({ Address: url, SubAddress: subAddress, ScreenTip: screenTip, TextToDisplay: textToDisplay, Name: `Link${nextHyperlink++}`, Type: 'hyperlink' }); hyperlinks.Count += 1 }, Delete: () => { hyperlinks.Count = 0; hyperlinks.items = [] }, Item: (index) => hyperlinks.items[index - 1] }
   const conditionalFormats = { Count: 0, items: [], Add: (type, operator, formula1, formula2) => { const item = { Type: type, Operator: operator, Formula1: formula1, Formula2: formula2 ?? '', Priority: conditionalFormats.Count + 1, Interior: { Color: '#FFFFFF' }, Font: { Color: '#000000', Bold: false, Italic: false } }; conditionalFormats.items.push(item); conditionalFormats.Count += 1; return item }, Delete: () => { conditionalFormats.Count = 0; conditionalFormats.items = [] }, Item: (index) => conditionalFormats.items[index - 1] }
@@ -47,7 +49,7 @@ function fakeApp() {
     ToImageDataURL: () => 'data:image/png;base64,AQID',
   }
   const sheet = {
-    Name: 'Sheet1', getName: () => 'Sheet1', getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
+    Name: 'Sheet1', getName: () => 'Sheet1', PageSetup: pageSetup, getRowOutlineLevel: (index) => rowOutline.get(index) ?? 0, getColOutlineLevel: (index) => columnOutline.get(index) ?? 0, getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); const rowMatch = String(address ?? '').match(/^(\d+):(\d+)$/); const columnMatch = String(address ?? '').match(/^([A-Z]+):([A-Z]+)$/i); if (rowMatch) { const from = Number(rowMatch[1]); const to = Number(rowMatch[2]); return Object.assign(Object.create(range), { Rows: { Group: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, (rowOutline.get(index) ?? 0) + 1) }, Ungroup: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, Math.max(0, (rowOutline.get(index) ?? 0) - 1)) } } }) }; if (columnMatch) { const index = (name) => name.toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); const from = index(columnMatch[1]); const to = index(columnMatch[2]); return Object.assign(Object.create(range), { Columns: { Group: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, (columnOutline.get(item) ?? 0) + 1) }, Ungroup: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, Math.max(0, (columnOutline.get(item) ?? 0) - 1)) } } }) }; return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
     getPivotTables: () => pivots,
     addChart: (_style, type, _range, callback) => { const chart = { Id: charts.Count + 1, Name: `Chart ${charts.Count + 1}`, Type: type }; charts.items.push(chart); charts.Count += 1; callback(chart, 'ok') },
     ExportImage: () => ({ result: 'ok', data: { size: 3, type: 'image/png', arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } }),
@@ -55,7 +57,7 @@ function fakeApp() {
   range.createPivotTable = (options, callback) => { const pivot = { Id: pivots.Count + 1, Name: `Pivot ${pivots.Count + 1}`, Destination: options.destRangeText }; pivots.items.push(pivot); pivots.Count += 1; callback({ isOk: true, pivotTableId: pivot.Id }) }
   const workbook = { Name: 'Budget.xlsx', getName: () => 'Budget.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet }, ExportAsFixedFormat: () => ({ url: 'https://download.example.test/Budget.pdf?Expires=2000000000' }) }
   const activeWindow = { get FreezePanes() { return freezePanes }, set FreezePanes(value) { freezePanes = value; if (value) { splitRow = activeRow - 1; splitColumn = activeColumn - 1 } }, get SplitRow() { return splitRow }, get SplitColumn() { return splitColumn }, Zoom: 100, ScrollRow: 1, ScrollColumn: 1 }
-  const app = { ActiveWorkbook: workbook, ActiveSheet: sheet, ActiveWindow: activeWindow, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook, _activeWindow: activeWindow }
+  const app = { ActiveWorkbook: workbook, ActiveSheet: sheet, ActiveWindow: activeWindow, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook, _activeWindow: activeWindow, _pageSetup: pageSetup, _rowOutline: rowOutline, _columnOutline: columnOutline }
   Object.defineProperty(app, 'ActiveCell', { get: () => ({ Row: activeRow, Column: activeColumn }) })
   return app
 }
@@ -450,6 +452,45 @@ test('view writes fail closed for stale, invalid targets, missing APIs, and inco
   const wrong = fakeApp(); Object.defineProperty(wrong._activeWindow, 'FreezePanes', { configurable: true, get: () => false, set: () => {} }); const wrongRun = await runtimeWith(wrong); const wrongResource = (await wrongRun({ action: 'context' })).result.resource; assert.equal((await wrongRun({ action: 'write', resource: wrongResource, operation: 'set_freeze_panes', payload: { freeze: true, target: 'B2' } })).error.code, 'readback_mismatch')
 })
 
+test('print settings expose a complete snapshot and verify requested and non-target fields', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const read = await run({ action: 'print_settings' }); assert.equal(read.result.printSettings.supported, true); assert.equal(read.result.printSettings.orientation, 'portrait')
+  const printed = await run({ action: 'write', resource, operation: 'set_print_settings', payload: { orientation: 'landscape', leftMargin: 42, centerHorizontally: true } })
+  assert.equal(printed.result.observed.verified, true); assert.equal(printed.result.observed.printSettings.orientation, 'landscape'); assert.equal(printed.result.observed.printSettings.rightMargin, 36)
+  const fitted = await run({ action: 'write', resource, operation: 'set_print_settings', payload: { fitToPagesWide: 2, fitToPagesTall: 1 } })
+  assert.equal(fitted.result.observed.printSettings.zoom, false)
+})
+
+test('print settings fail closed for invalid payloads, missing APIs, stale state, and forged readback', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'set_print_settings', payload: { zoom: 100, fitToPagesWide: 1 } })).error.code, 'invalid_range')
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'set_print_settings', payload: { zoom: false } })).error.code, 'invalid_range')
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'set_print_settings', payload: { printTitleRows: '1048577:1048577' } })).error.code, 'invalid_range')
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'set_print_settings', payload: { leftMargin: 40 } }); app._pageSetup.RightMargin = 37
+  assert.equal((await run.raw({ action: 'write', resource, operation: 'set_print_settings', payload: { leftMargin: 40 }, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
+  const missing = fakeApp(); delete missing._sheet.PageSetup; const missingRun = await runtimeWith(missing); assert.equal((await missingRun.raw({ action: 'inspect_write', operation: 'set_print_settings', payload: { leftMargin: 40 } })).error.code, 'unsupported')
+  const forged = fakeApp(); Object.defineProperty(forged._pageSetup, 'LeftMargin', { configurable: true, get: () => 36, set: () => {} }); const forgedRun = await runtimeWith(forged); const forgedResource = (await forgedRun({ action: 'context' })).result.resource
+  assert.equal((await forgedRun({ action: 'write', resource: forgedResource, operation: 'set_print_settings', payload: { leftMargin: 40 } })).error.code, 'readback_mismatch')
+})
+
+test('outline reads every bounded target level and verifies group and ungroup', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const read = await run({ action: 'outline', range: '1:3', axis: 'row' }); assert.equal(JSON.stringify(read.result.outline.levels), '[0,0,0]')
+  const grouped = await run({ action: 'write', resource, operation: 'set_outline_group', payload: { range: '1:3', axis: 'row', grouped: true } }); assert.equal(JSON.stringify(grouped.result.observed.outline.levels), '[1,1,1]')
+  const ungroupedRows = await run({ action: 'write', resource, operation: 'set_outline_group', payload: { range: '1:3', axis: 'row', grouped: false } }); assert.equal(JSON.stringify(ungroupedRows.result.observed.outline.levels), '[0,0,0]')
+  const ungrouped = await run({ action: 'write', resource, operation: 'set_outline_group', payload: { range: 'A:B', axis: 'column', grouped: true } }); assert.equal(JSON.stringify(ungrouped.result.observed.outline.levels), '[1,1]')
+})
+
+test('outline fail-closes invalid axes, unavailable APIs, stale levels, and wrong readback', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  assert.equal((await run.raw({ action: 'inspect_write', operation: 'set_outline_group', payload: { range: 'A1:B2', axis: 'row', grouped: true } })).error.code, 'invalid_range')
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'set_outline_group', payload: { range: '1:2', axis: 'row', grouped: true } }); app._rowOutline.set(1, 1)
+  assert.equal((await run.raw({ action: 'write', resource, operation: 'set_outline_group', payload: { range: '1:2', axis: 'row', grouped: true }, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
+  const missing = fakeApp(); delete missing._sheet.getRowOutlineLevel; const missingRun = await runtimeWith(missing); assert.equal((await missingRun.raw({ action: 'inspect_write', operation: 'set_outline_group', payload: { range: '1:2', axis: 'row', grouped: true } })).error.code, 'unsupported')
+  const forged = fakeApp(); forged._sheet.getRange = () => ({ Rows: { Group: () => {} } }); const forgedRun = await runtimeWith(forged); const forgedResource = (await forgedRun({ action: 'context' })).result.resource
+  assert.equal((await forgedRun({ action: 'write', resource: forgedResource, operation: 'set_outline_group', payload: { range: '1:2', axis: 'row', grouped: true } })).error.code, 'readback_mismatch')
+})
+
 test('data validation fails closed for stale state, missing API, wrong property readback, changed range state, and oversized feature reads', async () => {
   const staleApp = fakeApp(); const stale = await runtimeWith(staleApp); const resource = (await stale({ action: 'context' })).result.resource; const payload = { range: 'A1:B2', validationType: 'wholeNumber', formula1: '1', formula2: '9' }
   const inspected = await stale.raw({ action: 'inspect_write', operation: 'set_data_validation', payload }); staleApp._validation.Type = 3
@@ -504,7 +545,7 @@ test('unusable spreadsheet exports fail closed before invoking WebEdit export AP
 test('every unverified AccrUI spreadsheet family fails closed before mutation', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   let mutations = 0; app._range.copyRange = () => { mutations += 1 }
-  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'set_print_settings', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
+  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
     const result = await run({ action: 'write', resource, operation, payload: { range: 'A1' } })
     assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
   }

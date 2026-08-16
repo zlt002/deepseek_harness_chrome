@@ -170,6 +170,8 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     const spreadsheet = tools.tools.find((tool) => tool.name === 'office_spreadsheet')
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_zoom'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_freeze_panes'))
+    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_print_settings'))
+    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_outline_group'))
     const codeSearch = tools.tools.find((tool) => tool.name === 'code_search')
     assert.deepEqual(codeSearch?.inputSchema, {
       type: 'object', additionalProperties: false, required: ['question'],

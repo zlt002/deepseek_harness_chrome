@@ -29,6 +29,10 @@
   }
   const WORKBOOK_OPERATIONS = new Set(['create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'])
   const VIEW_OPERATIONS = new Set(['set_zoom', 'set_freeze_panes'])
+  const PRINT_OPERATIONS = new Set(['set_print_settings'])
+  const OUTLINE_OPERATIONS = new Set(['set_outline_group'])
+  const PRINT_KEYS = ['printArea', 'printTitleRows', 'printTitleColumns', 'orientation', 'zoom', 'fitToPagesWide', 'fitToPagesTall', 'centerHorizontally', 'centerVertically', 'leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'headerMargin', 'footerMargin']
+  const PRINT_PROPERTY = { printArea: 'PrintArea', printTitleRows: 'PrintTitleRows', printTitleColumns: 'PrintTitleColumns', orientation: 'Orientation', zoom: 'Zoom', fitToPagesWide: 'FitToPagesWide', fitToPagesTall: 'FitToPagesTall', centerHorizontally: 'CenterHorizontally', centerVertically: 'CenterVertically', leftMargin: 'LeftMargin', rightMargin: 'RightMargin', topMargin: 'TopMargin', bottomMargin: 'BottomMargin', headerMargin: 'HeaderMargin', footerMargin: 'FooterMargin' }
 
   async function appAndSheet(requestedSheet) {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
@@ -53,6 +57,56 @@
     if (operation === 'set_zoom') return Object.keys(payload).every((key) => ['sheetName', 'zoom'].includes(key)) && Number.isInteger(payload.zoom) && payload.zoom >= 10 && payload.zoom <= 400 ? { zoom: payload.zoom } : null
     if (operation === 'set_freeze_panes') { if (!Object.keys(payload).every((key) => ['sheetName', 'freeze', 'target'].includes(key)) || typeof payload.freeze !== 'boolean' || (payload.freeze ? typeof payload.target !== 'string' : payload.target !== undefined)) return null; const target = payload.freeze ? parseAddress(payload.target) : null; return payload.freeze ? target && target.rowFrom === target.rowTo && target.colFrom === target.colTo ? { freeze: true, target: payload.target } : null : { freeze: false } }
     return null
+  }
+  function canonicalOrientation(value) { return value === 1 || value === '1' || value === 'portrait' ? 'portrait' : value === 2 || value === '2' || value === 'landscape' ? 'landscape' : null }
+  function canonicalPrintArea(value) { if (typeof value !== 'string') return null; const area = value.trim().replace(/^.*!/, '').replace(/\$/g, '').toUpperCase(); return area === '' || parseAddress(area) ? area : null }
+  function parseOutlineRange(address, axis) {
+    if (typeof address !== 'string' || address.length === 0 || address.length > 128 || (axis !== 'row' && axis !== 'column')) return null
+    const rows = /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(address.trim())
+    const columns = /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(address.trim())
+    if (axis === 'row' && rows) { const from = Number(rows[1]); const to = Number(rows[2]); return from <= to && to <= 1048576 && to - from < 1000 ? { range: `${from}:${to}`, from, to } : null }
+    if (axis === 'column' && columns) { const index = (name) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0); const from = index(columns[1]); const to = index(columns[2]); return from <= to && to <= 16384 && to - from < 1000 ? { range: `${columns[1].toUpperCase()}:${columns[2].toUpperCase()}`, from, to } : null }
+    return null
+  }
+  function requestedOutlineOperation(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['sheetName', 'range', 'axis', 'grouped'].includes(key)) || typeof payload.axis !== 'string' || typeof payload.grouped !== 'boolean') return null
+    const target = parseOutlineRange(payload.range, payload.axis); return target ? { ...target, axis: payload.axis, grouped: payload.grouped } : null
+  }
+  function validPrintTitle(value, axis) {
+    if (value === '') return true
+    const match = axis === 'row' ? /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(value) : /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(value)
+    if (!match) return false
+    const index = axis === 'row' ? (item) => Number(item) : (item) => item.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0)
+    const from = index(match[1]); const to = index(match[2]); const maximum = axis === 'row' ? 1048576 : 16384
+    return from <= to && to <= maximum
+  }
+  function validPrintValue(key, value) {
+    if (key === 'printArea') return typeof value === 'string' && value.length <= 128 && (value === '' || !!parseAddress(value))
+    if (key === 'printTitleRows') return typeof value === 'string' && value.length <= 64 && validPrintTitle(value, 'row')
+    if (key === 'printTitleColumns') return typeof value === 'string' && value.length <= 32 && validPrintTitle(value, 'column')
+    if (key === 'orientation') return value === 'portrait' || value === 'landscape'
+    if (key === 'zoom') return Number.isInteger(value) && value >= 10 && value <= 400
+    if (key === 'fitToPagesWide' || key === 'fitToPagesTall') return Number.isInteger(value) && value >= 1 && value <= 100
+    if (key === 'centerHorizontally' || key === 'centerVertically') return typeof value === 'boolean'
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 720
+  }
+  function requestedPrintOperation(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => key === 'sheetName' || PRINT_KEYS.includes(key))) return null
+    const requested = Object.fromEntries(PRINT_KEYS.filter((key) => Object.hasOwn(payload, key)).map((key) => [key, payload[key]])); const keys = Object.keys(requested)
+    if (keys.length === 0 || keys.some((key) => !validPrintValue(key, requested[key])) || (Object.hasOwn(requested, 'zoom') && (Object.hasOwn(requested, 'fitToPagesWide') || Object.hasOwn(requested, 'fitToPagesTall')))) return null
+    return requested
+  }
+  async function printSettingsSnapshot(resolved) {
+    const pageSetup = await property(resolved.sheet, 'PageSetup') ?? await call(resolved.sheet, 'getPageSetup'); if (!pageSetup) return { supported: false }
+    const values = {}; for (const key of PRINT_KEYS) values[key] = await property(pageSetup, PRINT_PROPERTY[key])
+    const orientation = canonicalOrientation(values.orientation); const printArea = canonicalPrintArea(values.printArea); const zoom = values.zoom === false ? false : Number(values.zoom)
+    if (printArea === null || typeof values.printTitleRows !== 'string' || values.printTitleRows.length > 64 || !validPrintTitle(values.printTitleRows, 'row') || typeof values.printTitleColumns !== 'string' || values.printTitleColumns.length > 32 || !validPrintTitle(values.printTitleColumns, 'column') || !orientation || !(zoom === false || Number.isInteger(zoom) && zoom >= 10 && zoom <= 400) || !Number.isInteger(values.fitToPagesWide) || values.fitToPagesWide < 1 || values.fitToPagesWide > 100 || !Number.isInteger(values.fitToPagesTall) || values.fitToPagesTall < 1 || values.fitToPagesTall > 100 || typeof values.centerHorizontally !== 'boolean' || typeof values.centerVertically !== 'boolean' || !['leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'headerMargin', 'footerMargin'].every((key) => typeof values[key] === 'number' && Number.isFinite(values[key]) && values[key] >= 0 && values[key] <= 720)) return { supported: false }
+    return { supported: true, pageSetup, settings: { sheetName: resolved.resource.sheetName, printArea, printTitleRows: values.printTitleRows, printTitleColumns: values.printTitleColumns, orientation, zoom, fitToPagesWide: values.fitToPagesWide, fitToPagesTall: values.fitToPagesTall, centerHorizontally: values.centerHorizontally, centerVertically: values.centerVertically, leftMargin: values.leftMargin, rightMargin: values.rightMargin, topMargin: values.topMargin, bottomMargin: values.bottomMargin, headerMargin: values.headerMargin, footerMargin: values.footerMargin } }
+  }
+  async function outlineSnapshot(resolved, target) {
+    const method = target.axis === 'row' ? 'getRowOutlineLevel' : 'getColOutlineLevel'; if (typeof resolved.sheet?.[method] !== 'function') return { supported: false }
+    const levels = []; for (let index = target.from; index <= target.to; index += 1) { const level = await call(resolved.sheet, method, [index]); if (!Number.isInteger(level) || level < 0 || level > 8) return { supported: false }; levels.push(level) }
+    return { supported: true, outline: { sheetName: resolved.resource.sheetName, range: target.range, axis: target.axis, levels } }
   }
   async function rangeSnapshot(sheet, address) {
     const range = await rangeFor(sheet, address)
@@ -385,7 +439,7 @@
       copyPasteMove: { supported: false, moveRange: typeof range?.Cut === 'function', requiresInspectableTarget: true, reason: 'copy and paste remain unavailable; move_range requires inspected source and destination state' },
       viewFreeze: { supported: false, reason: unavailable },
       definedNames: { supported: !!workbookNames, create: !!(workbookNames && typeof workbookNames.collection.Add === 'function'), delete: !!workbookNames, requiresInspectableTarget: true, reason: 'defined-name writes require a complete bounded name snapshot and exact readback' },
-      printSettings: { supported: false, reason: unavailable },
+      printSettings: { supported: !!(await printSettingsSnapshot(resolved)).supported, requiresInspectableTarget: true, reason: 'print writes require a complete PageSetup snapshot and exact whole-state readback' },
       worksheetCopyMoveHide: { supported: false, copy: !!(workbookSheets && typeof workbookSheets.collection.copy === 'function'), move: !!(workbookSheets && typeof workbookSheets.collection.move === 'function'), visibility: !!workbookSheets, requiresInspectableTarget: true, reason: 'worksheet writes require a complete bounded sheet-order snapshot and exact readback' },
       undoRedo: { supported: false, reason: unavailable },
       chartManagement: { create: false, list: false, update: false, resize: false, delete: false, reason: unavailable },
@@ -417,6 +471,16 @@
     if (request.action === 'view') {
       const snapshot = await viewSnapshot(resolved)
       return { ok: true, result: { status: 'ok', resource: resolved.resource, view: snapshot.supported ? { supported: true, ...snapshot.view } : { supported: false } } }
+    }
+    if (request.action === 'print_settings') {
+      const snapshot = await printSettingsSnapshot(resolved)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, printSettings: snapshot.supported ? { supported: true, ...snapshot.settings } : { supported: false } } }
+    }
+    if (request.action === 'outline') {
+      const target = parseOutlineRange(request.range, request.axis)
+      if (!target) return fail('invalid_range', 'outline requires a bounded whole-row or whole-column range with matching axis')
+      const snapshot = await outlineSnapshot(resolved, { ...target, axis: request.axis })
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, outline: snapshot.supported ? { supported: true, ...snapshot.outline } : { supported: false } } }
     }
     if (request.action === 'range_features') {
       if (typeof request.range !== 'string' || request.range.length === 0 || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
@@ -450,6 +514,21 @@
   }
   async function inspectWrite(request) {
     const payload = request.payload ?? {}; const operation = request.operation
+    if (PRINT_OPERATIONS.has(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const requested = requestedPrintOperation(payload); const before = await printSettingsSnapshot(resolved)
+      if (!requested) return fail('invalid_range', 'print settings require a nonempty whitelisted payload without zoom/fit conflict')
+      if (!before.supported) return fail('unsupported', 'WebEdit does not expose a complete readable PageSetup')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 5, printSettings: before.settings } } }
+    }
+    if (OUTLINE_OPERATIONS.has(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const target = requestedOutlineOperation(payload); if (!target) return fail('invalid_range', 'outline requires a bounded whole-row or whole-column range, axis, and grouped flag')
+      const snapshot = await outlineSnapshot(resolved, target); const range = await rangeFor(resolved.sheet, target.range); const member = range && (await property(range, target.axis === 'row' ? 'Rows' : 'Columns'))
+      if (!snapshot.supported || !member || typeof member[target.grouped ? 'Group' : 'Ungroup'] !== 'function') return fail('unsupported', 'WebEdit cannot fully inspect and mutate this outline target')
+      if (snapshot.outline.levels.some((level) => target.grouped ? level >= 8 : level <= 0)) return fail('invalid_range', 'outline target is already at its bounded group or ungroup limit')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 6, outline: snapshot.outline } } }
+    }
     if (VIEW_OPERATIONS.has(operation)) {
       const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
       const requested = requestedViewOperation(operation, payload); const before = await viewSnapshot(resolved)
@@ -527,6 +606,8 @@
   async function preconditionMatches(resolved, request) {
     const approved = request.precondition
     if (approved?.version === 4 && approved.view) { const current = await viewSnapshot(resolved); return current.supported && same(current.view, approved.view) ? null : fail('fingerprint_mismatch', 'The worksheet view changed since inspection; reread and inspect before writing') }
+    if (approved?.version === 5 && approved.printSettings) { const current = await printSettingsSnapshot(resolved); return current.supported && same(current.settings, approved.printSettings) ? null : fail('fingerprint_mismatch', 'The print settings changed since inspection; reread and inspect before writing') }
+    if (approved?.version === 6 && approved.outline) { const target = parseOutlineRange(approved.outline.range, approved.outline.axis); const current = target && await outlineSnapshot(resolved, { ...target, axis: approved.outline.axis }); return current?.supported && same(current.outline, approved.outline) ? null : fail('fingerprint_mismatch', 'The outline levels changed since inspection; reread and inspect before writing') }
     if (approved?.version === 3 && Array.isArray(approved.sheets)) {
       const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets || !same(sheets.sheets, approved.sheets)) return fail('fingerprint_mismatch', 'The workbook sheet order or visibility changed since inspection')
       if (approved.definedNames !== undefined) { const names = await definedNamesSnapshot(resolved.workbook); if (!names || !same(names.names, approved.definedNames)) return fail('fingerprint_mismatch', 'The workbook defined names changed since inspection') }
@@ -969,6 +1050,30 @@
     const after = await viewSnapshot(resolved); if (!after.supported || after.view.freezePanes !== true || after.view.splitRow !== parsed.rowFrom - 1 || after.view.splitColumn !== parsed.colFrom - 1 || after.view.activeCell !== expected.target || after.view.zoom !== before.zoom || after.view.scrollRow !== before.scrollRow || after.view.scrollColumn !== before.scrollColumn || after.view.sheetName !== before.sheetName) return fail('readback_mismatch', 'WebEdit freeze readback differs from target or changed another view field')
     return { requested: { freeze: true, target: expected.target }, observed: { view: after.view, verified: true } }
   }
+  async function writePrintSettings(resolved, request) {
+    const requested = requestedPrintOperation(request.payload ?? {}); const before = request.precondition?.printSettings; const snapshot = await printSettingsSnapshot(resolved)
+    if (!requested || !before || !snapshot.supported || !same(snapshot.settings, before)) return fail('fingerprint_mismatch', 'The print settings changed since inspection; reread and inspect before writing')
+    const expected = { ...before, ...requested, ...(Object.hasOwn(requested, 'fitToPagesWide') || Object.hasOwn(requested, 'fitToPagesTall') ? { zoom: false } : {}) }
+    for (const [key, value] of Object.entries(expected)) {
+      if (key === 'sheetName' || (!Object.hasOwn(requested, key) && !(key === 'zoom' && expected.zoom === false))) continue
+      const assigned = key === 'orientation' ? value === 'landscape' ? 2 : 1 : value
+      if (!await set(snapshot.pageSetup, PRINT_PROPERTY[key], assigned)) return fail('unsupported', `WebEdit does not expose ${key} print mutation`)
+    }
+    const after = await printSettingsSnapshot(resolved)
+    if (!after.supported || !same(after.settings, expected)) return fail('readback_mismatch', 'WebEdit print settings readback differs from the requested complete state')
+    return { requested: { ...requested, ...(expected.zoom === false ? { zoom: false } : {}) }, observed: { printSettings: after.settings, verified: true } }
+  }
+  async function writeOutline(resolved, request) {
+    const target = requestedOutlineOperation(request.payload ?? {}); const before = request.precondition?.outline
+    if (!target || !before || before.range !== target.range || before.axis !== target.axis) return fail('fingerprint_mismatch', 'The outline request no longer matches inspection')
+    const snapshot = await outlineSnapshot(resolved, target); if (!snapshot.supported || !same(snapshot.outline, before)) return fail('fingerprint_mismatch', 'The outline levels changed since inspection; reread and inspect before writing')
+    const range = await rangeFor(resolved.sheet, target.range); const member = range && await property(range, target.axis === 'row' ? 'Rows' : 'Columns'); const method = target.grouped ? 'Group' : 'Ungroup'
+    if (!member || typeof member[method] !== 'function') return fail('unsupported', 'WebEdit does not expose outline mutation')
+    await resolve(member[method]()); const after = await outlineSnapshot(resolved, target)
+    const expected = before.levels.map((level) => target.grouped ? level + 1 : level - 1)
+    if (!after.supported || !same(after.outline.levels, expected)) return fail('readback_mismatch', 'WebEdit outline level readback differs from each requested target')
+    return { requested: { range: target.range, axis: target.axis, grouped: target.grouped }, observed: { outline: after.outline, verified: true } }
+  }
   async function write(request) {
     const resolved = await appAndSheet(request.resource?.sheetName); if (resolved.error) return resolved.error
     if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select'].includes(request.operation)) return fail('unsupported', 'WebEdit structural sheet mutation lacks a mutation-safe preflight and is unavailable')
@@ -981,6 +1086,16 @@
     }
     if (VIEW_OPERATIONS.has(request.operation)) {
       const result = await writeView(resolved, request)
+      if (!result.ok && result.error) return result
+      return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
+    }
+    if (PRINT_OPERATIONS.has(request.operation)) {
+      const result = await writePrintSettings(resolved, request)
+      if (!result.ok && result.error) return result
+      return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
+    }
+    if (OUTLINE_OPERATIONS.has(request.operation)) {
+      const result = await writeOutline(resolved, request)
       if (!result.ok && result.error) return result
       return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
     }
