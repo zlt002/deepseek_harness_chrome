@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 
 const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://doc.midea.com/teamKnowledge/catalog/9' }
 const parent = {

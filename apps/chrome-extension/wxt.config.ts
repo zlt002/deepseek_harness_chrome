@@ -1,8 +1,12 @@
 import { defineConfig } from 'wxt'
 import { execFile } from 'node:child_process'
 import { resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { dirname } from 'node:path'
 import { promisify } from 'node:util'
 
+const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)))
+const projectRoot = resolve(extensionRoot, '..', '..')
 const isDevCommand = !process.argv.some((argument) => ['build', 'zip', 'submit'].includes(argument))
 const execFileAsync = promisify(execFile)
 
@@ -21,13 +25,13 @@ export default defineConfig({
       // WXT copies public assets serially. Copy the generated Harness tree in
       // a fresh process after the extension shell and manifest are ready.
       await execFileAsync(process.execPath, [
-        resolve(wxt.config.root, 'scripts/copy-dev-public.mjs'),
-        resolve(wxt.config.root, 'public'),
+        resolve(projectRoot, 'scripts/copy-dev-public.mjs'),
+        resolve(extensionRoot, 'public'),
         wxt.config.outDir,
       ])
     },
     'vite:devServer:extendConfig'(config) {
-      const root = resolve(config.root ?? '.')
+      const root = resolve(config.root ?? extensionRoot)
       const watched = [
         resolve(root, 'entrypoints'),
         resolve(root, 'src'),

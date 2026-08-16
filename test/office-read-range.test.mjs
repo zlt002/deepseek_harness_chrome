@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 
 test('publishes office_read_range and correlates a bounded WebEdit range response', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://doc.midea.com/sheets/budget' }

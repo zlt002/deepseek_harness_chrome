@@ -1,0 +1,22 @@
+.label {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  max-width: min(220px, 40vw);
+  height: 22px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon {
+  flex: none;
+  opacity: .7;
+}
+
+@media (max-width: 999px) {
+  .label { display: inline-flex; }
+}

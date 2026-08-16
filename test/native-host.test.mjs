@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { NativeHost } from '../native-server/src/native-host.mjs'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
+import { NativeHost } from '../apps/native-server/src/native-host.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 
 test('returns the Harness Web URL for repeated start requests and exits on close', async () => {
   const upstream = createServer((_request, response) => response.end('ok'))

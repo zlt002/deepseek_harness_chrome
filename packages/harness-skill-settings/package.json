@@ -1,0 +1,15 @@
+{
+  "name": "@accrui/harness-skill-settings",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Product-owned Skill invocation policy and future Harness adapter",
+  "main": "./lib/index.js",
+  "exports": { ".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json" },
+  "dsh": { "client": { "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-locale"], "platform": "web" } },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "node --check src/index.mjs && node --test test/*.test.mjs",
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-skill-settings"
+  }
+}

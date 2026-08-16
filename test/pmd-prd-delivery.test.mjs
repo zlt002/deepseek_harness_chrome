@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
-import { TeamDocRecordStore } from '../native-server/src/team-doc-record-store.mjs'
-import { PmdDeliveryRecordStore } from '../native-server/src/pmd-delivery-record-store.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
+import { TeamDocRecordStore } from '../apps/native-server/src/team-doc-record-store.mjs'
+import { PmdDeliveryRecordStore } from '../apps/native-server/src/pmd-delivery-record-store.mjs'
 
 const target = { browser: 'chrome', windowId: 7, tabId: 8, url: 'https://doc.midea.com/teamKnowledge/catalog/9' }
 const parent = { parentId: '9', bookId: '10', parentName: 'PMD', parentType: 'directory', canRead: true, canCreate: true, fingerprint: 'parent-pmd-1' }

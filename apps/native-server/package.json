@@ -1,0 +1,15 @@
+{
+  "name": "@accrui/native-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "accrui-harness-native-host": "./bin.mjs"
+  },
+  "scripts": {
+    "start": "node bin.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
+  }
+}

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 
 async function callOfficeGetContext(endpoint, args = {}, id = 1) {
   const response = await fetch(`${endpoint.url}/mcp`, {

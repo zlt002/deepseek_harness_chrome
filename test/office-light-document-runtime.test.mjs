@@ -26,7 +26,7 @@ async function runtime(options = {}) {
   const editor = { canvas, document: documentApi, ...(options.editorApi ?? {}) }
   const context = vm.createContext({ window, globalThis: null, APP: { openApi: { editor }, ...(options.otlSelection ? { OTL: { state: { selection: options.otlSelection } } } : {}) }, location: { href: 'https://webedit.midea.com/weboffice/office/o/1', origin: 'https://webedit.midea.com', pathname: '/weboffice/office/o/1' }, document: { title: '测试', createElement() { return { set innerHTML(value) { this.value = String(value).replace(/<[^>]+>/g, '') }, value: '' } } }, crypto: webcrypto, TextEncoder, Uint8Array, URL, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail } }, setTimeout, clearTimeout, Date })
   context.globalThis = context
-  vm.runInContext(await readFile(new URL('../public/office-light-document-runtime.js', import.meta.url), 'utf8'), context)
+  vm.runInContext(await readFile(new URL('../apps/chrome-extension/public/office-light-document-runtime.js', import.meta.url), 'utf8'), context)
   let id = 0
   return async (input) => new Promise((resolve) => {
     const requestId = String(++id)

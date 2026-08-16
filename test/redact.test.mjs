@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { redactSensitiveDiagnostic } from '../native-server/src/redact.mjs'
+import { redactSensitiveDiagnostic } from '../apps/native-server/src/redact.mjs'
 
 test('redacts authorization, bearer tokens, and cookies from Native Host diagnostics', () => {
   assert.equal(

@@ -5,12 +5,12 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
-import { HarnessWebProcess } from '../native-server/src/harness-process.mjs'
-import { Context } from '../../deepseek-harness/vendor/cordis/lib/index.js'
-import SystemPrompt from '../../deepseek-harness/packages/core/system-prompt/lib/index.js'
-import ToolRuntime from '../../deepseek-harness/packages/core/tools/lib/index.js'
-import * as McpClient from '../../deepseek-harness/packages/mcp/mcp-client/lib/index.js'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
+import { HarnessWebProcess } from '../apps/native-server/src/harness-process.mjs'
+import { Context } from '../upstream/deepseek-harness/vendor/cordis/lib/index.js'
+import SystemPrompt from '../upstream/deepseek-harness/packages/core/system-prompt/lib/index.js'
+import ToolRuntime from '../upstream/deepseek-harness/packages/core/tools/lib/index.js'
+import * as McpClient from '../upstream/deepseek-harness/packages/mcp/mcp-client/lib/index.js'
 
 function target(url = 'https://docs.example.test/dsh-client') {
   return { browser: 'chrome', windowId: 5, tabId: 9, url }
@@ -120,7 +120,7 @@ test('a real DSH Web profile loads, discovers, and executes its generated Connec
     const url = await harness.start()
     assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/)
     const html = await fetch(`${url}/`).then((response) => response.text())
-    assert.match(html, /@deepseek-ai\/dsh-client-ui-knowledge-scope/)
+    assert.match(html, /window\.__DSH_BOOT__/)
     const timeout = setTimeout(() => listed.reject(new Error('DSH Web profile never listed the generated Connector patch tools')), 15_000)
     try {
       await listed.promise

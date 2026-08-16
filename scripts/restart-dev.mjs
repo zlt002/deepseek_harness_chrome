@@ -8,7 +8,12 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const harnessRoot = resolve(projectRoot, '../deepseek-harness')
+const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
+const harnessRoot = process.env.DSH_ROOT?.trim()
+  ? resolve(process.env.DSH_ROOT.trim())
+  : existsSync(join(generatedHarnessRoot, '.harness-product.json'))
+    ? generatedHarnessRoot
+    : resolve(projectRoot, 'upstream/deepseek-harness')
 
 export function extensionIdsFromManifest(manifest) {
   const origins = Array.isArray(manifest?.allowed_origins) ? manifest.allowed_origins : []
@@ -149,6 +154,10 @@ export async function main(args = process.argv.slice(2)) {
       ...process.env,
       DEEPSEEK_HARNESS_EXTENSION_ID: extensionIds.join(','),
       DSH_ROOT: process.env.DSH_ROOT?.trim() || harnessRoot,
+      DSH_ENABLE_KNOWLEDGE_SCOPE_UI: process.env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI
+        ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
+      DSH_ENABLE_SKILL_SETTINGS_UI: process.env.DSH_ENABLE_SKILL_SETTINGS_UI
+        ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
     },
   })
 

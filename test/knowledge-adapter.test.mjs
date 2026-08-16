@@ -4,7 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 async function adapter() {
-  const background = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
+  const background = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const end = background.indexOf('\nconst NATIVE_HOST_NAME')
   assert.notEqual(end, -1, 'knowledge adapter source block must remain before background bootstrap')
   const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, sseEvents as consumeSseChunk }\n`

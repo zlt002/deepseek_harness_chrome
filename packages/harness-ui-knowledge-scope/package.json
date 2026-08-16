@@ -1,0 +1,32 @@
+{
+  "name": "@accrui/harness-ui-knowledge-scope",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Out-of-tree enterprise knowledge and repository scope plugin for AccrUI Harness",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map"
+  ],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-knowledge-scope",
+    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-knowledge-scope",
+    "test": "node --test test/*.test.mjs"
+  }
+}

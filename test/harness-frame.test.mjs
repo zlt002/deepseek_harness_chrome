@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { HarnessFrameSource, NormalizeActiveTabForBrowserTarget } from '../entrypoints/sidepanel/harness-frame.ts'
+import { HarnessFrameSource, NormalizeActiveTabForBrowserTarget } from '../apps/chrome-extension/entrypoints/sidepanel/harness-frame.ts'
 
 test('uses the native loopback URL as the Harness iframe source', () => {
   assert.equal(HarnessFrameSource('http://127.0.0.1:62070'), 'http://127.0.0.1:62070')

@@ -29,7 +29,7 @@ function assertBusinessSystemHeader(options) {
 }
 
 async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, sendMessage = async () => ({ ok: false }), initialTab = target } = {}) {
-  const source = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   let runtimeListener; const nativeMessages = []; const nativeListeners = new Set(); const executions = []
   const tab = { id: initialTab.tabId, windowId: initialTab.windowId, url: initialTab.url, title: 'Team Knowledge', status: 'complete' }

@@ -3,7 +3,7 @@ import { mkdtemp, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { OfficeSpreadsheetWriteRecordStore } from '../native-server/src/office-spreadsheet-write-record-store.mjs'
+import { OfficeSpreadsheetWriteRecordStore } from '../apps/native-server/src/office-spreadsheet-write-record-store.mjs'
 
 test('spreadsheet checkpoint grants exactly one initial dispatch and fail-closes a historical pending record', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-spreadsheet-store-')); const recordPath = join(directory, 'writes.json')

@@ -86,6 +86,7 @@ test('installs the native host into a stable macOS location', async () => {
     await stat(launcher)
     await stat(join(nativeServer, 'bin.mjs'))
     await stat(join(nativeServer, 'src/native-host.mjs'))
+    await stat(join(nativeServer, 'harness-runtime.mjs'))
     const installedSkill = join(installRoot, 'skills/pmd-prd/SKILL.md')
     await stat(installedSkill)
     const installedSkillSource = await readFile(installedSkill, 'utf8')
@@ -101,7 +102,7 @@ test('installs the native host into a stable macOS location', async () => {
 
     const launcherSource = await readFile(launcher, 'utf8')
     assert.match(launcherSource, new RegExp(`exec .*${nativeServer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/bin\\.mjs`))
-    assert.doesNotMatch(launcherSource, new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.doesNotMatch(launcherSource, new RegExp(`${projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/native-server`))
     assert.doesNotMatch(JSON.stringify(manifests), new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   } finally {
     await rm(home, { recursive: true, force: true })
@@ -172,10 +173,10 @@ test('merges existing Edge origins and adds the current extension id', async () 
   }
 })
 
-test('records a valid sibling Harness root when no launch override is supplied', async () => {
+test('records the generated product Harness root when no launch override is supplied', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const launcher = join(home, 'Library/Application Support/DeepSeekHarness/com.deepseek.harness.chrome')
-  const siblingRoot = resolve(projectRoot, '../deepseek-harness')
+  const productRoot = resolve(projectRoot, '.generated/harness-product')
   try {
     const result = await runRegister(home, {
       DSH_ROOT: undefined,
@@ -184,7 +185,9 @@ test('records a valid sibling Harness root when no launch override is supplied',
       DSH_NATIVE_LOG: undefined,
     })
     assert.equal(result.code, 0, result.stderr)
-    assert.match(await readFile(launcher, 'utf8'), new RegExp(`export DSH_ROOT='${siblingRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
+    const source = await readFile(launcher, 'utf8')
+    assert.match(source, new RegExp(`export DSH_ROOT='${productRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
+    assert.match(source, /export DSH_ENABLE_KNOWLEDGE_SCOPE_UI='1'/)
   } finally {
     await rm(home, { recursive: true, force: true })
   }
@@ -193,11 +196,13 @@ test('records a valid sibling Harness root when no launch override is supplied',
 test('treats a blank Harness root as an absent override', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const launcher = join(home, 'Library/Application Support/DeepSeekHarness/com.deepseek.harness.chrome')
-  const siblingRoot = resolve(projectRoot, '../deepseek-harness')
+  const productRoot = resolve(projectRoot, '.generated/harness-product')
   try {
     const result = await runRegister(home, { DSH_ROOT: '   ', DSH_CLI_PATH: undefined })
     assert.equal(result.code, 0, result.stderr)
-    assert.match(await readFile(launcher, 'utf8'), new RegExp(`export DSH_ROOT='${siblingRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
+    const source = await readFile(launcher, 'utf8')
+    assert.match(source, new RegExp(`export DSH_ROOT='${productRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
+    assert.match(source, /export DSH_ENABLE_KNOWLEDGE_SCOPE_UI='1'/)
   } finally {
     await rm(home, { recursive: true, force: true })
   }

@@ -1,0 +1,144 @@
+diff --git a/packages/skill/skill/src/index.ts b/packages/skill/skill/src/index.ts
+index fd227f5665f652bbc2f2403412821821a253549a..94bfd9b1fae344e74c381f3848f9e591273251a8 100644
+--- a/packages/skill/skill/src/index.ts
++++ b/packages/skill/skill/src/index.ts
+@@ -52,6 +52,21 @@ export interface SkillInvocationPolicy {
+   readonly userInvocable: boolean
+ }
+
++/**
++ * Resolves the invocation controls actually granted to a discovered skill.
++ * Implementations may only reduce a provider's controls; the registry
++ * intersects their answer with the skill's authored controls before exposing
++ * it to a caller.
++ */
++export interface SkillInvocationPolicyResolver {
++  /**
++   * Return the Harness-local controls requested for one discovered skill.
++   * @param skill - provider-authored summary before Harness-local restrictions.
++   * @returns requested Harness-local controls for this skill.
++   */
++  resolve(skill: SkillSummary): SkillInvocationPolicy
++}
++
+ /** Invocation-neutral skill metadata returned by `ctx.skills.list()`. */
+ export interface SkillSummary {
+   /** Kebab-case identifier used to address the skill. */
+@@ -365,6 +380,8 @@ export class SkillRegistry extends Service {
+     () => { this.invalidateCache() },
+   )
+   private readonly collectCache = new Map<string, Map<string, IndexedCandidate>>()
++  /** One Host-wide policy owner; policy changes invalidate effective catalog caches. */
++  private invocationPolicy: SkillInvocationPolicyResolver | undefined
+   private revision = 0
+   private nextProviderOrder = 0
+   /** Stable identities for cache keys; scope keys are opaque identity-compared objects. */
+@@ -460,6 +477,31 @@ export class SkillRegistry extends Service {
+     )
+   }
+
++  /**
++   * Install the one Harness-local invocation policy. Provider frontmatter
++   * remains authoritative: every policy answer is intersected with it, so a
++   * local setting can tighten but never widen an authored restriction.
++   * @param resolver - Host-local resolver owned by a settings plugin.
++   * @returns disposer that restores provider-authored controls.
++   */
++  registerInvocationPolicy(resolver: SkillInvocationPolicyResolver): () => void {
++    if (this.invocationPolicy !== undefined) {
++      throw new Error('a skill invocation policy is already registered')
++    }
++    this.invocationPolicy = resolver
++    this.invalidateCache()
++    return () => {
++      if (this.invocationPolicy !== resolver) return
++      this.invocationPolicy = undefined
++      this.invalidateCache()
++    }
++  }
++
++  /** Notify effective catalog consumers after the installed policy changes. */
++  invalidateInvocationPolicy(): void {
++    if (this.invocationPolicy !== undefined) this.invalidateCache()
++  }
++
+   /**
+    * List invocation-neutral skill summaries for a workspace. Consumers apply
+    * model or user invocation policy at their operational boundary. Lookup
+@@ -472,6 +514,20 @@ export class SkillRegistry extends Service {
+     return (await this.snapshot(options)).skills
+   }
+
++  /**
++   * List winning source summaries before Harness-local policy restrictions.
++   * This inspection operation is for the Host's Skill settings surface; model
++   * and command consumers must use {@link list} or {@link get}.
++   * @param options - workspace and scope lookup context.
++   * @returns sorted provider-authored winning summaries.
++   */
++  async listSource(options: SkillViewOptions = {}): Promise<SkillSummary[]> {
++    const collected = await this.collect(options)
++    return [...collected.entries.values()]
++      .map(entry => toSummary(entry.candidate))
++      .sort(compareSkillSummary)
++  }
++
+   /**
+    * Observe the current invocation-neutral catalog and whether discovery completed within a stable revision.
+    * Incomplete observations are never cached, allowing consumers to retain last-good state and
+@@ -483,7 +539,7 @@ export class SkillRegistry extends Service {
+     const collected = await this.collect(options)
+     return {
+       skills: [...collected.entries.values()]
+-        .map(entry => toSummary(entry.candidate))
++        .map(entry => this.resolveSummary(toSummary(entry.candidate)))
+         .sort(compareSkillSummary),
+       complete: collected.cacheable,
+     }
+@@ -514,7 +570,27 @@ export class SkillRegistry extends Service {
+       this.invalidateEntry(match)
+       return undefined
+     }
+-    return definition
++    return this.resolveDefinition(definition)
++  }
++
++  /** Resolve policy while preserving a provider's stricter frontmatter controls. */
++  private resolveSummary(skill: SkillSummary): SkillSummary {
++    const requested = this.invocationPolicy?.resolve(skill)
++    if (requested === undefined) return skill
++    validateInvocation(requested, `skill invocation policy for "${skill.name}"`)
++    return {
++      ...skill,
++      invocation: intersectInvocation(skill.invocation, requested),
++    }
++  }
++
++  /** Resolve the same policy for a loaded body; loaders must enforce the list view. */
++  private resolveDefinition(skill: SkillDefinition): SkillDefinition {
++    const summary = this.resolveSummary(skill)
++    return {
++      ...skill,
++      invocation: summary.invocation,
++    }
+   }
+
+   private async collect(options: SkillViewOptions): Promise<CollectResult> {
+@@ -794,6 +870,17 @@ function validateInvocation(invocation: unknown, subject: string): void {
+   }
+ }
+
++/** Intersect authored and local controls so a local override never widens an authored denial. */
++function intersectInvocation(
++  authored: SkillInvocationPolicy,
++  requested: SkillInvocationPolicy,
++): SkillInvocationPolicy {
++  return {
++    modelInvocable: authored.modelInvocable && requested.modelInvocable,
++    userInvocable: authored.userInvocable && requested.userInvocable,
++  }
++}
++
+ function compareSkillSummary(left: SkillSummary, right: SkillSummary): number {
+   return compareCodePoints(left.name, right.name)
+ }

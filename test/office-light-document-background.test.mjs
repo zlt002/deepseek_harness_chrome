@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
 test('background forwards selection_insert to WebEdit and rejects unknown light-document operations', async () => {
-  const source = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   let runtimeListener; const listeners = new Set(); const sent = []; const nativeMessages = []
   const target = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/109?id=109' }

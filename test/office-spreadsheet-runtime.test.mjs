@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
 async function runtimeWith(app) {
-  const source = await readFile(new URL('../public/office-spreadsheet-runtime.js', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/public/office-spreadsheet-runtime.js', import.meta.url), 'utf8')
   const context = vm.createContext({ APP: app, location: { origin: 'https://webedit.midea.com', pathname: '/sheet/1' }, globalThis: null, window: null, console, btoa: (value) => Buffer.from(value, 'binary').toString('base64'), setTimeout, clearTimeout, Uint8Array, Date, URL })
   context.globalThis = context; context.window = context
   vm.runInContext(source, context)

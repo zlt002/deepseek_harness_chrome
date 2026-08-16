@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import net from 'node:net'
-import { LoopbackProxy } from '../native-server/src/loopback-proxy.mjs'
+import { LoopbackProxy } from '../apps/native-server/src/loopback-proxy.mjs'
 
 test('rejects an upstream outside the local Harness server', () => {
   assert.throws(

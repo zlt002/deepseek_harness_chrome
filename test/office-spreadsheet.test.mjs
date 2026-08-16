@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
-import { OfficeSpreadsheetWriteRecordStore } from '../native-server/src/office-spreadsheet-write-record-store.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
+import { OfficeSpreadsheetWriteRecordStore } from '../apps/native-server/src/office-spreadsheet-write-record-store.mjs'
 
 function writeStore() { return new OfficeSpreadsheetWriteRecordStore({ recordPath: join(tmpdir(), `dsh-spreadsheet-${randomUUID()}.json`) }) }
 function writePrecondition(range = 'A1') {

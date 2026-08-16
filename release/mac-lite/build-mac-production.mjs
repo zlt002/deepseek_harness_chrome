@@ -11,10 +11,16 @@ import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { bundleHarnessRuntimePlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
-const HARNESS_ROOT = path.resolve(PROJECT_ROOT, '..', 'deepseek-harness')
+const GENERATED_HARNESS_ROOT = path.join(PROJECT_ROOT, '.generated', 'harness-product')
+const HARNESS_ROOT = path.resolve(process.env.DSH_ROOT?.trim() || (
+  existsSync(path.join(GENERATED_HARNESS_ROOT, '.harness-product.json'))
+    ? GENERATED_HARNESS_ROOT
+    : path.join(PROJECT_ROOT, 'upstream', 'deepseek-harness')
+))
 const PACKAGE_NAME = 'accr-ui-mac-production-poc'
 const EXTENSION_VERSION = '1.1.63'
 const EXTENSION_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtjVzlR9cE9zV44l999YtraoKbQ77NfaFgwJmpeABPL2HxUK82pD0DFRSv/7FfZ4nEZRDlgZz1zj1yIF4HLnftCZyf/xYIrwhXDojQfYULE8miIGufKEJf/IUBkpFdFKHgfKgowV0M72wNzqaYd27MdR6DczCR5PQKwi5G2JKUJxx4xc2+KD3GOUjpE8DrhzliD3gYcwEZ8lphtOuCUIx5kI97etKEiixqrwFGRoUbHFLXT14+Fqg7jmSu/HaUVWbl/Dx1VbI1hgVZdnJI//UJY+T0qMLV8hcfHPpwBum0lf1rfP+FQwnqoV2wf4k+6f70dE/Xrlckddpkl0IWDSEdwIDAQAB'
@@ -29,6 +35,12 @@ const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
   '@deepseek-ai/dsh-host-directory-picker-browse',
   '@deepseek-ai/dsh-client-ui-directory-picker-browse',
   '@deepseek-ai/dsh-mcp-client',
+]
+const PRODUCT_UI_PACKAGE_NAMES = [
+  'harness-ui-agent-preset',
+  'harness-ui-browser-target',
+  'harness-ui-knowledge-scope',
+  'harness-skill-settings',
 ]
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options })
@@ -436,6 +448,21 @@ async function copyWithoutSourceMaps(source, destination) {
   })
 }
 
+/** Keep the small product plugins beside the packaged Native Host. */
+async function copyProductUiPackages(destination) {
+  for (const name of PRODUCT_UI_PACKAGE_NAMES) {
+    const source = path.join(PROJECT_ROOT, 'packages', name)
+    if (!existsSync(path.join(source, 'package.json')) || !existsSync(path.join(source, 'lib', 'index.js')) || !existsSync(path.join(source, 'lib', 'client.js'))) {
+      throw new Error(`Missing built product UI package: ${source}`)
+    }
+    await cp(source, path.join(destination, name), {
+      recursive: true,
+      dereference: true,
+      filter: (candidate) => !candidate.endsWith('.map') && !candidate.includes(`${path.sep}src${path.sep}`) && !candidate.includes(`${path.sep}test${path.sep}`),
+    })
+  }
+}
+
 async function directorySize(root) {
   let bytes = 0
   async function visit(current) {
@@ -470,6 +497,9 @@ fi
 export DSH_ROOT="$PACKAGE_DIR/harness"
 export DSH_CLI_PATH="$DSH_ROOT/apps/cli/lib/server.mjs"
 export DSH_CWD="$PACKAGE_DIR/../workspace"
+export DSH_ENABLE_KNOWLEDGE_SCOPE_UI="1"
+export DSH_ENABLE_SKILL_SETTINGS_UI="1"
+export DSH_PRODUCT_PLUGIN_ROOT="$PACKAGE_DIR/product-plugins"
 export DSH_NODE_PTY_SPAWN_HELPER="$PACKAGE_DIR/native/node-pty/spawn-helper"
 export DSH_NATIVE_LOG="$PACKAGE_DIR/../logs/native-host.log"
 exec "$NODE_EXEC" "$PACKAGE_DIR/native-server/runtime.mjs"
@@ -560,8 +590,8 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   const cliEntry = path.join(HARNESS_ROOT, 'apps', 'cli', 'lib', 'bin.js')
   const webDist = path.join(HARNESS_ROOT, 'apps', 'web', 'dist')
   const cliConfig = path.join(HARNESS_ROOT, 'apps', 'cli', 'config')
-  const extensionDir = path.join(PROJECT_ROOT, '.output', 'chrome-mv3')
-  const nativeServerEntry = path.join(PROJECT_ROOT, 'native-server', 'bin.mjs')
+  const extensionDir = path.join(PROJECT_ROOT, 'apps', 'chrome-extension', '.output', 'chrome-mv3')
+  const nativeServerEntry = path.join(PROJECT_ROOT, 'apps', 'native-server', 'bin.mjs')
   for (const required of [cliEntry, webDist, cliConfig, extensionDir, nativeServerEntry]) {
     if (!existsSync(required)) throw new Error(`Missing built package input: ${required}`)
   }
@@ -606,12 +636,18 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   })
   await patchBundledWorkerPaths(bundlePath)
   const nativeBundlePath = path.join(tempDir, 'native-server.mjs')
+  const harnessRuntimePluginPath = path.join(tempDir, 'harness-runtime.mjs')
   const pluginManagerPath = path.join(tempDir, 'plugin-manager.mjs')
+  const schemasteryPath = path.join(harnessDir, 'vendor', 'schemastery', 'lib', 'index.mjs')
   // The sibling Harness checkout owns the host-native esbuild binary. The
   // extension checkout may have been installed for a different CPU target.
-  run('pnpm', ['exec', 'esbuild', nativeServerEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${nativeBundlePath}`], { cwd: HARNESS_ROOT })
-  run('pnpm', ['exec', 'esbuild', cliEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${pluginManagerPath}`], { cwd: HARNESS_ROOT })
+  run('pnpm', ['exec', 'esbuild', nativeServerEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${nativeBundlePath}`], { cwd: PROJECT_ROOT })
+  await bundleHarnessRuntimePlugin({ outfile: harnessRuntimePluginPath, projectRoot: PROJECT_ROOT, harnessRoot: HARNESS_ROOT })
+  run('pnpm', ['exec', 'esbuild', cliEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${pluginManagerPath}`], { cwd: PROJECT_ROOT })
   await mkdir(path.join(cliDir, 'lib'), { recursive: true })
+  // `harness-skill-settings` loads this through DSH_PRODUCT_SCHEMATERY_URL.
+  // Keep a bundled copy in the same location as a normal Harness runtime.
+  run('pnpm', ['exec', 'esbuild', path.join(HARNESS_ROOT, 'vendor', 'schemastery', 'lib', 'index.mjs'), '--bundle', '--platform=node', '--format=esm', '--target=node22', `--outfile=${schemasteryPath}`], { cwd: PROJECT_ROOT })
   await cp(bundlePath, path.join(cliDir, 'lib', 'server.mjs'))
   await cp(
     path.join(HARNESS_ROOT, 'packages', 'code-runtime', 'code-runtime-worker-thread', 'lib', 'worker.cjs'),
@@ -642,6 +678,12 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await writeFile(manifestPath, `${JSON.stringify({ ...manifest, name: 'accr-ui Harness UI', version: EXTENSION_VERSION, key: EXTENSION_KEY }, null, 2)}\n`)
   await mkdir(path.join(runtimeDir, 'native-server'), { recursive: true })
   await cp(nativeBundlePath, path.join(runtimeDir, 'native-server', 'runtime.mjs'))
+  await cp(harnessRuntimePluginPath, path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'))
+  await cp(
+    path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'),
+    path.join(runtimeDir, 'native-server', 'selected-source-routing-prompt.mjs'),
+  )
+  await copyProductUiPackages(path.join(runtimeDir, 'product-plugins'))
   await copyMacNativeAssets(path.join(runtimeDir, 'native'))
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })

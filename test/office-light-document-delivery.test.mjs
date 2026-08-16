@@ -4,10 +4,10 @@ import test from 'node:test'
 
 test('delivers light-document requests to the discovered WebEdit iframe instead of the doc.midea top frame', async () => {
   const [background, content, config, runtime] = await Promise.all([
-    readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../entrypoints/office-read.content.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../wxt.config.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../public/office-light-document-runtime.js', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/chrome-extension/wxt.config.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/chrome-extension/public/office-light-document-runtime.js', import.meta.url), 'utf8'),
   ])
   assert.match(background, /type: 'office-document\/v1'/)
   assert.match(background, /\{ frameId: frame\.frameId \}/)

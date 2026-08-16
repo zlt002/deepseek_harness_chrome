@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { buildMacProductionPackage } from '../release/mac-lite/build-mac-production.mjs'
-import { decodeNativeFrames, encodeNativeFrame } from '../native-server/src/protocol.mjs'
+import { decodeNativeFrames, encodeNativeFrame } from '../apps/native-server/src/protocol.mjs'
 
 test('Mac production package boots the real Web surface without node_modules', { timeout: 60_000 }, async (t) => {
   if (process.platform !== 'darwin' || process.arch !== 'arm64') return t.skip('Mac ARM64 native package test')
@@ -22,6 +22,8 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.doesNotMatch(entries, /\.map$/m)
   assert.match(entries, /runtime\/harness\/apps\/cli\/lib\/code-runtime-worker\.cjs/m)
   assert.match(entries, /runtime\/harness\/apps\/cli\/lib\/workflow-worker\.cjs/m)
+  assert.match(entries, /runtime\/native-server\/selected-source-routing-prompt\.mjs/m)
+  assert.match(entries, /runtime\/native-server\/harness-runtime\.mjs/m)
 
   const installed = path.join(root, 'installed')
   await mkdir(installed)

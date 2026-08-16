@@ -1,16 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { claudeSkillsPatch, harnessArgs, resolveHarnessCwd, resolveHarnessCli } from '../native-server/src/harness-process.mjs'
-import { readFile } from 'node:fs/promises'
+import { claudeSkillsPatch, harnessArgs, prepareProductUiPackages, productUiPatch, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin } from '../apps/native-server/src/harness-process.mjs'
+import { mkdtemp, readFile, readlink, rm } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import yaml from 'js-yaml'
-import { Context } from '../../deepseek-harness/vendor/cordis/lib/index.js'
-import { entryListSchema } from '../../deepseek-harness/vendor/include/lib/index.js'
-import SystemPrompt, { renderPrompt } from '../../deepseek-harness/packages/core/system-prompt/lib/index.js'
-import { createScope } from '../../deepseek-harness/packages/core/scope/lib/index.js'
-import * as Persona from '../../deepseek-harness/packages/preset/persona/lib/index.js'
-import * as SelectedSourceRoutingPrompt from '../native-server/src/selected-source-routing-prompt.mjs'
+import { Context } from '../upstream/deepseek-harness/vendor/cordis/lib/index.js'
+import { entryListSchema } from '../upstream/deepseek-harness/vendor/include/lib/index.js'
+import SystemPrompt, { renderPrompt } from '../upstream/deepseek-harness/packages/core/system-prompt/lib/index.js'
+import { createScope } from '../upstream/deepseek-harness/packages/core/scope/lib/index.js'
+import * as Persona from '../upstream/deepseek-harness/packages/preset/persona/lib/index.js'
+import * as SelectedSourceRoutingPrompt from '../apps/native-server/src/selected-source-routing-prompt.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -35,6 +36,13 @@ test('resolves the CLI from DSH_ROOT when no explicit CLI path is set', () => {
   )
 })
 
+test('resolves the product-owned Harness runtime plugin outside the upstream checkout', () => {
+  assert.equal(
+    resolveHarnessRuntimePlugin({}),
+    resolve(projectRoot, 'packages/harness-runtime/src/index.mjs'),
+  )
+})
+
 test('passes the Native Host-owned MCP patch to the official Harness client', () => {
   assert.deepEqual(
     harnessArgs(0, '/private/tmp/connector.cordis.yml'),
@@ -55,6 +63,26 @@ test('mounts Harness-native skills before Claude skills so duplicate names resol
           - '${harnessSkillsDir}'
           - '/Users/alice/.claude/skills'
 `,
+  )
+})
+
+test('mounts product UI packages outside upstream and gates the missing knowledge composer seam', () => {
+  assert.match(productUiPatch({}), /@accrui\/harness-ui-browser-target/)
+  assert.doesNotMatch(productUiPatch({}), /@accrui\/harness-ui-knowledge-scope/)
+  assert.match(
+    productUiPatch({ DSH_ENABLE_KNOWLEDGE_SCOPE_UI: '1' }),
+    /@accrui\/harness-ui-knowledge-scope/,
+  )
+})
+
+test('installs a managed product UI link into an isolated Harness profile', async (t) => {
+  const dshHome = await mkdtemp(resolve(tmpdir(), 'harness-product-ui-test-'))
+  t.after(() => rm(dshHome, { recursive: true, force: true }))
+  await prepareProductUiPackages({ DSH_HOME: dshHome })
+  const link = resolve(dshHome, 'profiles/web/node_modules/@accrui/harness-ui-browser-target')
+  assert.equal(
+    resolve(dirname(link), await readlink(link)),
+    resolve(projectRoot, 'packages/harness-ui-browser-target'),
   )
 })
 
@@ -134,7 +162,7 @@ test('keeps an empty pmd-prd invocation free of workspace scans and manifest rec
 })
 
 test('advertises distinct selected-source routes with isolated MCP tools', async () => {
-  const source = await readFile(new URL('../native-server/src/harness-process.mjs', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/native-server/src/harness-process.mjs', import.meta.url), 'utf8')
   assert.match(source, /deepseek-harness-selected-source-routing/)
   assert.match(source, /selected-source-routing-prompt\.mjs/)
   assert.match(source, /toolScopes:/)
@@ -147,14 +175,14 @@ test('advertises distinct selected-source routes with isolated MCP tools', async
   assert.match(source, /mcp__chrome__knowledge_search with exactly one non-empty "question" string before answering; never use "query"/)
   const code = source.slice(source.indexOf('toolName: search_selected_remote_code'), source.indexOf('toolName: search_selected_knowledge'))
   const knowledge = source.slice(source.indexOf('toolName: search_selected_knowledge'))
-  assert.match(code, /- mcp__chrome__code_search/)
+  assert.match(code, /allow: \[\]/)
   assert.doesNotMatch(code, /mcp__chrome__knowledge_search/)
-  assert.match(knowledge, /- mcp__chrome__knowledge_search/)
+  assert.match(knowledge, /allow: \[\]/)
   assert.doesNotMatch(knowledge, /mcp__chrome__code_search/)
 })
 
 test('keeps selected-source routing in the final Code preset system prompt', async () => {
-  const codePresetPath = resolve(projectRoot, '../deepseek-harness/apps/cli/config/agent-presets/code/agent.cordis.yml')
+  const codePresetPath = resolve(projectRoot, 'upstream/deepseek-harness/apps/cli/config/agent-presets/code/agent.cordis.yml')
   const entries = yaml.load(await readFile(codePresetPath, 'utf8'), { schema: entryListSchema })
   assert.ok(Array.isArray(entries))
   const codePersona = entries.find((entry) => entry?.id === 'persona')

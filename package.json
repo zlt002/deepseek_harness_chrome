@@ -9,31 +9,28 @@
     "node": ">=22"
   },
   "scripts": {
+    "verify:upstream": "node scripts/verify-upstream-clean.mjs",
+    "materialize:harness-product": "node scripts/materialize-harness-product.mjs",
+    "build:harness-product": "node scripts/materialize-harness-product.mjs --build",
+    "build:harness-client-plugins": "node scripts/build-harness-client-plugins.mjs",
     "sync-harness-assets": "node scripts/sync-harness-assets.mjs",
-    "dev": "pnpm sync-harness-assets && node scripts/prepare-dev-port.mjs && wxt --port 3001",
-    "build": "pnpm sync-harness-assets && wxt build",
-    "zip": "pnpm sync-harness-assets && wxt zip",
+    "dev": "pnpm build:harness-client-plugins && pnpm sync-harness-assets && node scripts/prepare-dev-port.mjs && pnpm --dir apps/chrome-extension run dev",
+    "build": "pnpm build:harness-client-plugins && pnpm sync-harness-assets && pnpm --dir apps/chrome-extension run build",
+    "zip": "pnpm build:harness-client-plugins && pnpm sync-harness-assets && pnpm --dir apps/chrome-extension run zip",
     "release:windows-lite": "pnpm build && node release/windows-lite/windows-release.mjs",
     "release:mac-production-poc": "node release/mac-lite/build-mac-production.mjs",
     "materialize:windows-harness-runtime": "node release/windows-lite/materialize-harness-runtime.mjs",
     "test:windows-release": "node --test test/windows-release.test.mjs",
     "test:windows-runtime": "node --test test/materialize-harness-runtime.test.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "pnpm --dir apps/chrome-extension run typecheck",
+    "typecheck:plugins": "pnpm --filter @accrui/harness-ui-browser-target run typecheck && pnpm --filter @accrui/harness-ui-knowledge-scope run typecheck && pnpm --filter @accrui/harness-ui-agent-preset run typecheck && pnpm --filter @accrui/harness-skill-settings run typecheck",
     "test": "node --test test/*.test.mjs",
     "register-native-host": "node scripts/register-native-host.mjs",
     "dev:restart": "node scripts/restart-dev.mjs"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
-    "@wxt-dev/module-react": "^1.1.3",
-    "react": "^19.2.1",
-    "react-dom": "^19.2.1",
-    "wxt": "^0.20.8"
-  },
   "devDependencies": {
-    "@types/chrome": "^0.1.27",
-    "@types/react": "^19.2.1",
-    "@types/react-dom": "^19.2.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "esbuild": "0.27.7",
     "typescript": "^5.9.2"
   }
 }

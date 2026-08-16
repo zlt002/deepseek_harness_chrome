@@ -1,0 +1,19 @@
+export function selectedNames(ids, entries, fallbackToId = false) {
+  const byId = new Map(entries.map(entry => [entry.id, entry.name]))
+  const names = ids.flatMap(id => {
+    const name = byId.get(id)
+    return name === undefined ? fallbackToId ? [id] : [] : [name]
+  })
+  return names.length === 0 ? undefined : names.join('、')
+}
+
+export function scopeLabels(scope, catalog) {
+  // A saved scope is authoritative. The catalog is refreshed independently
+  // and may temporarily omit an item, but a wide composer should still show
+  // which repository key is selected instead of looking unselected.
+  const repositories = selectedNames(scope?.repositoryIds ?? [], catalog.repositories, true)
+  const knowledge = selectedNames(scope?.systemIds ?? [], catalog.systems)
+    ?? catalog.domains.find(domain => domain.id === scope?.domainId)?.name
+    ?? '知识范围'
+  return { repositories, knowledge }
+}

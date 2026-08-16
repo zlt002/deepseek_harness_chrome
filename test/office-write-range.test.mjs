@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 
 test('publishes approval-annotated office_write_range and returns a verified readback', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://doc.midea.com/sheets/budget' }

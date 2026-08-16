@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TeamDocRecordStore, resolveTeamDocStatePath } from '../native-server/src/team-doc-record-store.mjs'
+import { TeamDocRecordStore, resolveTeamDocStatePath } from '../apps/native-server/src/team-doc-record-store.mjs'
 
 test('uses only the explicit connector-state override in tests', () => {
   assert.equal(resolveTeamDocStatePath({ DSH_CONNECTOR_STATE_DIR: '/private/test-state' }), '/private/test-state/team-doc-delivery-records.json')

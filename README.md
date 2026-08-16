@@ -1,110 +1,120 @@
 # DeepSeek Harness Chrome
 
-这是一个独立的 Chrome MV3 扩展项目，参考 `accr-ui` 的组织方式：`sidepanel` 负责用户入口，background service worker 负责 Native Messaging，`native-server` 负责启动和监管 DeepSeek Harness Web 进程。
+这是一个独立的 Chrome MV3 产品仓库。官方 DeepSeek Harness 作为干净的上游底座保存在
+`upstream/deepseek-harness`；Chrome、Native Messaging、远程知识库/代码库和产品 UI
+能力由本仓库维护。
 
-当前第一阶段的实际链路是：
+## 架构
+
+```text
+deepseek_harness_chrome/
+├── apps/
+│   ├── chrome-extension/       WXT Chrome 扩展和 sidepanel
+│   └── native-server/          Native Messaging Host 和 Connector
+├── packages/                   产品拥有的 Harness Host/Client 插件
+├── upstream/
+│   └── deepseek-harness/       固定版本的官方 Git submodule，不直接修改
+├── upstream-contributions/     官方暂缺的通用、最小插件 seam
+├── release/                    Mac/Windows 安装包构建
+├── scripts/                    构建、同步、安装和重启脚本
+└── test/                       跨层回归测试
+```
+
+运行链路：
 
 ```text
 Chrome sidepanel
   -> background: chrome.runtime.connectNative()
-  -> native-server: Chrome Native Messaging
-  -> dsh --profile web --host 127.0.0.1 --port 0
-  -> DeepSeek Harness Web UI + /api + WebSocket
+  -> apps/native-server
+  -> 生成的产品 Harness（官方底座 + 通用 seam + 产品插件）
+  -> Harness Web UI + /api + WebSocket
 ```
 
-sidepanel 会在 iframe 中直接加载 Native Host 返回的 `http://127.0.0.1:<port>` Harness Web UI，因此 Harness 的页面、会话、设置、模型、工具和流式事件都继续使用原项目实现。native-server 不复制 Harness 核心逻辑，只负责进程生命周期和本地地址发现。
+根目录只负责编排，不保存重复的扩展或 Native Host 源码。不要修改
+`upstream/deepseek-harness`；产品功能放入 `packages/`，确实通用且官方缺少的插件 seam
+才放入 `upstream-contributions/`。
 
-## 当前状态
-
-- 已有 MV3 sidepanel/background/native-server 链路。
-- Native Host 只返回它实际启动的、带端口的 `127.0.0.1` Harness Web 地址。
-- Native host 注册脚本覆盖 macOS/Linux；Windows 仍需要后续增加 launcher/安装器。
-- 当前已完成源码、协议/代理测试、真实 Harness 启动和 `host.describe` 命令行端到端验证；Chrome 加载扩展后的可视化验收仍需在本机浏览器中完成。
-
-## 本地运行
-
-在 `deepseek-harness` 仓库中先构建 Web 和 host artifacts：
+## 安装依赖与构建
 
 ```sh
-cd /Users/zhanglt21/Desktop/accrnew/deepseek-harness
-pnpm run build
-```
-
-安装并构建扩展：
-
-```sh
-cd /Users/zhanglt21/Desktop/accrnew/deepseek_harness_chrome
 pnpm install
-pnpm run build
+pnpm build:harness-product
+pnpm build
 ```
 
-打开 `chrome://extensions`，开启“开发者模式”，选择 `.output/chrome-mv3`，复制扩展 ID。扩展图标会直接打开 Chrome side panel。然后注册 native host：
+不需要预先构建相邻的 `deepseek-harness` 仓库。`pnpm build:harness-product` 会从固定的
+官方提交生成 `.generated/harness-product`，顺序应用通用 seam，并构建增强版 Harness。
+`pnpm build` 会构建产品插件和 Chrome 扩展。
+
+在 `chrome://extensions` 开启“开发者模式”，选择：
+
+```text
+apps/chrome-extension/.output/chrome-mv3
+```
+
+然后复制扩展 ID，并注册 Native Host：
 
 ```sh
-DEEPSEEK_HARNESS_EXTENSION_ID=<扩展ID> \
-DSH_ROOT=/Users/zhanglt21/Desktop/accrnew/deepseek-harness \
-pnpm run register-native-host
+DEEPSEEK_HARNESS_EXTENSION_ID=<扩展ID> pnpm register-native-host
 ```
 
-需要同时使用生产构建和 `chrome-mv3-dev` 时，用逗号同时传入两个扩展 ID，避免其中一个被 Native Messaging 白名单拒绝：
+需要同时允许生产版和开发版时，可以传入逗号分隔的多个 ID：
 
 ```sh
-DEEPSEEK_HARNESS_EXTENSION_ID=<生产ID>,<开发ID> \
-DSH_ROOT=/Users/zhanglt21/Desktop/accrnew/deepseek-harness \
-pnpm run register-native-host
+DEEPSEEK_HARNESS_EXTENSION_ID=<生产ID>,<开发ID> pnpm register-native-host
 ```
 
-重新加载扩展，点击扩展图标或打开 side panel。若 native host 找不到 Harness CLI，可直接指定：
+注册脚本默认使用 `.generated/harness-product`。只有调试其他 Harness 构建时才设置
+`DSH_ROOT` 或 `DSH_CLI_PATH`；使用其他工作目录时设置 `DSH_CWD`。
+
+## 开发和一键重启
 
 ```sh
-DSH_CLI_PATH=/absolute/path/to/deepseek-harness/apps/cli/lib/bin.js \
-DEEPSEEK_HARNESS_EXTENSION_ID=<扩展ID> \
-pnpm run register-native-host
+pnpm dev:restart
 ```
 
-Native Host 的工作目录默认跟随 `DSH_ROOT`；需要使用其他工作区时设置 `DSH_CWD`。
-
-开发时，扩展页面和样式由 WXT 自动热更新。修改 `native-server`、Harness 服务端插件或
-工具配置后，运行下面的一键命令；它会按需启动 WXT、重建 Harness Host、同步 Native
-Host 并结束旧进程，已经打开的 side panel 会自动连接到最新版。如果命令启动了 WXT，
-需要保持这个终端运行：
+该命令会按需启动 WXT、生成产品 Harness、同步 Native Host 并结束旧进程。若命令启动了
+WXT，需要保持终端运行。只修改扩展或 Native Server、确定不需要重建 Harness 时：
 
 ```sh
-pnpm run dev:restart
+pnpm dev:restart -- --skip-harness-build
 ```
 
-如果只改了本项目的 `native-server`，没有修改相邻的 `deepseek-harness`，可以跳过较慢的
-Harness 重建：
-
-```sh
-pnpm run dev:restart -- --skip-harness-build
-```
-
-排查 Native Messaging 启动问题时，可以把 `DSH_NATIVE_LOG` 传给注册命令；Native Host 会把启动、协议帧和退出原因追加到该文件：
+扩展页面和样式由 WXT 热更新；Native Server、Harness Host 插件和配置变更需要执行上面的
+一键重启。排查 Native Messaging 时可以设置日志文件：
 
 ```sh
 DSH_NATIVE_LOG=/tmp/deepseek-harness-native-host.log \
 DEEPSEEK_HARNESS_EXTENSION_ID=<扩展ID> \
-pnpm run register-native-host
+pnpm register-native-host
 ```
 
 ## 验证
 
 ```sh
-pnpm test
+pnpm verify:upstream
 pnpm typecheck
+pnpm typecheck:plugins
+pnpm test
 pnpm build
 ```
 
-`pnpm build` 当前仍会同步旧的扩展内置 Harness 资源，后续可在 localhost iframe 完成真实 Chrome 验收后删除这部分兼容构建。native-server 是无依赖的 Node ESM launcher，注册脚本会把它作为 Chrome Native Messaging executable 运行。开发环境默认从相邻的 `deepseek-harness/apps/cli/lib/bin.js` 启动 Harness，也可以通过 `DSH_CLI_PATH` 指向已安装的 CLI。
+`pnpm verify:upstream` 必须显示官方 submodule 干净。扩展生产产物位于
+`apps/chrome-extension/.output/chrome-mv3`。
 
-## 后续迁移方向
+## Mac 生产包
 
-下一阶段可以补充用户安装包、Windows Native Host launcher、版本升级和真实模型验收。当前 iframe 只访问 Native Host 启动的本机 `127.0.0.1` Harness 服务，不会把 Harness UI 请求发到公网。
+```sh
+pnpm release:mac-production-poc
+```
 
-## Windows-first AccrUI 兼容候选包
+Mac 包包含无 `node_modules` 的 Harness/Native Server 运行时、扩展和安装脚本。生成包通过
+自动化启动验证后才会完成构建；正式交付仍应在目标 Mac 上完成安装、Chrome Native
+Messaging 和升级验收。
 
-Windows 包不重排现有扩展或 Native Server 目录，而是由 `release/windows-lite` 生成一个独立发行模块。它保留 AccrUI 更新器的外层契约：
+## Windows AccrUI 兼容包
+
+Windows 发行模块保留 AccrUI 更新器的外层契约：
 
 ```text
 accr-ui-windows-lite-x64.zip
@@ -114,24 +124,41 @@ accr-ui-windows-lite-x64.zip
     └── payload.zip
 ```
 
-`payload.zip` 内是本项目真实的 extension、native-server 和一个显式提供的、完整的 Harness runtime；没有旧 AccrUI Agent Backend。扩展会固定为 AccrUI 正式 ID `cmgjacoohdgjedoekbdbhbelpmboankg`，并要求版本不低于 `1.1.63`。
-
-先准备一个已经构建且依赖闭包完整的 Harness runtime 目录（必须包含 `apps/cli/lib/bin.js`、Web dist 和 `node_modules/@deepseek-ai` 的必要包），再运行：
+Windows x64 Runtime 必须在 Windows x64 构建机上物化，不能从 macOS 复制原生依赖：
 
 ```sh
-pnpm release:windows-lite -- --harness-runtime <runtime-directory> --version 1.1.63
+pnpm materialize:windows-harness-runtime -- \
+  --source <built-harness-checkout> \
+  --out <runtime-directory> \
+  --revision <git-revision>
+
+pnpm release:windows-lite -- \
+  --harness-runtime <runtime-directory> \
+  --version 1.1.63
+```
+
+随后运行：
+
+```sh
 pnpm test:windows-release
 ```
 
-没有 `--harness-runtime` 时会直接失败，绝不会悄悄把开发机上相邻的 `deepseek-harness` 路径写进用户包。生成 ZIP 只证明更新器契约和静态内容；仍需在真实 Windows 机器验证安装、Native Messaging、Harness 启动与回滚。
+GitHub Actions 的 `Build Windows Lite` 工作流会在 `windows-latest` 上构建。ZIP 和自动化测试
+会递归检出固定版本的官方 submodule，构建 `.generated/harness-product`，再从该产品树物化
+Windows Runtime。它不再检出第二份 Harness，也不再应用产品级大补丁。自动化只能证明静态
+闭包与安装器契约；发布前仍需真实 Windows 安装、Native Messaging、升级和回滚验收。
 
-Windows x64 Runtime 必须先在 Windows x64 上物化，不能从 macOS 开发机复制 `node_modules`：
+## 上游升级
+
+升级时只更新 `upstream/deepseek-harness` 的固定提交，然后依次执行：
 
 ```sh
-pnpm materialize:windows-harness-runtime -- --source <built-harness-checkout> --out <runtime-directory> --revision <git-revision>
-pnpm release:windows-lite -- --harness-runtime <runtime-directory> --version 1.1.63
+pnpm verify:upstream
+pnpm build:harness-product
+pnpm typecheck:plugins
+pnpm test
+pnpm build
 ```
 
-materializer 使用上游 `pnpm deploy --prod --ignore-scripts` 获取已经构建完成的 CLI 生产依赖闭包，再补入构建后的 Web dist；deploy 阶段不会重复执行第三方安装脚本。它拒绝外部 symlink、非 Windows PE 原生 addon 和不通过 `node apps/cli/lib/bin.js --help` 的产物；仅这些检查均通过后才写入 `harness-runtime.json` 的 `closureComplete: true`。
-
-仓库的 `Build Windows Lite` GitHub Actions 工作流会在 `windows-latest` 上完成上述步骤并上传 ZIP 与 SHA-256。`release/windows-lite/harness-ui.patch` 是当前 Harness UI 工作树相对于固定上游提交的发布快照；更新快照时必须同时更新工作流中的 Harness 提交号，并先用 `git apply --check` 验证补丁。
+若通用 seam 无法应用，应更新对应的 `upstream-contributions/*.patch`；不要直接在 submodule
+中修复。Windows 和 Mac 构建都只消费由该流程生成的产品 Harness。

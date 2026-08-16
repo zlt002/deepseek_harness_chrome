@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { BrowserConnector } from '../native-server/src/connector.mjs'
-import { TeamDocRecordStore } from '../native-server/src/team-doc-record-store.mjs'
-import { TeamKnowledgeBatchRecordStore } from '../native-server/src/team-knowledge-batch-record-store.mjs'
+import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
+import { TeamDocRecordStore } from '../apps/native-server/src/team-doc-record-store.mjs'
+import { TeamKnowledgeBatchRecordStore } from '../apps/native-server/src/team-knowledge-batch-record-store.mjs'
 
 const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://doc.midea.com/teamKnowledge/catalog/9' }
 const parent = { parentId: '9', bookId: '10', parentName: 'Root', parentType: 'directory', canRead: true, canCreate: true, fingerprint: 'parent-batch-v1' }

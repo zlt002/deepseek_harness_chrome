@@ -5,7 +5,7 @@ import test from 'node:test'
 const source = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
 
 test('knowledge scope state follows the AccrUI session and remember precedence', async () => {
-  const background = await source('entrypoints/background.ts')
+  const background = await source('apps/chrome-extension/entrypoints/background.ts')
   assert.match(background, /interface KnowledgeScopeRecord \{ scope: KnowledgeScope; enabled: boolean \}/)
   assert.match(background, /chrome\.storage\.local\.get\(KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY\)/)
   assert.match(background, /chrome\.storage\.local\.set\(\{ \[KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY\]/)
@@ -15,8 +15,8 @@ test('knowledge scope state follows the AccrUI session and remember precedence',
 
 test('knowledge login opens the AccrUI login page and automatically rechecks', async () => {
   const [background, sidepanel] = await Promise.all([
-    source('entrypoints/background.ts'),
-    source('entrypoints/sidepanel/main.tsx'),
+    source('apps/chrome-extension/entrypoints/background.ts'),
+    source('apps/chrome-extension/entrypoints/sidepanel/main.tsx'),
   ])
   assert.match(background, /const KNOWLEDGE_LOGIN_URL = 'https:\/\/wb-uat\.annto\.com\/'/)
   assert.match(background, /chrome\.tabs\.create\(\{ url: KNOWLEDGE_LOGIN_URL, active: true \}\)/)

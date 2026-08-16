@@ -1,0 +1,132 @@
+diff --git a/packages/host/apiproxy/src/api-proxy.ts b/packages/host/apiproxy/src/api-proxy.ts
+index bda99362b6..d9930961e5 100644
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -1954,6 +1954,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+     const exposed = modelProviderNamespaces()
+     for (const ns of WEB_SETTINGS_NAMESPACES) exposed.add(ns)
+     for (const ns of PRODUCT_SETTINGS_NAMESPACES) exposed.add(ns)
++    for (const descriptor of ctx.settings.describe({ redactSecrets: true })) {
++      if (descriptor.configurationExposed) exposed.add(String(descriptor.ns))
++    }
+     return exposed
+   }
+
+@@ -3242,7 +3245,26 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+         // '/' popup lists the catalog its composition actually serves.
+         const scope = await presenterScopeFor(sessionId, session)
+         try {
+-          const skills = (await skillRegistry.list({ cwd, scope })).filter(isUserInvocable)
++          const effective = await skillRegistry.list({ cwd, scope })
++          if (request.payload.includeUnavailable === true) {
++            const effectiveByName = new Map(effective.map(skill => [skill.name, skill]))
++            const source = await skillRegistry.listSource({ cwd, scope })
++            return ok(request, {
++              skills: source.map(skill => {
++                const resolved = effectiveByName.get(skill.name) ?? skill
++                return {
++                  name: skill.name,
++                  description: skill.description,
++                  ...skill.whenToUse === undefined ? {} : { whenToUse: skill.whenToUse },
++                  modelInvocable: resolved.invocation.modelInvocable,
++                  userInvocable: resolved.invocation.userInvocable,
++                  authoredModelInvocable: skill.invocation.modelInvocable,
++                  authoredUserInvocable: skill.invocation.userInvocable,
++                }
++              }),
++            })
++          }
++          const skills = effective.filter(isUserInvocable)
+           return ok(request, {
+             skills: skills.map(skill => ({
+               name: skill.name,
+diff --git a/packages/host/apiproxy/src/api/skills.schema.ts b/packages/host/apiproxy/src/api/skills.schema.ts
+index 747bf19bad..1aca2279e2 100644
+--- a/packages/host/apiproxy/src/api/skills.schema.ts
++++ b/packages/host/apiproxy/src/api/skills.schema.ts
+@@ -15,11 +15,15 @@ export const skillEntrySchema = z.object({
+   description: z.string(),
+   whenToUse: z.string().optional(),
+   modelInvocable: z.boolean(),
++  userInvocable: z.boolean().optional(),
++  authoredModelInvocable: z.boolean().optional(),
++  authoredUserInvocable: z.boolean().optional(),
+ }) satisfies z.ZodType<Wire<SkillEntry>>
+
+ /** skill.list request payload. */
+ export const skillListRequestSchema = z.object({
+   sessionId: sessionIdSchema,
++  includeUnavailable: z.boolean().optional(),
+ }) satisfies z.ZodType<Wire<RequestPayload<'skill.list'>>>
+
+ /** skill.list response value. */
+diff --git a/packages/host/apiproxy/src/api/skills.ts b/packages/host/apiproxy/src/api/skills.ts
+index 3b3e711a93..bba63408ce 100644
+--- a/packages/host/apiproxy/src/api/skills.ts
++++ b/packages/host/apiproxy/src/api/skills.ts
+@@ -18,6 +18,12 @@ export interface SkillEntry {
+   readonly whenToUse?: string
+   /** False marks a user-only skill (`disable-model-invocation`): invocable here, absent from the model catalog. */
+   readonly modelInvocable: boolean
++  /** Effective user invocation control. Present for the settings catalog. */
++  readonly userInvocable?: boolean
++  /** Provider-authored model control before Harness-local setting intersection. */
++  readonly authoredModelInvocable?: boolean
++  /** Provider-authored user control before Harness-local setting intersection. */
++  readonly authoredUserInvocable?: boolean
+ }
+
+ /**
+@@ -29,5 +35,5 @@ export interface SkillEntry {
+  */
+ export interface SkillsApi {
+   /** Lists the user-invocable skill catalog for the session's project. */
+-  list(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ skills: readonly SkillEntry[] }>>
++  list(request: RpcRequest<{ sessionId: SessionId; includeUnavailable?: boolean }>): Promise<RpcResponse<{ skills: readonly SkillEntry[] }>>
+ }
+diff --git a/packages/settings/settings/src/index.ts b/packages/settings/settings/src/index.ts
+index 4150aa9a81..d891c182ed 100644
+--- a/packages/settings/settings/src/index.ts
++++ b/packages/settings/settings/src/index.ts
+@@ -39,6 +39,8 @@ export interface SettingsRegisterOptions<T> {
+   base?: Partial<T>
+   /** Owner's effect timing, surfaced to configuration UIs; defaults to `live`. */
+   applies?: SettingsApplies
++  /** Allow this namespace through Host configuration-client transports. */
++  configurationExposed?: boolean
+   /**
+    * Reject a resolved section the owner could not act on, for constraints its
+    * schema cannot express — a cross-field requirement, or one field's validity
+@@ -85,6 +87,8 @@ export interface SettingsDescriptor {
+   user?: unknown
+   /** Owner's declared effect timing. */
+   applies: SettingsApplies
++  /** Whether the owner opted this namespace into configuration-client transports. */
++  configurationExposed: boolean
+   /** Schema-declared secret positions; present only under `redactSecrets`. */
+   secrets?: RedactedSecret[]
+ }
+@@ -326,6 +330,7 @@ interface SettingsRegistration {
+   schema: z<unknown>
+   base: unknown
+   applies: SettingsApplies
++  configurationExposed: boolean
+   /** Owner-supplied check for constraints the schema cannot express. */
+   validate?: (value: unknown) => void
+   resolved: unknown
+@@ -441,6 +446,7 @@ export abstract class SettingsProvider extends Service {
+       schema: schema as z<unknown>,
+       base: options?.base,
+       applies: options?.applies ?? 'live',
++      configurationExposed: options?.configurationExposed ?? false,
+       ...options?.validate === undefined
+         ? {}
+         : { validate: options.validate as (value: unknown) => void },
+@@ -497,6 +503,7 @@ export abstract class SettingsProvider extends Service {
+         ...base === undefined ? {} : { base },
+         ...detachedUser === undefined ? {} : { user: detachedUser },
+         applies: registration.applies,
++        configurationExposed: registration.configurationExposed,
+       }
+       if (options?.redactSecrets !== true) return descriptor
+       const schema = registration.schema as z<never>

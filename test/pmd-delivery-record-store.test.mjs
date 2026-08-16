@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PmdDeliveryRecordStore, resolvePmdDeliveryStatePath } from '../native-server/src/pmd-delivery-record-store.mjs'
+import { PmdDeliveryRecordStore, resolvePmdDeliveryStatePath } from '../apps/native-server/src/pmd-delivery-record-store.mjs'
 
 const item = (kind) => ({ kind, name: `${kind}.doc`, idempotencyIdentity: `run-1:${kind}`, contentHash: `hash-${kind}` })
 

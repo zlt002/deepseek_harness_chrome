@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { bundleHarnessRuntimePlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -118,7 +119,7 @@ export async function validateHarnessRuntime(harnessRuntimeDir) {
 }
 
 function nativeHostBat() {
-  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\bin.js"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\bin.mjs"\r\n`
+  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\bin.js"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace"\r\nset "DSH_ENABLE_KNOWLEDGE_SCOPE_UI=1"\r\nset "DSH_ENABLE_SKILL_SETTINGS_UI=1"\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\bin.mjs"\r\n`
 }
 
 function nativeHostManifest(nativeHostName) {
@@ -405,8 +406,8 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
 export async function buildWindowsRelease({
   projectRoot = PROJECT_ROOT,
   releaseDir = path.join(projectRoot, 'release'),
-  extensionDir = path.join(projectRoot, '.output', 'chrome-mv3'),
-  nativeServerDir = path.join(projectRoot, 'native-server'),
+  extensionDir = path.join(projectRoot, 'apps', 'chrome-extension', '.output', 'chrome-mv3'),
+  nativeServerDir = path.join(projectRoot, 'apps', 'native-server'),
   harnessRuntimeDir,
   version = ACCR_UI_REPLACEMENT_MIN_VERSION,
 } = {}) {
@@ -439,6 +440,14 @@ export async function buildWindowsRelease({
   await writeFile(manifestPath, `${JSON.stringify(packagedManifest, null, 2)}\n`, 'utf8')
 
   await copyDereferenced(nativeServerDir, path.join(runtimeDir, 'native-server'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-agent-preset'), path.join(runtimeDir, 'product-plugins', 'harness-ui-agent-preset'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-browser-target'), path.join(runtimeDir, 'product-plugins', 'harness-ui-browser-target'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-knowledge-scope'), path.join(runtimeDir, 'product-plugins', 'harness-ui-knowledge-scope'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-skill-settings'), path.join(runtimeDir, 'product-plugins', 'harness-skill-settings'))
+  await bundleHarnessRuntimePlugin({
+    outfile: path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'),
+    projectRoot,
+  })
   await copyDereferenced(runtimeSource, path.join(runtimeDir, 'harness'))
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })

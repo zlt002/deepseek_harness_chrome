@@ -1,0 +1,50 @@
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+index f57caea9e5..0db8080ae1 100644
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -202,6 +202,7 @@ export function apply(ctx: Context): void {
+       'conversation.composer': { kind: 'chain', scope: 'session' },
+       'conversation.composer.bar': { kind: 'single', scope: 'session-maybe' },
+       'conversation.input.overlay': { kind: 'list', scope: 'session' },
++      'conversation.composer.above': { kind: 'list', scope: 'session' },
+       'conversation.input.dock': { kind: 'list', scope: 'session' },
+       'conversation.composer.dock': { kind: 'list', scope: 'session' },
+       'conversation.input.left': { kind: 'list', scope: 'session' },
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+index 21259146a7..7e4d7b97ad 100644
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -148,6 +148,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+     // this package, while this package's input contract already imports
+     // ui-input-trigger, so the type arrives transitively). The runtime declaration
+     // (children table in apply.ts) stays here with the other input slots.
++    /**
++     * A compact interactive strip immediately above the composer card. The
++     * entry is the card's sibling, so it does not consume textarea space.
++     * Use the existing `conversation.input.overlay` slot for floating panels.
++     */
++    'conversation.composer.above': { kind: 'list'; scope: 'session'; owner: InputZone }
+     /**
+      * A full-width row of its own, stacked above the composer card — the seat
+      * for anything that needs a line to itself (queue rows, a todo strip, a
+@@ -570,7 +576,7 @@ export type ConversationSlotProps =
+   PropsRuntime<'conversation'> & PropsRenderSlots<
+     | 'conversation.session' | 'conversation.session.header'
+     | 'conversation.composer' | 'conversation.composer.bar'
+-    | 'conversation.input.overlay'
++    | 'conversation.input.overlay' | 'conversation.composer.above'
+     | 'conversation.input.dock' | 'conversation.composer.dock'
+     | 'conversation.input.left' | 'conversation.input.right'
+     | 'conversation.hero.workspace'
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+index ef1221cd99..90e3be7d97 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+@@ -162,6 +162,7 @@ export function ConversationRoot({
+       {hero && <HeroShell t={t} />}
+       {hero && heroWorkspaceRow}
+       {zone !== undefined && renderSlot('conversation.input.dock', zone)}
++      {zone !== undefined && renderSlot('conversation.composer.above', zone)}
+       {inputBar}
+     </div>
+   )

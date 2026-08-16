@@ -1,23 +1,40 @@
 #!/usr/bin/env node
-import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { HarnessWebProcess } from '../native-server/src/harness-process.mjs'
+import { HarnessWebProcess } from '../apps/native-server/src/harness-process.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const generatedHarness = join(projectRoot, '.generated', 'harness-product')
 const harnessRoot = resolve(
-  process.env.DSH_ROOT?.trim() || join(projectRoot, '..', 'deepseek-harness'),
+  process.env.DSH_ROOT?.trim() || (
+    existsSync(join(generatedHarness, '.harness-product.json'))
+      ? generatedHarness
+      : join(projectRoot, 'upstream', 'deepseek-harness')
+  ),
 )
 const distRoot = join(harnessRoot, 'apps/web/dist')
 const distIndex = join(distRoot, 'index.html')
-const outputRoot = join(projectRoot, 'public')
+const outputRoot = join(projectRoot, 'apps', 'chrome-extension', 'public')
 
 if (!existsSync(distIndex)) {
   throw new Error(`DeepSeek Harness Web dist is missing: ${distIndex}. Run "pnpm run build" in ${harnessRoot} first.`)
 }
 
-const harness = new HarnessWebProcess({ env: process.env })
+const syncHome = await mkdtemp(join(tmpdir(), 'deepseek-harness-sync-'))
+const harness = new HarnessWebProcess({
+  env: {
+    ...process.env,
+    DSH_HOME: syncHome,
+    DSH_ROOT: harnessRoot,
+    DSH_ENABLE_KNOWLEDGE_SCOPE_UI: process.env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI
+      ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
+    DSH_ENABLE_SKILL_SETTINGS_UI: process.env.DSH_ENABLE_SKILL_SETTINGS_UI
+      ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
+  },
+})
 const harnessUrl = await harness.start()
 let index
 try {
@@ -26,6 +43,7 @@ try {
   index = await response.text()
 } finally {
   await harness.stop()
+  await rm(syncHome, { recursive: true, force: true })
 }
 const manifestMatch = /<script>window\.__DSH_BOOT__\s*=\s*(\{.*?\})<\/script>/s.exec(index)
 if (!manifestMatch) throw new Error(`Could not find window.__DSH_BOOT__ in ${distIndex}`)
@@ -58,6 +76,7 @@ const findPackageJson = async (directory) => {
 
 const resolvePackageJson = async (packageName) => {
   const candidates = [
+    join(projectRoot, 'packages'),
     join(harnessRoot, 'packages'),
     join(harnessRoot, 'apps'),
   ]

@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
 import { redactSensitiveDiagnostic } from './redact.mjs'
 
@@ -21,9 +21,24 @@ export function resolveHarnessCli(env = process.env) {
   if (explicit) return resolve(explicit)
   const root = env.DSH_ROOT?.trim()
   if (root) return resolve(root, 'apps/cli/lib/bin.js')
-  const sibling = resolve(THIS_DIR, '../../../deepseek-harness/apps/cli/lib/bin.js')
-  if (existsSync(sibling)) return sibling
-  return sibling
+  const upstream = resolve(THIS_DIR, '../../../upstream/deepseek-harness/apps/cli/lib/bin.js')
+  if (existsSync(upstream)) return upstream
+  return upstream
+}
+
+/** Resolve the product-owned out-of-tree MCP plugin in source and packages. */
+export function resolveHarnessRuntimePlugin(env = process.env) {
+  const explicit = env.DSH_HARNESS_RUNTIME_PLUGIN?.trim()
+  if (explicit) return resolve(explicit)
+  const candidates = [
+    // Bundled macOS Native Host: runtime/native-server/runtime.mjs.
+    resolve(THIS_DIR, 'harness-runtime.mjs'),
+    // Source-based Windows package: runtime/native-server/src/*.mjs.
+    resolve(THIS_DIR, '../harness-runtime.mjs'),
+    // Product checkout: native-server/src/*.mjs.
+    resolve(THIS_DIR, '../../../packages/harness-runtime/src/index.mjs'),
+  ]
+  return candidates.find(existsSync) ?? candidates.at(-1)
 }
 
 /**
@@ -38,7 +53,13 @@ export function resolveHarnessCwd(env = process.env) {
   if (explicit) return resolve(explicit)
   const root = env.DSH_ROOT?.trim()
   if (root) return resolve(root)
-  return resolve(THIS_DIR, '../..')
+  return resolve(THIS_DIR, '../../..')
+}
+
+/** Resolve the official runtime dependency used by the one product Host plugin. */
+export function resolveSchemasteryUrl(cliPath) {
+  const harnessRoot = resolve(dirname(cliPath), '../../..')
+  return pathToFileURL(join(harnessRoot, 'vendor/schemastery/lib/index.mjs')).href
 }
 
 /** Arguments owned by this integration, kept separate from the Harness CLI. */
@@ -63,7 +84,7 @@ function validMcpConnector(value) {
   }
 }
 
-function connectorPatch(url, token) {
+function connectorPatch(url, token, runtimePluginPath) {
   return `- id: persona
   config:
     text: >-
@@ -75,10 +96,9 @@ function connectorPatch(url, token) {
 
 - insert:
     - id: deepseek-harness-browser-connector
-      name: '@deepseek-ai/dsh-mcp-client'
+      name: ${yamlString(runtimePluginPath)}
       config:
         serverName: chrome
-        transport: streamable-http
         url: '${url}'
         headers:
           Authorization: 'Bearer ${token}'
@@ -107,8 +127,7 @@ function connectorPatch(url, token) {
           mcp__chrome__code_search with exactly one non-empty "question" string before answering; never use "query". Never inspect local
           files or use shell/git as a substitute for the selected remote scope.
         toolFilter:
-          allow:
-            - mcp__chrome__code_search
+          allow: []
 
 - insert:
     - id: deepseek-harness-knowledge-subagent
@@ -122,8 +141,7 @@ function connectorPatch(url, token) {
           mcp__chrome__knowledge_search with exactly one non-empty "question" string before answering; never use "query". Never inspect local
           files or use shell/git as a substitute for the selected remote scope.
         toolFilter:
-          allow:
-            - mcp__chrome__knowledge_search
+          allow: []
 `
 }
 
@@ -140,7 +158,14 @@ function yamlString(value) {
 export function claudeSkillsPatch(env = process.env) {
   const home = env.HOME?.trim() || homedir()
   const claudeSkillsDir = resolve(home, '.claude/skills')
-  const harnessChromeSkillsDir = resolve(THIS_DIR, '../../skills')
+  const harnessChromeSkillsDir = env.DSH_PRODUCT_SKILLS_ROOT?.trim()
+    ? resolve(env.DSH_PRODUCT_SKILLS_ROOT)
+    : [
+        // Product source: apps/native-server/src -> repository skills/.
+        resolve(THIS_DIR, '../../../skills'),
+        // Installed Mac runtime: runtime/native-server -> app data skills/.
+        resolve(THIS_DIR, '../../skills'),
+      ].find(existsSync) ?? resolve(THIS_DIR, '../../../skills')
   return `- insert:
     - id: deepseek-harness-chrome-claude-skills
       name: '@deepseek-ai/dsh-skill-filesystem'
@@ -152,14 +177,74 @@ export function claudeSkillsPatch(env = process.env) {
 `
 }
 
+/** Product UI packages stay outside the official Harness checkout. */
+export function productUiPatch(env = process.env) {
+  const packages = productUiPackages(env)
+  return packages.map((name, index) => `- insert:
+    - id: deepseek-harness-product-ui-${index}
+      name: '${name}'
+`).join('')
+}
+
+function productUiPackages(env = process.env) {
+  const packages = [
+    '@accrui/harness-ui-agent-preset',
+    '@accrui/harness-ui-browser-target',
+  ]
+  if (env.DSH_ENABLE_SKILL_SETTINGS_UI === '1') packages.push('@accrui/harness-skill-settings')
+  // Knowledge Scope needs the generic composer-above/card-overlay seam. Keep
+  // the package built, but do not mount it against an older clean upstream.
+  if (env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI === '1') packages.push('@accrui/harness-ui-knowledge-scope')
+  return packages
+}
+
+/**
+ * Make product packages resolvable from the Harness Web profile without
+ * copying them into the official checkout or overwriting user-installed data.
+ */
+export async function prepareProductUiPackages(env = process.env) {
+  const home = env.HOME?.trim() || homedir()
+  const dshHome = resolve(env.DSH_HOME?.trim() || resolve(home, '.dsh'))
+  const sourceRoot = env.DSH_PRODUCT_PLUGIN_ROOT?.trim()
+    ? resolve(env.DSH_PRODUCT_PLUGIN_ROOT)
+    : [
+        // Product source: apps/native-server/src -> repository packages/.
+        resolve(THIS_DIR, '../../../packages'),
+        // Installed Mac runtime: runtime/native-server -> runtime/product-plugins/.
+        resolve(THIS_DIR, '../product-plugins'),
+        // Installed Windows runtime: runtime/native-server/src -> runtime/product-plugins/.
+        resolve(THIS_DIR, '../../product-plugins'),
+      ].find((candidate) => existsSync(candidate)) ?? resolve(THIS_DIR, '../../../packages')
+  for (const packageName of productUiPackages(env)) {
+    const source = resolve(sourceRoot, packageName.split('/').at(-1))
+    for (const required of ['package.json', 'lib/index.js', 'lib/client.js']) {
+      if (!existsSync(resolve(source, required))) {
+        throw new Error(`Product Harness UI package is not built: ${resolve(source, required)}. Run pnpm build:harness-client-plugins.`)
+      }
+    }
+    const link = resolve(dshHome, 'profiles/web/node_modules', ...packageName.split('/'))
+    await mkdir(dirname(link), { recursive: true })
+    try {
+      const info = await lstat(link)
+      if (!info.isSymbolicLink()) throw new Error(`Refusing to replace unmanaged Harness plugin path: ${link}`)
+      const current = resolve(dirname(link), await readlink(link))
+      if (current !== source) throw new Error(`Harness product plugin link points elsewhere: ${link} -> ${current}`)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      await symlink(source, link, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+  }
+}
+
 /**
  * Spawn and supervise one `dsh --profile web` process.
  */
 export class HarnessWebProcess {
-  /** @param {{ cliPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string, mcpConnector?: { url: string, token: string }, extraPatchPaths?: string[] }} [options] */
+  /** @param {{ cliPath?: string, runtimePluginPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string, mcpConnector?: { url: string, token: string }, extraPatchPaths?: string[] }} [options] */
   constructor(options = {}) {
     this.env = options.env ?? process.env
     this.cliPath = options.cliPath ?? resolveHarnessCli(this.env)
+    this.runtimePluginPath = options.runtimePluginPath ?? resolveHarnessRuntimePlugin(this.env)
     this.port = options.port ?? 0
     this.cwd = options.cwd ?? resolveHarnessCwd(this.env)
     this.mcpConnector = options.mcpConnector
@@ -211,6 +296,7 @@ export class HarnessWebProcess {
       throw new Error(`DeepSeek Harness CLI was not found: ${this.cliPath}. Set DSH_CLI_PATH or DSH_ROOT.`)
     }
     this.stopping = false
+    await prepareProductUiPackages(this.env)
     const patchPath = await this.#createConnectorPatch()
     const child = spawn(process.execPath, [this.cliPath, ...harnessArgs(this.port, patchPath, this.extraPatchPaths)], {
       cwd: this.cwd,
@@ -219,6 +305,7 @@ export class HarnessWebProcess {
         // Native stdout is reserved for framed messages. The child is piped,
         // but disabling telemetry keeps the development process deterministic.
         DSH_TELEMETRY_DISABLED: this.env.DSH_TELEMETRY_DISABLED ?? '1',
+        DSH_PRODUCT_SCHEMATERY_URL: this.env.DSH_PRODUCT_SCHEMATERY_URL ?? resolveSchemasteryUrl(this.cliPath),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -271,10 +358,13 @@ export class HarnessWebProcess {
 
   async #createConnectorPatch() {
     if (this.mcpConnector !== undefined && !validMcpConnector(this.mcpConnector)) throw new Error('Native Host supplied an invalid Browser Connector endpoint')
+    if (this.mcpConnector !== undefined && !existsSync(this.runtimePluginPath)) {
+      throw new Error(`Harness runtime plugin was not found: ${this.runtimePluginPath}`)
+    }
     const directory = await mkdtemp(`${tmpdir()}/deepseek-harness-connector-`)
     const patchPath = resolve(directory, 'connector.cordis.yml')
-    const connector = this.mcpConnector === undefined ? '' : connectorPatch(this.mcpConnector.url, this.mcpConnector.token)
-    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${connector}`, { mode: 0o600 })
+    const connector = this.mcpConnector === undefined ? '' : connectorPatch(this.mcpConnector.url, this.mcpConnector.token, this.runtimePluginPath)
+    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${productUiPatch(this.env)}${connector}`, { mode: 0o600 })
     this.connectorPatchDir = directory
     this.connectorPatchPath = patchPath
     return patchPath

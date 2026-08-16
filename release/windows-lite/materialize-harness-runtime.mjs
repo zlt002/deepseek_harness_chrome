@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
-const DEFAULT_SOURCE_DIR = path.resolve(PROJECT_ROOT, '..', 'deepseek-harness')
+const DEFAULT_SOURCE_DIR = path.resolve(PROJECT_ROOT, 'upstream', 'deepseek-harness')
 const DEFAULT_OUTPUT_DIR = path.join(PROJECT_ROOT, 'release', 'windows-lite', 'harness-runtime-win32-x64')
 const MARKER_FILE = 'harness-runtime.json'
 const FRONTEND_DIST = 'node_modules/@deepseek-ai/dsh-web-frontend/dist'

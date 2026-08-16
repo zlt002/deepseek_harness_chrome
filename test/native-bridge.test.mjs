@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
-const bridgeSource = await readFile(new URL('../public/native-bridge.js', import.meta.url), 'utf8')
+const bridgeSource = await readFile(new URL('../apps/chrome-extension/public/native-bridge.js', import.meta.url), 'utf8')
 
 function loadBridge(query) {
   const calls = { fetch: [], sockets: [], events: [], errors: [] }

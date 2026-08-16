@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
 test('routes office_spreadsheet writes only to the WebEdit iframe and forwards runtime failures', async () => {
-  const source = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   let runtimeListener
   const sent = []; const nativeMessages = []; const listeners = new Set()

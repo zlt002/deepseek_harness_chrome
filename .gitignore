@@ -1,15 +1,19 @@
 node_modules/
 .pnpm-store/
 .DS_Store
-.output/
-.wxt/
+apps/chrome-extension/.output/
+apps/chrome-extension/.wxt/
+packages/*/lib/
+packages/*/dist/
+packages/*/*.tsbuildinfo
+.generated/
 coverage/
 *.log
-public/assets/
-public/plugins/
-public/harness/
-public/favicon.svg
-public/manifest.webmanifest
+apps/chrome-extension/public/assets/
+apps/chrome-extension/public/plugins/
+apps/chrome-extension/public/harness/
+apps/chrome-extension/public/favicon.svg
+apps/chrome-extension/public/manifest.webmanifest
 
 # Windows Lite release outputs are reproducible artifacts, not source.
 release/.tmp/

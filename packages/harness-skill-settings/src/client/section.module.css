@@ -1,0 +1,3 @@
+.section { display: grid; gap: 12px; max-width: 720px; color: var(--dsw-alias-label-primary); }
+.section h2, .section p { margin: 0; }.section ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.section li { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; }.section span, .status { color: var(--dsw-alias-label-tertiary); font-size: 13px; margin-right: 8px; }.section select { min-width: 104px; }

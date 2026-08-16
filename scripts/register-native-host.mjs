@@ -4,6 +4,7 @@ import { chmod, cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { bundleHarnessRuntimePlugin } from './bundle-harness-runtime-plugin.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const extensionIds = [...new Set(
@@ -12,14 +13,18 @@ const extensionIds = [...new Set(
     .map((value) => value.trim())
     .filter(Boolean),
 )]
-const nativeServerSource = resolve(projectRoot, 'native-server')
+const nativeServerSource = resolve(projectRoot, 'apps', 'native-server')
 const skillsSource = resolve(projectRoot, 'skills')
 const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined
 const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim() || undefined
-const siblingHarnessRoot = resolve(projectRoot, '../deepseek-harness')
+const upstreamHarnessRoot = resolve(projectRoot, 'upstream/deepseek-harness')
+const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
+const defaultHarnessRoot = existsSync(join(generatedHarnessRoot, '.harness-product.json'))
+  ? generatedHarnessRoot
+  : upstreamHarnessRoot
 const inferredHarnessRoot = !explicitHarnessRoot && !explicitHarnessCli
-  && existsSync(join(siblingHarnessRoot, 'apps/cli/lib/bin.js'))
-  ? siblingHarnessRoot
+  && existsSync(join(defaultHarnessRoot, 'apps/cli/lib/bin.js'))
+  ? defaultHarnessRoot
   : undefined
 if (extensionIds.length === 0) {
   console.error('Set DEEPSEEK_HARNESS_EXTENSION_ID to one or more comma-separated Chrome extension ids.')
@@ -60,6 +65,11 @@ for (const [name, value] of [
   ['DSH_CLI_PATH', explicitHarnessCli],
   ['DSH_CWD', process.env.DSH_CWD?.trim()],
   ['DSH_NATIVE_LOG', process.env.DSH_NATIVE_LOG?.trim()],
+  ['DSH_HARNESS_RUNTIME_PLUGIN', process.env.DSH_HARNESS_RUNTIME_PLUGIN?.trim()],
+  ['DSH_ENABLE_KNOWLEDGE_SCOPE_UI', process.env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI?.trim()
+    || ((explicitHarnessRoot ?? inferredHarnessRoot) === generatedHarnessRoot ? '1' : undefined)],
+  ['DSH_ENABLE_SKILL_SETTINGS_UI', process.env.DSH_ENABLE_SKILL_SETTINGS_UI?.trim()
+    || ((explicitHarnessRoot ?? inferredHarnessRoot) === generatedHarnessRoot ? '1' : undefined)],
 ]) {
   if (value !== undefined && value !== '') launcherLines.splice(1, 0, `export ${name}=${shellQuote(value)}`)
 }
@@ -100,6 +110,7 @@ async function writeManifestAtomically(manifestPath, manifest) {
 
 await mkdir(installRoot, { recursive: true })
 await cp(nativeServerSource, nativeServer, { recursive: true })
+await bundleHarnessRuntimePlugin({ outfile: join(nativeServer, 'harness-runtime.mjs'), projectRoot })
 await cp(skillsSource, skills, { recursive: true })
 await writeFile(launcher, `${launcherLines.join('\n')}\n`, 'utf8')
 await chmod(launcher, 0o755)

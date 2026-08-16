@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
 test('forwards Browser Target snapshots to the Harness iframe through the strict bridge', async () => {
-  const source = await readFile(new URL('../entrypoints/sidepanel/main.tsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/sidepanel/main.tsx', import.meta.url), 'utf8')
   assert.match(source, /browser-target-snapshot\/v1/)
   assert.match(source, /browser-target-command\/v1/)
   assert.match(source, /event\.source !== frameRef\.current\?\.contentWindow \|\| event\.origin !== frameOrigin/)
@@ -15,14 +15,14 @@ test('forwards Browser Target snapshots to the Harness iframe through the strict
 })
 
 test('accepts a Harness reconnect only from the nonce-bound loopback iframe', async () => {
-  const source = await readFile(new URL('../entrypoints/sidepanel/main.tsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/sidepanel/main.tsx', import.meta.url), 'utf8')
   assert.match(source, /event\.source !== frameRef\.current\?\.contentWindow \|\| event\.origin !== frameOrigin/)
   assert.match(source, /value\.type === 'harness-reconnect\/v1' && value\.nonce === frameNonce/)
   assert.match(source, /void connect\(\)/)
 })
 
 test('publishes only read-only active-tab snapshots and serves the initial snapshot', async () => {
-  const source = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText
@@ -88,7 +88,7 @@ test('publishes only read-only active-tab snapshots and serves the initial snaps
 })
 
 test('publishes only the latest activation when Chrome tab lookups resolve out of order', async () => {
-  const source = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText
@@ -139,7 +139,7 @@ test('publishes only the latest activation when Chrome tab lookups resolve out o
 })
 
 test('an update in a background window republishes the active tab from the focused window', async () => {
-  const source = await readFile(new URL('../entrypoints/background.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText
