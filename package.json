@@ -20,7 +20,8 @@
     "test:windows-runtime": "node --test test/materialize-harness-runtime.test.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
-    "register-native-host": "node scripts/register-native-host.mjs"
+    "register-native-host": "node scripts/register-native-host.mjs",
+    "dev:restart": "node scripts/restart-dev.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
