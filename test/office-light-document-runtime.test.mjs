@@ -80,6 +80,8 @@ test('light-document runtime pages rich reads and verifies public selection, blo
     },
     editorApi: { async exportAsPdf() { return { url: 'https://download.example.test/test.pdf?X-Amz-Signature=secret&Expires=2000000000' } } },
   })
+  const titleRead = await call({ action: 'read', payload: { kind: 'title' } })
+  assert.equal(titleRead.result.document.title.text, '旧标题')
   const initial = await call({ action: 'read' }); const resource = initial.result.resource
   const capabilities = await call({ action: 'read', payload: { kind: 'capabilities' } })
   assert.equal(capabilities.result.document.capabilities.selection, false); assert.equal(capabilities.result.document.capabilities.wordCount, true)
@@ -98,6 +100,32 @@ test('light-document runtime pages rich reads and verifies public selection, blo
   assert.notEqual(titled.result.resource.fingerprint, resource.fingerprint)
   const exported = await call({ action: 'write', resource: titled.result.resource, operation: 'export_pdf', payload: {} })
   assert.equal(exported.ok, false); assert.equal(exported.error.code, 'unsupported')
+})
+
+test('light-document search matches full block text while returning bounded summaries', async () => {
+  const longText = `${'前'.repeat(140)}尾部关键词${'后'.repeat(20)}`
+  const call = await runtime({ initialXml: `<apcanvas><outlineTitle id="title">标题</outlineTitle><p id="long">${longText}</p></apcanvas>` })
+  const searched = await call({ action: 'search', query: '尾部关键词', offset: 0, limit: 10 })
+  assert.equal(searched.ok, true)
+  assert.equal(searched.result.document.total, 1)
+  assert.equal(searched.result.document.blocks[0].id, 'long')
+  assert.equal(searched.result.document.blocks[0].text.length, 120)
+  assert.equal(searched.result.document.blocks[0].truncated, true)
+  assert.equal('fullText' in searched.result.document.blocks[0], false)
+})
+
+test('light-document title read fails closed for missing, thrown, and malformed public APIs', async () => {
+  const missing = await runtime({ documentApi: {} })
+  const missingTitle = (await missing({ action: 'read', payload: { kind: 'title' } })).result.document.title
+  assert.equal(missingTitle.supported, false); assert.equal(missingTitle.reason, 'title_api_not_detected')
+
+  const thrown = await runtime({ documentApi: { async getTitleContent() { throw new Error('no title') } } })
+  const thrownTitle = (await thrown({ action: 'read', payload: { kind: 'title' } })).result.document.title
+  assert.equal(thrownTitle.supported, false); assert.equal(thrownTitle.reason, 'title_api_unreadable')
+
+  const malformed = await runtime({ documentApi: { async getTitleContent() { return { value: 'not authoritative' } } } })
+  const malformedTitle = (await malformed({ action: 'read', payload: { kind: 'title' } })).result.document.title
+  assert.equal(malformedTitle.supported, false); assert.equal(malformedTitle.reason, 'title_api_unreadable')
 })
 
 test('light-document runtime verifies stable-ID batch edits while ambiguous selection and media remain fail-closed', async () => {

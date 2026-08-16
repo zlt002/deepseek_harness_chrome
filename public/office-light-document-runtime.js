@@ -36,9 +36,9 @@
     if (inner === undefined) return null
     const all = [...inner.matchAll(/<(p|h[1-6]|outlineTitle|li|blockquote|pre|codeBlock|table)\b([^>]*)>([\s\S]*?)<\/\1>/gi)]
       .filter((match) => match[1].toLowerCase() !== 'outlinetitle')
-      .map((match, index) => { const text = decode(match[3]); return { index, id: /\bid=["']([^"']*)/i.exec(match[2])?.[1] || null, type: match[1].toLowerCase(), text: text.slice(0, 120), textLength: text.length, truncated: text.length > 120 } })
+      .map((match, index) => { const text = decode(match[3]); return { index, id: /\bid=["']([^"']*)/i.exec(match[2])?.[1] || null, type: match[1].toLowerCase(), text: text.slice(0, 120), textLength: text.length, truncated: text.length > 120, fullText: text } })
     const page = all.slice(offset, offset + limit)
-    return { blockCount: all.length, offset, limit, hasMore: offset + page.length < all.length, blocks: page }
+    return { blockCount: all.length, offset, limit, hasMore: offset + page.length < all.length, blocks: page.map(({ fullText, ...block }) => block) }
   }
   const escapeXml = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   const editableBlocks = (xml) => {
@@ -162,6 +162,16 @@
       ]
       return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, capabilities: { ...detected, detectedButUnsupported } } } }
     }
+    if (readKind === 'title') {
+      const document = documentApi(current)
+      if (!document || typeof document.getTitleContent !== 'function') return { ok: true, result: { status: 'ok', resource, document: { title: { supported: false, reason: 'title_api_not_detected' } } } }
+      try {
+        const value = await document.getTitleContent()
+        const title = typeof value === 'string' ? value : typeof value?.text === 'string' ? value.text : null
+        if (title === null) return { ok: true, result: { status: 'ok', resource, document: { title: { supported: false, reason: 'title_api_unreadable' } } } }
+        return { ok: true, result: { status: 'ok', resource, document: { title: { supported: true, text: title.slice(0, 500), textLength: title.length, truncated: title.length > 500 } } } }
+      } catch { return { ok: true, result: { status: 'ok', resource, document: { title: { supported: false, reason: 'title_api_unreadable' } } } } }
+    }
     if (readKind === 'word_count') {
       const document = documentApi(current)
       if (!document || typeof document.getWordCount !== 'function') return { ok: true, result: { status: 'ok', resource, document: { supported: false, reason: 'word_count_api_not_detected' } } }
@@ -185,8 +195,8 @@
     }
     if (input.action === 'search') {
       const query = String(input.query || '').trim().toLocaleLowerCase()
-      const all = blocks(xml, 0, 100_000)
-      const matches = all.blocks.filter((block) => block.text.toLocaleLowerCase().includes(query))
+      const indexed = editableBlocks(xml); const all = blocks(xml, 0, 100_000)
+      const matches = (indexed?.list ?? []).filter((block) => block.text.toLocaleLowerCase().includes(query)).map((block) => ({ index: indexed.list.indexOf(block), id: block.id, type: block.tag.toLowerCase(), text: block.text.slice(0, 120), textLength: block.text.length, truncated: block.text.length > 120 }))
       const page = matches.slice(offset, offset + limit)
       return { ok: true, result: { status: 'ok', resource, document: { blockCount: all.blockCount, offset, limit, hasMore: offset + page.length < matches.length, blocks: page, search: query, total: matches.length } } }
     }
