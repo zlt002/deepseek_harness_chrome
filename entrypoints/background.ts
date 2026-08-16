@@ -328,8 +328,8 @@ interface OfficeDocumentRequest {
   resource?: LightDocumentResourceIdentity
 }
 
-type OfficeSpreadsheetAction = 'context' | 'range' | 'search' | 'sheets' | 'capabilities' | 'inspect_write' | 'write'
-type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range'
+type OfficeSpreadsheetAction = 'context' | 'range' | 'search' | 'sheets' | 'defined_names' | 'capabilities' | 'inspect_write' | 'write'
+type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range' | 'create_defined_name' | 'delete_defined_name' | 'copy_worksheet' | 'move_worksheet' | 'set_worksheet_visibility'
 interface OfficeSpreadsheetPreconditionTarget {
   range: string
   state: {
@@ -346,7 +346,8 @@ interface OfficeSpreadsheetPreconditionV1 extends OfficeSpreadsheetPreconditionT
   version: 1
 }
 interface OfficeSpreadsheetPreconditionV2 { version: 2; targets: OfficeSpreadsheetPreconditionTarget[] }
-type OfficeSpreadsheetPrecondition = OfficeSpreadsheetPreconditionV1 | OfficeSpreadsheetPreconditionV2
+interface OfficeSpreadsheetPreconditionV3 { version: 3; sheets: Array<{ index: number; name: string; visible: boolean | null; active: boolean | null }>; definedNames?: Array<{ name: string; refersTo: string; visible: boolean | null; scope: string | number | null }> }
+type OfficeSpreadsheetPrecondition = OfficeSpreadsheetPreconditionV1 | OfficeSpreadsheetPreconditionV2 | OfficeSpreadsheetPreconditionV3
 interface OfficeSpreadsheetRequest {
   type: 'connector_request'
   requestId: string
@@ -557,7 +558,9 @@ function isOfficeSpreadsheetPrecondition(value: unknown): value is OfficeSpreads
     && !!state.format && typeof state.format === 'object' && !Array.isArray(state.format)
   }
   const candidate = value as { version?: unknown; range?: unknown; state?: unknown; targets?: unknown }
-  return (candidate.version === 1 && validTarget(candidate as Partial<OfficeSpreadsheetPreconditionTarget>)) || (candidate.version === 2 && Array.isArray(candidate.targets) && candidate.targets.length >= 1 && candidate.targets.length <= 2 && candidate.targets.every((target: unknown) => validTarget(target as Partial<OfficeSpreadsheetPreconditionTarget>)))
+  const workbook = value as Partial<OfficeSpreadsheetPreconditionV3>
+  const validWorkbook = candidate.version === 3 && Array.isArray(workbook.sheets) && workbook.sheets.length >= 1 && workbook.sheets.length <= 200 && workbook.sheets.every((sheet) => sheet && Number.isInteger(sheet.index) && sheet.index >= 1 && typeof sheet.name === 'string' && sheet.name.length > 0 && (sheet.visible === null || typeof sheet.visible === 'boolean') && (sheet.active === null || typeof sheet.active === 'boolean')) && (workbook.definedNames === undefined || Array.isArray(workbook.definedNames) && workbook.definedNames.length <= 200 && workbook.definedNames.every((name) => name && typeof name.name === 'string' && name.name.length > 0 && typeof name.refersTo === 'string' && name.refersTo.length > 0 && (name.visible === null || typeof name.visible === 'boolean') && (name.scope === null || typeof name.scope === 'string' || typeof name.scope === 'number')))
+  return (candidate.version === 1 && validTarget(candidate as Partial<OfficeSpreadsheetPreconditionTarget>)) || (candidate.version === 2 && Array.isArray(candidate.targets) && candidate.targets.length >= 1 && candidate.targets.length <= 2 && candidate.targets.every((target: unknown) => validTarget(target as Partial<OfficeSpreadsheetPreconditionTarget>))) || validWorkbook
     && JSON.stringify(value).length <= 100_000
 }
 
@@ -565,13 +568,13 @@ function isOfficeSpreadsheetRequest(message: NativeMessage): message is OfficeSp
   const candidate = message as NativeMessage & Partial<OfficeSpreadsheetRequest>
   if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
     && message.tool === 'office_spreadsheet' && isBrowserTarget(message.browserTarget)
-    && ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
-  if (candidate.action === 'context' || candidate.action === 'sheets') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined
-  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000
+    && ['context', 'range', 'search', 'sheets', 'defined_names', 'capabilities', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
+  if (candidate.action === 'context' || candidate.action === 'sheets' || candidate.action === 'defined_names') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined
+  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000
   if (candidate.action === 'range') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'capabilities') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
   if (candidate.action === 'search') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128 && typeof candidate.query === 'string' && candidate.query.trim().length > 0 && candidate.query.length <= 500
-  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetPrecondition(candidate.precondition)
+  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetPrecondition(candidate.precondition)
 }
 
 function isTeamDocParent(value: unknown): value is TeamDocParent {

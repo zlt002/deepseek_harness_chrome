@@ -103,6 +103,17 @@ function sheetApp() {
   return { ActiveWorkbook: workbook, getActiveWorkbook: () => workbook, getActiveSheet: () => active, get ActiveSheet() { return active } }
 }
 
+function workbookFixture() {
+  let active; let nextId = 1; const names = []
+  const makeSheet = (name, values = [[name]]) => { const sheet = { Name: name, Id: nextId++, Visible: true, _values: values, getName: () => sheet.Name, getObjID: () => sheet.Id, setName: (value) => { sheet.Name = value }, setVisible: (value) => { sheet.Visible = value }, Activate: () => { active = sheet } }; sheet.getUsedRange = () => ({ getAddress: () => 'A1', getValue2: () => sheet._values.map((row) => [...row]), getFormula: () => sheet._values.map((row) => row.map(() => '')) }); return sheet }
+  const sheets = [makeSheet('Sheet1'), makeSheet('Sheet2')]; active = sheets[0]
+  const collection = { get Count() { return sheets.length }, Item: (value) => typeof value === 'number' ? sheets[value - 1] : sheets.find((sheet) => sheet.Name === value), copy: () => { const copy = makeSheet(`${active.Name} Copy`, active._values.map((row) => [...row])); sheets.push(copy); return copy }, move: (id, beforeId) => { const from = sheets.findIndex((sheet) => sheet.Id === id); const target = sheets.findIndex((sheet) => sheet.Id === beforeId); const [sheet] = sheets.splice(from, 1); sheets.splice(target, 0, sheet) } }
+  const nameCollection = { get Count() { return names.length }, Item: (value) => typeof value === 'number' ? names[value - 1] : names.find((item) => item.Name === value), Add: (name, refersTo) => { const item = { Name: name, RefersTo: refersTo, Visible: true, Scope: 'workbook', Delete: () => { names.splice(names.indexOf(item), 1) } }; names.push(item); return item } }
+  const workbook = { Name: 'Workbook.xlsx', ActiveSheet: active, getName: () => 'Workbook.xlsx', getWorksheet: (name) => collection.Item(name), Worksheets: collection, Names: nameCollection }
+  Object.defineProperty(workbook, 'ActiveSheet', { get: () => active })
+  return { ActiveWorkbook: workbook, getActiveWorkbook: () => workbook, getActiveSheet: () => active, get ActiveSheet() { return active }, _sheets: sheets, _names: names }
+}
+
 test('spreadsheet runtime reads formulas and performs verified values, formulas, format, and merge writes', async () => {
   const app = fakeApp(); const run = await runtimeWith(app)
   const context = await run({ action: 'context' })
@@ -127,6 +138,27 @@ test('spreadsheet runtime rejects a stale resource and unsupported structural AP
   assert.equal(stale.error.code, 'fingerprint_mismatch')
   const unsupported = await run({ action: 'write', resource, operation: 'insert_rows', payload: { range: '1:1', count: 1 } })
   assert.equal(unsupported.error.code, 'unsupported')
+})
+
+test('workbook operations use bounded snapshots and exact readback', async () => {
+  const app = workbookFixture(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const created = await run({ action: 'write', resource, operation: 'create_defined_name', payload: { name: 'Budget', refersTo: '=Sheet1!A1', visible: true } })
+  assert.equal(created.result.observed.refersTo, '=Sheet1!A1')
+  assert.equal((await run({ action: 'defined_names' })).result.definedNames.length, 1)
+  const deleted = await run({ action: 'write', resource, operation: 'delete_defined_name', payload: { name: 'Budget' } }); assert.equal(deleted.result.observed.deleted, true)
+  const copied = await run({ action: 'write', resource, operation: 'copy_worksheet', payload: { sourceName: 'Sheet1', newName: 'Copied' } }); assert.equal(copied.result.observed.sheetName, 'Copied')
+  const moved = await run({ action: 'write', resource, operation: 'move_worksheet', payload: { sourceName: 'Sheet2', index: 1 } }); assert.equal(moved.result.observed.order[0], 'Sheet2')
+  const hidden = await run({ action: 'write', resource, operation: 'set_worksheet_visibility', payload: { sheetName: 'Sheet1', visible: false } }); assert.equal(hidden.result.observed.visible, false)
+})
+
+test('workbook operations reject stale snapshots, last-visible hides, and unreadable APIs', async () => {
+  const app = workbookFixture(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'copy_worksheet', payload: { sourceName: 'Sheet1', newName: 'Copied' } }); app._sheets[0]._values[0][0] = 'changed'
+  assert.equal((await run.raw({ action: 'write', resource, operation: 'copy_worksheet', payload: { sourceName: 'Sheet1', newName: 'Copied' }, precondition: inspected.result.precondition })).error.code, 'fingerprint_mismatch')
+  app._sheets[1].Visible = false
+  assert.equal((await run({ action: 'write', resource, operation: 'set_worksheet_visibility', payload: { sheetName: 'Sheet1', visible: false } })).error.code, 'invalid_range')
+  delete app.ActiveWorkbook.Names.Add
+  assert.equal((await run({ action: 'write', resource, operation: 'create_defined_name', payload: { name: 'NoApi', refersTo: '=Sheet1!A1' } })).error.code, 'unsupported')
 })
 
 test('spreadsheet write rereads its inspected precondition before mutation', async () => {
@@ -308,7 +340,7 @@ test('unusable spreadsheet exports fail closed before invoking WebEdit export AP
 test('every unverified AccrUI spreadsheet family fails closed before mutation', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   let mutations = 0; app._range.copyRange = () => { mutations += 1 }
-  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'add_conditional_format', 'copy_range', 'move_range', 'set_freeze_panes', 'create_defined_name', 'set_print_settings', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
+  for (const operation of ['insert_cells', 'set_rows_hidden', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'add_conditional_format', 'copy_range', 'move_range', 'set_freeze_panes', 'set_print_settings', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
     const result = await run({ action: 'write', resource, operation, payload: { range: 'A1' } })
     assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
   }

@@ -261,9 +261,9 @@ const officeSpreadsheetTool = {
   description: 'Use only for a bound WebEdit spreadsheet. Reads return bounded context, ranges, searches, or sheet lists. Any mutation first obtains a one-time inspect_write challenge; its operation, payload, Browser Target, and workbook fingerprint are revalidated and the same frame is read back.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
-    action: { enum: ['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
+    action: { enum: ['context', 'range', 'search', 'sheets', 'defined_names', 'capabilities', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
     challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
-    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'] }, payload: { type: 'object', additionalProperties: true },
+    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'] }, payload: { type: 'object', additionalProperties: true },
   } },
 }
 
@@ -563,10 +563,14 @@ function verifiedLightDocumentWriteMatches(result, request) {
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
 }
-const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range']
+const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'sort', 'set_auto_filter', 'clear_filters', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility']
 function validSpreadsheetMatrix(value) { return Array.isArray(value) && value.every((row) => Array.isArray(row)) }
 function spreadsheetMatrixMatchesAddress(value, address) { const parsed = parseSpreadsheetAddress(address); const rows = parsed ? parsed.rowTo - parsed.rowFrom + 1 : 0; const columns = parsed ? parsed.colTo - parsed.colFrom + 1 : 0; return rows > 0 && columns > 0 && validSpreadsheetMatrix(value) && value.length === rows && value.every((row) => row.length === columns) }
+function validWorkbookSheet(value) { return value && typeof value === 'object' && Number.isInteger(value.index) && value.index >= 1 && value.index <= 200 && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 31 && (value.visible === null || typeof value.visible === 'boolean') && (value.active === null || typeof value.active === 'boolean') }
+function validDefinedName(value) { return value && typeof value === 'object' && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 255 && typeof value.refersTo === 'string' && value.refersTo.length > 0 && value.refersTo.length <= 1024 && (value.visible === null || typeof value.visible === 'boolean') && (value.scope === null || typeof value.scope === 'string' || typeof value.scope === 'number') }
+function validWorkbookContent(value) { return value && typeof value === 'object' && typeof value.address === 'string' && value.address.length > 0 && validSpreadsheetMatrix(value.values) && validSpreadsheetMatrix(value.formulas) && spreadsheetSameShape(value.values, value.formulas) }
 function validSpreadsheetPrecondition(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 3 && Array.isArray(value.sheets) && value.sheets.length >= 1 && value.sheets.length <= 200 && value.sheets.every(validWorkbookSheet) && (value.definedNames === undefined || Array.isArray(value.definedNames) && value.definedNames.length <= 200 && value.definedNames.every(validDefinedName)) && (value.sourceContent === undefined || validWorkbookContent(value.sourceContent))) return JSON.stringify(value).length <= 100_000
   if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 2 && Array.isArray(value.targets) && value.targets.length >= 1 && value.targets.length <= 2) return value.targets.every((target) => validSpreadsheetPrecondition({ version: 1, range: target?.range, state: target?.state })) && JSON.stringify(value).length <= 100_000
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !value.state || typeof value.state !== 'object' || Array.isArray(value.state)) return false
   const state = value.state
@@ -579,7 +583,7 @@ function validSpreadsheetPrecondition(value) {
 function validOfficeSpreadsheetArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
   const keys = Object.keys(value)
-  if (['context', 'sheets'].includes(value.action)) return keys.length === 1
+  if (['context', 'sheets', 'defined_names'].includes(value.action)) return keys.length === 1
   if (value.action === 'inspect_write') return keys.length === 3 && SPREADSHEET_OPERATIONS.includes(value.operation)
     && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000
   if (value.action === 'capabilities') return keys.every((key) => ['action', 'range', 'sheetName'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && (value.sheetName === undefined || typeof value.sheetName === 'string')
@@ -669,7 +673,15 @@ function spreadsheetP0Plan(operation, payload, precondition) {
   return null
 }
 function validSpreadsheetOperationPrecondition(operation, payload, precondition) {
-  return !['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation) || spreadsheetP0Plan(operation, payload, precondition) !== null
+  if (['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) return spreadsheetP0Plan(operation, payload, precondition) !== null
+  if (!['create_defined_name', 'delete_defined_name', 'copy_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(operation)) return true
+  if (precondition?.version !== 3 || !Array.isArray(precondition.sheets)) return false
+  const name = typeof payload?.name === 'string' ? payload.name.trim() : typeof payload?.sourceName === 'string' ? payload.sourceName : typeof payload?.sheetName === 'string' ? payload.sheetName : ''
+  if (operation === 'create_defined_name') return Array.isArray(precondition.definedNames) && typeof payload.refersTo === 'string' && (payload.scope === undefined || payload.scope === 'workbook') && !precondition.definedNames.some((item) => item.name === name)
+  if (operation === 'delete_defined_name') return Array.isArray(precondition.definedNames) && precondition.definedNames.some((item) => item.name === name)
+  if (operation === 'copy_worksheet') return precondition.sheets.some((item) => item.name === name) && typeof payload.newName === 'string' && !precondition.sheets.some((item) => item.name === payload.newName.trim()) && payload.index === undefined && validWorkbookContent(precondition.sourceContent)
+  if (operation === 'move_worksheet') return precondition.sheets.some((item) => item.name === name) && Number.isInteger(payload.index) && payload.index >= 1 && payload.index <= precondition.sheets.length
+  return precondition.sheets.some((item) => item.name === name) && typeof payload.visible === 'boolean' && (payload.visible || precondition.sheets.filter((item) => item.visible === true).length > 1)
 }
 function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedResource, precondition) {
   if (!validOfficeSpreadsheetWriteResult(result) || result.operation !== operation || !sameOfficeResource(result.resource, approvedResource)) return false
@@ -683,6 +695,23 @@ function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedRes
   if (operation === 'sort') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.sorts, payload.sorts) && result.requested.hasHeader === (payload.hasHeader !== false) && Array.isArray(result.observed.values)
   if (operation === 'set_auto_filter') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.enabled === payload.enabled && result.observed.enabled === payload.enabled
   if (operation === 'clear_filters') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.after?.operator === 'none'
+  if (operation === 'create_defined_name') {
+    const expected = precondition?.definedNames?.find((item) => item.name === payload.name?.trim()); return precondition?.version === 3 && !expected && result.requested.name === payload.name?.trim() && result.requested.refersTo === payload.refersTo?.trim() && result.requested.visible === (payload.visible ?? true) && result.requested.scope === 'workbook' && result.observed.name === payload.name?.trim() && result.observed.refersTo === payload.refersTo?.trim() && result.observed.visible === (payload.visible ?? true) && result.observed.scope === 'workbook' && Array.isArray(result.observed.names) && jsonMatches(result.observed.names.filter((item) => item.name !== payload.name?.trim()), precondition.definedNames) && result.observed.verified === true
+  }
+  if (operation === 'delete_defined_name') {
+    const expected = precondition?.definedNames?.find((item) => item.name === payload.name?.trim()); return precondition?.version === 3 && !!expected && result.requested.name === expected.name && jsonMatches(result.requested.refersTo, expected.refersTo) && result.observed.name === expected.name && result.observed.deleted === true && jsonMatches(result.observed.names, precondition.definedNames.filter((item) => item.name !== expected.name)) && result.observed.verified === true
+  }
+  if (operation === 'copy_worksheet') {
+    const sheets = precondition?.sheets; const source = payload.sourceName ?? payload.sheetName; const newName = payload.newName?.trim(); return precondition?.version === 3 && Array.isArray(sheets) && validWorkbookContent(precondition.sourceContent) && sheets.some((item) => item.name === source) && !sheets.some((item) => item.name === newName) && payload.index === undefined && result.requested.sourceName === source && result.requested.newName === newName && result.observed.sheetName === newName && result.observed.count === sheets.length + 1 && Array.isArray(result.observed.order) && result.observed.order.filter((name) => name === newName).length === 1 && jsonMatches(result.observed.order.filter((name) => name !== newName), sheets.map((item) => item.name)) && result.observed.order.length === sheets.length + 1 && jsonMatches(result.observed.content, precondition.sourceContent) && result.observed.verified === true
+  }
+  if (operation === 'move_worksheet') {
+    const sheets = precondition?.sheets; const source = payload.sourceName ?? payload.sheetName; if (precondition?.version !== 3 || !Array.isArray(sheets) || !Number.isInteger(payload.index) || !sheets.some((item) => item.name === source)) return false
+    const expected = sheets.map((item) => item.name).filter((name) => name !== source); expected.splice(payload.index - 1, 0, source)
+    return result.requested.sourceName === source && result.requested.index === payload.index && jsonMatches(result.observed.order, expected) && result.observed.verified === true
+  }
+  if (operation === 'set_worksheet_visibility') {
+    const sheets = precondition?.sheets; const source = payload.sourceName ?? payload.sheetName; return precondition?.version === 3 && Array.isArray(sheets) && sheets.some((item) => item.name === source) && typeof payload.visible === 'boolean' && result.requested.sheetName === source && result.requested.visible === payload.visible && result.observed.sheetName === source && result.observed.visible === payload.visible && Array.isArray(result.observed.sheets) && result.observed.sheets.length === sheets.length && jsonMatches(result.observed.sheets.filter((item) => item.name !== source), sheets.filter((item) => item.name !== source)) && result.observed.verified === true
+  }
   if (operation === 'replace_range_text') {
     const plan = spreadsheetP0Plan(operation, payload, precondition); const what = payload.what; const replacement = payload.replacement ?? ''
     if (!plan || typeof what !== 'string' || !what || typeof replacement !== 'string') return false
