@@ -80,10 +80,13 @@ function connectorPatch(url, token) {
         headers:
           Authorization: 'Bearer ${token}'
         forwardSessionIdentity: true
-        # Office/browser operations must be reachable by the active Web
-        # profile. Selected-source subagents remain constrained by their own
-        # explicit allow-lists below.
-        toolScope: global
+        # Office/browser operations remain visible to the active Web profile.
+        # Selected-source searches are visible only to continuable children;
+        # their wrapper tools below are the parent's only entry points.
+        toolScopes:
+          default: global
+          code_search: continuable-child
+          knowledge_search: continuable-child
         toolCallTimeoutMs: 1800000
         failOnStartupError: true
         reconnect:
