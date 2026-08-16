@@ -60,6 +60,7 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
       'mcp__chrome__browser_open_tab',
       'mcp__chrome__code_search',
       'mcp__chrome__knowledge_search',
+      'mcp__chrome__office_document',
       'mcp__chrome__office_get_context',
       'mcp__chrome__office_read_range',
       'mcp__chrome__office_write_range',

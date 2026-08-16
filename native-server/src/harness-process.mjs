@@ -64,7 +64,13 @@ function validMcpConnector(value) {
 }
 
 function connectorPatch(url, token) {
-  return `- insert:
+  return `- id: persona
+  config:
+    text: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+      When a request clearly concerns enterprise code or knowledge, prefer the corresponding selected-source tool before local tools: use search_selected_remote_code for remote repository questions and search_selected_knowledge for enterprise knowledge questions. Treat the selected remote range as authoritative; never substitute the local workspace, Bash, grep, or Git for it. Give the selected-source tool one focused, bounded question. If that search reports no selected or enabled range, report that limitation instead of falling back to local files, shell, or git.
+
+- insert:
     - id: deepseek-harness-browser-connector
       name: '@deepseek-ai/dsh-mcp-client'
       config:
@@ -74,22 +80,41 @@ function connectorPatch(url, token) {
         headers:
           Authorization: 'Bearer ${token}'
         forwardSessionIdentity: true
+        toolScope: continuable-child
         toolCallTimeoutMs: 1800000
         failOnStartupError: true
         reconnect:
           enabled: false
 
 - insert:
+    - id: deepseek-harness-remote-code-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: search_selected_remote_code
+        backgroundMode: continuable
+        persona: >-
+          Search the user-selected remote code repositories. Always call
+          mcp__chrome__code_search with exactly one non-empty "question" string before answering; never use "query". Never inspect local
+          files or use shell/git as a substitute for the selected remote scope.
+        toolFilter:
+          allow:
+            - mcp__chrome__code_search
+
+- insert:
     - id: deepseek-harness-knowledge-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
-        toolName: knowledge_subagent
+        toolName: search_selected_knowledge
         backgroundMode: continuable
+        persona: >-
+          Search the user-selected enterprise knowledge sources. Always call
+          mcp__chrome__knowledge_search with exactly one non-empty "question" string before answering; never use "query". Never inspect local
+          files or use shell/git as a substitute for the selected remote scope.
         toolFilter:
           allow:
             - mcp__chrome__knowledge_search
-            - mcp__chrome__code_search
 `
 }
 

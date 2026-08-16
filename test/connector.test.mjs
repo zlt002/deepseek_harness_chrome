@@ -166,7 +166,12 @@ test('accepts the official MCP client at the public tools/list and tools/call se
   try {
     await client.connect(transport)
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'team_doc_create', 'browser_open_tab', 'knowledge_search', 'code_search'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'office_document', 'team_doc_create', 'browser_open_tab', 'knowledge_search', 'code_search'])
+    const codeSearch = tools.tools.find((tool) => tool.name === 'code_search')
+    assert.deepEqual(codeSearch?.inputSchema, {
+      type: 'object', additionalProperties: false, required: ['question'],
+      properties: { question: { type: 'string', minLength: 1, maxLength: 4000 } },
+    })
 
     const result = await client.callTool({
       name: 'office_get_context',
@@ -201,6 +206,95 @@ test('routes a continuable child identity to the knowledge adapter without model
     const body = await response.json()
     assert.equal(body.result.structuredContent.answer, '知识答案')
     assert.deepEqual(seen, { type: 'connector_request', requestId: seen.requestId, runId: 'knowledge-run', generation: seen.generation, tool: 'knowledge_search', harnessSessionId: 'child-1', harnessParentSessionId: 'parent-1', question: '订单流程' })
+  } finally { await connector.stop() }
+})
+
+test('proxies only bounded Knowledge Platform requests with browser cookies inside the native boundary', async () => {
+  const upstreamCalls = []
+  const connector = new BrowserConnector({
+    requestExtension: () => {},
+    fetch: async (url, init) => {
+      upstreamCalls.push({ url: String(url), init })
+      return new Response(JSON.stringify({ data: [{ id: 'repo', name: 'H5_前端' }] }), { status: 200, headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' } })
+    },
+  })
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/knowledge-proxy`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/api-sse-kd/api/repos', method: 'GET', headers: [['accept', 'application/json']], cookie: 'session=browser-only' }),
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-encoding'), null)
+    assert.deepEqual(await response.json(), { data: [{ id: 'repo', name: 'H5_前端' }] })
+    assert.equal(upstreamCalls[0].url, 'https://anapi-uat.annto.com/api-sse-kd/api/repos')
+    assert.equal(upstreamCalls[0].init.headers.get('cookie'), 'session=browser-only')
+    assert.equal(upstreamCalls[0].init.headers.get('origin'), 'https://wb-uat.annto.com')
+    assert.equal(upstreamCalls[0].init.headers.get('referer'), 'https://wb-uat.annto.com/')
+    assert.equal(upstreamCalls[0].init.headers.get('cache-control'), 'no-cache')
+    assert.equal(upstreamCalls[0].init.redirect, 'follow')
+
+    const identity = await fetch(`${endpoint.url}/knowledge-proxy`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/api-sse-kd/api/auth/me', method: 'GET', cookie: 'session=browser-only' }),
+    })
+    assert.equal(identity.status, 200)
+    assert.equal(upstreamCalls[1].url, 'https://anapi-uat.annto.com/api-sse-kd/api/auth/me')
+
+    const rejected = await fetch(`${endpoint.url}/knowledge-proxy`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/api-sse-kd/api/admin', method: 'GET', cookie: 'session=browser-only' }),
+    })
+    assert.equal(rejected.status, 400)
+    assert.equal(upstreamCalls.length, 2)
+  } finally { await connector.stop() }
+})
+
+test('accepts a large enterprise SSO cookie header within the AccrUI 64KB boundary', async () => {
+  const upstreamCalls = []
+  const connector = new BrowserConnector({
+    requestExtension: () => {},
+    fetch: async (url, init) => {
+      upstreamCalls.push({ url: String(url), init })
+      return new Response(JSON.stringify({ data: { id: 'current-user' } }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/knowledge-proxy`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/api-sse-kd/api/auth/me', method: 'GET', cookie: `enterprise_sso=${'x'.repeat(32_000)}` }),
+    })
+    assert.equal(response.status, 200)
+    assert.equal(upstreamCalls.length, 1)
+  } finally { await connector.stop() }
+})
+
+test('bounds catalog proxy requests separately from long knowledge queries', async () => {
+  const connector = new BrowserConnector({
+    requestExtension: () => {},
+    knowledgeCatalogTimeoutMs: 20,
+    knowledgeRequestTimeoutMs: 10_000,
+    fetch: async (_url, init) => new Promise((_, reject) => {
+      const fallback = setTimeout(() => reject(new Error('upstream catalog still pending')), 300)
+      init.signal.addEventListener('abort', () => {
+        clearTimeout(fallback)
+        reject(init.signal.reason)
+      }, { once: true })
+    }),
+  })
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/knowledge-proxy`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/api-sse-kd/api/repos', method: 'GET', cookie: '' }),
+      signal: AbortSignal.timeout(150),
+    })
+    assert.equal(response.status, 502)
   } finally { await connector.stop() }
 })
 

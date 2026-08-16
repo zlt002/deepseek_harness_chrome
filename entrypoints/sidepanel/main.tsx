@@ -14,7 +14,9 @@ interface BrowserTargetSettingsResponse { ok: boolean; settings?: BrowserTargetS
 interface ActiveTab extends BrowserTargetTab {}
 interface ActiveTabResponse { ok: boolean; epoch?: string; sequence?: number; tab?: ActiveTab; error?: string }
 interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
-interface KnowledgeScopeResponse { ok: boolean; scope?: KnowledgeScope; catalog?: unknown; error?: string }
+type KnowledgeServiceState = 'checking' | 'ready' | 'unauthenticated' | 'unavailable'
+type KnowledgeScopeOptions = { enabled?: boolean; remember?: boolean; action?: 'login' | 'retry' }
+interface KnowledgeScopeResponse { ok: boolean; scope?: KnowledgeScope; enabled?: boolean; remember?: boolean; serviceState?: KnowledgeServiceState; catalog?: unknown; error?: string }
 
 type BrowserTargetCommand =
   | { command: 'refresh' }
@@ -99,6 +101,10 @@ function App(): React.JSX.Element {
   const commandSequenceRef = useRef(0)
   const knowledgeCommandSequenceRef = useRef(0)
   const knowledgeSnapshotSequenceRef = useRef(0)
+  const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
+  const knowledgeLoginAttemptsRef = useRef(0)
+  const knowledgeLoginTimerRef = useRef<number | undefined>(undefined)
+  const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => Promise<void>>(async () => {})
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
   const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin }), [frameNonce, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
@@ -139,11 +145,11 @@ function App(): React.JSX.Element {
       const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
       if (value.type === 'harness-ready' && typeof value.url === 'string') { setUrl(value.url); setStatus('ready'); setError(undefined) }
-      if (value.type === 'harness-disconnected') { setStatus('error'); setError(typeof value.error === 'string' ? value.error : 'Native server disconnected.') }
+      if (value.type === 'harness-disconnected') { void connect() }
     }
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)
-  }, [])
+  }, [connect])
 
   const sendBrowserTargetSnapshot = useCallback(() => {
     if (frameOrigin === undefined) return
@@ -176,29 +182,65 @@ function App(): React.JSX.Element {
     await saveTargetSettings({ ...settings, primaryTabId: tab.tabId })
   }, [loadTargetSettings, saveTargetSettings])
 
-  const handleKnowledgeScopeCommand = useCallback(async (sessionId: string, scope: KnowledgeScope | undefined) => {
-    const response = await requestKnowledgeScope({ type: 'knowledge-scope/v1', sessionId, ...(scope === undefined ? {} : { scope }) })
+  const handleKnowledgeScopeCommand = useCallback(async (sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => {
+    if (options.action === 'login') {
+      if (knowledgeLoginTimerRef.current !== undefined) window.clearTimeout(knowledgeLoginTimerRef.current)
+      knowledgeLoginSessionRef.current = sessionId
+      knowledgeLoginAttemptsRef.current = 0
+    }
+    const response = await requestKnowledgeScope({ type: 'knowledge-scope/v1', sessionId, ...(scope === undefined ? {} : { scope }), ...options })
     if (frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
+    const serviceState = response.serviceState ?? (response.ok ? 'ready' : 'unavailable')
     knowledgeSnapshotSequenceRef.current += 1
     frameRef.current.contentWindow.postMessage({
       type: 'knowledge-scope-snapshot/v1', nonce: frameNonce, sequence: knowledgeSnapshotSequenceRef.current,
-      snapshot: response.ok && response.catalog !== undefined ? { sessionId, ...(response.scope === undefined ? {} : { scope: response.scope }), catalog: response.catalog } : { sessionId, catalog: { domains: [], systems: [], repositories: [] }, error: response.error ?? 'Unable to load Knowledge scope.' },
+      snapshot: {
+        sessionId,
+        ...(response.scope === undefined ? {} : { scope: response.scope }),
+        enabled: response.enabled,
+        remember: response.remember,
+        serviceState,
+        catalog: response.catalog ?? { domains: [], systems: [], repositories: [] },
+        ...(response.error === undefined ? {} : { error: response.error }),
+      },
     }, frameOrigin)
+    if (serviceState === 'ready' && knowledgeLoginSessionRef.current === sessionId) {
+      knowledgeLoginSessionRef.current = undefined
+      knowledgeLoginAttemptsRef.current = 0
+      if (knowledgeLoginTimerRef.current !== undefined) window.clearTimeout(knowledgeLoginTimerRef.current)
+      knowledgeLoginTimerRef.current = undefined
+      return
+    }
+    if (serviceState !== 'ready' && knowledgeLoginSessionRef.current === sessionId && knowledgeLoginAttemptsRef.current < 15) {
+      knowledgeLoginAttemptsRef.current += 1
+      knowledgeLoginTimerRef.current = window.setTimeout(() => {
+        void knowledgeCommandHandlerRef.current(sessionId, undefined, {})
+      }, 2_000)
+    }
   }, [frameNonce, frameOrigin])
+
+  useEffect(() => {
+    knowledgeCommandHandlerRef.current = handleKnowledgeScopeCommand
+  }, [handleKnowledgeScopeCommand])
+
+  useEffect(() => () => {
+    if (knowledgeLoginTimerRef.current !== undefined) window.clearTimeout(knowledgeLoginTimerRef.current)
+  }, [])
 
   // This listener must exist before the iframe can finish booting: its ready
   // signal is the recovery path when the first onLoad snapshot arrives early.
   useLayoutEffect(() => {
     const onFrameMessage = (event: MessageEvent<unknown>): void => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
-      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown }
+      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown }
       if (value.nonce !== frameNonce) return
       if (value.type === 'harness-reconnect/v1' && value.nonce === frameNonce) { void connect(); return }
       if (value.type === 'browser-target-ready/v1') { commandSequenceRef.current = 0; sendBrowserTargetSnapshot(); return }
       if (value.type === 'knowledge-scope-command/v1') {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= knowledgeCommandSequenceRef.current || typeof value.sessionId !== 'string' || value.sessionId.length === 0 || (value.scope !== undefined && !isKnowledgeScope(value.scope))) return
         knowledgeCommandSequenceRef.current = value.sequence
-        void handleKnowledgeScopeCommand(value.sessionId, value.scope)
+        if ((value.enabled !== undefined && typeof value.enabled !== 'boolean') || (value.remember !== undefined && typeof value.remember !== 'boolean') || (value.action !== undefined && value.action !== 'login' && value.action !== 'retry')) return
+        void handleKnowledgeScopeCommand(value.sessionId, value.scope, { ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}), ...(typeof value.remember === 'boolean' ? { remember: value.remember } : {}), ...((value.action === 'login' || value.action === 'retry') ? { action: value.action } : {}) })
         return
       }
       if (value.type !== 'browser-target-command/v1' || typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= commandSequenceRef.current || !isBrowserTargetCommand(value.command)) return

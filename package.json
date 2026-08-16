@@ -14,6 +14,7 @@
     "build": "pnpm sync-harness-assets && wxt build",
     "zip": "pnpm sync-harness-assets && wxt zip",
     "release:windows-lite": "pnpm build && node release/windows-lite/windows-release.mjs",
+    "release:mac-production-poc": "node release/mac-lite/build-mac-production.mjs",
     "materialize:windows-harness-runtime": "node release/windows-lite/materialize-harness-runtime.mjs",
     "test:windows-release": "node --test test/windows-release.test.mjs",
     "test:windows-runtime": "node --test test/materialize-harness-runtime.test.mjs",

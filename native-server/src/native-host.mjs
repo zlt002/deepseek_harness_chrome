@@ -178,7 +178,7 @@ export class NativeHost {
       return
     }
     if (this.serverUrl !== undefined) {
-      this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId } })
+      this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token } })
       return
     }
     if (this.startPromise === undefined) {
@@ -188,7 +188,7 @@ export class NativeHost {
     }
     try {
       const url = await this.startPromise
-      this.send({ type: 'server_started', payload: { url, runId: this.currentRunId } })
+      this.send({ type: 'server_started', payload: { url, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token } })
     } catch (error) {
       this.send({ type: 'error', error: error instanceof Error ? error.message : String(error) })
     }
