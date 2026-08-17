@@ -64,8 +64,17 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(css, /\[data-permission='danger-full-access'\][\s\S]*state-warn-primary/)
   // ModelSelect needs a named product-neutral host so its upward sheet is
   // anchored to the full composer card rather than its tiny trigger.
-  assert.match(css, /\[data-composer-overlay-host\][\s\S]*position: static/)
+  assert.match(
+    css,
+    /\.root\s+:global\(\[data-composer-overlay-host\]\)[\s\S]*position: static/,
+    'the product root must raise host specificity above ModelSelect .root regardless of bundle order',
+  )
   assert.match(css, /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*width: 100%/)
+  assert.match(
+    css,
+    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*height: auto[\s\S]*overflow: hidden/,
+    'the model menu itself carries the generic surface marker, so it must undo the shared zero-height anchor geometry',
+  )
   assert.match(overlayHostSeam, /data-composer-overlay-host=\{overlay\.available \|\| undefined\}/)
   for (const name of ['root', 'scrollBody', 'heroTitleSeat']) {
     assert.match(presentation, new RegExp(`css\\.${name}`))

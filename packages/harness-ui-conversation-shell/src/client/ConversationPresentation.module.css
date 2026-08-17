@@ -138,7 +138,7 @@
    ComposerOverlaySurface.  The generic host marker deliberately clears the
    tiny trigger's positioning context, so the sheet uses the composer card as
    its containing block just like the accepted e327 layout. */
-:global([data-composer-overlay-host]) {
+.root :global([data-composer-overlay-host]) {
   position: static;
 }
 
@@ -151,6 +151,8 @@
   width: 100%;
   max-width: none;
   max-height: min(500px, calc(100vh - 144px));
+  height: auto;
+  overflow: hidden;
 }
 
 /* e327 keeps the new-session permission picker color-first: a 28px shield
