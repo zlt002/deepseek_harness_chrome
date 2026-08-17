@@ -24,6 +24,12 @@ test('responsive sidebar uses the public compact presentation seam without ownin
   assert.match(presentation, /owner\.startSession\(\)/)
   assert.doesNotMatch(presentation, /useSessions|useView|Controller|upstream\/deepseek-harness/)
   assert.match(styles, /flex: 0 0 50%/)
+  assert.match(
+    styles,
+    /\.settings\s*\{\s*flex:\s*none;\s*\}/,
+    'settings must remain adjacent to compact actions instead of consuming a second auto margin',
+  )
+  assert.match(styles, /\.actions\s*\{[\s\S]*?margin-left:\s*auto;[\s\S]*?\}/)
   assert.match(buildScript, /'harness-ui-responsive-sidebar'/)
   assert.match(nativeRegistration, /'harness-ui-responsive-sidebar'/)
 })

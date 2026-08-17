@@ -26,9 +26,11 @@
   min-width: 0;
 }
 
-.settings,
-.actions,
-.detailActions {
+.settings {
+  flex: none;
+}
+
+.actions {
   display: flex;
   flex: none;
   align-items: center;
@@ -46,6 +48,13 @@
   line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.detailActions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  margin-left: auto;
 }
 
 .action {
