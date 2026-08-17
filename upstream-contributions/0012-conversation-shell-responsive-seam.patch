@@ -1,0 +1,3318 @@
+# Conversation shell responsive presentation seam
+
+This patch is deliberately generic: it keeps the official conversation store,
+session lifecycle and model/permission APIs as the only business owners. It
+moves the composer outside the transcript scrollport, exposes the existing
+view state to compact presentation plugins, and makes model, permission and
+context panels share the composer overlay. Product-specific compact actions
+live in `@accrui/harness-ui-conversation-shell`.
+
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+index 0db8080ae1..d8f7b324f8 100644
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -18,255 +18,261 @@ import type {
+ } from './contract/slots.ts'
+ import type { InputNotice } from './input/contract.ts'
+ import { createChatStore } from './stores.ts'
++import { ConversationViewState } from './view-state.ts'
+ import { ConversationController, UnsupportedImageMediaTypeError } from './service.ts'
+ import type { IConversation } from './service.ts'
+ import { ComposerBlockRegistry } from './input/blocks.ts'
+ import type { ComposerBlock } from './input/blocks.ts'
+ import { InputHub } from './input/hub.ts'
+ import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
+ import { InputBar } from './skeleton/InputBar.tsx'
+ import { EnterBehaviorRow } from './settings/EnterBehaviorRow.tsx'
+ import type { EnterBehaviorRowInjected } from './settings/EnterBehaviorRow.tsx'
+ import { ChatView } from './chat/ChatView.tsx'
+ import { StatsLine } from './chat/StatsLine.tsx'
+ import { ApprovalPanel } from './skeleton/ApprovalPanel.tsx'
+ import { todoDockEntry } from './skeleton/TodoPanel.tsx'
+ import { queueDockEntry } from './queue/QueueDock.tsx'
+ import { ConversationRoot } from './skeleton/ConversationRoot.tsx'
+ import { ConversationSession, ConversationSessionHeader } from './skeleton/ConversationSession.tsx'
+ import { DetailsPanel } from './skeleton/DetailsPanel.tsx'
+ import { en, NS, zh, type ConversationKey } from './locales.ts'
+ import { registerConversationNodes } from './conversation-nodes/register.ts'
+ import { registerChatNodeRenderers } from './chat/register-node-renderers.ts'
+ import { CONVERSATION_SETTINGS_NAMESPACE, type ConversationSettings } from '../submission-settings.ts'
+ 
+ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   interface LocaleNamespaceMap {
+     /** The conversation skeleton, chat flow, commands, details, and docks copy. */
+     conversation: ConversationKey
+   }
+ }
+ 
+ /** Services required by the conversation plugin. */
+ export const inject = [
+   'slots', 'layout', 'sessions', 'workspaces', 'locale', 'connection', 'remote', 'settingsScope',
+   'conversationEvents', 'conversationViews',
+ ]
+ 
+ // Static no-session sources for the composer-bar hooks compartment: module
+ // constants so the render side's per-source hook cache (observableHook) keeps
+ // one identity across every no-session render.
+ const ABSENT_NOTICES = {
+   getSnapshot: (): InputNotice | null => null,
+   subscribe: () => () => {},
+ }
+ /** No session, therefore nothing to block; same one-identity rule as above. */
+ const ABSENT_BLOCK = {
+   getSnapshot: (): ComposerBlock | undefined => undefined,
+   subscribe: () => () => {},
+ }
+ const EMPTY_LEXICON: ReadonlyMap<'/' | '@', readonly string[]> = new Map()
+ const ABSENT_LEXICON = {
+   getSnapshot: () => EMPTY_LEXICON,
+   subscribe: () => () => {},
+ }
+ const ABSENT_MENU_LAUNCHER = {
+   getSnapshot: (): string | null => null,
+   subscribe: () => () => {},
+ }
+ 
+ const CHAT_NODE_INJECT: ChatNodeTurnDataInjected = {
+   hooks: {
+     turnData: ({ useSession }, nodeKey) => function useTurnData(key) {
+       return useSession((snapshot) => {
+         const location = snapshot.chat.nodes.get(nodeKey)?.location
+         return location?.kind === 'turn' || location?.kind === 'step'
+           ? location.turn.data.get(key)
+           : undefined
+       })
+     },
+   },
+ }
+ 
+ /** Resolve the session-scoped conversation face (scope-addressed send/cancel), failing loud. */
+ function scopedConversation(sessions: ISessions, id: SessionId): IConversation {
+   const scoped = sessions.scope(id)
+   if (scoped === undefined) throw new Error(`ui-conversation: session "${id}" resolved no scope`)
+   const conversation = scoped.get('conversation')
+   if (conversation === undefined) throw new Error('ui-conversation: conversation service unavailable through the session scope')
+   return conversation
+ }
+ 
+ /** Resolve package-internal attachment operations from the public service registration. */
+ function concreteConversation(ctx: Context): ConversationController {
+   const conversation = ctx.get('conversation') as ConversationController | undefined
+   if (conversation === undefined) throw new Error('ui-conversation: conversation service unavailable')
+   return conversation
+ }
+ 
+ /** Chain routing: claim the composer while an approval wait is pending (pure — owner props only). */
+ function selectApproval({ interactions }: ComposerChainProps): ApprovalWait | null {
+   return interactions.find((i): i is ApprovalWait => i.kind === 'approval') ?? null
+ }
+ 
+ /** Mounts the conversation plugin.
+  * @param ctx - Client root context.
+  */
+ export function apply(ctx: Context): void {
+   const sessions = ctx.sessions
+   const workspaces = ctx.workspaces
+   const layout = ctx.layout
+   const slots = ctx.slots
+ 
+   registerConversationNodes(ctx)
+   registerChatNodeRenderers(ctx)
+ 
+   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-conversation: dictionaries')
+ 
+   // Registration-time text (the view tab label) reads through the bound
+   // translate as a thunk, so it follows the active locale without
+   // re-registration; components read the standard `t` seat instead.
+   const t = ctx.locale.bind(NS)
+ 
+   // Apply-time construction keeps store identity bound to this fiber.
+-  const chatStore = createChatStore()
++  const conversationViewState = new ConversationViewState()
++  const chatStore = createChatStore(conversationViewState)
++  ctx.provide('conversationViewState', conversationViewState)
++  ctx.effect(() => () => { conversationViewState.dispose() }, 'ui-conversation: view bridge cleanup')
+   const submissionPolicy = new ComposerSubmissionPolicy(
+     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
+   )
+ 
+   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+     name: 'settings.general.item',
+     id: 'composer-enter',
+     order: 20,
+     locale: NS,
+     inject: (): EnterBehaviorRowInjected => ({
+       hooks: { busyEnter: submissionPolicy.busyEnter },
+       setBusyEnter: (behavior) => { submissionPolicy.setBusyEnter(behavior) },
+     }),
+   }, EnterBehaviorRow))
+ 
+   // Chat semantic reader positions by session, surviving view switches and
+   // width reflow when the tab ring remounts the view. Deliberately not
+   // persisted: a fresh page load keeps the open-jump-to-bottom default.
+   const chatScrollPositions = new Map<SessionId, ChatScrollPosition>()
+ 
+   const viewTabs = (): ViewTab[] => {
+     const tabs: ViewTab[] = []
+     for (const entry of slots.entries('conversation.view')) {
+       /* v8 ignore next -- unreachable: list registration validates id at load. */
+       if (entry.options.id === undefined) continue
+       tabs.push({ id: entry.options.id, label: resolveSlotLabel(entry.options.label) ?? entry.options.id })
+     }
+     return tabs
+   }
+   const views = {
+     list: viewTabs,
+     subscribe: (fn: () => void) => slots.subscribe('conversation.view', fn),
+     version: () => slots.getVersion('conversation.view'),
+   }
+ 
+   // The per-session input machine registry (SessionInputResolver face; published as
+   // ctx.conversation.input by the service below sharing this one instance).
+   const inputHub = new InputHub(ctx, t)
+ 
+   // The composer-block registry: a plugin that knows a session cannot send —
+   // ui-model-selection, when no adapter serves the session's route — raises a block
+   // here, and the bar reads its own session's store. It cannot flow the other
+   // way: this package must not import the plugins that would know.
+   const composerBlocks = new ComposerBlockRegistry()
+ 
+   // The input machine feeds every session-scope slot
+   // component through the standard provide channel — the 'input' hook plus
+   // the two public actions. Materialization is the shell creation trigger
+   // (per-session lazy; scope disposer tears down).
+   ctx.effect(() => sessions.provide({
+     hooks: ['input'],
+     props: ['inputActions'],
+     resolve: (binding) => {
+       const shell = inputHub.shellFor(binding)
+       return {
+         hooks: { input: shell.state },
+         props: { inputActions: shell.actions },
+       }
+     },
+   }), 'ui-conversation: input standard-kit provider')
+ 
+   // Resident current-session-optional shell. It owns the stable Hero/composer
+   // frame while strict session slots fill only their session-bound regions.
+   slots.register({
+     name: 'conversation',
+     locale: NS,
+     children: {
+       'conversation.session': { kind: 'single', scope: 'session' },
+       'conversation.session.header': { kind: 'single', scope: 'session' },
+       'conversation.composer': { kind: 'chain', scope: 'session' },
+       'conversation.composer.bar': { kind: 'single', scope: 'session-maybe' },
+       'conversation.input.overlay': { kind: 'list', scope: 'session' },
+       'conversation.composer.above': { kind: 'list', scope: 'session' },
+       'conversation.input.dock': { kind: 'list', scope: 'session' },
+       'conversation.composer.dock': { kind: 'list', scope: 'session' },
+       'conversation.input.left': { kind: 'list', scope: 'session' },
+       'conversation.input.right': { kind: 'list', scope: 'session' },
+       'conversation.hero.workspace': { kind: 'single', scope: 'root' },
+       'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },
+     },
+     inject: (sessionId: SessionId | undefined): ConversationInjected => ({
+       hooks: { composerBlock: sessionId === undefined ? ABSENT_BLOCK : composerBlocks.storeFor(sessionId) },
+       selectWorkspace: async (workspaceId) => {
+         const nextId = await workspaces.connectWorkspace(workspaceId)
+         if (sessionId !== undefined && nextId !== sessionId) {
+           const from = inputHub.shell(sessionId)
+           const draft = from.snapshot.draft
+           const imageIds = from.snapshot.imageIds
+           const next = inputHub.shell(nextId)
+           if (imageIds.length === 0 || next.addImages(imageIds)) {
+             if (draft !== '') {
+               next.setDraft(draft)
+               from.setDraft('')
+             }
+             if (imageIds.length > 0) {
+               for (const id of imageIds) from.removeImage(id)
+             }
+           }
+         }
+         sessions.open(nextId)
+       },
+     }),
+   }, ConversationRoot)
+ 
+   // The strict session body fills the resident scrollport without owning it;
+   // the Hero/composer path therefore stays fixed while the first blank
+   // session appears after a Workspace pick.
+   slots.register({
+     name: 'conversation.session',
+     children: {
+       'conversation.view': { kind: 'list', scope: 'session' },
+     },
+     store: chatStore,
+     inject: (sessionId: SessionId, _actions: BoundActions<typeof chatStore>): ConversationSessionInjected => {
+       const conversation = concreteConversation(ctx)
+       return {
+         views,
+         releaseSessionImages: (id) => { conversation.releaseSessionImages(id) },
+         bindDraftMirror: write => inputHub.shell(sessionId).bindMirror(write),
+       }
+     },
+   }, ConversationSession)
+ 
+   // Header chrome sits above the resident scrollport but shares the same
+   // per-session chat store (active view) as its body and view entries.
+   slots.register({
+     name: 'conversation.session.header',
+     locale: NS,
+     children: {
+       'conversation.session.header.actions': { kind: 'list', scope: 'session' },
+       'conversation.session.header.utilities': { kind: 'list', scope: 'session' },
+     },
+     store: chatStore,
+-    inject: (): ConversationSessionHeaderInjected => ({
+-      views,
+-      open: (id) => { sessions.open(id) },
+-    }),
++    inject: (_sessionId: SessionId, _actions: BoundActions<typeof chatStore>): ConversationSessionHeaderInjected => {
++      return {
++        views,
++        open: (id) => { sessions.open(id) },
++      }
++    },
+   }, ConversationSessionHeader)
+ 
+   // The default composer body: its own single slot inside the composer
+diff --git a/packages/client/ui-conversation/src/client/chat/ChatView.module.css b/packages/client/ui-conversation/src/client/chat/ChatView.module.css
+index d16608c856..26ca06b802 100644
+--- a/packages/client/ui-conversation/src/client/chat/ChatView.module.css
++++ b/packages/client/ui-conversation/src/client/chat/ChatView.module.css
+@@ -1,175 +1,166 @@
+ /* Chat flow: one 16px rhythm everywhere through the column gap. Input
+-   padding cap rides the skeleton. Under
+-   `[data-conversation-scroll]` the column host owns overflow and this view
+-   is ordinary flow (see ConversationRoot active-phase rules). */
++   padding cap rides the skeleton. Under `[data-conversation-scroll]` the
++   column host owns overflow and the composer is its fixed sibling. */
+ 
+ .root {
+   position: relative;
+   display: flex;
+   flex-direction: column;
+   min-height: 0;
+   flex: 1 1 auto;
+ }
+ 
+ .scroll {
+   flex: 1 1 auto;
+   min-height: 0;
+   overflow-y: auto;
+   /* Sides = composer clearance + 16px: on narrow viewports the transcript
+      stays exactly 32px narrower than the input card (the shared width rule). */
+   padding: 16px calc(var(--dsh-composer-side-clearance) + 16px);
+ }
+ 
+ :global([data-conversation-scroll]) .root {
+   flex: 0 0 auto;
+   min-height: auto;
+   height: auto;
+ }
+ 
+ :global([data-conversation-scroll]) .scroll {
+   overflow: visible;
+   flex: 0 0 auto;
+   min-height: auto;
+ }
+ 
+ /* Message column: shared chat width (ConversationRoot --dsh-chat-content-width),
+    centered on the same axis as the input box (which caps at chat + 16px); the
+    scroller itself stays full-bleed. */
+ .column {
+   max-width: var(--dsh-chat-content-width);
+   width: 100%;
+   margin: 0 auto;
+   display: flex;
+   flex-direction: column;
+   gap: 16px;
+ }
+ 
+ /* Settled-flow identity boundary. It is neutral today and becomes the natural
+    measurement/mount unit for a virtualizer without changing the column gap. */
+ .flowItem {
+   min-width: 0;
+ }
+ 
+ /* A keyed renderer may intentionally decline its row after dispatch (the
+    completed-turn tail does this when it owns neither actions nor extensions).
+    An empty flex item must not consume the column gap. */
+ .flowItem:empty {
+   display: none;
+ }
+ 
+ .callRow {
+   border-radius: 6px;
+ }
+ 
+ /* Selection still sets data-selected for details linkage; no outline —
+    tool rows match Think chrome (no selected ring). */
+ 
+ /* Turn activity keeps the former loader's one-line footprint. A pale
+    brand-blue band sweeps from left to right; reduced-motion keeps it static. */
+ .turnStatus {
+   align-self: flex-start;
+   flex: none;
+   display: inline-flex;
+   align-items: center;
+   height: 26px;
+   font: var(--dsw-font-s-strong-14);
+   white-space: nowrap;
+   background: linear-gradient(
+     90deg,
+     var(--dsw-static-deepseek-500) 0%,
+     var(--dsw-static-deepseek-500) 40%,
+     var(--dsw-static-deepseek-200) 50%,
+     var(--dsw-static-deepseek-500) 60%,
+     var(--dsw-static-deepseek-500) 100%
+   );
+   background-position: 100% 0;
+   background-size: 250% 100%;
+   background-clip: text;
+   color: transparent;
+   -webkit-background-clip: text;
+   -webkit-text-fill-color: transparent;
+   animation: dsh-turn-status-shimmer 1.8s linear infinite;
+ }
+ 
+ .turnStatusClock {
+   margin-left: 8px;
+   font: var(--dsw-font-xs-13);
+   font-weight: 400;
+   font-variant-numeric: tabular-nums;
+   color: var(--dsw-alias-label-caption);
+   -webkit-text-fill-color: var(--dsw-alias-label-caption);
+ }
+ 
+ @keyframes dsh-turn-status-shimmer {
+   to {
+     background-position: 0 0;
+   }
+ }
+ 
+ @media (prefers-reduced-motion: reduce) {
+   .turnStatus {
+     background-position: 0 0;
+     background-size: 100% 100%;
+     animation: none;
+   }
+ }
+ 
+ .hint {
+   color: var(--dsw-alias-label-tertiary);
+   font-size: 12px;
+   line-height: 18px;
+ }
+ 
+ .openError {
+   color: var(--dsw-alias-state-error-primary);
+   font-size: 12px;
+   line-height: 18px;
+ }
+ 
+ .older {
+   display: flex;
+   justify-content: center;
+ }
+ 
+ .older button {
+   border: none;
+   border-radius: 14px;
+   padding: 4px 12px;
+   font-size: 12px;
+   color: var(--dsw-alias-label-secondary);
+   background: var(--dsw-alias-interactive-bg-hover-solid);
+   cursor: pointer;
+ }
+ 
+ .older button:disabled {
+   cursor: default;
+   opacity: 0.6;
+ }
+ 
+ /* Back-to-bottom: zero-height sticky slot so the control does not extend
+-   scrollHeight; the button translates up into the viewport. Under the
+-   conversation host, clearance sits above the sticky composer stack. */
++   scrollHeight; the button translates up into the viewport. The scrollport
++   already ends above the root-level composer, so it needs only its 16px gap. */
+ .toBottomSlot {
+   position: sticky;
+   bottom: 16px;
+-  /* Above the sticky composer (z-index 7) so the control stays clickable and
+-     visible over the input card. */
++  /* Keep the control clickable above transcript content near the scrollport
++     edge; the composer itself is a separate root-level footer. */
+   z-index: 8;
+   height: 0;
+   display: flex;
+   justify-content: flex-end;
+   padding-right: max(0px, calc((100% - var(--dsh-chat-content-width)) / 2));
+   pointer-events: none;
+ }
+ 
+-:global([data-conversation-scroll]) .toBottomSlot {
+-  /* Clears the sticky composer stack (docks + input card + stats): the live
+-     height rides --dsh-composer-height (ConversationRoot's seat observer) so
+-     the control follows a growing textarea; the fallback covers the first
+-     paint before the observer fires. */
+-  bottom: calc(var(--dsh-composer-height, 152px) + 16px);
+-}
+-
+ .toBottom {
+   display: flex;
+   align-items: center;
+diff --git a/packages/client/ui-conversation/src/client/chat/ChatView.tsx b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
+index 58e63b312f..dea9d46af3 100644
+--- a/packages/client/ui-conversation/src/client/chat/ChatView.tsx
++++ b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
+@@ -325,15 +325,15 @@ export function ChatView({
+       chatScroll.save(null)
+     }
+   }
+-  // Streaming, tool disclosures, and other flow changes resize the column;
+-  // the sticky composer resizes outside it. This observer owns ChatView's
+-  // dynamic-height follow decisions and writes only while the reader is pinned.
++  // Streaming, tool disclosures, and the root-level composer all change the
++  // visible chat viewport. This observer keeps a reader who was at the end
++  // following those changes without making the footer part of the scroll flow.
+   useEffect(() => {
+     const column = columnRef.current
+     const local = listRef.current
+     if (column === null || local === null || typeof ResizeObserver === 'undefined') return
+     const scrollport = scrollerOf(local)
+-    const composer = scrollport.querySelector<HTMLElement>('[data-composer-seat]')
++    const composer = scrollport.closest<HTMLElement>('[data-phase]')?.querySelector<HTMLElement>('[data-composer-seat]') ?? null
+     const observer = new ResizeObserver(() => { followRef.current?.() })
+     observer.observe(column)
+     if (composer !== null) observer.observe(composer)
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+index 7e4d7b97ad..fde3f0134d 100644
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -150,343 +150,343 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+     // (children table in apply.ts) stays here with the other input slots.
+     /**
+      * A compact interactive strip immediately above the composer card. The
+-     * entry is the card's sibling, so it does not consume textarea space.
+-     * Use the existing `conversation.input.overlay` slot for floating panels.
++     * entry is the card's sibling, so a scope selector never consumes draft
++     * space or becomes part of the textarea surface.
+      */
+     'conversation.composer.above': { kind: 'list'; scope: 'session'; owner: InputZone }
+     /**
+      * A full-width row of its own, stacked above the composer card — the seat
+      * for anything that needs a line to itself (queue rows, a todo strip, a
+      * goal bar). Pick this over the three seats below when your content wraps
+      * or carries prose; pick `conversation.composer.dock` for an ambient
+      * readout under the card, and `conversation.input.left` /
+      * `.right` for a small control INSIDE the card's tool row.
+      * Read only `session`/`input` off the owner share ({@link InputZone}) —
+      * both are point-in-time snapshots re-rendered for you, never subscribe.
+      */
+     'conversation.input.dock': { kind: 'list'; scope: 'session'; owner: InputZone }
+     /**
+      * The band under the composer card, inside the bar's width column — the
+      * seat for an ambient readout about the conversation (the shipped stats
+      * line lives here). Same {@link InputZone} owner share as the other
+      * regions. Anything the user must click belongs in the tool row instead
+      * (`conversation.input.left` / `.right`); anything needing its own line
+      * above the card belongs in `conversation.input.dock`.
+      */
+     'conversation.composer.dock': { kind: 'list'; scope: 'session'; owner: InputZone }
+     /**
+      * The left end of the tool row INSIDE the composer card, after the
+      * resident chrome (access mode, plan, attach) — the seat for a small
+      * always-visible control. Entries sit beside that chrome, never replace
+      * it. Same {@link InputZone} owner share; use `.right` for a control that
+      * belongs next to the send button, and the docks for anything taller than
+      * one row.
+      */
+     'conversation.input.left': { kind: 'list'; scope: 'session'; owner: InputZone }
+     /**
+      * The right end of the same tool row, before the primary send button —
+      * the seat for a control the user reaches on the way to sending (the
+      * model select sits in its own named seat just left of here). Same
+      * {@link InputZone} owner share and the same one-row height budget as
+      * `conversation.input.left`.
+      */
+     'conversation.input.right': { kind: 'list'; scope: 'session'; owner: InputZone }
+     /**
+      * The default composer body: a single slot rendered as the composer
+      * chain's fallback (a real entry, not a chain rider, so a
+      * takeover election hides rather than unmounts it and the textarea DOM
+      * survives). Session-maybe: the bar stays mounted across the
+      * no-session/session transition — the no-workspace hero renders the SAME
+      * textarea DOM as a read-only Workspace-picker trigger instead of a
+      * parallel inert tree — with the machine hooks absent until a session is
+      * current. InputBar registers
+      * here from this package's apply; its machine state arrives through the
+      * standard provide channel (useInput + inputActions), the keyboard
+      * command face through its own inject.
+      */
+     'conversation.composer.bar': { kind: 'single'; scope: 'session-maybe'; owner: ComposerBarOwnerProps }
+     /**
+      * The named plan-status seat in the composer tool row, immediately right
+      * of the access-mode control — one occupant, so taking it means rendering
+      * the plan affordance yourself. The owner passes only `locked` (see
+      * {@link InputControlOwnerProps}): honour it by refusing interaction, and
+      * take everything else from the framework session kit or your own inject.
+      * Unoccupied, the seat renders nothing at all — the bar paints no
+      * placeholder, so an absent plan plugin costs no layout.
+      */
+     'conversation.input.plan': { kind: 'single'; scope: 'session'; owner: InputControlOwnerProps }
+     /**
+      * The named model-select seat at the right end of the composer tool row,
+      * left of the send button — one occupant, so taking it means rendering the
+      * whole model affordance yourself. Same `locked`-only owner share and same
+      * renders-nothing-while-empty contract as the plan seat. Note the composer
+      * deliberately keeps this seat LIVE while it refuses text for a
+      * model-related block: every such block is one the user clears by picking
+      * a model here.
+      */
+     'conversation.input.model': { kind: 'single'; scope: 'session'; owner: InputControlOwnerProps }
+   }
+ 
+   /**
+    * ui-conversation's members of the session standard kit, provided through
+    * `sessions.provide`: every session-scope slot component
+    * receives the input machine's state hook and the two public actions.
+    */
+   interface SessionStandardProps {
+     /** Selector hook over the session's live input machine state. */
+     useInput: SnapshotSelectorHook<InputState>
+     /** The public input action face (stable identity per session). */
+     inputActions: InputActions
+   }
+ 
+   /** Input members for the resident composer while current session is optional. */
+   interface SessionMaybeStandardProps {
+     useInput: MaybeSnapshotSelectorHook<InputState>
+     inputActions: InputActions | undefined
+   }
+ }
+ 
+ /** Owner share of the hero agent-preset chip: the shell supplies nothing. */
+ export interface HeroAgentPresetOwnerProps {
+   /** Marker field: the chip owns its own roster, staging, and menu state. */
+   children?: never
+ }
+ 
+ /** Owner share of the strict session content seat. */
+ export interface ConversationSessionOwnerProps {
+   /**
+    * Wrap the view ring in the transcript scrollport that also hosts the
+    * sticky composer seat (whole `'conversation.composer'` chain output).
+    * Supplied for every real session (hero/settling/active) so the composer
+    * keeps one tree seat across the blank → active flip; the header stays
+    * outside that wrapper as ordinary column chrome (`flex: none`), while
+    * active CSS sticks the seat to the bottom of the same scrollport so wheel
+    * over the footer scrolls the flow.
+    * @param view - the session view-ring content (null while blank chrome is hidden).
+    * @returns the scrollport containing `view` and the sticky composer seat.
+    */
+   wrapActiveBody?: (view: ReactNode) => ReactNode
+ }
+ 
+ /** Header actions derive their state from the standard session/global kit. */
+ export interface ConversationHeaderActionOwnerProps {}
+ 
+ /**
+  * The input-region slot currency: dock/left/right entries read
+  * the conversation snapshot and the live input state as owner props (both
+  * are point-in-time snapshots — the dispatching skeleton re-renders on
+  * either store's change, so entries stay current without subscribing).
+  */
+ export interface InputZone {
+   readonly session: ConversationSnapshot
+   readonly input: InputState
+ }
+ 
+ /**
+  * View-slot owner share: the cross-view inspect handoff (otherwise views need
+  * nothing from the render site — sessionId and the snapshot hook arrive as
+  * framework-standard props; tool rows go through each view's own declared
+  * toolview hole).
+  */
+ export interface ConvViewOwnerProps {
+   /** One-shot inspect request from another view (chat's Inspect button); null when idle. */
+   inspect?: { callId: CallId } | null
+   /** Acknowledge the inspect request once applied (clears the store field). */
+   onInspectDone?: () => void
+ }
+ 
+ /**
+  * Optional prose file-mention provider, consumed via `ctx.get('chatFileMentions')`
+  * (optional-service convention): the chat view asks it for a closing message's
+  * inline-code vocabulary and threads the result into MarkdownText. Absent
+  * service — the providing plugin composed out of cordis.yml — turns the
+  * surface off; the prose renders inert code.
+  */
+ export interface ChatFileMentions {
+   /**
+    * Mention vocabulary for the closing message the owner currency names.
+    * @param owner - Turn-tail owner currency (Turn data, closing seq, opener).
+    * @returns The resolver MarkdownText consumes, or undefined when the turn
+    * produced nothing worth linking.
+    */
+   forClosing(owner: TurnTailOwnerProps): MarkdownFileMentions | undefined
+ }
+ 
+ declare module '@deepseek-ai/cordis' {
+   interface Context {
+     /** Prose file-mention provider (ui-deliverables); reach via ctx.get — optional. */
+     chatFileMentions: ChatFileMentions
+   }
+ }
+ 
+ /**
+  * Owner currency of the chat view's turn-tail hole: the engine-owned Turn and
+  * the closing assistant's anchor. Registrants read their own typed Turn data
+  * and open files through the same opener the tool rows use.
+  */
+ export interface TurnTailOwnerProps {
+   /** Engine-owned closing Turn boundary. */
+   turn: TurnLocation
+   /** The closing assistant's seq — the anchor the tail renders under. */
+   seq: number
+   /**
+    * Open a filesystem path through the Host (tool-row semantics; the chat
+    * view resolves relative paths against the session cwd).
+    */
+   openFile: (path: string) => void
+ }
+ 
+ /**
+  * Owner currency of the assistant-message action strip: the durable identity
+  * of the one finalized message the contributed actions address. Only finalized
+  * messages reach this slot, so the id is always present.
+  */
+ export interface AssistantActionOwnerProps {
+   /** Stable identity carried from the `assistant/message` event. */
+   messageId: MessageId
+ }
+ 
+ /** Hook constrained to business data published on the current Chat Node's Turn. */
+ export type UseChatNodeTurnData = <Key extends Extract<keyof ConversationTurnDataMap, string>>(
+   key: Key,
+ ) => Readonly<ConversationTurnDataMap[Key]> | undefined
+ 
+ /** Slot-level Hook factory used by renderers reading their Node's Turn data. */
+ export interface ChatNodeTurnDataInjected {
+   hooks: {
+     turnData: SlotHookFactory<'conversation.chat.node', UseChatNodeTurnData>
+   }
+ }
+ 
+ /** Stable owner currency delivered to one keyed Chat business renderer. */
+ export interface ChatNodeOwnerProps {
+   /** Selected Tool call, when the shared details store names one. */
+   selectedCallId?: CallId | undefined
+   /** Session workspace root; Tool summaries display paths relative to it. */
+   cwd?: string | undefined
+   openFile: (path: string) => void
+   inspectCall: (callId: CallId) => void
+   forkAt: (seq: number) => void
+   /** Resolve a session-authorized historical image for inline display. */
+   loadImage: (attachment: ImageAttachmentRef) => Promise<string>
+   fileMentions: (owner: TurnTailOwnerProps) => MarkdownFileMentions | undefined
+ }
+ 
+ /** Full props of one registered keyed Chat business renderer. */
+ export type ChatNodeViewProps<Kind extends ChatNodeKind = ChatNodeKind> =
+   PropsRuntime<'conversation.chat.node', Kind> & PropsLocale<'conversation'>
+ 
+ /** Owner currency of the details panel's Tool output renderer. */
+ export interface DetailsToolOwnerProps {
+   /** Frozen selected call slice. */
+   block: ToolCallBlock
+   /** Session workspace root for card cwd and relative-path display. */
+   cwd?: string | undefined
+ }
+ 
+ /**
+  * Owner share of the per-command row slot: the frozen {@link CommandNode}
+  * slice off the snapshot (cache-stable reference — memo premise). The node
+  * carries the whole lifecycle (structured name/args, pairing id, and
+  * outcome-or-executing). A successful domain command may also carry the
+  * explicitly linked projection node needed to fold two log records into one
+  * presentation row.
+  */
+ export interface CommandRowOwnerProps {
+   /** Folded command lifecycle node (run + optional done). */
+   node: CommandNode
+   /** Explicitly linked compaction checkpoint for the settled `/compact` presentation. */
+   compaction?: CompactionSummaryNode
+ }
+ 
+ /** Full props of a registered command-row component. */
+ export type CommandRowProps = PropsRuntime<'conversation.chat.commandview'>
+ 
+ /**
+  * Base props of a conversation view entry: the framework standard kit for the
+  * session-scope 'conversation.view' slot (useSession narrowed to the
+  * conversation snapshot by the runtime merge, sessionId, useSessions).
+  * Entries declaring the shared store or an inject face compose their shares
+  * on top (the chat entry's {@link ChatViewSlotProps}); store-less pure
+  * readers (ui-trajectory) take this base alone.
+  */
+ export type ConvViewProps = PropsRuntime<'conversation.view'>
+ 
+ /** The shared chat store handle type declared by the Session header/body, details, and chat-view registrations. */
+ export type ChatStore = ReturnType<typeof createChatStore>
+ 
+ /** Business callbacks injected into the conversation slot. */
+ export interface ConversationInjected {
+   /**
+    * Connect the selected Workspace and open its reusable/new blank session.
+    * When a blank session is already current, carry its draft to the target.
+    */
+   selectWorkspace: (workspaceId: WorkspaceId) => Promise<void>
+   /**
+    * Framework-bound sources. `composerBlock` is this session's block when a
+    * plugin raised one; the reason is the blocker's own localized copy, which
+    * the root renders as the inert composer's placeholder.
+    */
+   hooks: { composerBlock: ObservableSnapshot<ComposerBlock | undefined> }
+ }
+ 
+ /** Business callbacks injected into the strict Session body seat. */
+ export interface ConversationSessionInjected {
+   /** Views projected from the `conversation.view` slot ledger. */
+   views: {
+     list: () => readonly ViewTab[]
+     subscribe: (fn: () => void) => () => void
+     version: () => number
+   }
+   /** Release historical image URLs when this rendered session scope unmounts. */
+   releaseSessionImages: (sessionId: SessionId) => void
+   /** Bind the input machine's draft persistence mirror to the session store. */
+   bindDraftMirror: (write: (text: string) => void) => () => void
+ }
+ 
+ /** Business callbacks injected into the strict session header seat. */
+ export interface ConversationSessionHeaderInjected {
+   /** Views projected from the `conversation.view` slot ledger. */
+   views: {
+     list: () => readonly ViewTab[]
+     subscribe: (fn: () => void) => () => void
+     version: () => number
+   }
+   /** Select a real Session through the runtime navigation owner. */
+   open: (sessionId: SessionId) => void
+ }
+ 
+ /**
+  * Owner share of the composer-bar slot: ConversationRoot's layout-phase
+  * inputs plus the input-region child-slot content it renders (the region
+  * slots stay declared/rendered by the conversation entry; the bar hosts the
+  * results as chrome).
+  */
+ export interface ComposerBarOwnerProps {
+   /** Hero = empty-state centered card; composer = resident bottom bar. */
+   variant: 'hero' | 'composer'
+   /**
+    * A block another plugin raised for this session: the bar refuses input and
+    * shows the blocker's reason as the placeholder, but — unlike `disabled` —
+    * keeps the model seat live. Every block this contract has is one the user
+    * clears by choosing a model, so locking that seat too would leave the
+    * composer telling them to do the one thing it prevents.
+    */
+   blocked?: { readonly reason: string }
+   /**
+    * Inert no-workspace state: the bar locks message actions while preserving
+    * its normal DOM so the Workspace pick transitions in place.
+    */
+   disabled?: boolean
+   /** Whether the shared Workspace picker menu is expanded, regardless of which trigger opened it. */
+   workspacePickerOpen?: boolean
+   /** Open the existing Workspace picker from the inert textarea. */
+   onRequestWorkspace?: () => void
+   placeholder?: string
+   /** Optional content rendered above the textarea. */
+   accessory?: ReactNode
+-  /** Floating overlay anchor content (menu / popup shell entries), rendered inside the card. */
+-  overlay?: ReactNode
++  /** New-session mode selector rendered beside the permission control. */
++  heroModeControl?: ReactNode
+   /** input.left slot entries (tool row, beside the resident chrome). */
+   leftItems?: ReactNode
+   /** input.right slot entries (tool row, before the primary button). */
+diff --git a/packages/client/ui-conversation/src/client/index.ts b/packages/client/ui-conversation/src/client/index.ts
+index 0574aa8375..09368b1a39 100644
+--- a/packages/client/ui-conversation/src/client/index.ts
++++ b/packages/client/ui-conversation/src/client/index.ts
+@@ -18,28 +18,31 @@ export { apply, inject } from './apply.ts'
+ export { ConversationController } from './service.ts'
+ export type { IConversation } from './service.ts'
+ export type { DraftAttachmentId } from './input/contract.ts'
++export { ConversationViewState } from './view-state.ts'
+ 
+ export type {
+   CallId, ChatStoreState, SelectionTarget, ViewTab,
+ } from './contract/views.ts'
+ export type { ConversationKey } from './locales.ts'
+ export type {
+   AssistantChatData, ChatNode, ChatNodeDataMap, ChatNodeKind, ManualCompactionChatData,
+   RetryChatData, ToolChatData, TurnTailChatData,
+ } from './contract/chat-nodes.ts'
+ export type {
+   ChatFileMentions, ChatNodeOwnerProps, ChatNodeViewProps,
+   ChatStore, ChatViewInjected, ChatViewSlotProps, CommandRowOwnerProps, CommandRowProps, ComposerBarInjected,
+   ComposerAttachment, ComposerChainProps, ConversationInjected,
+   ConversationSessionHeaderInjected, ConversationSessionInjected, ConversationSlotProps, ConvViewOwnerProps,
+   ConvViewProps, DetailsInjected, DetailsSlotProps, DetailsToolOwnerProps, EmptyWorkspaceOwnerProps,
+   TurnTailOwnerProps, UseChatNodeTurnData,
+ } from './contract/slots.ts'
+ // Export discipline: packages/client/AGENTS.md.
+ 
+ declare module '@deepseek-ai/cordis' {
+   interface Context {
+     /** The outward face only; the concrete service stays inside this plugin. */
+     conversation: import('./service.ts').IConversation
++    /** Existing per-session chat view exposed to root-scoped compact controls. */
++    conversationViewState: import('./view-state.ts').ConversationViewState
+   }
+ }
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ContextMeter.module.css b/packages/client/ui-conversation/src/client/skeleton/ContextMeter.module.css
+index 9eed743214..e1fc1a7433 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ContextMeter.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/ContextMeter.module.css
+@@ -55,93 +55,114 @@
+   cursor: default;
+ }
+ 
++/* Inside the shared composer overlay the anchor already spans the entire
++   input card. Override the legacy standalone popover width so Context uses
++   the same full-width upward sheet as Browser Target and the other composer
++   controls. The standalone fallback keeps its compact 264px geometry. */
++:global([data-composer-overlay-surface]) > .panel {
++  right: auto;
++  left: 0;
++  width: 100%;
++}
++
+ .header {
+   display: flex;
+   align-items: center;
+   gap: 6px;
+ }
+ 
+ .figures {
+   margin-left: auto;
+   font-weight: 500;
+   font-variant-numeric: tabular-nums;
+   color: var(--dsw-alias-label-primary);
+ }
+ 
+ .percent {
+   font-weight: 500;
+   color: var(--dsw-alias-label-primary);
+ }
+ 
+ .headline {
+   color: var(--dsw-alias-label-tertiary);
+ }
+ 
+ /* The headline brackets the reading, so the side a locale leaves empty must
+    drop out of the flex row rather than spend a gap. */
+ .headline:empty {
+   display: none;
+ }
+ 
+ .bar {
+   display: flex;
+   gap: 1px;
+   margin: 10px 0 12px;
+   height: 4px;
+   border-radius: 999px;
+   background: var(--dsw-alias-interactive-bg-hover);
+   overflow: hidden;
+ }
+ 
+ .segment {
+   flex: none;
+   min-width: 2px;
+   height: 100%;
+   border-radius: 1px;
+   background: var(--meter-tint, var(--dsw-alias-label-tertiary));
+ }
+ 
+ .swatch {
+   display: inline-block;
+   margin-right: 6px;
+   width: 8px;
+   height: 8px;
+   border-radius: 2px;
+   background: var(--meter-tint);
+   vertical-align: baseline;
+ }
+ 
+ .colorSystem {
+   --meter-tint: var(--dsw-static-neutral-bluish-400);
+ }
+ 
+ .colorTools {
+   /* The design platform ships no purple static token; violet-400 literal. */
+   --meter-tint: rgb(167, 139, 250);
+ }
+ 
+ .colorMessages {
+   --meter-tint: var(--dsw-static-blue-450);
+ }
+ 
+ .rows {
+   margin: 6px 0 0;
+ }
+ 
+ .row {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 12px;
+   padding: 2px 0;
+ }
+ 
+ .row dt {
+   color: var(--dsw-alias-label-secondary);
+ }
+ 
+ .row dd {
+   margin: 0;
+   font-variant-numeric: tabular-nums;
+   color: var(--dsw-alias-label-primary);
+ }
++
++.stats {
++  margin-top: 10px;
++  padding-top: 8px;
++  border-top: 1px solid var(--dsw-alias-border-l1);
++}
++
++.panel .stats > * {
++  width: auto;
++  padding: 0;
++}
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ContextMeter.tsx b/packages/client/ui-conversation/src/client/skeleton/ContextMeter.tsx
+index b6b62468d1..7505b12d4e 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ContextMeter.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/ContextMeter.tsx
+@@ -5,149 +5,149 @@
+  * capacity. */
+ 
+ import { useEffect, useRef, useState } from 'react'
++import type { ReactNode } from 'react'
+ import type { UseProjection } from '@deepseek-ai/dsh-client-runtime/client'
+ // Type-only: the `contextPressure` / `contextBreakdown` projection key merges.
+-import type {} from '@deepseek-ai/dsh-token-meter/client'
++import type { ContextBreakdownProjection } from '@deepseek-ai/dsh-token-meter/client'
+ import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ComposerBarProps } from '../contract/slots.ts'
+ import { contextOccupancy, formatTokens } from '../chat/StatsLine.tsx'
+ import css from './ContextMeter.module.css'
++import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
+ 
+ /** Ring geometry: 14px viewBox, 2px stroke. */
+ const RADIUS = 5.5
+ const CIRCUMFERENCE = 2 * Math.PI * RADIUS
+ 
+ /**
+  * Marker the localized occupancy sentence is split on, so the panel headline
+  * keeps the reading in its own tone while each locale still owns the word
+  * order (`45% of context used` / `上下文已用 45%`).
+  */
+ const READING_SLOT = '\u0000'
+ 
+ /** Panel legend rows, in bar-segment order; each color class carries the shared swatch/segment tint. */
+ const ROWS = [
+   { key: 'systemTokens', label: 'context.system', color: css.colorSystem },
+   { key: 'toolsTokens', label: 'context.tools', color: css.colorTools },
+   { key: 'messageTokens', label: 'context.messages', color: css.colorMessages },
+ ] as const
+ 
+ export interface ContextMeterProps {
+   useProjection: UseProjection
++  /** Session statistics formerly rendered as the standalone footer band. */
++  stats?: ReactNode | undefined
+   /** The owning bar's locale seat, passed down as a plain prop. */
+   t: ComposerBarProps['t']
+ }
+ 
+-export function ContextMeter({ useProjection, t }: ContextMeterProps) {
++function ContextPanel({ reading, headBefore, headAfter, context, segments, breakdown, stats, t }: {
++  reading: string
++  headBefore: string
++  headAfter: string
++  context: NonNullable<ReturnType<typeof contextOccupancy>>
++  segments: readonly { key: string; color: string | undefined; width: number }[]
++  breakdown: ContextBreakdownProjection | undefined
++  stats?: ReactNode | undefined
++  t: ComposerBarProps['t']
++}) {
++  return <div className={css.panel} role="dialog" aria-label={t('context.used')}>
++    <div className={css.header}>
++      <span className={css.headline}>{headBefore}</span><span className={css.percent}>{reading}</span><span className={css.headline}>{headAfter}</span>
++      <span className={css.figures}>{`~${formatTokens(context.usedTokens)} / ${formatTokens(context.contextWindow)}`}</span>
++    </div>
++    <div className={css.bar}>{segments.map(segment => <div key={segment.key} className={segment.color === undefined ? css.segment : `${css.segment} ${segment.color}`} style={{ width: `${segment.width}%` }} />)}</div>
++    {breakdown !== undefined && <dl className={css.rows}>{ROWS.map(row => <div key={row.key} className={css.row}><dt><span className={`${css.swatch} ${row.color}`} aria-hidden />{t(row.label)}</dt><dd>{`~${formatTokens(breakdown[row.key])}`}</dd></div>)}</dl>}
++    {stats !== undefined && <div className={css.stats}>{stats}</div>}
++  </div>
++}
++
++function ContextPanelRegistration({ panel }: { panel: ReactNode }) {
++  useComposerOverlay('context-usage', panel)
++  return null
++}
++
++export function ContextMeter({ useProjection, stats, t }: ContextMeterProps) {
+   const pressure = useProjection('contextPressure')
+   const breakdown = useProjection('contextBreakdown')
+   const [open, setOpen] = useState(false)
+   const rootRef = useRef<HTMLSpanElement | null>(null)
+   const context = contextOccupancy(pressure)
+   const available = context !== null
++  const hosted = useComposerOverlay('context-usage')
+ 
+   // A model switch can temporarily remove capacity while this component stays
+   // mounted. Close the now-unavailable panel instead of preserving stale UI.
+   useEffect(() => {
+     if (!available && open) setOpen(false)
+   }, [available, open])
+ 
+   // Outside click / Escape close, one document listener while open (Menu's pattern).
+   useEffect(() => {
+     if (!open || !available) return
+     const onPointerDown = (e: PointerEvent): void => {
+       if (e.target instanceof Node && rootRef.current?.contains(e.target) === true) return
+       setOpen(false)
+     }
+     const onKeyDown = (e: KeyboardEvent): void => {
+       if (e.key === 'Escape') setOpen(false)
+     }
+     document.addEventListener('pointerdown', onPointerDown)
+     document.addEventListener('keydown', onKeyDown)
+     return () => {
+       document.removeEventListener('pointerdown', onPointerDown)
+       document.removeEventListener('keydown', onKeyDown)
+     }
+   }, [available, open])
+ 
+   if (context === null) return null
+   const percent = context.percent
+   const reading = `${percent}%`
+   const [headBefore = '', headAfter = ''] = t('context.aria', { percent: READING_SLOT })
+     .split(READING_SLOT)
+     .map(part => part.trim())
+ 
+   // The bar's overall length stays the provider-exact percent; the heuristic
+   // breakdown only proportions its colored parts. A zero-width part is dropped
+   // instead of rendered: `.segment`'s min-width keeps a hairline part visible,
+   // which at 0% occupancy would draw a filled bar over an empty context.
+   const breakdownTotal = breakdown === undefined
+     ? 0
+     : breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens
+   const parts = breakdown === undefined || breakdownTotal === 0
+     ? [{ key: 'total', color: undefined, width: percent }]
+     : ROWS.map(row => ({ key: row.key, color: row.color, width: percent * breakdown[row.key] / breakdownTotal }))
+   const segments = parts.filter(part => part.width > 0)
++  const panel = <ContextPanel reading={reading} headBefore={headBefore} headAfter={headAfter} context={context} segments={segments} breakdown={breakdown} stats={stats} t={t} />
++  const panelOpen = hosted.available ? hosted.open : open
+ 
+   return (
+     <span ref={rootRef} className={css.root}>
+-      <Tooltip label={t('context.aria', { percent: reading })} side="top" delayMs={200} disabled={open}>
++      {hosted.available && <ContextPanelRegistration panel={panel} />}
++      <Tooltip label={t('context.aria', { percent: reading })} side="top" delayMs={200} disabled={panelOpen}>
+         <button
+           type="button"
+           className={css.trigger}
+           aria-label={t('context.aria', { percent: reading })}
+           aria-haspopup="dialog"
+-          aria-expanded={open}
+-          onClick={() => { setOpen(!open) }}
++          aria-expanded={panelOpen}
++          data-composer-overlay-trigger
++          onClick={() => { if (hosted.available) hosted.toggle(); else setOpen(!open) }}
+         >
+           <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden>
+             <circle className={css.track} cx="7" cy="7" r={RADIUS} />
+             <circle
+               className={css.fill}
+               cx="7"
+               cy="7"
+               r={RADIUS}
+               strokeDasharray={`${CIRCUMFERENCE * percent / 100} ${CIRCUMFERENCE}`}
+               transform="rotate(-90 7 7)"
+             />
+           </svg>
+         </button>
+       </Tooltip>
+-      {open && (
+-        <div className={css.panel} role="dialog" aria-label={t('context.used')}>
+-          <div className={css.header}>
+-            {/* Empty sides collapse through `.headline:empty` so the locale that
+-                needs no leading (or trailing) text spends no header gap. */}
+-            <span className={css.headline}>{headBefore}</span>
+-            <span className={css.percent}>{reading}</span>
+-            <span className={css.headline}>{headAfter}</span>
+-            <span className={css.figures}>
+-              {`~${formatTokens(context.usedTokens)} / ${formatTokens(context.contextWindow)}`}
+-            </span>
+-          </div>
+-          <div className={css.bar}>
+-            {segments.map(segment => (
+-              <div
+-                key={segment.key}
+-                className={segment.color === undefined ? css.segment : `${css.segment} ${segment.color}`}
+-                style={{ width: `${segment.width}%` }}
+-              />
+-            ))}
+-          </div>
+-          {breakdown !== undefined && (
+-            <dl className={css.rows}>
+-              {ROWS.map(row => (
+-                <div key={row.key} className={css.row}>
+-                  <dt>
+-                    <span className={`${css.swatch} ${row.color}`} aria-hidden />
+-                    {t(row.label)}
+-                  </dt>
+-                  <dd>{`~${formatTokens(breakdown[row.key])}`}</dd>
+-                </div>
+-              ))}
+-            </dl>
+-          )}
+-        </div>
+-      )}
++      {!hosted.available && open && panel}
+     </span>
+   )
+ }
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css
+index 6146d42810..5b375b3e10 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.module.css
+@@ -177,187 +177,182 @@
+   background: var(--dsw-alias-state-business-primary);
+ }
+ 
++/* Below 1000px the compact workspace header already names the active Session.
++   Keep the conversation mounted but remove its duplicate title and tab strip;
++   Trajectory remains reachable from the compact settings menu. */
++@media (max-width: 999px) {
++  .header {
++    display: none;
++  }
++}
++
+ .viewArea {
+   display: flex;
+   flex: 1;
+   flex-direction: column;
+   min-height: 0;
+ }
+ 
+ /* Composer context stack (Figma 9:937): standalone dock cards share one
+    rhythm above the input card. */
+ .composerStack {
+   /* Horizontal geometry (card width, clearance, dock inset) rides the shared
+      .root variables above so takeover siblings match the stack. */
+   --dsh-composer-stack-gap: 6px;
+ 
+   display: flex;
+   flex-direction: column;
+   gap: var(--dsh-composer-stack-gap);
+ }
+ 
++.overlayAnchor {
++  position: relative;
++  z-index: 2;
++  height: 0;
++}
++
+ /* Common seat for the composer chain (fallback + elected overlay siblings). */
+ .composerSeat {
+   display: flex;
+   flex: none;
+   flex-direction: column;
+   /* One cap for every scrolling text region a composer seat can hold: the
+      InputBar draft (figma Input 75:8208 max 14 lines × 24px line) and the
+      takeover panels' bodies top out at the same height, so electing a
+      takeover never grows the footer past the card it replaces. Declared on
+      the seat because it is the chain's only shared ancestor — fallback and
+      elected overlay are siblings — and custom properties inherit down to
+      whichever entry is mounted. */
+   --dsh-composer-text-max-height: 336px;
+ }
+ 
+-/* Active phase: header is ordinary column chrome above the scrollport (not
+-   sticky). The scroll body holds the transcript and the sticky composer seat
+-   so wheel over the footer moves the flow. */
++/* Active phase: header and composer are fixed flex siblings of the session
++   scrollport. Only the body between them scrolls, so the input cannot leave
++   the viewport with a long transcript. */
+ .root[data-phase='active'] {
+   overflow: hidden;
+ }
+ 
+ .root[data-phase='active'] .header {
+   flex: none;
+ }
+ 
+ .scrollBody {
+   display: flex;
+   flex: 1;
+   flex-direction: column;
+   min-height: 0;
+   overflow-y: auto;
+   /* The column scrolls on ONE axis. Stating `hidden` rather than leaving the
+      initial `visible` is what removes the horizontal bar: a box that scrolls in
+      one axis computes `visible` to `auto` in the other, so any bleed becomes
+      user-scrollable. `.heroGlow` bleeds by construction (1051/776 of the hero
+      box), which put a horizontal scrollbar under every center column narrower
+      than the glow. Clipping is unchanged — `overflow-y: auto` already made this
+      a scroll container that clips both axes, so this only takes away the bar. */
+   overflow-x: hidden;
+-  /* Reserved unconditionally: the composer seat rides this box's content box in
+-     Chat and its padding box under a view's composer overlay, so an `auto`
+-     gutter moves the input card sideways by the bar's width whenever the two
+-     differ ([decision](../../../../../../.agents/notes/implemented/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)). */
++  /* Sidepanel history must consume the upward wheel gesture at scrollTop 0:
++     without containment Chromium passes it to the embedding document, which
++     exposes the shell background above the Harness frame. Keep this axis-only
++     so horizontal clipping remains governed by the explicit rule above. */
++  overscroll-behavior-y: contain;
++  /* Reserve the transcript gutter unconditionally so content does not shift
++     sideways when a long conversation first becomes scrollable. */
+   scrollbar-gutter: stable;
+ }
+ 
+ .root[data-phase='active'] .viewArea {
+   flex: 1 0 auto;
+   min-height: auto;
+ }
+ 
+-.root[data-phase='active'] .composerSeat {
+-  position: sticky;
+-  bottom: 0;
+-  /* Above markdown CodeBlock sticky banners (z-index 6) so the footer never
+-     paints under a sticking code header while scrolling. */
+-  z-index: 7;
+-  /* Input mask (figma 1205:27463): transcript fades out under a FIXED 36px
+-     band at the seat's top (the figma 24% of the resting ~150px composer),
+-     solid below — px stops, not %, so a growing draft only widens the solid
+-     region and the fade band never stretches. The 0px stop is bg-base at
+-     zero alpha (not white, which the figma export hardcodes) so both themes
+-     fade from their own base. */
+-  background: linear-gradient(
+-    180deg,
+-    color-mix(in srgb, var(--dsw-alias-bg-base) 0%, transparent) 0px,
+-    var(--dsw-alias-bg-base) 36px
+-  );
+-}
+-
+ /* Views may opt into a composer overlay while ConversationRoot retains
+-   ownership of the seat geometry and its active-phase precedence. */
++   ownership of the footer geometry. */
+ .scrollBody:has([data-conversation-composer-overlay]) {
+   position: relative;
+   /* A clipping box nothing scrolls out of, stated as a scroll container on both
+      axes rather than `overflow: hidden`: a single-axis scroller computes the
+-     other axis to `auto`, and the seat's absolute positioning below needs the
+-     box to stay a containing block in every engine. */
++     other axis to `auto`, and overlay views need a stable containing block. */
+   overflow-x: hidden;
+   overflow-y: auto;
+   /* The view owns its own scrollers (the trajectory ledger scrolls inside the
+-     view), so this box never scrolls here; reserving a gutter would only
+-     narrow the view's content by the bar's width. Chat keeps the reservation
+-     on the same element, so the seat below compensates with the bar's width
+-     ([decision](../../../../../../.agents/notes/implemented/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)). */
++     view), so reserving a gutter here would only narrow its content. */
+   scrollbar-gutter: auto;
+ }
+ 
+ .scrollBody:has([data-conversation-composer-overlay]) > :global([data-slot='conversation.session']) > .viewArea {
+   flex: 1 1 0;
+   min-height: 0;
+   overflow: hidden;
+ }
+ 
+-.scrollBody:has([data-conversation-composer-overlay]) > .composerSeat {
+-  position: absolute;
+-  /* Chat's seat rides this box's content box, which its own scrolling shortens
+-     by the bar's width; the overlay seat is against the padding box, so it
+-     must give back the same width to keep the input card in place across
+-     tabs. Reads ui-theme's --dsh-scrollbar-width, which mirrors the WebKit
+-     bar's layout width. Chat reserves the engine-resolved width, so on an
+-     engine where the resolved width differs from this fixed 8px the card
+-     drifts by half the difference — accepted residual risk, recorded in
+-     ([decision](../../../../../../.agents/notes/implemented/bug-fix/2026-08-12-composer-overlay-seat-width-compensation.md)). */
+-  right: var(--dsh-scrollbar-width);
+-  bottom: 0;
+-  left: 0;
+-}
+-
+-/* Hero phase: the composer stack (hero chrome + workspace row + card) is
+-   flex-centered in the column; composer phase docks it at the bottom. Flex,
+-   NOT absolute+transform: a transform would make this box the containing
+-   block for position:fixed descendants (pickers/modals), shrinking them. */
++/* Hero keeps its own chrome, while the shared composer remains in the
++   root-level footer. Flex, NOT absolute+transform: a
++   transform would make this box the containing block for position:fixed
++   descendants (pickers/modals), shrinking them. */
+ .composerHero {
+   position: relative; /* .heroGlow positioning context */
+   align-self: center;
+   /* figma 75:8208 drew 12 between all three rows; the workspace row now sits
+      8 above the card (its margin-top restores 12 under the hero chrome). */
+   gap: 8px;
+-  /* Foot inside the centered box floats the stack a bit above true center. */
+-  padding-bottom: 32px;
++  /* The InputBar owns the same 8px bottom clearance in hero and active mode. */
++  padding-bottom: 0;
+   /* Card cap + both clearances: the hero input card lands at exactly the same
+      width as the docked composer at every viewport. */
+   width: min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)), 100%);
+   z-index: 1;
+ }
+ 
+ /* Blue backdrop ellipse (figma 313:14109), centered on the input card: the
+    card's resting center sits ~92px above the stack bottom (32 foot pad +
+    half of the ~120px two-row card); width tracks the card (glow asset 1051
+    vs design card 776) so blur scales in userSpace with it. z-index -1 keeps
+    it behind the in-flow hero content inside this stacking context. */
+ .heroGlow {
+   position: absolute;
+   left: 50%;
+   bottom: 92px;
+   z-index: -1;
+   width: calc(100% * 1051 / 776);
+   aspect-ratio: 1051 / 468;
+   transform: translate(-50%, 50%);
+   pointer-events: none;
+ }
+ 
+ .heroWorkspaceRow {
+   display: flex;
+   align-items: center;
+   gap: 2px;
+   min-width: 0;
+   margin-top: 4px;
+   /* figma drew px 8; nudged +12 so the chip's folder glyph lines up closer to
+      the card's inner controls below. */
+   padding-left: 20px;
+ }
+ 
+-/* Hero: the composer sits inside the session scroll body; center there so
+-   the tree seat matches active (sticky footer) without a Root remount. */
++/* Hero uses the space above the root-level composer footer. */
+ .root[data-phase='hero'] .scrollBody {
+-  justify-content: center;
++  position: relative;
++  justify-content: flex-end;
+   overflow-y: auto;
+ }
+ 
++/* Keep the hero mark in the visual middle of the available workspace while
++   the resident composer remains anchored at the bottom.  This is a sibling
++   overlay rather than a transform on the composer, so popovers and dialogs
++   keep their viewport positioning contract. */
++.heroTitleSeat {
++  position: absolute;
++  inset: 0;
++  z-index: 0;
++  pointer-events: none;
++}
++
++.heroTitleSeat > * {
++  height: 100%;
++}
++
+ /* Settling (session replaying, hero/docked unknown): keep the composer seat
+    mounted but invisible so no wrong layout flashes before the phase lands. */
+ .root[data-phase='settling'] .composerSeat {
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+index 246316550a..a3620c9dcc 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+@@ -2,199 +2,152 @@
+ // chain, AND the composer bar (session-maybe slot) stay mounted across
+ // no-session/session transitions — the bar renders inert via owner props.
+ 
+-import { useCallback, useEffect, useRef, useState } from 'react'
++import { useCallback, useRef } from 'react'
+ import clsx from 'clsx'
+ import { ComposerOverlayProvider, ComposerOverlaySurface } from '@deepseek-ai/dsh-client-ui-primitives'
+-import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
+ import type { ConversationSlotProps, InputZone } from '../contract/slots.ts'
+-import { HeroGlow, HeroShell, WorkspaceChip, workspaceLabel } from './EmptyHero.tsx'
++import { HeroGlow, HeroShell, workspaceLabel } from './EmptyHero.tsx'
+ import css from './ConversationRoot.module.css'
+ 
+ /** Full props composed from the slot contract. */
+ export type ConversationRootProps = ConversationSlotProps
+ 
+ export function ConversationRoot({
+   sessionId, useSession, useSessions, useWorkspaces, useInput, useComposerBlock,
+-  renderSlot, renderSlotChain, selectWorkspace, t,
++  renderSlot, renderSlotChain, t,
+ }: ConversationRootProps) {
+   const openState = useSession(s => s.openState)
+   const composerPhase = useSession(s => s.composerPhase)
+   const pending = useSession(s => s.pending) ?? []
+   const session = useSession(s => s)
+   const inputState = useInput(s => s)
+   const cwd = useSessions(s => sessionId === undefined ? undefined : s.byId[sessionId]?.cwd)
+   const summaryBlank = useSessions(s => sessionId === undefined ? undefined : s.byId[sessionId]?.blank)
+   const workspaces = useWorkspaces(s => s)
+   // A plugin this package cannot import (ui-model-selection) says this session cannot
+   // send; its reason is already localized by whoever raised it.
+   const composerBlock = useComposerBlock(block => block)
+ 
+-  const [pickerOpen, setPickerOpen] = useState(false)
+-  const [pendingWorkspaceId, setPendingWorkspaceId] = useState<WorkspaceId | undefined>()
+-  const pickerAnchor = useRef<HTMLButtonElement>(null)
+-
+-  // Publishes the seat's live height as --dsh-composer-height on the scroll
+-  // body so floating controls (ChatView back-to-bottom) clear the composer as
+-  // it grows. Callback ref, not an effect; stable identity prevents observer
+-  // churn while the first blank session fills the resident body outlet.
++  // Publishes the seat's live height on the conversation root for views that
++  // need it. The composer is a root-level footer, never a child of the
++  // session scrollport, so scrolling history cannot move the input away.
+   const seatObserver = useRef<ResizeObserver | null>(null)
+   const seatResizeRef = useCallback((seat: HTMLDivElement | null): void => {
+     seatObserver.current?.disconnect()
+     seatObserver.current = null
+-    const scroller = seat?.parentElement ?? null
+-    if (seat === null || scroller === null) return
++    const root = seat?.parentElement ?? null
++    if (seat === null || root === null) return
+     seatObserver.current = new ResizeObserver(() => {
+-      scroller.style.setProperty('--dsh-composer-height', `${seat.offsetHeight}px`)
++      root.style.setProperty('--dsh-composer-height', `${seat.offsetHeight}px`)
+     })
+     seatObserver.current.observe(seat)
+   }, [])
+ 
+   const sessionWorkspace = sessionId === undefined
+     ? undefined
+     : workspaces.items.find(workspace => workspace.sessionIds.includes(sessionId))
+-  const pendingWorkspace = workspaces.items.find(
+-    workspace => workspace.workspaceId === pendingWorkspaceId,
+-  )
+-
+-  // Clear the pending pick once the session lands in it, or when the picked
+-  // workspace disappears from a ready list (deleted from the sidebar).
+-  useEffect(() => {
+-    if (pendingWorkspaceId === undefined) return
+-    if (sessionWorkspace?.workspaceId === pendingWorkspaceId
+-      || (workspaces.phase === 'ready' && pendingWorkspace === undefined)) {
+-      setPendingWorkspaceId(undefined)
+-    }
+-  }, [pendingWorkspaceId, sessionWorkspace?.workspaceId, workspaces.phase, pendingWorkspace])
+-
+   // While a session is still replaying (loading + blank) the hero/docked
+   // choice is unknowable — render the composer hidden instead of flashing
+   // the centered hero and snapping to the docked bar (or vice versa).
+   // Exemption: a session the list summary already proves blank can only
+   // land on the hero, so hiding would blank the column for the whole
+   // history round-trip (the startup auto-selection flash) for nothing.
+   // The exemption is deliberately open-state-wide, not loading-only: a
+   // summary-blank session is the hero before its open starts (`cold`) and
+   // after one fails (`error`) for the same reason — there is no history.
+   const settling = sessionId !== undefined && composerPhase === 'blank' && openState === 'loading'
+     && summaryBlank !== true
+   const hero = sessionId === undefined
+     || (composerPhase === 'blank' && (openState === 'open' || summaryBlank === true))
+   const zone: InputZone | undefined =
+     session === undefined || inputState === undefined ? undefined : { session, input: inputState }
+ 
+   // The chip is a selector; label resolution walks the flow top-down:
+   //   1. a just-picked workspace (pending) → its title;
+   //   2. cold start, no session yet → placeholder ("Choose workspace");
+   //   3. the blank session's workspace is in the list → its title;
+   //   4. list still loading → cwd folder name bridges so the title does not
+   //      flash on refresh (empty cwd → placeholder);
+   //   5. list ready but no owning workspace (deleted from the sidebar) →
+   //      placeholder, never the deleted folder's name via cwd.
+-  const chipTitle = pendingWorkspace?.title
+-    ?? (sessionId === undefined
++  const chipTitle = sessionId === undefined
+       ? undefined
+       : sessionWorkspace?.title
+         ?? (workspaces.phase === 'ready' || cwd === undefined || cwd === ''
+           ? undefined
+-          : workspaceLabel(cwd)))
+-
+-  const heroWorkspaceRow = (
+-    <div className={css.heroWorkspaceRow}>
+-      <WorkspaceChip
+-        buttonRef={pickerAnchor}
+-        label={chipTitle}
+-        menuOpen={pickerOpen}
+-        onClick={() => { setPickerOpen(open => !open) }}
+-        t={t}
+-      />
+-      {renderSlot('conversation.hero.workspace', {
+-        open: pickerOpen,
+-        anchorRef: pickerAnchor,
+-        selectedId: pendingWorkspaceId ?? sessionWorkspace?.workspaceId,
+-        onPick: (workspaceId) => {
+-          setPickerOpen(false)
+-          setPendingWorkspaceId(workspaceId)
+-          void selectWorkspace(workspaceId).catch(() => {
+-            setPendingWorkspaceId(current => current === workspaceId ? undefined : current)
+-          })
+-        },
+-        onClose: () => { setPickerOpen(false) },
+-      })}
+-      {renderSlot('conversation.hero.agentPreset', {})}
+-    </div>
+-  )
++          : workspaceLabel(cwd))
+ 
+   // The placeholder chip ("Choose workspace") and the Workspace-trigger input travel
+   // together: no workspace picked yet (cold start, no session at all), or a
+   // blank session whose workspace vanished (deleted from the sidebar). The
+   // bar is ONE session-maybe slot rendered unconditionally — inert is a prop,
+   // not a different tree, so the textarea DOM survives the transition.
+   const inert = sessionId === undefined || (hero && chipTitle === undefined)
+   // A raised block is the same inert posture with the blocker's own reason:
+   // one disabled textarea, never a second tree. The no-workspace state wins
+   // when both hold — picking a workspace is the earlier prerequisite.
+   const blocked = !inert && composerBlock !== undefined
+   const inputBar = renderSlot('conversation.composer.bar', {
+     variant: hero ? 'hero' : 'composer',
+     ...(inert
+       ? {
+         disabled: true,
+         placeholder: t('placeholder.workspace'),
+-        workspacePickerOpen: pickerOpen,
+-        onRequestWorkspace: () => { setPickerOpen(true) },
+       }
+       : blocked
+         // `blocked`, not `disabled`: the bar refuses input either way, but a
+         // block keeps the model seat live because choosing a model is how the
+         // user clears it.
+         ? { blocked: composerBlock, placeholder: composerBlock.reason }
+         : hero ? { placeholder: t('placeholder.hero') } : {}),
+-    overlay: renderSlot('conversation.input.overlay', {}),
++    heroModeControl: hero ? renderSlot('conversation.hero.agentPreset', {}) : null,
+     leftItems: zone === undefined ? null : renderSlot('conversation.input.left', zone),
+     rightItems: zone === undefined ? null : renderSlot('conversation.input.right', zone),
+     // Stats band under the card, inside the bar's width column so both
+     // share one constraint (composer.dock = stats-line family).
+     footer: !hero && zone !== undefined ? renderSlot('conversation.composer.dock', zone) : null,
+   })
+ 
+   const composerBar = (
+     <ComposerOverlayProvider>
+       <div className={clsx(css.composerStack, hero && css.composerHero)}>
+-      {hero && <HeroGlow className={css.heroGlow} />}
+-      {hero && <HeroShell t={t} />}
+-      {hero && heroWorkspaceRow}
+-      {zone !== undefined && renderSlot('conversation.input.dock', zone)}
+-      {zone !== undefined && renderSlot('conversation.composer.above', zone)}
+-      <ComposerOverlaySurface />
+-      {inputBar}
++        {hero && <HeroGlow className={css.heroGlow} />}
++        {zone !== undefined && renderSlot('conversation.input.dock', zone)}
++        <div className={css.overlayAnchor}>{renderSlot('conversation.input.overlay', {})}<ComposerOverlaySurface /></div>
++        {zone !== undefined && renderSlot('conversation.composer.above', zone)}
++        {inputBar}
+       </div>
+     </ComposerOverlayProvider>
+   )
+ 
+   const phase = settling ? 'settling' : hero ? 'hero' : 'active'
+   const composer = renderSlotChain(
+     'conversation.composer',
+     { interactions: pending, session },
+     { fallback: composerBar, overlay: true },
+   )
+ 
+-  // Sticky wraps the whole chain output (fallback + elected overlay), not
+-  // only `.composerStack`: overlay:true renders those as siblings, and sticky
+-  // on the fallback alone would leave Question/Approval panels at the content
+-  // end off-screen when the user is not pinned to the floor.
++  // The footer wraps the whole chain output (fallback + elected overlay), not
++  // only `.composerStack`: overlay:true renders those as siblings, and every
++  // elected input surface must remain outside the session scrollport.
+   const composerSeat = (
+     <div ref={seatResizeRef} className={css.composerSeat} data-composer-seat="">
+       {composer}
+     </div>
+   )
+ 
+   return (
+     <div className={css.root} data-phase={phase}>
+       {renderSlot('conversation.session.header', {})}
+       <div className={css.scrollBody} data-conversation-scroll="">
++        {hero && (
++          <div className={css.heroTitleSeat}>
++            <HeroShell t={t} />
++          </div>
++        )}
+         {renderSlot('conversation.session', {})}
+-        {composerSeat}
+       </div>
++      {composerSeat}
+     </div>
+   )
+ }
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+index 6a2eb5fdf4..ae71a64caf 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+@@ -29,116 +29,107 @@
+ }
+ 
+ .hero {
+-  /* No bottom pad in the centered hero, but the side clearance must survive:
+-     the hero wrapper is full-width on narrow viewports, so this padding is
+-     the only thing keeping the card off the edges there. */
+-  padding: 0 var(--dsh-composer-side-clearance);
++  /* Hero shares the docked composer's bottom clearance, while retaining the
++     side clearance on narrow viewports. */
++  padding: 0 var(--dsh-composer-side-clearance) 8px;
+ }
+ 
+ .notice {
+   width: 100%;
+   max-width: var(--dsh-composer-card-max-width);
+   margin-bottom: 6px;
+   padding: 4px 8px;
+   border-radius: 8px;
+   background: var(--dsw-alias-interactive-bg-hover);
+   color: var(--dsw-alias-label-secondary);
+   font-size: 12px;
+   line-height: 18px;
+ }
+ 
+ .noticeError {
+   background: var(--dsw-alias-interactive-bg-hover-danger);
+   color: var(--dsw-alias-state-error-primary);
+ }
+ 
+ .card {
+   box-sizing: border-box;
+   position: relative; /* overlay anchor positioning context */
+   display: flex;
+   flex-direction: column;
+   /* figma Input 75:8208: 12px between the text area and the button row; 10px
+      top pad on the card before .InputText. */
+   gap: 12px;
+   width: 100%;
+   max-width: var(--dsh-composer-card-max-width);
+   padding-top: 10px;
+   /* Input stroke: black/0.10 light, white/0.06 dark (figma darkmode note says
+      the input border is one notch weaker than buttons) — exactly the
+      l2-darkmode-thin pair. Fill: the input surface token (elevated in dark). */
+   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
+   border-radius: 22px;
+   background: var(--dsw-specific-input-major);
+   box-shadow: var(--dsw-shadow-lv2);
+   font-size: 16px;
+   line-height: 24px;
+   /* Elevated surface in dark, same as the menus: the draft scrollport inside
+      scrolls once the composer hits its height cap, so the thumb takes the l2
+      pair. Declared on the card because the elevation belongs to the surface,
+      and the custom properties inherit down to the box that actually scrolls
+      (see ui-theme styles/scrollbar.css for the rebinding contract). */
+   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+ }
+ 
+ /* No-workspace trigger state: dashed l4 stroke marks the card as a pick-a-
+    workspace affordance rather than a live composer; hover answers in the
+    business blue to invite the click. Native `dashed` has a fixed browser
+    pattern, so the stroke is an ::after overlay: theme-token background masked
+    by an SVG dash ring (stroke-width 2 centered on the box edge = 1px visible
+    inside), which keeps the 22px radius and both themes. */
+ .cardWorkspaceTrigger {
+   border-color: transparent;
+   cursor: pointer;
+ }
+ 
+ .cardWorkspaceTrigger::after {
+   content: '';
+   position: absolute;
+   inset: -1px;
+   border-radius: 22px;
+   background: var(--dsw-alias-border-l4);
+   transition: background-color 100ms ease;
+   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100%25' height='100%25' fill='none' rx='22' ry='22' stroke='black' stroke-width='2' stroke-dasharray='4 4'/%3E%3C/svg%3E");
+   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100%25' height='100%25' fill='none' rx='22' ry='22' stroke='black' stroke-width='2' stroke-dasharray='4 4'/%3E%3C/svg%3E");
+   pointer-events: none;
+ }
+ 
+ /* Disabled toolbar controls neither receive nor swallow clicks in the trigger
+    state: pointer events fall through to the card's own click handler, making
+    the full capsule one pick target. */
+ .cardWorkspaceTrigger :disabled {
+   pointer-events: none;
+ }
+ 
+ .cardWorkspaceTrigger:hover::after {
+   background: var(--dsw-alias-state-business-primary);
+ }
+ 
+ .accessory {
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   padding: 10px 12px 0;
+ }
+ 
+ /* Rail seat: the card's top padding (10px) plus this 4px matches DeepSeek
+    Chat's spacing above the thumbnails; the card's 12px flex gap owns the space
+    below. The rail itself (arrows, hidden scrollbar, card geometry) is the
+    ui-attachment atom's. */
+ .attachments {
+   min-width: 0;
+   padding: 4px 12px 0;
+ }
+ 
+-/* Floating overlay anchor (menu / popupSelect shell): entries position
+-   themselves against the card (bottom: 100% + gap); closed entries render null. */
+-.overlayAnchor {
+-  position: absolute;
+-  inset: 0 0 auto;
+-  height: 0;
+-}
+-
+ /* The draft's scrollport, and the ONLY scrolling box in the composer: the
+    caret is the textarea's and every visible glyph is the backdrop's, so the two
+    layers stay together only by riding one offset the browser applies to both at
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+index 9585677ae3..0e0158eefe 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+@@ -49,760 +49,759 @@ export function InputBar({
+   renderSlot, useNotices, useLexicon, useMenuLauncher,
+   useProjection, sessionId, variant, disabled: inert = false, blocked,
+   workspacePickerOpen = false, onRequestWorkspace,
+-  placeholder, accessory, overlay, leftItems, rightItems, footer,
++  placeholder, accessory, heroModeControl, leftItems, rightItems, footer,
+ }: InputBarProps) {
+   const input = useInput(s => s)
+   const notice = useNotices(s => s)
+   const lexicon = useLexicon(s => s)
+   const commandMenuOpen = useMenuLauncher(source => source === 'command')
+   const promptError = useSession(s => s.promptError) ?? null
+   const running = useSession(s => s.running) ?? false
+   const subagent = useSession(s => s.subagent) ?? null
+   const removed = useSession(s => s.removed) ?? false
+   // Plan mode swaps the textarea placeholder (the projection is the folded
+   // host value; owner-prop placeholders — hero, session-unavailable — win).
+   const planActive = useProjection('plan', plan => plan !== undefined && (plan.pending ? !plan.active : plan.active))
+   // Absent (undefined: no frame yet) and cleared (null) both mean no goal.
+   const hasGoal = useProjection('goal', goal => goal != null)
+   // Session-maybe: the machine faces are absent together while no session is
+   // current; the bar renders the same DOM inert instead of a parallel tree.
+   const live = input !== undefined && keyboard !== undefined && inputActions !== undefined
+   const draft = input?.draft ?? ''
+   const attachments = useMemo(
+     () => input === undefined || draftImages === undefined ? [] : draftImages(input.imageIds),
+     [draftImages, input?.imageIds],
+   )
+   const empty = draft.trim() === '' && attachments.length === 0
+   const [preview, setPreview] = useState<ComposerAttachment | null>(null)
+   const [dragActive, setDragActive] = useState(false)
+   // Transient error banner (image-intake rejections and prompt failures): the
+   // seq keys the Toast so an identical repeated message restarts the
+   // hold-then-fade cycle instead of silently reusing the faded one.
+   const [toast, setToast] = useState<{ seq: number; text: string } | null>(null)
+   const toastSeq = useRef(0)
+   const showToast = useCallback((text: string) => {
+     toastSeq.current += 1
+     setToast({ seq: toastSeq.current, text })
+   }, [])
+   const dismissToast = useCallback(() => { setToast(null) }, [])
+   // The deployment's image-intake limits (absent while no attachment service
+   // is composed — the pre-check below then defers entirely to the host).
+   const imageLimits = useProjection('imageLimits')
+   // Prompt failures are ordinary failures (no create/attach transaction exists
+   // anymore): the toast announces promptError, the draft stays in the machine,
+   // and the user resubmits. A remount over a session whose machine still holds
+   // an unresolved promptError deliberately re-announces it once — the failure
+   // is still pending, and a transient banner is its only surface. Attachment
+   // rejections show product copy keyed by the wire reason; other codes are
+   // developer-facing and keep the raw message plus code.
+   useEffect(() => {
+     if (promptError === null) return
+     showToast(promptError.error.code === 'attachment-error'
+       ? attachmentErrorText(t, promptError.error.details.reason, imageLimits)
+       : `${promptError.error.message} (${promptError.error.code})`)
+   }, [promptError, showToast, t, imageLimits])
+   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+   const cardRef = useRef<HTMLDivElement | null>(null)
+   const dragDepthRef = useRef(0)
+   const scrollRef = useRef<HTMLDivElement | null>(null)
+   const mirrorRef = useRef<HTMLDivElement | null>(null)
+   // IME guard: composition Enter picks a candidate, it must not send. The ref outlives renders;
+   // clearing is deferred one tick because Safari delivers the closing keydown AFTER compositionend.
+   const composingRef = useRef(false)
+   const onCompositionStart = (): void => {
+     composingRef.current = true
+   }
+   const onCompositionEnd = (): void => {
+     setTimeout(() => {
+       composingRef.current = false
+     }, 10)
+   }
+ 
+   // The Access seat's data: the host-computed permissions projection
+   // (undefined = capability absent → the chip renders nothing).
+   const permissions = useProjection('permissions')
+ 
+   // A continuable child without its live parent cannot accept human input,
+   // but its independent Stop below stays available while it runs.
+   const continuable = subagent?.address.mode === 'continuable'
+   const parentOffline = continuable && !subagent.parentAvailable
+   // Running input stays free; locked = session removed, the
+   // inert no-workspace state, the machine faces absent (no session), or a
+   // parent-offline continuable child. An owner block also disables input;
+   // adjudicating and submitting render read-only so the draft stays visible.
+   const disabled = removed || inert || !live || blocked !== undefined || parentOffline
+   const locked = disabled
+   // The model seat is the ONE control a block leaves live: every block this
+   // contract has is cleared by choosing a model, so locking it too would leave
+   // the composer asking for the only thing it prevents. The other reasons to
+   // be disabled do lock it — there is no session to choose a model for.
+   const modelSeatLocked = removed || inert || !live
+   const machineBusy = input?.phase === 'adjudicating' || input?.phase === 'submitting'
+   // The no-workspace textarea remains the resident DOM node but acts as the
+   // existing picker trigger. Message controls stay locked until a Session
+   // exists; the trigger itself is read-only rather than disabled so pointer
+   // and keyboard users can reach the recovery action.
+   const workspaceTrigger = inert && !removed && onRequestWorkspace !== undefined
+   const textareaDisabled = removed || (locked && !workspaceTrigger)
+   const canSteerQueue = !locked && !machineBusy && !commandMenuOpen && empty && running && subagent === null
+     && input.queue.some(row => row.placement === 'queued')
+ 
+   useEffect(() => {
+     if (input === undefined || inputActions === undefined) return
+     if (attachments.length !== input.imageIds.length) {
+       inputActions.pruneImages(attachments.map(attachment => attachment.id))
+     }
+   }, [attachments, input?.imageIds, inputActions])
+ 
+   useEffect(() => {
+     if (preview !== null && !attachments.some(attachment => attachment.id === preview.id)) setPreview(null)
+   }, [attachments, preview])
+ 
+   // Scroll the draft scrollport the minimum that brings `caret` into view — the
+   // browser's own behavior for typing, performed for the paths where it does
+   // not act.
+   //
+   // The mirror is the caret's ruler: it renders the same draft at the same
+   // metrics and the same wrap width in the same stack (that is what makes it
+   // the height authority), so a Range collapsed at the caret's index reports
+   // where the caret is without a caret API.
+   const revealCaret = (caret: number): void => {
+     const scrollEl = scrollRef.current
+     const mirrorEl = mirrorRef.current
+     const text = mirrorEl?.firstChild
+     if (scrollEl === null || mirrorEl === null || !(text instanceof Text)) return
+     // A box that cannot scroll has nothing to reveal: the draft fits, so every
+     // caret is already in view and the assignment below would clamp to itself.
+     if (scrollEl.scrollHeight <= scrollEl.clientHeight) return
+     const at = Math.min(caret, text.data.length)
+     // A caret straight after a newline sits on a line with nothing on it to
+     // measure — the shape a trailing-newline draft ends in — and the engines
+     // disagree there: chromium returns NO client rects at all (an all-zero box,
+     // which would scroll the wrong way), firefox reports the line above, WebKit
+     // the right one. Measure the newline itself instead, which is the line the
+     // caret just left, and step one line down; that they all agree on.
+     const afterNewline = at > 0 && text.data[at - 1] === '\n'
+     const range = document.createRange()
+     range.setStart(text, afterNewline ? at - 1 : at)
+     if (afterNewline) range.setEnd(text, at)
+     else range.collapse(true)
+     const line = afterNewline ? Number.parseFloat(getComputedStyle(mirrorEl).lineHeight) : 0
+     const rect = range.getBoundingClientRect()
+     const box = scrollEl.getBoundingClientRect()
+     if (rect.bottom + line > box.bottom) scrollEl.scrollTop += rect.bottom + line - box.bottom
+     else if (rect.top + line < box.top) scrollEl.scrollTop -= box.top - rect.top - line
+   }
+ 
+   // Reveal the focus end of the current selection. Today's entry paths leave a
+   // collapsed selection, but honoring direction keeps a future range-preserving
+   // path from revealing its anchor instead of its focus.
+   const revealSelectionFocus = (el: HTMLTextAreaElement): void => {
+     // selectionStart/End are number|null in lib.dom; the type-aware lint program narrows them.
+     const caret = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd
+     // oxlint-disable-next-line typescript/no-unnecessary-condition
+     revealCaret(caret ?? el.value.length)
+   }
+ 
+   // Unlock (mount / session switch) returns focus to the box, and owns the
+   // reveal that comes with it. `preventScroll` because this focus is ours, not
+   // a gesture: the textarea is as tall as the draft, so the browser's reveal
+   // would walk up to the conversation scrollport and move the transcript under
+   // a user who only switched session. That leaves the caret to us — the DOM is
+   // reused across sessions, so switching to a longer draft keeps the previous
+   // offset while the value swap puts the caret at the new draft's end, which is
+   // off screen (measured on all three engines: offset 0 with the caret 940px
+   // down). Suppress the walk, then reveal in our own box.
+   useEffect(() => {
+     const el = inputRef.current
+     if (locked || el === null) return
+     el.focus({ preventScroll: true })
+     revealSelectionFocus(el)
+   }, [locked, sessionId])
+ 
+   // A persisted draft arrives AFTER the unlock effect: ConversationSession
+   // adopts it in its own mount effect, and a parent's mount effect runs after
+   // its children's. Reveal when the draft becomes non-empty so a restored long
+   // draft does not stay at its head with the caret at its end. This effect does
+   // not focus: send-clear, failed-send restore, and first-character transitions
+   // must not steal focus from another control the user moved to.
+   useEffect(() => {
+     const el = inputRef.current
+     if (locked || draft === '' || el === null) return
+     revealSelectionFocus(el)
+   }, [draft !== ''])
+ 
+   // Caret restore after an edit the composer performs itself. The machine owns
+   // the draft and the undo log, so paste and cut suppress the native edit and
+   // write the value through the machine — and a
+   // programmatic selection change reveals nothing: measured in chromium and
+   // WebKit, pasting a long block leaves the view where it was while the caret
+   // sits at the end of the draft. Native typing gets its reveal from the
+   // browser; these two have to ask for it, so they share one restore.
+   const restoreCaret = (el: HTMLTextAreaElement, caret: number): void => {
+     requestAnimationFrame(() => {
+       el.setSelectionRange(caret, caret)
+       revealCaret(caret)
+     })
+   }
+ 
+   // Wheel chaining on the draft scrollport, one lifetime (it is never
+   // unmounted — the inert state renders the same element disabled). While the
+   // capped box can still move in this direction, keep the native scroll; only
+   // at its own edge forward the delta to the active conversation scrollport, so
+   // a short draft never traps the gesture and a long draft stays scrollable.
+   // Hero mounts have no host and keep native wheel scrolling.
+   useEffect(() => {
+     const el = scrollRef.current
+     if (el === null) return
+     const onWheel = (e: WheelEvent): void => {
+       const host = el.closest('[data-conversation-scroll]')
+       if (!(host instanceof HTMLElement) || e.deltaY === 0) return
+       const atTop = el.scrollTop <= 0
+       const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+       if ((e.deltaY < 0 && !atTop) || (e.deltaY > 0 && !atEnd)) return
+       e.preventDefault()
+       host.scrollTop += e.deltaY
+     }
+     el.addEventListener('wheel', onWheel, { passive: false })
+     return () => { el.removeEventListener('wheel', onWheel) }
+   }, [])
+ 
+   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+     if (workspaceTrigger) {
+       if (e.key === 'Enter' || e.key === ' ') {
+         e.preventDefault()
+         onRequestWorkspace()
+       }
+       return
+     }
+     // Absent machine without a Workspace recovery action stays disabled; the
+     // guard narrows the faces for the paths below.
+     if (keyboard === undefined || inputActions === undefined) return
+     // Shift+Enter is the native newline UNCONDITIONALLY — decided before the
+     // IME guard so a composition-closing Shift+Enter still breaks the line.
+     if (e.key === 'Enter' && e.shiftKey) return
+     // keyCode 229 is the legacy IME-composition signal engines emit without isComposing.
+     // oxlint-disable-next-line typescript/no-deprecated
+     const composing = composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229
+     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+       if (keyboard.arbitrate(e.key === 'ArrowUp' ? 'up' : 'down', composing) === 'consumed') e.preventDefault()
+       return
+     }
+     if (e.key === 'Escape') {
+       // Escape layering: an open overlay closes; claimed without an overlay
+       // does NOT release (backspacing the token is the only exit gesture).
+       keyboard.dismissPopup()
+       if (keyboard.arbitrate('escape', composing) === 'consumed') e.preventDefault()
+       return
+     }
+     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z' || e.key === 'y')) {
+       // The machine owns the undo/redo log (chip transactions have semantics
+       // the browser stack cannot represent); never let the native stack run.
+       e.preventDefault()
+       if (machineBusy || locked) return
+       const redo = e.key === 'y' || e.shiftKey
+       if (redo) keyboard.redo()
+       else keyboard.undo()
+       return
+     }
+     if (e.key === ' ') {
+       if (composing) return
+       if (keyboard.space()) e.preventDefault() // claim token already carries the trailing separator
+       return
+     }
+     if (e.key !== 'Enter') return
+     if (composing) return
+     // Menu-open Enter picks the highlight through arbitration; a no-highlight
+     // menu passes down to the machine's own adjudication.
+     const arbitrated = keyboard.arbitrate('enter', composing)
+     if (arbitrated !== 'pass') {
+       e.preventDefault()
+       return
+     }
+     e.preventDefault()
+     if (e.repeat) return // held-down Enter must not machine-gun sends
+     if (locked || machineBusy) return
+     const accelerated = e.ctrlKey || e.metaKey
+     // Empty-draft accelerated Enter acts on the queue instead of the (empty)
+     // draft: the machine rejects empty drafts, so the gesture steers every
+     // still-pending queued message into the running turn (the dock's per-row
+     // steer button applied to the whole queue). Steering needs the same
+     // window as the per-row button: a running ordinary session.
+     if (accelerated && canSteerQueue) {
+       keyboard.steerQueue()
+       return
+     }
+     keyboard.submit(resolveSubmitMode(
+       running,
+       accelerated ? 'accelerated' : 'enter',
+       subagent === null,
+     ))
+   }
+ 
+   const onChange = (e: ChangeEvent<HTMLTextAreaElement>): void => {
+     if (keyboard === undefined || locked) return // disabled/read-only states cannot edit the draft
+     if (machineBusy) return // submitting is the read-only span; adjudicating holds the pending lock
+     const next = e.target.value
+     keyboard.setDraft(next)
+     // selectionStart is number|null in lib.dom; the type-aware lint program narrows it.
+     // oxlint-disable-next-line typescript/no-unnecessary-condition
+     keyboard.track(next, e.target.selectionStart ?? next.length)
+   }
+ 
+   // ---- chip atomicity (DOM layer; the machine sees only transactions) ----
+   // Placeholders occupy exactly one char, so caret positions are always
+   // BETWEEN them — what needs normalizing is deletion (whole chip per
+   // Backspace/Delete via native single-char semantics, which U+FFFC already
+   // gives us) and selection endpoints: Shift-extension snapping is native
+   // too (one char = one step). Mouse selection of a chip is handled in the
+   // backdrop click handler below. Undo/redo must NOT reach the browser: the
+   // machine owns the transaction log.
+   // selectionStart/End are number|null in lib.dom; the type-aware lint program narrows them.
+   /* oxlint-disable typescript/no-unnecessary-condition */
+   const selectionOf = (el: HTMLTextAreaElement) => ({
+     start: el.selectionStart ?? 0,
+     end: el.selectionEnd ?? el.selectionStart ?? 0,
+   })
+   /* oxlint-enable typescript/no-unnecessary-condition */
+ 
+   const onCopyOrCut = (e: React.ClipboardEvent<HTMLTextAreaElement>, cut: boolean): void => {
+     if (input === undefined || keyboard === undefined) return // absent machine: no draft can be copied or cut
+     const el = e.currentTarget
+     const { start, end } = selectionOf(el)
+     if (start === end) return
+     const slice = draft.slice(start, end)
+     const touched = input.occurrences.filter(o => o.offset >= start && o.offset < end)
+     if (touched.length === 0 && !cut) return // plain copy of plain text: native path is fine
+     e.preventDefault()
+     // Expand placeholders to their owner clipboard projections.
+     let text = ''
+     let cursor = start
+     for (const o of touched) {
+       text += draft.slice(cursor, o.offset) + o.clipboardText
+       cursor = o.offset + 1
+     }
+     text += draft.slice(cursor, end)
+     e.clipboardData.setData('text/plain', text)
+     if (cut && !machineBusy && !locked) {
+       keyboard.setDraft(draft.slice(0, start) + draft.slice(end), { start, end, insertedLength: 0 })
+       restoreCaret(el, start)
+     }
+     void slice
+   }
+ 
+   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>): void => {
+     if (keyboard === undefined) return // absent machine: no draft can accept a paste
+     if (machineBusy || locked) return
+     const files = Array.from(e.clipboardData.items)
+       .filter(item => item.kind === 'file')
+       .map(item => item.getAsFile())
+       .filter((file): file is File => file !== null)
+     if (files.length > 0) intakeImages(files)
+     const text = e.clipboardData.getData('text/plain')
+     if (text === '') {
+       if (files.length > 0) e.preventDefault()
+       return
+     }
+     e.preventDefault()
+     const el = e.currentTarget
+     const sel = selectionOf(el)
+     // Sync components stay empty at this layer: hot-snapshot matching needs
+     // the Slash roster, which lives behind keyboard.track — the paste attempt
+     // opens in the machine and the controller upgrades tokens as matches
+     // land (paste-upgrade). The DOM layer only starts the transaction.
+     keyboard.pasteBegin(text, sel)
+     const caret = sel.start + text.length
+     restoreCaret(el, caret)
+     keyboard.track(keyboard.snapshot.draft, caret)
+   }
+ 
+   // Intake pre-check (DeepSeek Chat semantics): an addition that would break
+   // a projected limit is refused as a whole batch, announced immediately, and
+   // never enters the rail — no more submit-time failure rolling the rail
+   // back. The host enforces the same limits at submit for callers that bypass
+   // this composer.
+   const intakeImages = useCallback((files: readonly File[]): void => {
+     if (addImages === undefined || files.length === 0) return
+     const rejected = ((): string | null => {
+       if (imageLimits !== undefined) {
+         // Format precedes limits (DeepSeek Chat's filter order): a batch with
+         // a non-image must announce the format problem, not a count or size
+         // it could never pass anyway — addImages rejects it authoritatively.
+         if (files.some(file => !(imageLimits.mediaTypes as readonly string[]).includes(file.type))) {
+           return addImages(files)
+         }
+         if (attachments.length + files.length > imageLimits.maxImagesPerMessage) {
+           return t('image.tooMany', { count: imageLimits.maxImagesPerMessage })
+         }
+         if (files.some(file => file.size > imageLimits.maxImageBytes)) {
+           return t('image.fileTooLarge', { size: imageSizeText(imageLimits.maxImageBytes) })
+         }
+         const total = attachments.reduce((sum, attachment) => sum + attachment.file.size, 0)
+           + files.reduce((sum, file) => sum + file.size, 0)
+         if (total > imageLimits.maxMessageImageBytes) {
+           return t('image.totalTooLarge', { size: imageSizeText(imageLimits.maxMessageImageBytes) })
+         }
+       }
+       return addImages(files)
+     })()
+     if (rejected !== null) showToast(rejected)
+   }, [addImages, attachments, imageLimits, showToast, t])
+ 
+   // Whole-page file-drop intake (DeepSeek Chat behavior): the listeners live
+   // on the document so a drop anywhere over the window adds images, not only
+   // over the composer card. Safe as document-level state: the composer-bar
+   // slot is `kind: 'single'`, so at most one bar is mounted to bind these.
+   // Text drags carry no 'Files' type and pass through untouched, keeping the
+   // native drop-text-into-textarea path. The overlay layer itself is
+   // pointer-inert, so it never disturbs the enter/leave count.
+   const canAcceptDrop = !locked && !machineBusy && addImages !== undefined
+   useEffect(() => {
+     const hasFiles = (event: globalThis.DragEvent): boolean =>
+       event.dataTransfer?.types.includes('Files') ?? false
+     const reset = (): void => {
+       dragDepthRef.current = 0
+       setDragActive(false)
+     }
+     const onDragEnter = (event: globalThis.DragEvent): void => {
+       if (!hasFiles(event)) return
+       event.preventDefault()
+       dragDepthRef.current += 1
+       setDragActive(true)
+     }
+     const onDragOver = (event: globalThis.DragEvent): void => {
+       if (!hasFiles(event) || event.dataTransfer === null) return
+       event.preventDefault()
+       event.dataTransfer.dropEffect = canAcceptDrop ? 'copy' : 'none'
+     }
+     const onDragLeave = (event: globalThis.DragEvent): void => {
+       if (!hasFiles(event)) return
+       dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+       if (dragDepthRef.current === 0) setDragActive(false)
+       // Leaving through the viewport edge does not balance the count on every
+       // engine; a page-root leave at the border means the drag left the window.
+       const leavingViewport = event.clientX <= 0 || event.clientY <= 0
+         || event.clientX >= window.innerWidth || event.clientY >= window.innerHeight
+       if ((event.target === document.documentElement || event.target === document.body) && leavingViewport) reset()
+     }
+     const onDrop = (event: globalThis.DragEvent): void => {
+       if (!hasFiles(event)) return
+       event.preventDefault()
+       reset()
+       if (!canAcceptDrop) return
+       intakeImages([...(event.dataTransfer?.files ?? [])])
+     }
+     document.addEventListener('dragenter', onDragEnter)
+     document.addEventListener('dragover', onDragOver)
+     document.addEventListener('dragleave', onDragLeave)
+     document.addEventListener('drop', onDrop)
+     window.addEventListener('dragend', reset)
+     return () => {
+       document.removeEventListener('dragenter', onDragEnter)
+       document.removeEventListener('dragover', onDragOver)
+       document.removeEventListener('dragleave', onDragLeave)
+       document.removeEventListener('drop', onDrop)
+       window.removeEventListener('dragend', reset)
+     }
+   }, [canAcceptDrop, intakeImages])
+ 
+   const closePreview = useCallback(() => { setPreview(null) }, [])
+ 
+   // Rail thumbnails with their strings resolved here: the attachment atoms are
+   // zero-cordis and read no locale.
+   const railItems = useMemo<ComposerRailItem[]>(() => attachments.map(attachment => ({
+     id: attachment.id,
+     previewUrl: attachment.previewUrl,
+     alt: attachment.file.name || t('image.pending'),
+     removeLabel: t('image.remove', { name: attachment.file.name }),
+     attachment,
+   })), [attachments, t])
+ 
+   const onSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>): void => {
+     // Any caret/selection gesture ends a live paste attempt (the machine
+     // cannot observe DOM selection). Cheap no-op when none is live.
+     if (keyboard !== undefined && keyboard.snapshot.paste !== undefined) keyboard.invalidatePaste()
+     void e
+   }
+ 
+   // Button presses steal focus from the textarea; suppress at mousedown so
+   // typing continues seamlessly. `preventScroll` for the same reason as the
+   // unlock effect, and with no reveal of its own: the caret has not moved, and
+   // the next keystroke gets the browser's native one.
+   const keepFocus = (e: MouseEvent<HTMLButtonElement>): void => {
+     e.preventDefault()
+     inputRef.current?.focus({ preventScroll: true })
+   }
+ 
+   const onToggleCommandMenu = (): void => {
+     const el = inputRef.current
+     if (el !== null) toggleCommandMenu?.(selectionOf(el))
+   }
+ 
+   // Ordinary sessions retain their primary Send/Stop toggle. A continuable
+   // child keeps Send as the primary action and exposes Stop independently so
+   // pointer users can queue follow-ups while its current turn is running.
+   const primaryStops = running && subagent === null
+   const interruptible = running && continuable
+   const primaryLabel = primaryStops ? t('input.stop') : t('input.send')
+   const onPrimary = (): void => {
+     if (primaryStops) {
+       stop?.()
+       return
+     }
+     if (inputActions === undefined) return // absent machine: the button is disabled
+     /* v8 ignore next -- defensive: the primary button is disabled while empty||disabled, so a click cannot reach the false arm. */
+     if (!empty && !disabled && !machineBusy) inputActions.submit()
+   }
+ 
+   // The Access seat: the projection-fed permission chip (renders nothing
+   // while the permissions key is absent — permission-less host or Draft —
+   // or while the command face is absent with the session).
+   const accessSelect: ReactNode = command === undefined
+     ? null
+-    : <PermissionSelect key={sessionId} value={permissions} locked={locked} command={command} t={t} />
++    : <PermissionSelect key={sessionId} value={permissions} locked={locked} command={command} compact={variant === 'hero'} t={t} />
+ 
+   // Mirror-layer decorations: a visible backdrop with transparent text. The
+   // claim token highlights through behind the textarea glyphs; each U+FFFC
+   // placeholder renders as a chip (the textarea's own glyph is invisible, the
+   // backdrop chip supplies the visual); the claim hint is ghost text.
+   const deco = input === undefined ? INERT_DECORATIONS : deriveDecorations(input, lexicon)
+   const backdrop: ReactNode[] = []
+   {
+     // Segment boundaries: the token range end, every chip offset, and every
+     // text-ref range — merged in draft order (the sources never
+     // overlap: chips sit on placeholders, text-refs on plain tokens, the
+     // claim token only leads).
+     let cursor = 0
+     const pushPlain = (upTo: number): void => {
+       if (upTo > cursor) backdrop.push(draft.slice(cursor, upTo))
+       cursor = upTo
+     }
+     if (deco.token !== null) {
+       backdrop.push(
+         <mark key="token" className={css.hlToken} data-decoration="token">
+           {draft.slice(deco.token.start, deco.token.end)}
+         </mark>,
+       )
+       cursor = deco.token.end
+     }
+     type Boundary =
+       | { at: number; kind: 'chip'; chip: (typeof deco.chips)[number] }
+       | { at: number; kind: 'text-ref'; ref: (typeof deco.textRefs)[number] }
+     const boundaries: Boundary[] = [
+       ...deco.chips.map(chip => ({ at: chip.offset, kind: 'chip' as const, chip })),
+       ...deco.textRefs.map(ref => ({ at: ref.start, kind: 'text-ref' as const, ref })),
+     ].sort((a, b) => a.at - b.at)
+     for (const b of boundaries) {
+       if (b.at < cursor) continue // claim-token overlap: the leading mark wins
+       pushPlain(b.at)
+       if (b.kind === 'chip') {
+         const chip = b.chip
+         backdrop.push(
+           // The cell's ::before renders U+FFFC itself so its advance equals the
+           // textarea's placeholder exactly (same char, same font); the label is
+           // a clipped overlay that never affects layout.
+           <span
+             key={`chip-${chip.occurrenceId}`}
+             className={clsx(css.chip, chip.invalid && css.chipInvalid)}
+             data-decoration="chip"
+             data-occurrence={chip.occurrenceId}
+             data-invalid={chip.invalid || undefined}
+             title={chip.label}
+           >
+             <span className={css.chipLabel}>{chip.label}</span>
+           </span>,
+         )
+         cursor = chip.offset + 1 // the placeholder char the chip stands for
+       } else {
+         // Plain-range highlight: the glyphs stay the
+         // textarea's (advance untouched); the mark paints the chip look.
+         backdrop.push(
+           <mark key={`ref-${b.ref.start}`} className={css.textRef} data-decoration="text-ref">
+             {draft.slice(b.ref.start, b.ref.end)}
+           </mark>,
+         )
+         cursor = b.ref.end
+       }
+     }
+     pushPlain(draft.length)
+     if (deco.hint !== null) {
+       // Claim tokens have the `/name ` format (trailing space); trim to the bare name.
+       const commandName = input?.claim?.token.slice(1).trim() ?? ''
+       const hintKey = `hint.${commandName === 'goal' && hasGoal ? 'goal.active' : commandName}`
+       // Dynamic lookup by claimed command name: unknown commands miss the
+       // dictionary and keep the machine's own hint, so the call is wide.
+       const translated = (t as Translate)(hintKey)
+       const displayHint = translated !== hintKey ? translated : deco.hint
+       backdrop.push(<span key="hint" className={css.hint} data-decoration="hint">{displayHint}</span>)
+     }
+   }
+ 
+   return (
+     <div className={clsx(css.root, variant === 'hero' && css.hero)}>
+       {dragActive && (
+         <DropOverlay
+           disabled={!canAcceptDrop}
+           labels={dropOverlayLabels(t, canAcceptDrop, imageLimits === undefined ? undefined : {
+             count: imageLimits.maxImagesPerMessage,
+             size: imageSizeText(imageLimits.maxImageBytes),
+           })}
+         />
+       )}
+       {toast !== null && (
+         <Toast
+           key={toast.seq}
+           text={toast.text}
+           icon={<IconWarningOutline16 />}
+           anchor={cardRef.current}
+           onDone={dismissToast}
+         />
+       )}
+       {notice !== null && (
+         <div className={clsx(css.notice, notice.level === 'error' && css.noticeError)} role="status">
+           {notice.text}
+         </div>
+       )}
+       {/* Trigger clicks land on the card, not the textarea: the toolbar row's
+           disabled controls swallow clicks otherwise (the CSS state disarms
+           their pointer events), so the WHOLE capsule is the pick target.
+           pointerdown stops here so the Menu's outside-close cannot race the
+           click's reopen (close-then-open flickers the chip's open echo). */}
+       <div
+         ref={cardRef}
+         className={clsx(css.card, workspaceTrigger && css.cardWorkspaceTrigger)}
+         data-composer-card
+         onClick={workspaceTrigger ? onRequestWorkspace : undefined}
+         onPointerDown={workspaceTrigger ? (e) => { e.stopPropagation() } : undefined}
+       >
+-        {overlay !== undefined && <div className={css.overlayAnchor}>{overlay}</div>}
+         {accessory !== undefined && <div className={css.accessory}>{accessory}</div>}
+         {railItems.length > 0 && (
+           <div className={css.attachments}>
+             <AttachmentRail
+               items={railItems}
+               labels={attachmentRailLabels(t)}
+               onOpen={(item) => { setPreview(item.attachment) }}
+               onRemove={(item) => { removeImage?.(item.attachment.id) }}
+             />
+           </div>
+         )}
+         {/* One scrollport, two text layers. The hidden mirror renders draft+'\n' and stretches the
+             stack to the draft's FULL height (counting rows by '\n' cannot see soft wraps); the
+             absolutely-positioned backdrop and textarea ride that height, and .scroll — capped at 14
+             lines in CSS — is the only thing that scrolls. The caret belongs to the textarea and the
+             glyphs to the backdrop, so they can only stay together by moving together: one scroll
+             offset the browser applies to both layers at once, never a JS mirror between two boxes,
+             which a compositor-driven gesture outruns and leaves the words trailing the caret. */}
+         <div ref={scrollRef} className={css.scroll} data-input-scroll>
+           <div className={css.grow}>
+             <div aria-hidden className={css.backdrop} data-input-backdrop>{backdrop}</div>
+             <textarea
+               ref={inputRef}
+               className={css.input}
+               value={draft}
+               disabled={textareaDisabled}
+               readOnly={machineBusy || workspaceTrigger}
+               aria-label={workspaceTrigger ? t('hero.chooseWorkspace') : undefined}
+               aria-haspopup={workspaceTrigger ? 'menu' : undefined}
+               aria-expanded={workspaceTrigger ? workspacePickerOpen : undefined}
+               data-phase={input?.phase ?? 'inert'}
+               placeholder={placeholder ?? (parentOffline
+                 ? t('placeholder.parentOffline')
+                 : disabled
+                   ? t('placeholder.unavailable')
+                   // The steer hint deliberately outranks the plan placeholder:
+                   // while it shows, the whole-queue gesture is genuinely available
+                   // (the gate never consults plan mode), so the actionable hint wins.
+                   : canSteerQueue
+                     ? t('placeholder.steerQueue')
+                     : planActive ? t('placeholder.plan') : t('placeholder.default'))}
+               rows={2}
+               onChange={onChange}
+               onKeyDown={onKeyDown}
+               onSelect={onSelect}
+               onCopy={(e) => { onCopyOrCut(e, false) }}
+               onCut={(e) => { onCopyOrCut(e, true) }}
+               onPaste={onPaste}
+               onCompositionStart={onCompositionStart}
+               onCompositionEnd={onCompositionEnd}
+             />
+             <div ref={mirrorRef} aria-hidden className={css.mirror} data-input-mirror>{`${draft}\n`}</div>
+           </div>
+         </div>
+         <div className={css.row}>
+           <div className={css.tools}>
+             <Tooltip label={t('input.commands')} side="top" delayMs={500}>
+               <button
+                 type="button"
+                 className={css.add}
+                 aria-label={t('input.commands')}
+                 aria-haspopup="listbox"
+                 aria-expanded={commandMenuOpen}
+                 disabled={locked || toggleCommandMenu === undefined}
+                 onMouseDown={keepFocus}
+                 onClick={onToggleCommandMenu}
+               >
+                 <IconPlusOutline16 size={14} />
+               </button>
+             </Tooltip>
+             <div className={css.modes}>
+               {accessSelect}
++              {heroModeControl}
+               {renderSlot('conversation.input.plan', { locked })}
+             </div>
+             {leftItems}
+           </div>
+           <div className={css.trailing}>
+             {rightItems}
+             {renderSlot('conversation.input.model', { locked: modelSeatLocked })}
+-            <ContextMeter useProjection={useProjection} t={t} />
++            <ContextMeter useProjection={useProjection} stats={footer} t={t} />
+             {interruptible && (
+               <Tooltip label={t('input.stop')} side="top" delayMs={500}>
+                 <button
+                   type="button"
+                   className={css.primary}
+                   aria-label={t('input.stop')}
+                   disabled={stop === undefined}
+                   onMouseDown={keepFocus}
+                   onClick={stop}
+                 >
+                   <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+                     <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" />
+                   </svg>
+                 </button>
+               </Tooltip>
+             )}
+             <Tooltip label={primaryLabel} side="top" delayMs={500}>
+               <button
+                 type="button"
+                 className={css.primary}
+                 aria-label={primaryLabel}
+                 disabled={primaryStops ? stop === undefined : empty || disabled || machineBusy}
+                 onMouseDown={keepFocus}
+                 onClick={onPrimary}
+               >
+                 {primaryStops ? (
+                   <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+                     <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" />
+                   </svg>
+                 ) : (
+                   <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+                     <path d="M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.43233C9.48724 1.61297 9.73029 1.85793 9.97949 2.10714L14.707 6.83468L13.293 8.24874L9 3.95577V15.0417H7V3.95577L2.70703 8.24874L1.29297 6.83468L6.02051 2.10714C6.26971 1.85793 6.51277 1.61297 6.7373 1.43233C6.97662 1.23986 7.28445 1.04402 7.6875 0.980183C7.8973 0.947006 8.1031 0.95516 8.3125 0.980183Z" fill="currentColor" />
+                   </svg>
+                 )}
+               </button>
+             </Tooltip>
+           </div>
+         </div>
+       </div>
+       {preview !== null && (
+         <ImageLightbox
+           src={preview.previewUrl}
+           alt={preview.file.name || t('image.original')}
+           labels={lightboxLabels(t)}
+           onClose={closePreview}
+         />
+       )}
+-      {footer}
+     </div>
+   )
+ }
+diff --git a/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.module.css b/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.module.css
+index 22f64d6e61..37569be1a5 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.module.css
+@@ -43,34 +43,61 @@
+   height: 14px;
+ }
+ 
++/* Hero's bottom controls are intentionally color-first: the selected mode is
++   explained by its hover tip, while the safe/write/full states stay legible
++   at a glance without consuming the composer width. */
++.triggerCompact {
++  width: 28px;
++  min-width: 28px;
++  justify-content: center;
++  padding: 0;
++}
++
++.trigger[data-permission='read-only'] {
++  color: var(--dsw-alias-state-success-primary);
++}
++
++.trigger[data-permission='workspace-write'] {
++  color: var(--dsw-alias-state-business-primary);
++}
++
++.trigger[data-permission='danger-full-access'] {
++  color: var(--dsw-alias-state-warn-primary);
++}
++
+ .triggerLabel {
+   min-width: 0;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+ }
+ 
+ .chevron {
+   /* inline-flex, not inline: an inline seat reserves baseline descent under
+      the svg and floats the glyph off-center in the 28px trigger. */
+   display: inline-flex;
+   flex: 0 0 auto;
+   color: var(--dsw-alias-label-caption);
+   transition: transform 120ms ease;
+ }
+ 
+ /* Narrow composer: the trigger collapses to icon + chevron so the row keeps
+    fitting. Only triggers that actually carry a mode glyph drop their label —
+    a host-configured mode without one keeps its text as the sole identifier.
+    The 460px cut is the point where the row (attach + modes + model + send)
+    starts squeezing labels; the container is the composer row (InputBar .row —
+    anonymous query because CSS modules hash container-names per module). */
+ @container (max-width: 460px) {
+   .trigger:has(.triggerIcon) .triggerLabel {
+     display: none;
+   }
+ }
+ 
+ .chevronOpen {
+   transform: rotate(180deg);
+ }
++
++.panel { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 100; display: flex; box-sizing: border-box; width: 100%; padding: 6px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; background: var(--dsw-specific-menu); box-shadow: var(--dsw-shadow-lv3); }
++.option { display: flex; flex: 1; align-items: center; gap: 7px; min-height: 34px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font: inherit; font-size: 13px; }
++.option:hover, .optionSelected { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
++.optionIcon { display: inline-flex; color: inherit; }
+diff --git a/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx b/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx
+index 5230f59835..cfc4108631 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx
+@@ -2,158 +2,189 @@ import { useEffect, useState } from 'react'
+ import type { ReactNode } from 'react'
+ import clsx from 'clsx'
+ import type { PermissionSelect as PermissionSelectValue } from '@deepseek-ai/dsh-permission-presets/client'
+-import { IconChevronDownOutline14, Menu, RiskConfirmation } from '@deepseek-ai/dsh-client-ui-primitives'
++import { IconChevronDownOutline14, Menu, RiskConfirmation, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ComposerBarProps } from '../contract/slots.ts'
+ import css from './PermissionSelect.module.css'
++import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
+ 
+ const FULL_ACCESS = 'danger-full-access'
+ 
+ /* Shield glyphs (design set 1556): check = read-only, pencil = workspace
+    write, exclamation = full access. currentColor so the trigger and menu
+    rows tint them with their own text color. */
+ 
+ const shieldOutline = 'M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z'
+ 
+ const permissionGlyphs = {
+   'read-only': (
+     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+       <path d={shieldOutline} stroke="currentColor" strokeWidth="1.31831" strokeLinejoin="round" />
+       <path d="M12.1654 5.7552L8.9447 9.41475C8.73044 9.65816 8.53628 9.8804 8.35774 10.0423C8.1713 10.2114 7.94235 10.3717 7.64016 10.4254C7.48207 10.4535 7.32 10.4552 7.16151 10.4294C6.85843 10.3801 6.62728 10.2223 6.43836 10.0559C6.25752 9.89653 6.06037 9.67732 5.84264 9.43705L4.72925 8.20897L5.63557 7.38707L6.74897 8.61594C6.98603 8.87755 7.12974 9.03533 7.24673 9.13839C7.31033 9.19443 7.34485 9.21476 7.35823 9.22122C7.38068 9.22484 7.40352 9.22515 7.42593 9.22122C7.40522 9.22502 7.42893 9.23294 7.53583 9.136C7.65132 9.03126 7.79316 8.87139 8.02643 8.60638L11.2479 4.94763L12.1654 5.7552Z" fill="currentColor" />
+     </svg>
+   ),
+   'workspace-write': (
+     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+       <path d="M8.08887 0.251709C8.20479 0.23085 8.32486 0.241168 8.43652 0.282959L15.0215 2.75171C15.2787 2.84819 15.4492 3.09414 15.4492 3.3689V7.0105C15.4492 7.10986 15.4441 7.2081 15.4414 7.30542C15.0285 7.07175 14.5905 6.87695 14.1309 6.73022V3.82495L8.20508 1.60327L2.2793 3.82495V7.0105C2.27936 9.7171 3.4745 11.5379 5.02734 12.7947C5.01025 12.9942 5 13.1962 5 13.4001C5.00001 13.7617 5.02722 14.1169 5.08008 14.4636C2.91555 13.0393 0.961014 10.752 0.960938 7.0105V3.3689C0.960938 3.09417 1.13146 2.84821 1.38867 2.75171L7.97461 0.282959L8.08887 0.251709Z" fill="currentColor" />
+       <path d="M11.3525 5.64688V6.85688H5V5.64688H11.3525Z" fill="currentColor" />
+       <path d="M9.5824 8.29376V9.50376H5V8.29376H9.5824Z" fill="currentColor" />
+       <path d="M14.6647 15.6852H10.0338C10.3878 15.3751 10.7567 15.0517 11.0772 14.7706C11.2531 14.6164 11.4144 14.4746 11.5511 14.3547H14.6647V15.6852Z" fill="currentColor" />
+       <path d="M8.14852 14.1308L7.33925 15.4976C7.22458 15.6912 7.42245 15.9194 7.63037 15.8333L9.09785 15.2254L15.0399 10.0719L14.0905 8.97733L8.14852 14.1308Z" fill="currentColor" />
+     </svg>
+   ),
+   [FULL_ACCESS]: (
+     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+       <path d={shieldOutline} stroke="currentColor" strokeWidth="1.31831" strokeLinejoin="round" />
+       <path d="M9.10094 4.5V8.75939H7.59888V4.5H9.10094Z" fill="currentColor" />
+       <path d="M9.10094 9.8114V11.5H7.59888V9.8114H9.10094Z" fill="currentColor" />
+     </svg>
+   ),
+ } as Record<string, ReactNode>
+ 
+ /** Glyph for a permission option value; host-configured names outside the design set get none. */
+ function permissionGlyph(value: string): ReactNode | undefined {
+   return permissionGlyphs[value]
+ }
+ 
+ /**
+  * Display transform: kebab-case machine names render as title-case labels
+  * (`workspace-write` → `Workspace Write`); non-kebab host-configured names
+  * pass through. Full access intentionally overrides the machine-name
+  * transform so both permission surfaces use the product label `Full access`;
+  * the warning body remains locale-aware.
+  */
+ function displayName(name: string): string {
+   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) return name
+   return name.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+ }
+ 
+ function optionLabel(option: PermissionSelectValue['options'][number]): string {
+   return option.value === FULL_ACCESS ? 'Full access' : displayName(option.name)
+ }
+ 
+ export interface PermissionSelectProps {
+   value: PermissionSelectValue | undefined
+   locked: boolean
+   command: (line: string) => Promise<boolean>
++  /** Hero only: keep the compact bottom toolbar to a single colored glyph. */
++  compact?: boolean | undefined
+   /** The owning bar's locale seat, passed down as a plain prop. */
+   t: ComposerBarProps['t']
+ }
+ 
+-export function PermissionSelect({ value, locked, command, t }: PermissionSelectProps) {
++export function PermissionSelect({ value, locked, command, compact = false, t }: PermissionSelectProps) {
+   const [pick, setPick] = useState<string | null>(null)
+   const [open, setOpen] = useState(false)
+   const [confirmation, setConfirmation] = useState<string | null>(null)
+   const [acknowledged, setAcknowledged] = useState(false)
+ 
+   useEffect(() => {
+     if (!locked && value !== undefined) return
+     setOpen(false)
+     setAcknowledged(false)
+     setConfirmation(null)
+   }, [locked, value])
+ 
+   if (value === undefined) return null
+ 
+   const currentValue = pick ?? value.currentValue
+   const current = value.options.find(option => option.value === currentValue)
+   const busy = pick !== null || confirmation !== null
++  const currentLabel = current === undefined ? displayName(currentValue) : optionLabel(current)
+ 
+   const items: MenuEntry[] = value.options
+     .filter(o => o.value !== 'custom')
+     .map((option) => {
+       const icon = permissionGlyph(option.value)
+       return { id: option.value, label: optionLabel(option), ...icon === undefined ? {} : { icon } }
+     })
+ 
+   const submit = (id: string): void => {
+     setPick(id)
+     void command(`/permission ${id}`)
+       .catch(() => false)
+       .then(() => { setPick(null) })
+   }
+ 
+   const choose = (id: string): void => {
+     setOpen(false)
++    hosted.close()
+     if (id === value.currentValue) return
+     if (id === FULL_ACCESS) {
+       setAcknowledged(false)
+       setConfirmation(id)
+       return
+     }
+     submit(id)
+   }
+ 
+   const closeConfirmation = (): void => {
+     setAcknowledged(false)
+     setConfirmation(null)
+   }
+ 
+   const confirmFullAccess = (): void => {
+     if (locked || !acknowledged || confirmation === null) return
+     const id = confirmation
+     closeConfirmation()
+     submit(id)
+   }
+ 
++  const panel = (
++    <div className={css.panel} role="menu" aria-label={t('input.accessMode', { name: currentLabel })}>
++      {items.map(item => 'type' in item ? null : (
++        <button key={item.id} type="button" role="menuitem" aria-checked={item.id === currentValue}
++          className={clsx(css.option, item.id === currentValue && css.optionSelected)} onClick={() => { choose(item.id) }}>
++          {item.icon !== undefined && <span className={css.optionIcon}>{item.icon}</span>}<span>{item.label}</span>
++        </button>
++      ))}
++    </div>
++  )
++  const hosted = useComposerOverlay('permission', panel)
++  const panelOpen = hosted.available ? hosted.open : open
++
+   return (
+     <>
+-      <Menu
++      {!hosted.available && <Menu
+         open={open}
+         items={items}
+         selectedId={currentValue}
+         onSelect={choose}
+         onClose={() => { setOpen(false) }}
+         side="top"
+         anchor={
+-          <button
+-            type="button"
+-            className={css.trigger}
+-            aria-label={t('input.accessMode', { name: current === undefined ? displayName(currentValue) : optionLabel(current) })}
+-            title={current?.description}
+-            disabled={locked || busy}
+-            onClick={() => { setOpen(!open) }}
+-          >
+-            {permissionGlyph(currentValue) !== undefined && (
+-              <span className={css.triggerIcon} aria-hidden>{permissionGlyph(currentValue)}</span>
+-            )}
+-            <span className={css.triggerLabel}>{current === undefined ? displayName(currentValue) : optionLabel(current)}</span>
+-            {/* Same glyph + open rotation as the sibling ModelSelect trigger. */}
+-            <span className={clsx(css.chevron, open && css.chevronOpen)} aria-hidden>
+-              <IconChevronDownOutline14 />
+-            </span>
+-          </button>
++          <Tooltip label={currentLabel} side="top" delayMs={500}>
++            <button
++              type="button"
++              className={clsx(css.trigger, compact && css.triggerCompact)}
++              data-permission={currentValue}
++              aria-label={t('input.accessMode', { name: currentLabel })}
++              disabled={locked || busy}
++              onClick={() => { setOpen(!open) }}
++            >
++              {permissionGlyph(currentValue) !== undefined && (
++                <span className={css.triggerIcon} aria-hidden>{permissionGlyph(currentValue)}</span>
++              )}
++              {!compact && <span className={css.triggerLabel}>{currentLabel}</span>}
++              {/* Same glyph + open rotation as the sibling ModelSelect trigger. */}
++              {!compact && (
++                <span className={clsx(css.chevron, open && css.chevronOpen)} aria-hidden>
++                  <IconChevronDownOutline14 />
++                </span>
++              )}
++            </button>
++          </Tooltip>
+         }
+-      />
++      />}
++      {hosted.available && <Tooltip label={currentLabel} side="top" delayMs={500}>
++        <button type="button" className={clsx(css.trigger, compact && css.triggerCompact)} data-permission={currentValue}
++          data-composer-overlay-trigger aria-label={t('input.accessMode', { name: currentLabel })} disabled={locked || busy}
++          onClick={() => { hosted.toggle() }}>
++          {permissionGlyph(currentValue) !== undefined && <span className={css.triggerIcon} aria-hidden>{permissionGlyph(currentValue)}</span>}
++          {!compact && <span className={css.triggerLabel}>{currentLabel}</span>}
++          {!compact && <span className={clsx(css.chevron, panelOpen && css.chevronOpen)} aria-hidden><IconChevronDownOutline14 /></span>}
++        </button>
++      </Tooltip>}
+       <RiskConfirmation
+         open={confirmation !== null}
+         title={t('access.confirm.title')}
+diff --git a/packages/client/ui-conversation/src/client/stores.ts b/packages/client/ui-conversation/src/client/stores.ts
+index 5a4913f0fa..415ffe6300 100644
+--- a/packages/client/ui-conversation/src/client/stores.ts
++++ b/packages/client/ui-conversation/src/client/stores.ts
+@@ -2,33 +2,43 @@
+  * Per-session chat store shared by conversation and details registrations.
+  * The plugin creates its handle at apply time so identity follows the fiber.
+  */
+-import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-runtime/client'
++import { defineStore, type EngineStoreHandle, type SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+ import type { CallId, ChatStoreState, SelectionTarget } from './contract/views.ts'
++import type { ConversationViewState } from './view-state.ts'
+ 
+ /** Declared action shape used to give the exported factory a stable return type. */
+ type ChatActions = {
+   select: (draft: ChatStoreState, target: SelectionTarget | null) => void
+   setDraft: (draft: ChatStoreState, text: string) => void
+   setView: (draft: ChatStoreState, view: string) => void
+   setInspect: (draft: ChatStoreState, target: { callId: CallId } | null) => void
+ }
+ 
+ /**
+  * Declares the per-session chat state and write surface.
+  * @returns the store handle.
+  */
+-export function createChatStore(): EngineStoreHandle<ChatStoreState, ChatActions> {
+-  return defineStore({
++export function createChatStore(viewState?: ConversationViewState): EngineStoreHandle<ChatStoreState, ChatActions> {
++  const handle = defineStore({
+     // Anchored to the contract shape: consumers read the store through
+     // PropsStore<ChatStore>'s SnapshotSelectorHook<ChatStoreState>, so init
+     // and the contract cannot drift.
+     init: (): ChatStoreState => ({ selection: null, draft: '', view: null, inspect: null }),
+     persist: 'dsh.conversation.chat',
+     actions: {
+       select: (d, target: SelectionTarget | null) => { d.selection = target },
+       setDraft: (d, text: string) => { d.draft = text },
+       setView: (d, view: string) => { d.view = view },
+       setInspect: (d, target: { callId: CallId } | null) => { d.inspect = target },
+     },
+   })
++  if (viewState === undefined) return handle
++  return {
++    ...handle,
++    create(scopeKey) {
++      const instance = handle.create(scopeKey)
++      if (scopeKey !== undefined) viewState.attach(scopeKey as SessionId, instance)
++      return instance
++    },
++  }
+ }
+diff --git a/packages/client/ui-conversation/src/client/view-state.ts b/packages/client/ui-conversation/src/client/view-state.ts
+new file mode 100644
+index 0000000000..c37e2c6864
+--- /dev/null
++++ b/packages/client/ui-conversation/src/client/view-state.ts
+@@ -0,0 +1,140 @@
++/** Read-only bridge from a session chat store to root-scoped view controls. */
++import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
++import type { HostObservable, StoreInstance } from '@deepseek-ai/dsh-client-ui-slots'
++import type { ChatStoreState } from './contract/views.ts'
++
++type ChatActions = {
++  setView: (view: string) => void
++}
++
++type ChatStoreInstance = StoreInstance<ChatStoreState, {
++  setView: (draft: ChatStoreState, view: string) => void
++}>
++
++/** One session's live view source; it always reads the authoritative chat store. */
++class SessionViewSource implements HostObservable<string | null> {
++  private instance: ChatStoreInstance | undefined
++  private unsubscribe: (() => void) | undefined
++  private readonly listeners = new Set<() => void>()
++
++  attach(instance: ChatStoreInstance): void {
++    this.unsubscribe?.()
++    this.instance = instance
++    this.unsubscribe = instance.subscribe(() => { this.emit() })
++    this.emit()
++  }
++
++  getSnapshot(): string | null {
++    return this.instance?.getSnapshot().view ?? null
++  }
++
++  subscribe(listener: () => void): () => void {
++    this.listeners.add(listener)
++    return () => { this.listeners.delete(listener) }
++  }
++
++  setView(view: string): void {
++    (this.instance?.actions as ChatActions | undefined)?.setView(view)
++  }
++
++  dispose(): void {
++    this.unsubscribe?.()
++    this.unsubscribe = undefined
++    this.instance = undefined
++    this.listeners.clear()
++  }
++
++  private emit(): void {
++    for (const listener of this.listeners) listener()
++  }
++}
++
++/** Tracks the selected session without copying its view state. */
++class CurrentSessionViewSource implements HostObservable<string | null> {
++  private current: SessionViewSource | undefined
++  private unsubscribeCurrent: (() => void) | undefined
++  private readonly listeners = new Set<() => void>()
++  private readonly unsubscribeSessions: () => void
++
++  constructor(
++    private readonly owner: ConversationViewState,
++    private readonly sessions: HostObservable<{ readonly current: SessionId | undefined }>,
++  ) {
++    this.unsubscribeSessions = sessions.subscribe(() => { this.rebind() })
++    this.rebind()
++  }
++
++  getSnapshot(): string | null {
++    return this.current?.getSnapshot() ?? null
++  }
++
++  subscribe(listener: () => void): () => void {
++    this.listeners.add(listener)
++    return () => { this.listeners.delete(listener) }
++  }
++
++  dispose(): void {
++    this.unsubscribeSessions()
++    this.unsubscribeCurrent?.()
++    this.listeners.clear()
++  }
++
++  private rebind(): void {
++    const sessionId = this.sessions.getSnapshot().current
++    const next = sessionId === undefined ? undefined : this.owner.sessionSource(sessionId)
++    if (next === this.current) return
++    this.unsubscribeCurrent?.()
++    this.current = next
++    this.unsubscribeCurrent = next?.subscribe(() => { this.emit() })
++    this.emit()
++  }
++
++  private emit(): void {
++    for (const listener of this.listeners) listener()
++  }
++}
++
++/**
++ * Cross-surface view bridge. It holds no view state: each source subscribes
++ * directly to the existing per-session chat store owned by the slot runtime.
++ */
++export class ConversationViewState {
++  private readonly sources = new Map<SessionId, SessionViewSource>()
++  private current: CurrentSessionViewSource | undefined
++
++  sourceFor(sessionId: SessionId): HostObservable<string | null> {
++    return this.sessionSource(sessionId)
++  }
++
++  /** Root-scoped consumers follow the selected session's already-owned store. */
++  currentSource(sessions: HostObservable<{ readonly current: SessionId | undefined }>): HostObservable<string | null> {
++    this.current ??= new CurrentSessionViewSource(this, sessions)
++    return this.current
++  }
++
++  sessionSource(sessionId: SessionId): SessionViewSource {
++    let source = this.sources.get(sessionId)
++    if (source === undefined) {
++      source = new SessionViewSource()
++      this.sources.set(sessionId, source)
++    }
++    return source
++  }
++
++  attach(sessionId: SessionId, instance: ChatStoreInstance): void {
++    const source = this.sourceFor(sessionId) as SessionViewSource
++    source.attach(instance)
++  }
++
++  setView(sessionId: SessionId, view: string): void {
++    const source = this.sources.get(sessionId)
++    source?.setView(view)
++  }
++
++  dispose(): void {
++    this.current?.dispose()
++    this.current = undefined
++    for (const source of this.sources.values()) source.dispose()
++    this.sources.clear()
++  }
++}
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.module.css b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+index b19242fb44..6db9be5ce1 100644
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.module.css
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+@@ -3,6 +3,21 @@
+   min-width: 0;
+ }
+ 
++/* The provider's active id gives the model selector the same one-open-panel
++ * ownership as permission/target/context.  Dropping the tiny trigger as the
++ * containing block makes the existing pane render against InputBar's card. */
++.rootOverlay {
++  position: static;
++}
++
++.rootOverlay .menu {
++  right: auto;
++  left: 0;
++  width: 100%;
++  max-width: none;
++  max-height: min(500px, calc(100vh - 144px));
++}
++
+ /* Figma 313:14108 ToggleButton: 13/20 medium secondary label, 4px gap,
+    12px caption chevron; 28px chip height matches the sibling Plan /
+    Read-only selects in the same tool row. */
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.tsx b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+index e53001da89..186ca895bf 100644
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.tsx
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+@@ -23,228 +23,238 @@ import {
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { ModelSelectInjected } from './slots.ts'
++import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
+ import css from './ModelSelect.module.css'
+ 
+ /** Which pane the dropdown shows: the two-row root or one drilled-in list. */
+ type Pane = 'root' | 'model' | 'effort'
+ 
+ /** One dynamic effort row; undefined means preserve the provider default. */
+ interface EffortChoice {
+   key: string
+   effort: string | undefined
+   label: string
+   description?: string
+ }
+ 
+ /**
+  * Render the composer model seat.
+  * @param props - owner share (locked) + injected face (shared directory
+  * store/verbs) + the standard locale seat.
+  * @returns the trigger and, while open, the two-level menu.
+  */
+ export function ModelSelect(
+   { locked, available, directory, load, select, t }:
+   ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>,
+ ) {
+   const state = useSyncExternalStore(
+     fn => directory.subscribe(fn),
+     () => directory.getSnapshot(),
+   )
+   const [open, setOpen] = useState(false)
+   const [pane, setPane] = useState<Pane>('root')
+   // The in-menu error strip serves catalog loads (its Retry re-runs the
+   // load); a rejected SELECTION announces through the transient toast
+   // instead, so the strip renders only while the latest failure-capable
+   // action was a load.
+   const lastActionRef = useRef<'load' | 'select'>('load')
+   const [toast, setToast] = useState<{ seq: number; text: string } | null>(null)
+   const toastSeq = useRef(0)
+   const rootRef = useRef<HTMLDivElement | null>(null)
+   const triggerRef = useRef<HTMLButtonElement | null>(null)
+   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+   const id = useId()
++  // The menu stays local for standalone use/tests; in the composer the shared
++  // owner supplies mutual exclusion while CSS resolves this root against the
++  // card (not the tiny trigger) for the full-width panel geometry.
++  const overlay = useComposerOverlay('model-selection', <span />)
++  const menuOpen = overlay.available ? overlay.open : open
+ 
+   const choices = useMemo(() => state.groups.flatMap(group =>
+     group.models.map(model => ({
+       group,
+       model,
+       selection: {
+         provider: group.id,
+         model: model.id,
+         ...model.reasoning?.defaultEffort === undefined
+           ? {}
+           : { reasoningEffort: model.reasoning.defaultEffort },
+       } satisfies ModelSelection,
+     }))), [state.groups])
+   const selectedIndex = state.current === null
+     ? -1
+     : choices.findIndex(c => c.selection.provider === state.current?.provider && c.selection.model === state.current.model)
+   const currentChoice = choices[selectedIndex]
+   const reasoning = currentChoice?.model.reasoning
+   const effectiveEffort = state.current?.reasoningEffort ?? reasoning?.defaultEffort
+   const effortLabel = reasoning === undefined
+     ? undefined
+     : effectiveEffort === undefined
+       ? t('effort.providerDefault')
+       : reasoning.efforts.find(level => level.id === effectiveEffort)?.name ?? effectiveEffort
+   const effortChoices = useMemo<readonly EffortChoice[]>(() => reasoning === undefined
+     ? []
+     : [
+       ...reasoning.defaultEffort === undefined
+         ? [{ key: 'provider-default', effort: undefined, label: t('effort.providerDefault') }]
+         : [],
+       ...reasoning.efforts.map((effort: ModelReasoningEffort) => ({
+         key: `effort:${effort.id}`,
+         effort: effort.id,
+         label: effort.name,
+         ...effort.description === undefined ? {} : { description: effort.description },
+       })),
+     ], [reasoning, t])
+   const busy = state.status === 'selecting'
+ 
+   const reload = (): void => {
+     lastActionRef.current = 'load'
+     load()
+   }
+ 
+   // Mount-time load resolves the trigger label; every open refreshes.
+   useEffect(() => {
+     if (available) {
+       lastActionRef.current = 'load'
+       load()
+     }
+   }, [available, load])
+ 
+   useEffect(() => {
+-    if (!open) return
++    if (overlay.available || !open) return
+     const closeOutside = (event: MouseEvent): void => {
+       if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+     }
+     document.addEventListener('mousedown', closeOutside)
+     return () => { document.removeEventListener('mousedown', closeOutside) }
+-  }, [open])
++  }, [open, overlay.available])
+ 
+   if (!available) return null
+ 
+   const show = (): void => {
+     setPane('root')
+-    setOpen(true)
++    if (overlay.available) overlay.toggle()
++    else setOpen(true)
+     reload()
+   }
+ 
+   const close = (restoreFocus = false): void => {
+     setOpen(false)
++    overlay.close()
+     setPane('root')
+     if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
+   }
+ 
+   const moveFocus = (offset: number): void => {
+     const items = itemRefs.current.filter(item => item !== null)
+     if (items.length === 0) return
+     const active = items.findIndex(item => item === document.activeElement)
+     const next = (Math.max(active, 0) + offset + items.length) % items.length
+     items[next]?.focus()
+   }
+ 
+   const onRootKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+-    if (event.key === 'Escape' && open) {
++    if (event.key === 'Escape' && menuOpen) {
+       event.preventDefault()
+       // Escape backs out of a drilled pane first, then closes.
+       if (pane !== 'root') setPane('root')
+       else close(true)
+       return
+     }
+-    if (!open) return
++    if (!menuOpen) return
+     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+       event.preventDefault()
+       moveFocus(event.key === 'ArrowDown' ? 1 : -1)
+     }
+   }
+ 
+   const onBlur = (event: FocusEvent<HTMLDivElement>): void => {
+     if (event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget)) return
+     close()
+   }
+ 
+   const settleSelection = (accepted: boolean): void => {
+     if (accepted) {
+       if (rootRef.current !== null) close(true)
+       return
+     }
+     const message = directory.getSnapshot().error
+     if (message !== null) {
+       toastSeq.current += 1
+       setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
+     }
+   }
+ 
+   const choose = (selection: ModelSelection): void => {
+     if (state.current?.provider === selection.provider && state.current.model === selection.model) {
+       close(true)
+       return
+     }
+     lastActionRef.current = 'select'
+     void select(selection).then(settleSelection)
+   }
+ 
+   const chooseEffort = (effort: string | undefined): void => {
+     if (state.current === null) return
+     if (effectiveEffort === effort) {
+       close(true)
+       return
+     }
+     const selection: ModelSelection = {
+       provider: state.current.provider,
+       model: state.current.model,
+       ...effort === undefined ? {} : { reasoningEffort: effort },
+     }
+     lastActionRef.current = 'select'
+     void select(selection).then(settleSelection)
+   }
+ 
+   const modelLabel = currentChoice?.model.name ?? t('trigger.fallback')
+   const triggerLabel = effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`
+   const triggerAria = currentChoice === undefined
+     ? t('trigger.selectAria')
+     : effortLabel === undefined
+       ? t('trigger.aria', { model: modelLabel })
+       : t('trigger.ariaEffort', { model: modelLabel, effort: effortLabel })
+   itemRefs.current = []
+   let itemIndex = 0
+   const itemRef = () => {
+     const at = itemIndex++
+     return (node: HTMLButtonElement | null) => { itemRefs.current[at] = node }
+   }
+ 
+   return (
+-    <div ref={rootRef} className={css.root} onKeyDown={onRootKeyDown} onBlur={onBlur}>
++    <div ref={rootRef} className={clsx(css.root, overlay.available && css.rootOverlay)} onKeyDown={onRootKeyDown} onBlur={overlay.available ? undefined : onBlur}>
+       <button
+         ref={triggerRef}
+         type="button"
+         className={css.trigger}
+         aria-label={triggerAria}
+         aria-haspopup="menu"
+-        aria-expanded={open}
+-        aria-controls={open ? `${id}-menu` : undefined}
++        aria-expanded={menuOpen}
++        aria-controls={menuOpen ? `${id}-menu` : undefined}
++        data-composer-overlay-trigger={overlay.available || undefined}
+         title={triggerLabel}
+         disabled={locked}
+         onClick={() => {
+-          if (open) {
++          if (menuOpen) {
+             close()
+           } else {
+             show()
+           }
+         }}
+       >
+         <span className={css.triggerLabel}>{modelLabel}</span>
+         {effortLabel !== undefined && <span className={css.triggerEffort}>{effortLabel}</span>}
+-        <IconChevronDownOutline14 className={clsx(css.chevron, open && css.chevronOpen)} />
++        <IconChevronDownOutline14 className={clsx(css.chevron, menuOpen && css.chevronOpen)} />
+       </button>
+ 
+-      {open && (
++      {menuOpen && (
+         <div
+           id={`${id}-menu`}
+           className={css.menu}
++          data-composer-overlay-surface={overlay.available || undefined}
+           role="menu"
+           aria-label={t('menu.aria')}
+           aria-busy={state.status === 'loading' || busy}
+

@@ -193,7 +193,7 @@ index 0c29175a60..e82cb0696f 100644
      renderSeat()
  
 diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
-index ef1221cd99..d99dc6be98 100644
+index 90e3be7d97..b87799b48a 100644
 --- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
 +++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
 @@ -4,6 +4,7 @@
@@ -204,7 +204,7 @@ index ef1221cd99..d99dc6be98 100644
  import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
  import type { ConversationSlotProps, InputZone } from '../contract/slots.ts'
  import { HeroGlow, HeroShell, WorkspaceChip, workspaceLabel } from './EmptyHero.tsx'
-@@ -157,13 +158,16 @@ export function ConversationRoot({
+@@ -158,14 +159,17 @@ export function ConversationRoot({
    })
  
    const composerBar = (
@@ -215,6 +215,7 @@ index ef1221cd99..d99dc6be98 100644
        {hero && <HeroShell t={t} />}
        {hero && heroWorkspaceRow}
        {zone !== undefined && renderSlot('conversation.input.dock', zone)}
+       {zone !== undefined && renderSlot('conversation.composer.above', zone)}
 +      <ComposerOverlaySurface />
        {inputBar}
 -    </div>

@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import test from 'node:test'
+
+const text = (path) => readFile(new URL(path, import.meta.url), 'utf8')
+
+test('conversation shell seam keeps product quick actions outside the official patch', async () => {
+  const [generic, externalization, product] = await Promise.all([
+    text('../upstream-contributions/0012-conversation-shell-responsive-seam.patch'),
+    text('../product-overlays/externalized/0012-externalize-conversation-shell.patch'),
+    text('../packages/harness-ui-conversation-shell/src/client/index.ts'),
+  ])
+
+  assert.match(generic, /ConversationViewState/)
+  assert.match(generic, /ComposerOverlayProvider/)
+  assert.match(generic, /conversation\.composer\.above/)
+  assert.doesNotMatch(generic, /compact trajectory action|compact conversation action/)
+  assert.match(externalization, /compact trajectory action/)
+  assert.match(externalization, /compact conversation action/)
+  assert.match(product, /id: 'trajectory'/)
+  assert.match(product, /id: 'conversation'/)
+})
+
+test('Composer and transcript retain separate layout responsibilities', async () => {
+  const generic = await text('../upstream-contributions/0012-conversation-shell-responsive-seam.patch')
+  assert.match(generic, /root-level footer/)
+  assert.match(generic, /overscroll-behavior-y: contain/)
+  assert.match(generic, /data-composer-overlay-surface/)
+  assert.match(generic, /conversationViewState/)
+})
