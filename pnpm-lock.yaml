@@ -29,6 +29,9 @@ importers:
       '@accrui/harness-ui-knowledge-scope':
         specifier: workspace:*
         version: link:../../packages/harness-ui-knowledge-scope
+      '@accrui/harness-ui-workspace-picker':
+        specifier: workspace:*
+        version: link:../../packages/harness-ui-workspace-picker
       '@wxt-dev/module-react':
         specifier: ^1.1.3
         version: 1.2.2(vite@8.2.1(@types/node@26.2.0)(esbuild@0.27.7)(jiti@2.7.0))(wxt@0.20.27(@types/node@26.2.0)(jiti@2.7.0)(rolldown@1.2.4))
@@ -73,7 +76,11 @@ importers:
 
   packages/harness-ui-session-log-copy: {}
 
+  packages/harness-ui-settings-shell: {}
+
   packages/harness-ui-subagent-compact: {}
+
+  packages/harness-ui-workspace-picker: {}
 
 packages:
 

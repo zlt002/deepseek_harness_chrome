@@ -12,6 +12,7 @@
   "dependencies": {
     "@accrui/harness-ui-agent-preset": "workspace:*",
     "@accrui/harness-ui-browser-target": "workspace:*",
+    "@accrui/harness-ui-workspace-picker": "workspace:*",
     "@accrui/harness-ui-knowledge-scope": "workspace:*",
     "@wxt-dev/module-react": "^1.1.3",
     "react": "^19.2.1",

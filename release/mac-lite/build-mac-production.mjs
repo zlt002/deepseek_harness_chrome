@@ -42,9 +42,11 @@ function assertHarnessProductAvailable() {
 const PRODUCT_UI_PACKAGE_NAMES = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
+  'harness-ui-workspace-picker',
   'harness-ui-knowledge-scope',
   'harness-ui-subagent-compact',
   'harness-ui-session-log-copy',
+  'harness-ui-settings-shell',
   'harness-skill-settings',
 ]
 function run(command, args, options = {}) {

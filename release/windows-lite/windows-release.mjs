@@ -420,9 +420,11 @@ export async function buildWindowsRelease({
   await copyDereferenced(nativeServerDir, path.join(runtimeDir, 'native-server'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-agent-preset'), path.join(runtimeDir, 'product-plugins', 'harness-ui-agent-preset'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-browser-target'), path.join(runtimeDir, 'product-plugins', 'harness-ui-browser-target'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-workspace-picker'), path.join(runtimeDir, 'product-plugins', 'harness-ui-workspace-picker'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-knowledge-scope'), path.join(runtimeDir, 'product-plugins', 'harness-ui-knowledge-scope'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-subagent-compact'), path.join(runtimeDir, 'product-plugins', 'harness-ui-subagent-compact'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-session-log-copy'), path.join(runtimeDir, 'product-plugins', 'harness-ui-session-log-copy'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-settings-shell'), path.join(runtimeDir, 'product-plugins', 'harness-ui-settings-shell'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-skill-settings'), path.join(runtimeDir, 'product-plugins', 'harness-skill-settings'))
   await bundleHarnessRuntimePlugin({
     outfile: path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'),

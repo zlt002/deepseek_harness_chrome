@@ -1,0 +1,32 @@
+{
+  "name": "@accrui/harness-ui-settings-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Out-of-tree Settings shell for the AccrUI Harness client",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-general",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-settings-shell",
+    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-settings-shell",
+    "test": "node --test test/*.test.mjs"
+  }
+}

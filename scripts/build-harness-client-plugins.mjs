@@ -14,9 +14,11 @@ if (!explicitHarnessRoot && !existsSync(join(generatedHarness, '.harness-product
 const packageNames = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
+  'harness-ui-workspace-picker',
   'harness-ui-knowledge-scope',
   'harness-ui-subagent-compact',
   'harness-ui-session-log-copy',
+  'harness-ui-settings-shell',
   'harness-skill-settings',
 ]
 const selected = process.argv.slice(2)

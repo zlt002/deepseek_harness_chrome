@@ -195,16 +195,20 @@ function productUiPackages(env = process.env) {
     return [
       '@accrui/harness-ui-agent-preset',
       '@accrui/harness-ui-browser-target',
+      '@accrui/harness-ui-workspace-picker',
       '@accrui/harness-ui-subagent-compact',
       '@accrui/harness-ui-session-log-copy',
+      '@accrui/harness-ui-settings-shell',
       '@accrui/harness-skill-settings',
     ]
   }
   const packages = [
     '@accrui/harness-ui-agent-preset',
     '@accrui/harness-ui-browser-target',
+    '@accrui/harness-ui-workspace-picker',
     '@accrui/harness-ui-subagent-compact',
     '@accrui/harness-ui-session-log-copy',
+    '@accrui/harness-ui-settings-shell',
   ]
   if (env.DSH_ENABLE_SKILL_SETTINGS_UI === '1') packages.push('@accrui/harness-skill-settings')
   // Knowledge Scope needs the generic composer-above/card-overlay seam. Keep

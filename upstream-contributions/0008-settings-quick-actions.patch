@@ -1,0 +1,29 @@
+diff --git a/packages/client/ui-settings/src/client/quick-actions.ts b/packages/client/ui-settings/src/client/quick-actions.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/client/ui-settings/src/client/quick-actions.ts
+@@ -0,0 +1,24 @@
++import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
++import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
++
++export interface SettingsQuickAction {
++  readonly id: string
++  readonly label: string
++  readonly order: number
++  readonly run: (sessionId: SessionId) => void | Promise<void>
++}
++
++export class SettingsQuickActions {
++  readonly store: SnapshotStore<readonly SettingsQuickAction[]> = createSnapshotStore([])
++
++  register(action: SettingsQuickAction): () => void {
++    const actions = this.store.getSnapshot()
++    if (actions.some(candidate => candidate.id === action.id)) {
++      throw new Error(`Duplicate compact settings action: ${action.id}`)
++    }
++    this.store.set([...actions, action].sort((left, right) => left.order - right.order))
++    return () => {
++      this.store.set(this.store.getSnapshot().filter(candidate => candidate !== action))
++    }
++  }
++}

@@ -1,0 +1,180 @@
+diff --git a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx b/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
+index 762747500d..4b6046cd79 100644
+--- a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
++++ b/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
+@@ -16,7 +16,7 @@ import {
+   IconAgentPresetOutline16, IconCloseOutline16, IconDataOutline16,
+   IconPersonalizationOutline16, IconSettingsOutline16,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+-import type { SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
++import type { SettingsPresentationOwnerProps, SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
+ import css from './SettingsRoot.module.css'
+ 
+ /** Nav glyph by section id; unknown ids fall back to the settings gear. */
+@@ -101,7 +101,7 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
+  * @param props - composed slot props (contract/slots.ts).
+  * @returns the settings shell element tree.
+  */
+-export function SettingsRoot(props: SettingsRootComponentProps) {
++export function DefaultSettingsPresentation(props: SettingsPresentationOwnerProps) {
+   const { wide, useSections, useOnboardingSteps, useSessions, renderSlot } = props
+   const [open, setOpen] = useState(false)
+   const [activeId, setActiveId] = useState<string | undefined>(undefined)
+@@ -170,3 +170,10 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
+     </>
+   )
+ }
++
++export function SettingsRoot(props: SettingsRootComponentProps) {
++  const { renderSlotChain, ...presentation } = props
++  return renderSlotChain('settings.presentation', presentation, {
++    fallback: <DefaultSettingsPresentation {...presentation} />,
++  })
++}
+diff --git a/packages/client/ui-settings-general/src/client/index.ts b/packages/client/ui-settings-general/src/client/index.ts
+index e1a94934c7..f900c41751 100644
+--- a/packages/client/ui-settings-general/src/client/index.ts
++++ b/packages/client/ui-settings-general/src/client/index.ts
+@@ -36,6 +36,7 @@ export type {
+ } from './GeneralSection.tsx'
+ export type { SettingsDocumentActionInjected, SettingsDocumentActionProps } from './SettingsDocumentAction.tsx'
+ export type { SettingsDocumentState } from './settings-document-store.ts'
++export type { SettingsPresentationOwnerProps, SettingsSectionRow } from './shell-contract.ts'
+ export { SettingsDocumentStore } from './settings-document-store.ts'
+ export type { SettingsKey } from './locales.ts'
+ 
+@@ -54,7 +55,7 @@ const NS = 'settings'
+  * ui-settings' apply, whose activation order relative to this one is NOT
+  * constrained; registrations depend on their slots through `slots.inject()`.
+  */
+-export const inject = ['slots', 'locale', 'connection']
++export const inject = ['slots', 'locale', 'connection', 'settingsQuickActions']
+ 
+ /**
+  * Register the `settings` dictionaries, the chrome content, and the General
+@@ -69,6 +70,7 @@ export function apply(ctx: ClientContext): void {
+   // locale/change re-registration wiring.
+   const t = ctx.locale.bind(NS)
+   const connection = ctx.get('connection') as ConnectionHandle
++  const quickActions = ctx.get('settingsQuickActions')!
+   const documentController = connection.isLoopback
+     ? new SettingsDocumentStore(connection.api)
+     : undefined
+@@ -120,6 +122,7 @@ export function apply(ctx: ClientContext): void {
+           }
+         },
+       },
++      quickActions: quickActions.store,
+       onboardingSteps: {
+         getSnapshot: () => {
+           const version = ctx.slots.getVersion('settings.onboarding')
+@@ -148,6 +151,7 @@ export function apply(ctx: ClientContext): void {
+       'settings.close': { kind: 'single', scope: 'root' },
+       'settings.section': { kind: 'list', scope: 'root' },
+       'settings.onboarding': { kind: 'list', scope: 'root' },
++      'settings.presentation': { kind: 'chain', scope: 'root' },
+     },
+     inject: shellInjected,
+   }, SettingsRoot))
+diff --git a/packages/client/ui-settings-general/src/client/shell-contract.ts b/packages/client/ui-settings-general/src/client/shell-contract.ts
+index ad61b2111a..37cab2eda8 100644
+--- a/packages/client/ui-settings-general/src/client/shell-contract.ts
++++ b/packages/client/ui-settings-general/src/client/shell-contract.ts
+@@ -12,6 +12,13 @@ import type { HostObservable, InjectFace, PropsRenderSlots, PropsRuntime } from
+ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+ // Type-only: pulls the settings slot declarations the shell renders into.
+ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
++import type { SettingsQuickAction } from '@deepseek-ai/dsh-client-ui-settings/client'
++
++declare module '@deepseek-ai/dsh-client-ui-slots' {
++  interface SlotMap {
++    'settings.presentation': { kind: 'chain'; scope: 'root'; owner: SettingsPresentationOwnerProps }
++  }
++}
+ 
+ /** One nav row projected from a settings.section registration's options. */
+ export interface SettingsSectionRow {
+@@ -37,6 +44,7 @@ export type SettingsRootInjected = {
+     sections: HostObservable<readonly SettingsSectionRow[]>
+     /** settings.onboarding ledger projected into coordinator order. */
+     onboardingSteps: HostObservable<readonly SettingsOnboardingStep[]>
++    quickActions: HostObservable<readonly SettingsQuickAction[]>
+   }
+ }
+ 
+@@ -46,7 +54,7 @@ export type SettingsRootInjected = {
+  * (hooks compartment bound to useSections). No store is registered — modal
+  * open state and active section id are component-local viewing state.
+  */
+-export type SettingsRootComponentProps =
++export type SettingsPresentationOwnerProps =
+   PropsRuntime<'sidebar.settings'>
+   & PropsRenderSlots<
+     | 'settings.trigger'
+@@ -57,3 +65,6 @@ export type SettingsRootComponentProps =
+     | 'settings.onboarding'
+   >
+   & InjectFace<SettingsRootInjected>
++
++export type SettingsRootComponentProps = SettingsPresentationOwnerProps
++  & PropsRenderSlots<'settings.presentation'>
+diff --git a/packages/client/ui-settings/src/client/contract/slots.ts b/packages/client/ui-settings/src/client/contract/slots.ts
+index 5413f8cb29..0e10e054d9 100644
+--- a/packages/client/ui-settings/src/client/contract/slots.ts
++++ b/packages/client/ui-settings/src/client/contract/slots.ts
+@@ -104,6 +104,8 @@ export interface SettingsPluginsTabOwnerProps {
+ export interface SettingsTriggerOwnerProps {
+   /** Whether the sidebar renders wide content (false = 56px rail, icon only). */
+   wide: boolean
++  /** Compact-header presentation uses the more-actions trigger instead of settings chrome. */
++  compact?: boolean
+ }
+ 
+ /** Owner share of the header title seat (the shell supplies nothing). */
+diff --git a/packages/client/ui-settings/src/client/index.ts b/packages/client/ui-settings/src/client/index.ts
+index 2ace9e56b1..bbd931ea0d 100644
+--- a/packages/client/ui-settings/src/client/index.ts
++++ b/packages/client/ui-settings/src/client/index.ts
+@@ -10,17 +10,23 @@
+  */
+ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+ import { SettingsScopeBinder } from './settings-scope.ts'
++import { SettingsQuickActions } from './quick-actions.ts'
+ 
+ export type {
+   SettingsGeneralItemOwnerProps, SettingsHeaderOwnerProps, SettingsOnboardingOwnerProps,
+   SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps, SettingsTriggerOwnerProps,
+ } from './contract/slots.ts'
+ export { SettingsScopeController, SettingsScopeBinder } from './settings-scope.ts'
++export type { SettingsQuickAction } from './quick-actions.ts'
+ 
+ /**
+  * Required services: none. The transport is resolved per caller through
+  * `this.ctx` at `bind` time, so this plugin waits for nothing.
+  */
++declare module '@deepseek-ai/cordis' {
++  interface Context { settingsQuickActions: SettingsQuickActions }
++}
++
+ export const inject = []
+ 
+ /**
+@@ -32,4 +38,5 @@ export const inject = []
+  */
+ export function apply(ctx: ClientContext): void {
+   new SettingsScopeBinder(ctx)
++  ctx.provide('settingsQuickActions', new SettingsQuickActions())
+ }
+diff --git a/packages/client/ui-sidebar/src/client/contract/slots.ts b/packages/client/ui-sidebar/src/client/contract/slots.ts
+index a8c4f2894d..ad01ee23da 100644
+--- a/packages/client/ui-sidebar/src/client/contract/slots.ts
++++ b/packages/client/ui-sidebar/src/client/contract/slots.ts
+@@ -54,6 +54,8 @@ export interface SidebarSectionOwnerProps {
+ export interface SidebarSettingsOwnerProps {
+   /** Whether the sidebar renders wide content (false = 56px rail). */
+   wide: boolean
++  /** Compact top-header presentation used by narrow side panels. */
++  compact?: boolean
+ }
+ 
+ /** Owner share of an action rendered beside Settings at the sidebar foot. */
