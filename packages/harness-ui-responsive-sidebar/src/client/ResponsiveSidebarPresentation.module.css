@@ -1,0 +1,66 @@
+.root {
+  position: relative;
+  z-index: 10;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 48px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+.primary {
+  flex: 0 0 50%;
+  max-width: 50%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.workspaces {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings,
+.actions,
+.detailActions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  margin-left: auto;
+}
+
+.detailTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: 4px 8px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.action:hover { background: var(--dsw-alias-interactive-bg-hover); }

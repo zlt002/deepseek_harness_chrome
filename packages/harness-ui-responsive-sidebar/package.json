@@ -1,0 +1,29 @@
+{
+  "name": "@accrui/harness-ui-responsive-sidebar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Out-of-tree compact responsive sidebar presentation for AccrUI Harness",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-responsive-sidebar",
+    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-responsive-sidebar",
+    "test": "node --test test/*.test.mjs"
+  }
+}
