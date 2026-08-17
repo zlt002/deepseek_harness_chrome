@@ -139,31 +139,48 @@ jobs:
           $zip = 'release/accr-ui-windows-lite-x64.zip'
           $checksum = "$zip.sha256"
 
-          gh release view $env:RELEASE_TAG --repo $repo *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $env:RELEASE_TAG `
+          function Invoke-GhRetry {
+            param([scriptblock]$Command, [string]$Label)
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              & $Command
+              if ($LASTEXITCODE -eq 0) { return }
+              if ($attempt -lt 4) { Start-Sleep -Seconds (5 * $attempt) }
+            }
+            throw "$Label failed after 4 attempts."
+          }
+
+          $releaseExists = $false
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            $viewOutput = gh release view $env:RELEASE_TAG --repo $repo 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              $releaseExists = $true
+              break
+            }
+            $viewText = $viewOutput | Out-String
+            if ($viewText -match 'HTTP 404|release not found|Not Found') { break }
+            if ($attempt -eq 4) { throw 'Draft release lookup failed after 4 attempts.' }
+            Start-Sleep -Seconds (5 * $attempt)
+          }
+
+          if (-not $releaseExists) {
+            Invoke-GhRetry -Label 'Draft release creation' -Command {
+              gh release create $env:RELEASE_TAG `
+                --repo $repo `
+                --draft `
+                --target '${{ github.sha }}' `
+                --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
+                --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
+            }
+          }
+
+          Invoke-GhRetry -Label 'Draft release update' -Command {
+            gh release edit $env:RELEASE_TAG `
               --repo $repo `
-              --draft `
               --target '${{ github.sha }}' `
               --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
               --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-          gh release edit $env:RELEASE_TAG `
-            --repo $repo `
-            --target '${{ github.sha }}' `
-            --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
-            --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $uploaded = $false
-          for ($attempt = 1; $attempt -le 4; $attempt++) {
+          Invoke-GhRetry -Label 'Draft release upload' -Command {
             gh release upload $env:RELEASE_TAG $zip $checksum --repo $repo --clobber
-            if ($LASTEXITCODE -eq 0) {
-              $uploaded = $true
-              break
-            }
-            if ($attempt -lt 4) { Start-Sleep -Seconds (5 * $attempt) }
           }
-          if (-not $uploaded) { throw 'Draft release upload failed after 4 attempts.' }
