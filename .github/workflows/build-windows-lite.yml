@@ -82,7 +82,7 @@ jobs:
         if: steps.cache-harness-product.outputs.cache-hit == 'true' && steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
         working-directory: deepseek_harness_chrome/.generated/harness-product
         shell: pwsh
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --force
 
       - name: Bundle static Windows Harness runtime
         if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
