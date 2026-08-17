@@ -72,7 +72,11 @@ importers:
 
   packages/harness-ui-browser-target: {}
 
+  packages/harness-ui-conversation-shell: {}
+
   packages/harness-ui-knowledge-scope: {}
+
+  packages/harness-ui-responsive-sidebar: {}
 
   packages/harness-ui-session-log-copy: {}
 
