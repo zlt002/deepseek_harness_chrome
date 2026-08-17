@@ -10,6 +10,11 @@ on:
         description: AccrUI-compatible extension version
         required: true
         default: 1.1.63
+      quick_build:
+        description: Skip acceptance tests for a faster build (~38 min saved)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -70,6 +75,7 @@ jobs:
           --version "${{ inputs.version || '1.1.63' }}"
 
       - name: Accept Windows install, Native Messaging, upgrade, and rollback
+        if: ${{ inputs.quick_build != true }}
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: >-
