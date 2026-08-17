@@ -197,6 +197,7 @@ function productUiPackages(env = process.env) {
       '@accrui/harness-ui-browser-target',
       '@accrui/harness-ui-subagent-compact',
       '@accrui/harness-ui-session-log-copy',
+      '@accrui/harness-skill-settings',
     ]
   }
   const packages = [

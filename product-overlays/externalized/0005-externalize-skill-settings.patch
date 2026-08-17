@@ -1,0 +1,350 @@
+diff --git a/packages/bundle/base/cordis.patch.yml b/packages/bundle/base/cordis.patch.yml
+index f52cb3dc84..e9567d9206 100644
+--- a/packages/bundle/base/cordis.patch.yml
++++ b/packages/bundle/base/cordis.patch.yml
+@@ -237,11 +237,6 @@
+     - id: skill
+       name: '@deepseek-ai/dsh-skill'
+ 
+-    # Harness-local user choices over discovered skills. The policy intersects
+-    # with authored frontmatter and lives in settings.yaml, never SKILL.md.
+-    - id: skill-settings
+-      name: '@deepseek-ai/dsh-skill-settings'
+-
+     - id: skill-filesystem
+       name: '@deepseek-ai/dsh-skill-filesystem'
+ 
+diff --git a/packages/bundle/base/package.json b/packages/bundle/base/package.json
+index 6291101c65..706ee3202a 100644
+--- a/packages/bundle/base/package.json
++++ b/packages/bundle/base/package.json
+@@ -82,7 +82,6 @@
+     "@deepseek-ai/dsh-skill": "workspace:^",
+     "@deepseek-ai/dsh-skill-badge": "workspace:^",
+     "@deepseek-ai/dsh-skill-filesystem": "workspace:^",
+-    "@deepseek-ai/dsh-skill-settings": "workspace:^",
+     "@deepseek-ai/dsh-spill-local": "workspace:^",
+     "@deepseek-ai/dsh-spill-policy": "workspace:^",
+     "@deepseek-ai/dsh-subagent": "workspace:^",
+diff --git a/packages/bundle/web-app/cordis.patch.yml b/packages/bundle/web-app/cordis.patch.yml
+index 9e1ef41a0e..f740b06480 100644
+--- a/packages/bundle/web-app/cordis.patch.yml
++++ b/packages/bundle/web-app/cordis.patch.yml
+@@ -192,9 +192,6 @@
+     - id: ui-settings-models
+       name: '@deepseek-ai/dsh-client-ui-settings-models'
+ 
+-    - id: ui-skill-settings
+-      name: '@deepseek-ai/dsh-client-ui-skill-settings'
+-
+     - id: ui-settings-plugin-inventory
+       name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'
+ 
+diff --git a/packages/bundle/web-app/package.json b/packages/bundle/web-app/package.json
+index 5af5718985..d3893d1abb 100644
+--- a/packages/bundle/web-app/package.json
++++ b/packages/bundle/web-app/package.json
+@@ -66,7 +66,6 @@
+     "@deepseek-ai/dsh-client-ui-layout": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-model-selection": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-settings-models": "workspace:^",
+-    "@deepseek-ai/dsh-client-ui-skill-settings": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-settings-plugin-inventory": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-permission-presets": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-plan": "workspace:^",
+diff --git a/packages/client/ui-skill/src/client/index.ts b/packages/client/ui-skill/src/client/index.ts
+index b7db4412ba..f9c8f9db9d 100644
+--- a/packages/client/ui-skill/src/client/index.ts
++++ b/packages/client/ui-skill/src/client/index.ts
+@@ -180,12 +180,10 @@ export function apply(ctx: ClientContext): void {
+   // A preset decides which skill providers an agent reads, so a switched
+   // session's cached catalog belongs to the composition it no longer runs.
+   ctx.remote.$on('agent-preset/selected', invalidate)
+-  // A Harness-local mode change changes this same user-facing catalog. The
+-  // menu cache is per session, while the setting is Host-wide, so invalidate
+-  // every warm snapshot and let the next slash query read the enforced view.
+-  ctx.remote.$on('settings/document-updated', (ns) => {
+-    if (ns === 'skill-settings') clearAll()
+-  })
++  // A Host setting may alter the effective catalog (for example, an
++  // invocation policy). Settings have no per-session scope, so a change
++  // invalidates every warm menu snapshot before the next slash query.
++  ctx.remote.$on('settings/document-updated', clearAll)
+   ctx.on('connection/reset', clearAll)
+   ctx.effect(() => {
+     const unregister = inputTriggers.registerSource(source)
+diff --git a/packages/skill/skill-settings/README.i18n.yaml b/packages/skill/skill-settings/README.i18n.yaml
+deleted file mode 100644
+index 2bf14d9e03..0000000000
+--- a/packages/skill/skill-settings/README.i18n.yaml
++++ /dev/null
+@@ -1,6 +0,0 @@
+-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+-# side as of the last confirmed-consistent state. Both languages carry equal authority;
+-# after editing either side, bring the other along and re-record with:
+-#   pnpm run verify-translation-pairing --write packages/skill/skill-settings/README.md
+-README.md: f34fb5d7924bd7539271a003ee45842d634145b3
+-README.zh.md: 33827bcf9643366f0de2cdc4822fe38ff5841c4d
+diff --git a/packages/skill/skill-settings/README.md b/packages/skill/skill-settings/README.md
+deleted file mode 100644
+index f34fb5d792..0000000000
+--- a/packages/skill/skill-settings/README.md
++++ /dev/null
+@@ -1,22 +0,0 @@
+-# @deepseek-ai/dsh-skill-settings
+-
+-English | [中文](README.zh.md)
+-
+-Harness-local per-skill invocation modes. The plugin stores `skill-settings.modes` in the active Harness settings provider and registers one policy with `ctx.skills`. It never modifies a discovered `SKILL.md`.
+-
+-`enabled` permits model and user invocation, `manual-only` permits only a user `/name` invocation, and `disabled` permits neither. A missing entry inherits `enabled`. The registry intersects every mode with the provider-authored frontmatter policy, so a local setting cannot re-enable an entry whose author disabled model or user invocation.
+-
+-The base bundle mounts this plugin beside `dsh-skill`; without a settings provider the policy remains enabled and contributes no durable state.
+-
+-## Model Experience
+-
+-`manual-only` and `disabled` entries disappear from the model catalog. `disabled` entries also fail the user-explicit invocation path. The setting adds no prompt text or tool schema.
+-
+-#### KV Cache effect
+-
+-Changing a model-visible mode can cause `dsh-tool-skill` to publish its normal replacement skill catalog, which changes the retained session suffix. No mode adds a separate prompt section.
+-
+-## Known Limitations and Deferred Work
+-
+-- **One Host-wide mode map** — settings apply to every session served by the Harness instance; project- or preset-specific mode maps are not supported.
+-- **Discoverable entries only** — a mode for a missing skill remains stored and takes effect if that name is discovered later.
+diff --git a/packages/skill/skill-settings/README.zh.md b/packages/skill/skill-settings/README.zh.md
+deleted file mode 100644
+index 33827bcf96..0000000000
+--- a/packages/skill/skill-settings/README.zh.md
++++ /dev/null
+@@ -1,22 +0,0 @@
+-# @deepseek-ai/dsh-skill-settings
+-
+-[English](README.md) | 中文
+-
+-Harness 本地的单 Skill 调用模式。该插件将 `skill-settings.modes` 存在当前 Harness 设置提供方中，并向 `ctx.skills` 注册一个策略；它绝不会修改已发现 Skill 的 `SKILL.md`。
+-
+-`enabled` 允许模型和用户调用，`manual-only` 只允许用户通过 `/name` 调用，`disabled` 两者都不允许。未记录的名称默认 `enabled`。注册表会把每个模式与提供方 frontmatter 的原始策略取交集，因此本地设置不能重新放开作者已禁用的模型或用户入口。
+-
+-基础 bundle 将该插件与 `dsh-skill` 一起挂载；没有设置提供方时，策略保持启用且不产生持久化状态。
+-
+-## 模型体验
+-
+-`manual-only` 和 `disabled` 条目不会出现在模型目录中；`disabled` 也会被用户显式调用路径拒绝。设置不会增加提示词文本或工具 schema。
+-
+-#### KV Cache 影响
+-
+-改变模型可见模式时，`dsh-tool-skill` 可能发布其普通的替换 Skill 目录，进而改变会话保留后缀；模式本身不增加独立提示词分区。
+-
+-## 已知限制与暂缓事项
+-
+-- **一个 Host 范围的模式表** —— 设置影响该 Harness 实例服务的所有会话；不支持按项目或 preset 配置模式表。
+-- **只针对可发现条目** —— 缺失 Skill 的模式仍会存储；同名 Skill 日后被发现时会生效。
+diff --git a/packages/skill/skill-settings/package.json b/packages/skill/skill-settings/package.json
+deleted file mode 100644
+index 2ba1aef6a6..0000000000
+--- a/packages/skill/skill-settings/package.json
++++ /dev/null
+@@ -1,29 +0,0 @@
+-{
+-  "name": "@deepseek-ai/dsh-skill-settings",
+-  "description": "Harness-local persistent Skill invocation settings",
+-  "version": "0.1.0-rc.5",
+-  "type": "module",
+-  "main": "lib/index.js",
+-  "types": "lib/types/index.d.ts",
+-  "exports": {
+-    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+-    "./invariant": { "types": "./lib/types/invariant.d.ts", "default": "./lib/invariant.js" },
+-    "./src/*": "./src/*",
+-    "./package.json": "./package.json"
+-  },
+-  "files": ["lib/index.js", "lib/invariant.js", "lib/types/**/*.d.ts"],
+-  "license": "MIT",
+-  "peerDependencies": {
+-    "@deepseek-ai/cordis": "workspace:^",
+-    "@deepseek-ai/dsh-invariants": "workspace:^",
+-    "@deepseek-ai/dsh-settings": "workspace:^",
+-    "@deepseek-ai/dsh-skill": "workspace:^"
+-  },
+-  "dependencies": { "@deepseek-ai/schemastery": "workspace:^" },
+-  "devDependencies": {
+-    "@deepseek-ai/cordis": "workspace:^",
+-    "@deepseek-ai/dsh-invariants": "workspace:^",
+-    "@deepseek-ai/dsh-settings": "workspace:^",
+-    "@deepseek-ai/dsh-skill": "workspace:^"
+-  }
+-}
+diff --git a/packages/skill/skill-settings/src/index.ts b/packages/skill/skill-settings/src/index.ts
+deleted file mode 100644
+index 4c251de1f5..0000000000
+--- a/packages/skill/skill-settings/src/index.ts
++++ /dev/null
+@@ -1,72 +0,0 @@
+-/**
+- * Harness-local Skill invocation settings.
+- *
+- * This plugin keeps user choices in the Harness settings document and projects
+- * them through the skill registry. It never writes a provider's SKILL.md.
+- * @module @deepseek-ai/dsh-skill-settings
+- */
+-
+-import type { Context } from '@deepseek-ai/cordis'
+-import z from '@deepseek-ai/schemastery'
+-import {
+-  settingsNamespace,
+-  type SettingsScope,
+-} from '@deepseek-ai/dsh-settings'
+-import type { SkillInvocationPolicy, SkillSummary } from '@deepseek-ai/dsh-skill'
+-
+-export const name = 'skill-settings'
+-export const inject = ['skills']
+-
+-/** Settings document namespace owned by this plugin. */
+-export const SETTINGS_NAMESPACE = settingsNamespace('skill-settings')
+-
+-/** Harness-local visibility choices for an otherwise discovered skill. */
+-export type SkillSettingMode = 'enabled' | 'manual-only' | 'disabled'
+-
+-/** Durable settings document shape. Names absent from modes inherit enabled. */
+-export interface SkillSettingsConfig {
+-  readonly modes: Record<string, SkillSettingMode>
+-}
+-
+-/** Validate the small durable setting map. */
+-export const Config: z<SkillSettingsConfig> = z.object({
+-  modes: z.dict(z.union(['enabled', 'manual-only', 'disabled'])).default({}),
+-})
+-
+-/** Resolve the requested Harness-local controls for one mode. */
+-export function invocationForMode(mode: SkillSettingMode): SkillInvocationPolicy {
+-  switch (mode) {
+-    case 'enabled': return { modelInvocable: true, userInvocable: true }
+-    case 'manual-only': return { modelInvocable: false, userInvocable: true }
+-    case 'disabled': return { modelInvocable: false, userInvocable: false }
+-  }
+-}
+-
+-/** Resolve a setting mode, with new skills enabled until the user changes them. */
+-export function modeFor(config: SkillSettingsConfig, skill: Pick<SkillSummary, 'name'>): SkillSettingMode {
+-  return config.modes[skill.name] ?? 'enabled'
+-}
+-
+-/**
+- * Register the durable local policy. The registry intersects this answer with
+- * frontmatter, so choosing enabled cannot re-enable an author-disabled entry.
+- * @param ctx - Host context with the skill registry.
+- */
+-export function apply(ctx: Context): void {
+-  let settings: SkillSettingsConfig = { modes: {} }
+-  ctx.effect(() => ctx.skills.registerInvocationPolicy({
+-    resolve(skill) {
+-      return invocationForMode(modeFor(settings, skill))
+-    },
+-  }), 'skill-settings invocation policy')
+-
+-  ctx.inject(['settings'], (settingsCtx) => {
+-    const scope: SettingsScope<SkillSettingsConfig> = settingsCtx.settings.register(SETTINGS_NAMESPACE, Config)
+-    const publish = (next: SkillSettingsConfig): void => {
+-      settings = next
+-      ctx.skills.invalidateInvocationPolicy()
+-    }
+-    publish(scope.get())
+-    scope.watch((next) => { publish(next) })
+-  })
+-}
+diff --git a/packages/skill/skill-settings/src/invariant.ts b/packages/skill/skill-settings/src/invariant.ts
+deleted file mode 100644
+index 1de9f56834..0000000000
+--- a/packages/skill/skill-settings/src/invariant.ts
++++ /dev/null
+@@ -1,14 +0,0 @@
+-/** Package-owned invariant companion for @deepseek-ai/dsh-skill-settings. */
+-import type { Context } from '@deepseek-ai/cordis'
+-import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
+-
+-const PACKAGE_NAME = '@deepseek-ai/dsh-skill-settings'
+-export const name = 'skill-settings-invariant'
+-export const inject = ['invariants']
+-
+-/** No runtime invariant: settings commits and registry cache invalidation share one owner. */
+-const install: InvariantInstaller = () => {}
+-
+-/** Register this package's invariant ownership. */
+-export const apply = (ctx: Context): Promise<() => void> =>
+-  Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
+diff --git a/packages/skill/skill-settings/tests/skill-settings.spec.ts b/packages/skill/skill-settings/tests/skill-settings.spec.ts
+deleted file mode 100644
+index b7c12855d9..0000000000
+--- a/packages/skill/skill-settings/tests/skill-settings.spec.ts
++++ /dev/null
+@@ -1,50 +0,0 @@
+-import { Context } from '@deepseek-ai/cordis'
+-import { describe, expect, it } from 'vitest'
+-import { SkillRegistry } from '@deepseek-ai/dsh-skill'
+-import { MemorySettings } from '../../../settings/settings/tests/memory.ts'
+-import { apply, SETTINGS_NAMESPACE } from '../src/index.ts'
+-
+-describe('skill-settings', () => {
+-  it('persists modes and intersects them with authored invocation controls', async () => {
+-    const ctx = new Context()
+-    await ctx.plugin(SkillRegistry)
+-    await ctx.plugin(MemorySettings)
+-    await ctx.plugin({ inject: ['skills'], apply })
+-    ctx.skills.register({
+-      name: 'shared-skill', description: 'Both surfaces', source: 'runtime', content: 'shared',
+-    })
+-    ctx.skills.register({
+-      name: 'author-user-hidden', description: 'Author-hidden user surface', source: 'runtime', content: 'hidden',
+-      invocation: { modelInvocable: true, userInvocable: false },
+-    })
+-
+-    await ctx.settings.update(SETTINGS_NAMESPACE, {
+-      modes: { 'shared-skill': 'manual-only', 'author-user-hidden': 'enabled' },
+-    })
+-
+-    const effective = await ctx.skills.list()
+-    expect(effective.find(skill => skill.name === 'shared-skill')?.invocation)
+-      .toEqual({ modelInvocable: false, userInvocable: true })
+-    // Local enabled may not widen an author-owned frontmatter denial.
+-    expect(effective.find(skill => skill.name === 'author-user-hidden')?.invocation)
+-      .toEqual({ modelInvocable: true, userInvocable: false })
+-    expect((await ctx.skills.get('shared-skill'))?.invocation)
+-      .toEqual({ modelInvocable: false, userInvocable: true })
+-    // The settings page can still inspect and re-enable a disabled skill.
+-    expect((await ctx.skills.listSource()).find(skill => skill.name === 'shared-skill')?.invocation)
+-      .toEqual({ modelInvocable: true, userInvocable: true })
+-  })
+-
+-  it('removes both entry points for disabled without touching the source catalog', async () => {
+-    const ctx = new Context()
+-    await ctx.plugin(SkillRegistry)
+-    await ctx.plugin(MemorySettings)
+-    await ctx.plugin({ inject: ['skills'], apply })
+-    ctx.skills.register({ name: 'pause-me', description: 'Pause', source: 'runtime', content: 'pause' })
+-    await ctx.settings.update(SETTINGS_NAMESPACE, { modes: { 'pause-me': 'disabled' } })
+-
+-    expect((await ctx.skills.list())[0]?.invocation).toEqual({ modelInvocable: false, userInvocable: false })
+-    expect((await ctx.skills.get('pause-me'))?.invocation).toEqual({ modelInvocable: false, userInvocable: false })
+-    expect((await ctx.skills.listSource())[0]?.invocation).toEqual({ modelInvocable: true, userInvocable: true })
+-  })
+-})
+diff --git a/packages/skill/skill-settings/tsconfig.json b/packages/skill/skill-settings/tsconfig.json
+deleted file mode 100644
+index 690026ec5c..0000000000
+--- a/packages/skill/skill-settings/tsconfig.json
++++ /dev/null
+@@ -1,12 +0,0 @@
+-{
+-  "extends": "../../../tsconfig.base.json",
+-  "compilerOptions": { "rootDir": "src", "outDir": "lib/types" },
+-  "include": ["src"],
+-  "references": [
+-    { "path": "../../../vendor/cordis" },
+-    { "path": "../../../vendor/schemastery" },
+-    { "path": "../../settings/settings" },
+-    { "path": "../skill" },
+-    { "path": "../../runtime-diagnostics/invariants" }
+-  ]
+-}

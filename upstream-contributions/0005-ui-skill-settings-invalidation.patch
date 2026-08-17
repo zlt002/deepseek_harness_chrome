@@ -1,0 +1,14 @@
+diff --git a/packages/client/ui-skill/src/client/index.ts b/packages/client/ui-skill/src/client/index.ts
+--- a/packages/client/ui-skill/src/client/index.ts
++++ b/packages/client/ui-skill/src/client/index.ts
+@@ -179,6 +179,10 @@ export function apply(ctx: ClientContext): void {
+   const inputTriggers = ctx.get('inputTriggers') as InputTriggerServiceContract
+   // A preset decides which skill providers an agent reads, so a switched
+   // session's cached catalog belongs to the composition it no longer runs.
+   ctx.remote.$on('agent-preset/selected', invalidate)
++  // A Host setting may alter the effective catalog (for example, an
++  // invocation policy). Settings have no per-session scope, so a change
++  // invalidates every warm menu snapshot before the next slash query.
++  ctx.remote.$on('settings/document-updated', clearAll)
+   ctx.on('connection/reset', clearAll)
+   ctx.effect(() => {

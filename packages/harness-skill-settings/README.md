@@ -9,11 +9,11 @@ This is the product-owned deep module for Skill modes. Its small interface is:
 
 Modes are `enabled`, `manual-only`, and `disabled`. They are always intersected with the original `SKILL.md` frontmatter: local settings cannot re-enable an author-disabled model or manual entry point. The module never writes `SKILL.md`.
 
-## What is already external
+## What is external
 
-The policy, normalization, durable update serialization, source-catalog projection, and Claude-root configuration are external and tested. Claude discovery requires no upstream source change: the official filesystem provider already accepts `customSkillDirs`.
+The policy, normalization, durable update serialization, source-catalog projection, Claude-root configuration, Host plugin, and Settings page are external and tested. The compatibility overlay no longer mounts the old built-in `dsh-skill-settings` packages; the Native Host mounts this product package instead. Claude discovery requires no upstream source change: the official filesystem provider already accepts `customSkillDirs`.
 
-## Required upstream seams before wiring it into a real Host and client page
+## Required generic Harness seams
 
 The clean upstream at `47f943859b` is missing four generic capabilities introduced by the sibling product fork:
 
@@ -22,9 +22,9 @@ The clean upstream at `47f943859b` is missing four generic capabilities introduc
 3. Exposure of a plugin-owned registered settings namespace through the existing settings RPC. The current Host allow-list excludes unknown plugin namespaces.
 4. Wire schema fields for the extra Skill controls above.
 
-The browser `settings.section` slot itself is already public and sufficient. Do not ship a misleading settings screen until the four Host seams are available; it would only display currently user-invocable Skills and could not safely persist or re-enable disabled entries.
+The browser `settings.section` slot itself is already public and sufficient. The four small generic seams live as ordered patches in `upstream-contributions/` while the product runs against the compatibility overlay; they are deliberately written without AccrUI names so they can be upstreamed independently.
 
-## Main-agent integration after upstream seams land
+## Product integration
 
 1. Load this package as a Host plugin adapter and call `mountHostSkillSettings()` with the official registry/settings adapters.
 2. Add `claudeSkillRoots(homedir())` to `dsh-skill-filesystem.customSkillDirs` in the product Host profile.

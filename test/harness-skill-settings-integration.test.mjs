@@ -9,7 +9,11 @@ const root = resolve(import.meta.dirname, '..')
 const upstream = resolve(root, 'upstream/deepseek-harness')
 
 test('generic Skill seams remain applicable to the clean upstream', () => {
-  for (const patch of ['0002-skill-invocation-policy-registry.patch', '0003-skill-settings-api-wire.patch']) {
+  for (const patch of [
+    '0002-skill-invocation-policy-registry.patch',
+    '0003-skill-settings-api-wire.patch',
+    '0005-ui-skill-settings-invalidation.patch',
+  ]) {
     execFileSync('git', ['apply', '--check', resolve(root, 'upstream-contributions', patch)], { cwd: upstream, stdio: 'pipe' })
   }
   const wirePatch = readFileSync(resolve(root, 'upstream-contributions/0003-skill-settings-api-wire.patch'), 'utf8')
@@ -23,6 +27,8 @@ test('product profile mounts Claude discovery and the Skill settings plugin exac
   assert.match(patch, /\/tmp\/accrui-skill-settings-home\/.claude\/skills/)
   assert.doesNotMatch(patch, /@accrui\/harness-skill-settings/)
   assert.doesNotMatch(productUiPatch({}), /@accrui\/harness-skill-settings/)
+  const legacyPatch = productUiPatch({ DSH_LEGACY_UI_OVERLAY: '1' })
+  assert.equal(legacyPatch.match(/name: '@accrui\/harness-skill-settings'/g)?.length, 1)
   const productPatch = productUiPatch({ DSH_ENABLE_SKILL_SETTINGS_UI: '1' })
   assert.equal(productPatch.match(/name: '@accrui\/harness-skill-settings'/g)?.length, 1)
 })
