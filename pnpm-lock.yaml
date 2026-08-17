@@ -71,6 +71,8 @@ importers:
 
   packages/harness-ui-knowledge-scope: {}
 
+  packages/harness-ui-subagent-compact: {}
+
 packages:
 
   '@1natsu/wait-element@4.2.0':

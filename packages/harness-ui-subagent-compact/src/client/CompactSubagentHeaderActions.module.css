@@ -1,0 +1,44 @@
+.root {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.returnConversation {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.returnConversation:hover,
+.returnConversation:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.action:hover,
+.action:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}

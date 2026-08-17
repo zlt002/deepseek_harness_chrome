@@ -4,9 +4,14 @@ import path from 'node:path'
 import test from 'node:test'
 
 const productRoot = path.resolve('.generated/harness-product')
+const subagentPluginRoot = path.resolve('packages/harness-ui-subagent-compact')
 
 async function source(relativePath) {
   return readFile(path.join(productRoot, relativePath), 'utf8')
+}
+
+async function subagentPluginSource(relativePath) {
+  return readFile(path.join(subagentPluginRoot, relativePath), 'utf8')
 }
 
 test('materialized Harness preserves the latest compact product UI contracts', async () => {
@@ -15,7 +20,7 @@ test('materialized Harness preserves the latest compact product UI contracts', a
     source('packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.tsx'),
     source('packages/client/ui-settings-general/src/client/SettingsRoot.tsx'),
     source('packages/client/ui-settings-general/src/client/SettingsRoot.module.css'),
-    source('packages/client/ui-subagent/src/client/CompactSubagentAction.tsx'),
+    subagentPluginSource('src/client/CompactSubagentAction.tsx'),
   ])
 
   const scopeSeat = conversation.indexOf("renderSlot('conversation.composer.above', zone)")
@@ -29,4 +34,9 @@ test('materialized Harness preserves the latest compact product UI contracts', a
 
   assert.match(subagent, /PropsRuntime<'sidebar\.compact\.action'>/)
   assert.match(subagent, /openChild/)
+  await assert.rejects(
+    source('packages/client/ui-subagent/src/client/CompactSubagentAction.tsx'),
+    error => error?.code === 'ENOENT',
+    'compact subagent controls must stay outside the official ui-subagent package',
+  )
 })

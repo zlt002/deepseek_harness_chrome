@@ -1,0 +1,36 @@
+{
+  "name": "@accrui/harness-ui-subagent-compact",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Out-of-tree compact subagent controls for the AccrUI Harness client",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map"
+  ],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-subagent-compact",
+    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-subagent-compact",
+    "test": "node --test test/*.test.mjs"
+  }
+}

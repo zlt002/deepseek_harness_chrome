@@ -191,10 +191,16 @@ function productUiPackages(env = process.env) {
   // Browser Target is the first completed externalization. The generated e327
   // product tree removes its built-in package before this product package is
   // mounted; all other replacements remain disabled to avoid duplicate slots.
-  if (env.DSH_LEGACY_UI_OVERLAY === '1') return ['@accrui/harness-ui-browser-target']
+  if (env.DSH_LEGACY_UI_OVERLAY === '1') {
+    return [
+      '@accrui/harness-ui-browser-target',
+      '@accrui/harness-ui-subagent-compact',
+    ]
+  }
   const packages = [
     '@accrui/harness-ui-agent-preset',
     '@accrui/harness-ui-browser-target',
+    '@accrui/harness-ui-subagent-compact',
   ]
   if (env.DSH_ENABLE_SKILL_SETTINGS_UI === '1') packages.push('@accrui/harness-skill-settings')
   // Knowledge Scope needs the generic composer-above/card-overlay seam. Keep
