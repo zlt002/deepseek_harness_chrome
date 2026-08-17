@@ -86,14 +86,14 @@ test('mounts product UI packages outside upstream and gates the missing knowledg
   )
 })
 
-test('keeps all replacement UI plugins disabled while the accepted full-source overlay is active', () => {
+test('mounts only the completed Browser Target externalization while the full-source overlay is active', () => {
   const patch = productUiPatch({
     DSH_LEGACY_UI_OVERLAY: '1',
     DSH_ENABLE_KNOWLEDGE_SCOPE_UI: '1',
     DSH_ENABLE_SKILL_SETTINGS_UI: '1',
   })
   assert.doesNotMatch(patch, /harness-ui-agent-preset/)
-  assert.doesNotMatch(patch, /harness-ui-browser-target/)
+  assert.equal(patch.match(/@accrui\/harness-ui-browser-target/g)?.length, 1)
   assert.doesNotMatch(patch, /harness-ui-knowledge-scope/)
   assert.doesNotMatch(patch, /harness-skill-settings/)
 })

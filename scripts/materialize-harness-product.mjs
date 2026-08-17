@@ -107,6 +107,13 @@ const compatibilityOverlayParts = existsSync(compatibilityOverlayRoot)
       .map(entry => resolve(compatibilityOverlayRoot, entry.name))
       .sort()
   : []
+const externalizationRoot = resolve(compatibilityOverlayRoot, 'externalized')
+const externalizationPatches = existsSync(externalizationRoot)
+  ? (await readdir(externalizationRoot, { withFileTypes: true }))
+      .filter(entry => entry.isFile() && entry.name.endsWith('.patch'))
+      .map(entry => resolve(externalizationRoot, entry.name))
+      .sort()
+  : []
 
 await mkdir(generatedRoot, { recursive: true })
 const worktrees = run('git', ['worktree', 'list', '--porcelain'], source)
@@ -117,14 +124,18 @@ const registered = worktrees
 if (registered.includes(target)) {
   runVisible('git', ['worktree', 'remove', '--force', target], source)
 } else if (existsSync(target)) {
-  await rm(target, { recursive: true, force: true })
+  await rm(target, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 })
 }
 runVisible('git', ['worktree', 'prune'], source)
 // A regular local clone has its own Git configuration. A linked worktree would
 // share the submodule config and Harness' postinstall would reject installing
-// worktree-local Lefthook settings. Keeping the clone under .generated still
-// guarantees that the official submodule itself remains untouched.
-runVisible('git', ['clone', '--no-hardlinks', '--no-checkout', source, target], projectRoot)
+// worktree-local Lefthook settings. `--no-local` is important here: the
+// official source is often a submodule whose object database uses an
+// `objects/info/alternates` path from another checkout. A default local clone
+// would copy that broken alternate instead of the objects, then fail at
+// checkout. Keeping a self-contained clone under .generated still guarantees
+// that the official submodule itself remains untouched.
+runVisible('git', ['clone', '--no-local', '--no-checkout', source, target], projectRoot)
 // GitHub Windows runners commonly enable core.autocrlf globally. Configure the
 // generated clone before checkout so official sources retain their committed LF
 // bytes and the portable contribution patches apply identically on every OS.
@@ -137,6 +148,14 @@ if (compatibilityOverlayParts.length > 0) {
   const overlay = gunzipSync(Buffer.from(encoded.replace(/\s+/g, ''), 'base64'))
   runVisibleWithInput('git', ['apply', '--check', '-'], target, overlay)
   runVisibleWithInput('git', ['apply', '--whitespace=nowarn', '-'], target, overlay)
+  // Each reverse patch removes one accepted product feature from the full
+  // source overlay only after its equivalent out-of-tree package is ready.
+  // Keeping these small patches separate makes the migration reviewable and
+  // leaves the compressed e327 snapshot immutable.
+  for (const patch of externalizationPatches) {
+    runVisible('git', ['apply', '--check', patch], target)
+    runVisible('git', ['apply', '--whitespace=error', patch], target)
+  }
 } else {
   for (const patch of patchFiles) {
     runVisible('git', ['apply', '--check', patch], target)
@@ -159,6 +178,10 @@ const manifest = {
     sourceRevision: 'e32789808ce5e354cea13991e05d7a5bad7385a3',
     supersedesGenericPatches: patchFiles.map(path => relative(projectRoot, path)),
   },
+  externalizations: compatibilityOverlayParts.length === 0 ? [] : await Promise.all(externalizationPatches.map(async path => ({
+    path: relative(projectRoot, path),
+    bytes: Buffer.byteLength(await readFile(path)),
+  }))),
 }
 await writeFile(resolve(target, '.harness-product.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
@@ -184,5 +207,5 @@ if (shouldBuild) {
 
 console.log(`Materialized Harness product tree at ${target}`)
 console.log(`Official revision: ${revision}; ${compatibilityOverlayParts.length > 0
-  ? `latest full-source UI overlay parts: ${compatibilityOverlayParts.length}; generic patches retained but not applied`
+  ? `latest full-source UI overlay parts: ${compatibilityOverlayParts.length}; externalizations: ${externalizationPatches.length}; generic patches retained but not applied`
   : `generic patches: ${patchFiles.length}`}`)

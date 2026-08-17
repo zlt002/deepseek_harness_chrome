@@ -188,10 +188,10 @@ export function productUiPatch(env = process.env) {
 }
 
 function productUiPackages(env = process.env) {
-  // The accepted full-source overlay already contains agent preset, browser
-  // target, knowledge scope, and Skill settings. Mounting product replacements
-  // on top duplicates their singleton registrations and prevents Harness boot.
-  if (env.DSH_LEGACY_UI_OVERLAY === '1') return []
+  // Browser Target is the first completed externalization. The generated e327
+  // product tree removes its built-in package before this product package is
+  // mounted; all other replacements remain disabled to avoid duplicate slots.
+  if (env.DSH_LEGACY_UI_OVERLAY === '1') return ['@accrui/harness-ui-browser-target']
   const packages = [
     '@accrui/harness-ui-agent-preset',
     '@accrui/harness-ui-browser-target',
