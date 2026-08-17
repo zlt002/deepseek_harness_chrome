@@ -56,6 +56,12 @@ export default defineConfig({
   },
   dev: {
     server: {
+      // Chrome's service worker resolves ws://localhost to IPv4 first. WXT's
+      // default localhost bind is IPv6-only on this host, so HMR gets
+      // ERR_CONNECTION_REFUSED unless both listen address and injected origin
+      // are the IPv4 loopback the rest of the stack already uses.
+      host: '127.0.0.1',
+      origin: '127.0.0.1',
       strictPort: true,
     },
   },

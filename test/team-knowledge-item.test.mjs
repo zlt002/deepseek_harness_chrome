@@ -58,6 +58,16 @@ test('binds the create grant to parent, kind, name and body and rejects challeng
   } finally { await harness.connector.stop() }
 })
 
+test('surfaces a directory-required inspect result instead of a generic invalid parent', async () => {
+  const harness = await open(() => ({ status: 'partial_delivery', item: null, stages: [], failedAt: 'inspect', error: 'team_doc_directory_required' }))
+  try {
+    const inspected = await harness.call(1, { action: 'inspect_parent' })
+    assert.equal(inspected.result.isError, true)
+    assert.equal(inspected.result.content[0].text, 'team_doc_directory_required')
+    assert.equal(inspected.result.structuredContent, undefined)
+  } finally { await harness.connector.stop() }
+})
+
 test('does not turn an HTTP-success business failure into a successful spreadsheet creation', async () => {
   const harness = await open((request) => request.action === 'inspect_parent'
     ? { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }

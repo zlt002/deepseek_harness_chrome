@@ -15,5 +15,7 @@ test('pnpm dev uses a dedicated port instead of the AccrUI dev server port', asy
 test('WXT development config rejects a busy port instead of falling back to a CSP-blocked origin', async () => {
   const wxtConfig = await readFile(wxtConfigUrl, 'utf8')
 
-  assert.match(wxtConfig, /dev:\s*{\s*server:\s*{\s*strictPort:\s*true\s*,?\s*}\s*,?\s*}/s)
+  assert.match(wxtConfig, /host:\s*'127\.0\.0\.1'/)
+  assert.match(wxtConfig, /origin:\s*'127\.0\.0\.1'/)
+  assert.match(wxtConfig, /strictPort:\s*true/)
 })

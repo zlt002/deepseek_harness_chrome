@@ -14,6 +14,5 @@ export function scopeLabels(scope, catalog) {
   const repositories = selectedNames(scope?.repositoryIds ?? [], catalog.repositories, true)
   const knowledge = selectedNames(scope?.systemIds ?? [], catalog.systems)
     ?? catalog.domains.find(domain => domain.id === scope?.domainId)?.name
-    ?? '知识范围'
   return { repositories, knowledge }
 }

@@ -16,7 +16,7 @@ const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
 const MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES = 128 * 1024
 // Operations without a stable public API and operation-specific readback are
 // deliberately absent. Accepting them and failing after a mutation is unsafe.
-const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'selection_insert']
+const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace']
 
 function spreadsheetArtifactSummary(result) {
   const artifact = result?.observed?.artifact
@@ -80,6 +80,13 @@ const codeSearchTool = {
   inputSchema: { type: 'object', additionalProperties: false, required: ['question'], properties: { question: { type: 'string', minLength: 1, maxLength: 4000 } } },
 }
 
+const selectedSourceScopeTool = {
+  name: 'selected_source_scope',
+  title: 'Read selected source scope',
+  description: 'Read the repository and knowledge names currently selected in this Harness session composer. This is a read-only echo of the session selection. It does not search, retrieve, or authorize a query. Call it from the parent session with no arguments when you need to confirm what is selected. Never ask the user to read the two composer-strip labels.',
+  inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+}
+
 function validKnowledgeArguments(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).length === 1 && typeof value.question === 'string'
@@ -104,6 +111,23 @@ function validKnowledgeResult(value) {
   if (!['complete', 'partial', 'truncated'].includes(value.status) || typeof value.answer !== 'string' || value.answer.length > 16000 || !Array.isArray(value.sources) || value.sources.length > 20) return false
   return value.sources.every((source) => source && typeof source === 'object' && !Array.isArray(source)
     && typeof source.id === 'string' && source.id.length > 0 && typeof source.title === 'string' && source.title.length > 0)
+}
+
+function validSelectedSourceScopeArguments(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.keys(value).length === 0
+}
+
+function validSelectedSourceScopeName(value) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 200
+}
+
+function validSelectedSourceScopeResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if (typeof value.enabled !== 'boolean' || typeof value.codeSelected !== 'boolean' || typeof value.knowledgeSelected !== 'boolean') return false
+  if (!Array.isArray(value.repositories) || value.repositories.length > 50 || !value.repositories.every(validSelectedSourceScopeName)) return false
+  if (!Array.isArray(value.knowledge) || value.knowledge.length > 50 || !value.knowledge.every(validSelectedSourceScopeName)) return false
+  return value.codeSelected === value.repositories.length > 0 && value.knowledgeSelected === value.knowledge.length > 0
 }
 
 const browserTargetSchema = {
@@ -133,16 +157,33 @@ const officeContextSchema = {
         url: { type: 'string', format: 'uri' },
       },
     },
-    // This tracer bullet identifies only the verified page. The document
-    // adapter has not discovered a stable service-issued identity yet.
-    documentIdentity: { type: 'null' },
+    // The extension probes every webedit frame on both editor channels and
+    // reports the best ready frame's kind and identity so the model can route
+    // to office_spreadsheet / office_document without guessing from the title.
+    // null means no webedit frame answered ready — not "no document exists".
+    documentIdentity: {
+      oneOf: [
+        { type: 'null' },
+        {
+          type: 'object', additionalProperties: false,
+          required: ['kind', 'workbookName', 'sheetName', 'hasContent', 'webeditFrames'],
+          properties: {
+            kind: { enum: ['webedit_spreadsheet', 'webedit_light_document'] },
+            workbookName: { type: ['string', 'null'] },
+            sheetName: { type: ['string', 'null'] },
+            hasContent: { type: ['boolean', 'null'] },
+            webeditFrames: { type: 'integer', minimum: 1, maximum: 50 },
+          },
+        },
+      ],
+    },
     primaryBrowserTarget: browserTargetSchema,
     pages: {
       type: 'array', minItems: 1,
       items: {
         type: 'object', additionalProperties: false,
         required: ['browserTarget', 'pageIdentity', 'documentIdentity', 'isPrimary'],
-        properties: { browserTarget: browserTargetSchema, pageIdentity: { type: 'object', additionalProperties: false, required: ['title', 'url'], properties: { title: { type: 'string' }, url: { type: 'string', format: 'uri' } } }, documentIdentity: { type: 'null' }, isPrimary: { type: 'boolean' } },
+        properties: { browserTarget: browserTargetSchema, pageIdentity: { type: 'object', additionalProperties: false, required: ['title', 'url'], properties: { title: { type: 'string' }, url: { type: 'string', format: 'uri' } } }, documentIdentity: { oneOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['kind', 'workbookName', 'sheetName', 'hasContent', 'webeditFrames'], properties: { kind: { enum: ['webedit_spreadsheet', 'webedit_light_document'] }, workbookName: { type: ['string', 'null'] }, sheetName: { type: ['string', 'null'] }, hasContent: { type: ['boolean', 'null'] }, webeditFrames: { type: 'integer', minimum: 1, maximum: 50 } } }] }, isPrimary: { type: 'boolean' } },
       },
     },
     unavailableBrowserTargets: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['browserTarget', 'reason'], properties: { browserTarget: browserTargetSchema, reason: { const: 'closed_or_changed' } } } },
@@ -152,7 +193,7 @@ const officeContextSchema = {
 const officeGetContextTool = {
   name: 'office_get_context',
   title: 'Get Office context',
-  description: 'Read the trusted browser context bound to this Harness Run. In fixed-tab mode it returns every selected available page, marks the primary page, and reports selected pages that closed or changed. When multiple pages are returned, treat all of them as the current context and enumerate or use all of them unless the user explicitly asks only for the primary page. The model cannot select tabs.',
+  description: 'Read the trusted browser context bound to this Harness Run. In fixed-tab mode it returns every selected available page, marks the primary page, and reports selected pages that closed or changed. When multiple pages are returned, treat all of them as the current context and enumerate or use all of them unless the user explicitly asks only for the primary page. The model cannot select tabs. documentIdentity reports the probed WebEdit editor of each page: kind webedit_spreadsheet means call office_spreadsheet (view reports the selected cell), kind webedit_light_document means call office_document. A Team Knowledge light-document page can also preload a blank spreadsheet iframe; a blank spreadsheet next to a ready light document is reported as webedit_light_document, not a spreadsheet. null only means no webedit frame answered ready yet, so a null on a freshly loaded page should be retried with the specific office tool rather than read as "no document".',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -235,7 +276,7 @@ const lightDocumentResourceSchema = {
 
 const officeDocumentTool = {
   name: 'office_document', title: 'Read or edit light document',
-  description: 'Use this dispatch only for a bound WebEdit light document, never for spreadsheets. Reads are bounded. A mutation first obtains a one-time inspect_write challenge, then supplies that challenge and an idempotency identity; the extension rechecks the document fingerprint and reads back the result.',
+  description: 'Use this dispatch only for a bound WebEdit light document, never for spreadsheets. Reads are bounded. inspect_write is never a bare action: it always takes the final operation plus the exact payload that write will reuse, then returns a one-time challenge. write supplies that challenge, a new idempotencyIdentity, and the same operation/payload; the extension rechecks the document fingerprint and reads back the result. Empty documents report blockCount 0 and have no replaceable public block — do not call replace, blocks_replace, or blocks_batch_edit. To write body content into an empty document: first call action=selection, copy document.selection.selectionFingerprint, inspect_write with operation=selection_insert and payload {text|markdown|html, expectedSelectionFingerprint}, then write the same payload once; or inspect_write with operation=blocks_insert and payload {position:"end", blocks:[...]} / operation=insert_drawing and payload {mermaid}. Flowcharts, sequence diagrams, and pie charts are native text drawings: insert_drawing with Mermaid source (flowchart TD, sequenceDiagram, pie), not images. blocks_insert accepts h1-h6, p, blockquote, ul/ol items, table rows, and codeblock/mermaid. selection_replace edits the current non-collapsed selection and requires the same expectedSelectionFingerprint contract as selection_insert. replace/delete/format/blocks_* require an existing public block id or index from a prior read. set_title/title change only the document title.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['action'],
@@ -393,11 +434,22 @@ function validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowser
     && Array.isArray(unavailable) && unavailable.every(validUnavailableBrowserTarget)
 }
 
+function validOfficeDocumentIdentity(value) {
+  if (value === null) return true
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.keys(value).length === 5
+    && (value.kind === 'webedit_spreadsheet' || value.kind === 'webedit_light_document')
+    && (typeof value.workbookName === 'string' || value.workbookName === null)
+    && (typeof value.sheetName === 'string' || value.sheetName === null)
+    && (typeof value.hasContent === 'boolean' || value.hasContent === null)
+    && Number.isInteger(value.webeditFrames) && value.webeditFrames >= 1 && value.webeditFrames <= 50
+}
+
 function validOfficeContext(value, browserTarget) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   if (!(Object.keys(value).length === 3 || Object.keys(value).length === 6)) return false
   if (!(value.status === 'browser_target_verified'
-    && value.documentIdentity === null
+    && validOfficeDocumentIdentity(value.documentIdentity)
     && value.pageIdentity !== null && typeof value.pageIdentity === 'object' && !Array.isArray(value.pageIdentity)
     && Object.keys(value.pageIdentity).length === 2
     && typeof value.pageIdentity.title === 'string'
@@ -410,7 +462,7 @@ function validOfficeContext(value, browserTarget) {
       && Object.keys(page).length === 4 && validBrowserTarget(page.browserTarget)
       && page.pageIdentity && typeof page.pageIdentity === 'object' && !Array.isArray(page.pageIdentity)
       && Object.keys(page.pageIdentity).length === 2 && typeof page.pageIdentity.title === 'string'
-      && page.pageIdentity.url === page.browserTarget.url && page.documentIdentity === null && typeof page.isPrimary === 'boolean')
+      && page.pageIdentity.url === page.browserTarget.url && validOfficeDocumentIdentity(page.documentIdentity) && typeof page.isPrimary === 'boolean')
     && value.pages.filter((page) => page.isPrimary).length === 1
     && value.pages.some((page) => page.isPrimary && sameBrowserTarget(page.browserTarget, browserTarget))
     && Array.isArray(value.unavailableBrowserTargets) && value.unavailableBrowserTargets.every(validUnavailableBrowserTarget)
@@ -515,6 +567,28 @@ function validLightDocumentResource(value) {
     && typeof value.fingerprint === 'string' && value.fingerprint.length > 0 && value.fingerprint.length <= 128
 }
 
+function officeDocumentArgumentsHint(args) {
+  const action = args && typeof args === 'object' && !Array.isArray(args) ? args.action : undefined
+  if (action === 'inspect_write') {
+    if (typeof args.operation !== 'string' || !args.payload || typeof args.payload !== 'object' || Array.isArray(args.payload)) {
+      return 'office_document inspect_write requires the final operation and payload. For an empty document, first call selection, then inspect_write with operation=selection_insert and payload {text|markdown|html, expectedSelectionFingerprint} from that selection read.'
+    }
+    if ((args.operation === 'selection_insert' || args.operation === 'selection_replace') && selectionInsertFragments(args.payload) === null) {
+      return `office_document ${args.operation} requires exactly one of text/markdown/html plus expectedSelectionFingerprint from a prior selection read; inspect_write and write must reuse that exact payload.`
+    }
+    if (args.operation === 'insert_drawing' && lightDocumentInsertFragments('insert_drawing', args.payload) === null) {
+      return 'office_document insert_drawing requires mermaid source (flowchart, sequenceDiagram, or pie) and optional position start/end/before/after; before/after also need id or index.'
+    }
+    if (args.operation === 'blocks_insert' && lightDocumentInsertFragments('blocks_insert', args.payload) === null) {
+      return 'office_document blocks_insert requires payload.blocks of h1-h6/p/blockquote/ul/ol/table/codeblock items and optional position start/end/before/after; before/after also need id or index.'
+    }
+    return 'office_document inspect_write requires a supported operation and the exact final payload that write will reuse; extra keys and preview payloads are rejected.'
+  }
+  if (action === 'write') return 'office_document write requires challenge, idempotencyIdentity, operation, and the same payload approved by inspect_write.'
+  if (action === 'search') return 'office_document search requires a non-empty query'
+  return 'office_document requires a bounded read/search/selection action, or a challenged verified write'
+}
+
 function validOfficeDocumentArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
   const keys = Object.keys(value)
@@ -579,31 +653,85 @@ function lightDocumentBatchItems(operation, payload) {
   }
   return items
 }
+function distinctiveLightDocumentFragments(value) {
+  const plain = String(value ?? '')
+    .replace(/```[\w-]*\n?/g, ' ')
+    .replace(/\[[ xX]\]/g, ' ')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[`*_#>~\-|:]/g, ' ')
+  return [...new Set(plain.match(/[\p{L}\p{N}]+/gu) ?? [])].filter((part) => part.length >= 2).slice(0, 100)
+}
+function lightDocumentStructuredBlockValid(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return false
+  const type = String(item.type ?? item.blockType ?? '').toLowerCase()
+  if (!/^(h[1-6]|p|blockquote|ul|ol|table|codeblock)$/.test(type)) return false
+  const text = typeof item.text === 'string' ? item.text : typeof item.markdown === 'string' ? item.markdown : ''
+  const html = typeof item.html === 'string' ? item.html : ''
+  const language = item.language === undefined ? undefined : String(item.language)
+  if (language !== undefined && (language.length < 1 || language.length > 32 || !/^[a-z0-9_+#.-]+$/i.test(language))) return false
+  if (type === 'ul' || type === 'ol') {
+    const list = Array.isArray(item.items) ? item.items : text ? text.split('\n') : []
+    return list.length >= 1 && list.length <= 50 && list.every((line) => typeof line === 'string' && line.trim() && line.length <= 20_000)
+  }
+  if (type === 'table') {
+    const rows = Array.isArray(item.rows) ? item.rows : text ? text.split('\n').map((line) => line.split('|').map((cell) => cell.trim()).filter(Boolean)) : []
+    return rows.length >= 1 && rows.length <= 30 && rows.every((row) => Array.isArray(row) && row.length >= 1 && row.length <= 12 && row.every((cell) => typeof cell === 'string' && cell.length <= 2_000))
+  }
+  return !!(text.trim() || html.trim()) && text.length <= 20_000 && html.length <= 20_000
+}
+function lightDocumentStructuredBlockText(item) {
+  if (Array.isArray(item?.items)) return item.items.filter((line) => typeof line === 'string').join('\n')
+  if (Array.isArray(item?.rows)) return item.rows.flat().filter((cell) => typeof cell === 'string').join('\n')
+  if (typeof item?.text === 'string') return item.text
+  if (typeof item?.markdown === 'string') return item.markdown
+  if (typeof item?.html === 'string') return item.html.replace(/<[^>]*>/g, ' ')
+  return ''
+}
+function lightDocumentInsertFragments(operation, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const position = payload.position === undefined ? 'end' : payload.position
+  if (!['start', 'end', 'before', 'after'].includes(position)) return null
+  if ((position === 'before' || position === 'after') && !(typeof payload.id === 'string' && payload.id) && !Number.isInteger(payload.index)) return null
+  const allowed = operation === 'insert_drawing' ? ['mermaid', 'position', 'id', 'index'] : ['blocks', 'position', 'id', 'index']
+  if (!Object.keys(payload).every((key) => allowed.includes(key))) return null
+  if (operation === 'insert_drawing') {
+    if (typeof payload.mermaid !== 'string' || !payload.mermaid.trim() || payload.mermaid.length > 20_000) return null
+    const fragments = distinctiveLightDocumentFragments(payload.mermaid)
+    return fragments.length ? { kind: 'mermaid', fragments, position } : null
+  }
+  if (!Array.isArray(payload.blocks) || payload.blocks.length < 1 || payload.blocks.length > 50 || !payload.blocks.every(lightDocumentStructuredBlockValid)) return null
+  const fragments = distinctiveLightDocumentFragments(payload.blocks.map(lightDocumentStructuredBlockText).join('\n'))
+  return fragments.length ? { kind: 'blocks', fragments, position } : null
+}
 function selectionInsertFragments(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
   const kinds = ['markdown', 'html', 'text'].filter((key) => typeof payload[key] === 'string')
   if (kinds.length !== 1 || !Object.keys(payload).every((key) => ['markdown', 'html', 'text', 'insertBelow', 'expectedSelectionFingerprint'].includes(key))) return null
   const kind = kinds[0]; const value = payload[kind]
   if (!value.trim() || value.length > 20_000 || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint) || (payload.insertBelow !== undefined && typeof payload.insertBelow !== 'boolean')) return null
-  const plain = kind === 'html' ? value.replace(/<[^>]*>/g, ' ') : kind === 'markdown' ? value.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[`*_#>~\-]/g, ' ') : value
-  const fragments = [...new Set(plain.match(/[\p{L}\p{N}]+/gu) ?? [])].slice(0, 100)
+  const fragments = distinctiveLightDocumentFragments(kind === 'html' ? value.replace(/<[^>]*>/g, ' ') : value)
   return fragments.length ? { kind, fragments } : null
 }
 function validLightDocumentOperationPayload(operation, payload) {
-  if (operation === 'selection_insert') return selectionInsertFragments(payload) !== null
+  if (operation === 'selection_insert' || operation === 'selection_replace') return selectionInsertFragments(payload) !== null
+  if (operation === 'insert_drawing' || operation === 'blocks_insert') return lightDocumentInsertFragments(operation, payload) !== null
   return !['blocks_delete', 'blocks_format'].includes(operation) || lightDocumentBatchItems(operation, payload) !== null
+}
+function verifiedFragmentEvidence(request, result, requested) {
+  const observed = result.observed
+  if (!requested || !Array.isArray(observed?.verifiedFragments) || !Array.isArray(observed?.fragmentEvidence) || !Array.isArray(observed?.observedBlocks)) return false
+  if (canonicalJson(observed.verifiedFragments) !== canonicalJson(requested.fragments) || observed.fragmentEvidence.length !== requested.fragments.length || observed.observedBlocks.length < 1) return false
+  return observed.fragmentEvidence.every((evidence, index) => evidence && evidence.fragment === requested.fragments[index] && Array.isArray(evidence.blockIds) && evidence.blockIds.length > 0)
 }
 function verifiedLightDocumentWriteMatches(result, request) {
   const matchesRequest = validOfficeDocumentWriteResult(result) && result.requested?.operation === request.operation
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
   if (!matchesRequest) return false
-  if (request.operation === 'selection_insert') {
-    const requested = selectionInsertFragments(request.payload); const observed = result.observed
-    if (!requested || !Array.isArray(observed?.verifiedFragments) || !Array.isArray(observed?.fragmentEvidence) || !Array.isArray(observed?.observedBlocks)) return false
-    if (canonicalJson(observed.verifiedFragments) !== canonicalJson(requested.fragments) || observed.fragmentEvidence.length !== requested.fragments.length || observed.observedBlocks.length < 1) return false
-    return observed.fragmentEvidence.every((evidence, index) => evidence && evidence.fragment === requested.fragments[index] && Array.isArray(evidence.blockIds) && evidence.blockIds.length > 0)
-  }
+  if (request.operation === 'selection_insert' || request.operation === 'selection_replace') return verifiedFragmentEvidence(request, result, selectionInsertFragments(request.payload))
+  if (request.operation === 'insert_drawing' || request.operation === 'blocks_insert') return verifiedFragmentEvidence(request, result, lightDocumentInsertFragments(request.operation, request.payload))
   if (!['blocks_delete', 'blocks_format'].includes(request.operation)) return true
   const expected = lightDocumentBatchItems(request.operation, request.payload); const observed = result.observed?.verifiedBlocks
   if (!expected || result.requested?.count !== expected.length || !Array.isArray(observed) || observed.length !== expected.length) return false
@@ -723,6 +851,38 @@ function completeSpreadsheetDataValidationState(state) {
   const format = state?.format
   return !!state && typeof state === 'object' && typeof state.merged === 'boolean' && !!state.filter && typeof state.filter.operator === 'string' && typeof state.rowHeight === 'number' && Number.isFinite(state.rowHeight) && typeof state.columnWidth === 'number' && Number.isFinite(state.columnWidth)
     && !!format && typeof format === 'object' && ['bold', 'italic', 'underline', 'size', 'name', 'color', 'fill', 'numberFormat', 'alignment', 'wrap'].every((key) => Object.hasOwn(format, key) && format[key] !== null)
+}
+function spreadsheetSheetPrefix(address) {
+  const match = typeof address === 'string' ? /^\s*(?:'((?:[^']|'')+)'|([^'!:\s]+))!\s*(.+?)\s*$/.exec(address) : null
+  return match ? { sheetName: (match[1] ?? match[2]).replace(/''/g, "'"), range: match[3] } : null
+}
+function normalizeOfficeSpreadsheetArguments(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args
+  const output = { ...args }
+  const prefix = spreadsheetSheetPrefix(output.range)
+  if (prefix) {
+    output.range = prefix.range
+    if (output.sheetName === undefined) output.sheetName = prefix.sheetName
+  }
+  if (output.payload && typeof output.payload === 'object' && !Array.isArray(output.payload)) {
+    const rangePrefix = spreadsheetSheetPrefix(output.payload.range)
+    const targetPrefix = rangePrefix ? null : spreadsheetSheetPrefix(output.payload.target)
+    const hit = rangePrefix ?? targetPrefix
+    if (hit) {
+      output.payload = { ...output.payload }
+      if (rangePrefix) output.payload.range = hit.range; else output.payload.target = hit.range
+      if (output.payload.sheetName === undefined) output.payload.sheetName = hit.sheetName
+    }
+  }
+  return output
+}
+function spreadsheetArgumentsHint(args) {
+  const action = args && typeof args === 'object' && !Array.isArray(args) ? args.action : undefined
+  if (action === 'special_cells') return 'office_spreadsheet special_cells requires a bounded bare range (for example A1:C10), a supported kind, and optional offset/limit'
+  if (action === 'dimensions' || action === 'outline') return `office_spreadsheet ${action} requires a bounded whole-row or whole-column range and a matching axis`
+  if (action === 'range') return 'office_spreadsheet range requires a bounded bare range (for example A1:C10); qualify the sheet through sheetName'
+  if (action === 'search') return 'office_spreadsheet search requires a bounded bare range and a non-empty query'
+  return 'office_spreadsheet requires a bounded read action, inspect_write, or challenged verified write'
 }
 function validOfficeSpreadsheetArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
@@ -1318,6 +1478,7 @@ export class BrowserConnector {
     const isTeamDocRequest = pending.request.tool === 'team_doc_create'
     const isTeamKnowledgeItemRequest = pending.request.tool === 'team_knowledge_item'
     const isKnowledgeRequest = pending.request.tool === 'knowledge_search' || pending.request.tool === 'code_search'
+    const isSelectedSourceScopeRequest = pending.request.tool === 'selected_source_scope'
     const isOfficeRequest = isOfficeContextRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest || isTeamDocRequest || isTeamKnowledgeItemRequest
     const sameOpenIdentity = response.runId === pending.request.runId && response.generation === pending.request.generation
     const currentTarget = this.browserTargets.get(pending.request.runId)
@@ -1358,6 +1519,11 @@ export class BrowserConnector {
     }
     if (isKnowledgeRequest) {
       if (!validKnowledgeResult(response.result)) { pending.reject(new Error('Extension peer returned an invalid Knowledge Platform result')); return true }
+      pending.resolve(response.result)
+      return true
+    }
+    if (isSelectedSourceScopeRequest) {
+      if (!validSelectedSourceScopeResult(response.result)) { pending.reject(new Error('Extension peer returned an invalid selected-source scope result')); return true }
       pending.resolve(response.result)
       return true
     }
@@ -1457,7 +1623,7 @@ export class BrowserConnector {
     }
     if (message.method === 'tools/list') {
       this.onToolsListed?.()
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, officeSpreadsheetTool, teamDocCreateTool, teamKnowledgeItemTool, teamKnowledgeBatchTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool] } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, officeSpreadsheetTool, teamDocCreateTool, teamKnowledgeItemTool, teamKnowledgeBatchTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool] } })
       return
     }
     if (message.method !== 'tools/call') {
@@ -1502,6 +1668,10 @@ export class BrowserConnector {
     }
     if (message.params?.name === 'knowledge_search' || message.params?.name === 'code_search') {
       await this.#knowledgeSearch(message, response)
+      return
+    }
+    if (message.params?.name === 'selected_source_scope') {
+      await this.#selectedSourceScope(message, response)
       return
     }
     if (message.params?.name !== 'office_get_context' || !validOfficeGetContextArguments(message.params.arguments ?? {})) {
@@ -1647,7 +1817,9 @@ export class BrowserConnector {
     }
     const identity = harnessIdentity(message)
     if (identity === undefined || identity.parentSessionId === undefined) {
-      this.#toolError(response, message.id, 'Knowledge search is available only inside the continuable Knowledge subagent.')
+      const wrapper = kind === 'code_search' ? 'search_selected_remote_code' : 'search_selected_knowledge'
+      const label = kind === 'code_search' ? 'Code search' : 'Knowledge search'
+      this.#toolError(response, message.id, `${label} is available only inside the continuable ${kind === 'code_search' ? 'remote-code' : 'Knowledge'} subagent. From the parent session, call ${wrapper} with description and prompt.`)
       return
     }
     const runId = this.currentRunId
@@ -1665,6 +1837,33 @@ export class BrowserConnector {
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Knowledge Platform request failed')
+    }
+  }
+
+  async #selectedSourceScope(message, response) {
+    if (!validSelectedSourceScopeArguments(message.params?.arguments ?? {})) {
+      this.#reply(response, errorResponse(message.id, -32602, 'selected_source_scope accepts no model-controlled arguments'))
+      return
+    }
+    const identity = harnessIdentity(message)
+    if (identity === undefined) {
+      this.#toolError(response, message.id, 'selected_source_scope requires a Harness session identity.')
+      return
+    }
+    const runId = this.currentRunId
+    if (runId === undefined) {
+      this.#toolError(response, message.id, 'No active Harness Run is available for selected-source scope.')
+      return
+    }
+    const correlation = {
+      type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, tool: 'selected_source_scope',
+      harnessSessionId: identity.sessionId, ...(identity.parentSessionId === undefined ? {} : { harnessParentSessionId: identity.parentSessionId }),
+    }
+    try {
+      const result = await this.#requestExtension(correlation, response)
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) {
+      this.#toolError(response, message.id, error instanceof Error ? error.message : 'Selected-source scope request failed')
     }
   }
 
@@ -1695,7 +1894,7 @@ export class BrowserConnector {
   async #officeDocument(message, response) {
     const args = message.params?.arguments ?? {}
     if (!validOfficeDocumentArguments(args)) {
-      this.#reply(response, errorResponse(message.id, -32602, 'office_document requires a bounded read/search/selection action, or a challenged verified write'))
+      this.#reply(response, errorResponse(message.id, -32602, officeDocumentArgumentsHint(args)))
       return
     }
     const runId = this.currentRunId
@@ -1767,6 +1966,11 @@ export class BrowserConnector {
       const resolved = await this.#requestExtension(correlation)
       if (!validOfficeDocumentReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded light-document read')
       if (args.action === 'inspect_write') {
+        const blockCount = Number.isInteger(resolved.result.document?.blockCount) ? resolved.result.document.blockCount : undefined
+        if (['replace', 'delete', 'format', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format'].includes(args.operation) && blockCount === 0) {
+          this.#toolError(response, message.id, 'This light document has no public replaceable block (blockCount 0). Call selection then selection_insert, or inspect_write with blocks_insert / insert_drawing to add body content.')
+          return
+        }
         const challenge = randomBytes(32).toString('base64url')
         for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
         if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
@@ -1783,8 +1987,9 @@ export class BrowserConnector {
   }
 
   async #officeSpreadsheet(message, response) {
-    const args = message.params?.arguments ?? {}
-    if (!validOfficeSpreadsheetArguments(args)) { this.#reply(response, errorResponse(message.id, -32602, 'office_spreadsheet requires a bounded read action, inspect_write, or challenged verified write')); return }
+    let args = message.params?.arguments ?? {}
+    args = normalizeOfficeSpreadsheetArguments(args)
+    if (!validOfficeSpreadsheetArguments(args)) { this.#reply(response, errorResponse(message.id, -32602, spreadsheetArgumentsHint(args))); return }
     const runId = this.currentRunId; const browserTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
     if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
     if (args.action === 'write') {
@@ -1894,6 +2099,7 @@ export class BrowserConnector {
       const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
       const resolved = await this.#requestExtension(request)
       const result = resolved.teamKnowledgeItem
+      if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge parent')
       return { request, result }
     }
@@ -1976,6 +2182,7 @@ export class BrowserConnector {
     const inspectParent = async () => {
       const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
       const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
+      if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge batch parent')
       if (result.capabilities?.light_document === false) throw new Error('team_knowledge_light_document_unsupported')
       return result
@@ -2093,6 +2300,7 @@ export class BrowserConnector {
     const inspectParent = async () => {
       const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
       const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
+      if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid PMD delivery parent')
       if (result.capabilities?.light_document === false) throw new Error('team_knowledge_light_document_unsupported')
       return result

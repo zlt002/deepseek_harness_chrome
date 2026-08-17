@@ -2,6 +2,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createKnowledgeScopeBridge, knowledgeScopeBridgeConfig } from './bridge.ts'
 import { KnowledgeScopePanel, KnowledgeScopeStrip, type KnowledgeScopeInjected } from './KnowledgeScope.tsx'
+import { RemoteSearchToolRow } from './RemoteSearchToolRow.tsx'
 
 export const inject = ['slots']
 
@@ -19,8 +20,12 @@ export function apply(ctx: ClientContext): void {
     window.addEventListener('message', receive)
     return () => window.removeEventListener('message', receive)
   }, 'accrui-knowledge-scope: extension bridge')
+  const progressInjected = () => ({ hooks: { searchProgress: bridge.progress } })
   ctx.slots.inject('conversation.composer.above', () => ctx.slots.register({ name: 'conversation.composer.above', id: 'accrui-knowledge-scope-strip', order: 20, inject: injected }, KnowledgeScopeStrip))
   ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({ name: 'conversation.input.overlay', id: 'accrui-knowledge-scope-panel', order: 20, inject: injected }, KnowledgeScopePanel))
+  for (const key of ['search_selected_remote_code', 'mcp__chrome__code_search', 'search_selected_knowledge', 'mcp__chrome__knowledge_search']) {
+    ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key, inject: progressInjected }, RemoteSearchToolRow))
+  }
 }
 
 export { KnowledgeScopePanel, KnowledgeScopeStrip }

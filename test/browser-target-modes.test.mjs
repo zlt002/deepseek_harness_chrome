@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck }) {
+async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript }) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
@@ -11,6 +11,8 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
   let runtimeListener
   let activatedListener
   let createdListener
+  let updatedListener
+  let currentActiveTab = activeTab
   const nativeMessages = []
   const createdUrls = []
   const ports = []
@@ -72,17 +74,19 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
         Object.assign(stored, value)
       },
     } },
-    windows: { getLastFocused: async () => ({ id: activeTab.windowId }) },
+    windows: { getLastFocused: async () => ({ id: currentActiveTab.windowId }) },
     tabs: {
-      query: async () => [activeTab],
-      get: async (tabId) => tabsById[tabId] ?? (tabId === activeTab.id ? activeTab : undefined),
+      query: async () => [currentActiveTab],
+      get: async (tabId) => tabsById[tabId] ?? (tabId === currentActiveTab.id ? currentActiveTab : undefined),
       create: async (options) => {
         createdUrls.push(options.url)
         return createdTab ?? Object.values(tabsById).find((tab) => tab.url === options.url)
       },
       onActivated: { addListener: (listener) => { activatedListener = listener } },
       onCreated: { addListener: (listener) => { createdListener = listener } },
+      onUpdated: { addListener: (listener) => { updatedListener = listener } },
     },
+    scripting: { executeScript: async (options) => executeScript?.(options) ?? [] },
     sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()
@@ -101,8 +105,15 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
         reject(new Error('runtime message did not keep its response channel open'))
       }
     }),
-    activateTab: (tabId) => activatedListener({ tabId }),
+    activateTab: (tabId) => {
+      currentActiveTab = tabsById[tabId] ?? currentActiveTab
+      activatedListener({ tabId })
+    },
     createTab: (tab) => createdListener(tab),
+    updateActiveTab: (changeInfo, tab) => {
+      currentActiveTab = tab
+      updatedListener(tab.id, changeInfo, tab)
+    },
     emitNative: (message, portIndex = ports.length - 1) => ports[portIndex].emit(message),
     disconnectNative: () => ports.at(-1).disconnect(),
     cleanup: () => {
@@ -179,6 +190,59 @@ test('follow-active-tab uses the tab activated after one office turn for the nex
     assert.ok(responseIndex > transferIndex)
     const secondTurn = background.nativeMessages[responseIndex]
     assert.equal(secondTurn.result.pageIdentity.url, wb.url)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('follow-active-tab refreshes a same-tab URL change before the next Office turn', async () => {
+  const original = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/100', title: 'Original' }
+  const selected = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/200', title: 'Selected parent' }
+  const originalTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: original.url }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [], candidate: originalTarget }, activeTab: original,
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.updateActiveTab({ url: selected.url, title: selected.title }, selected)
+    background.emitNative({
+      type: 'connector_request', requestId: 'selected-parent-turn', runId: 'run-follow', generation: 'generation-1',
+      browserTarget: originalTarget, tool: 'office_get_context',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'selected-parent-turn')
+    assert.equal(response.error, undefined)
+    assert.equal(response.result.pageIdentity.url, selected.url)
+    const transfer = background.nativeMessages.find((message) => message.type === 'transfer-browser-target' && message.requestId === 'selected-parent-turn')
+    assert.deepEqual(transfer.browserTarget, { browser: 'chrome', windowId: 7, tabId: 42, url: selected.url })
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('Team Knowledge inspection transfers to a same-tab selected parent without an Office preflight', async () => {
+  const original = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/100', title: 'Original' }
+  const selected = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/200', title: 'Selected parent' }
+  const originalTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: original.url }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [], candidate: originalTarget }, activeTab: original,
+    executeScript: async () => [{ result: { ok: true, parent: { parentId: '200', bookId: '1', parentName: 'Selected parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-200' } } }],
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.updateActiveTab({ url: selected.url, title: selected.title }, selected)
+    background.emitNative({
+      type: 'connector_request', requestId: 'team-knowledge-inspect', runId: 'run-follow', generation: 'generation-1',
+      browserTarget: originalTarget, tool: 'team_knowledge_item', action: 'inspect_parent',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'team-knowledge-inspect')
+    assert.equal(response.error, undefined)
+    assert.equal(response.browserTarget.url, selected.url)
+    assert.equal(response.result.status, 'ok')
+    assert.equal(response.result.parent.parentId, '200')
+    const transfer = background.nativeMessages.find((message) => message.type === 'transfer-browser-target' && message.requestId === 'team-knowledge-inspect')
+    assert.deepEqual(transfer.browserTarget, { browser: 'chrome', windowId: 7, tabId: 42, url: selected.url })
   } finally {
     background.cleanup()
   }

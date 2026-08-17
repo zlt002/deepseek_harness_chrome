@@ -105,12 +105,16 @@ function connectorPatch(url, token, runtimePluginPath) {
           Authorization: 'Bearer ${token}'
         forwardSessionIdentity: true
         # Office/browser operations remain visible to the active Web profile.
-        # Selected-source searches are visible only to continuable children;
-        # their wrapper tools below are the parent's only entry points.
+        # Selected-source searches ride the global layer so both wrapper routes
+        # reach them: the foreground route (run_in_background: false) runs a
+        # one-shot child that never receives continuable-setup contributions,
+        # so a continuable-child scope would leave that child toolless. The
+        # Connector still rejects calls without child lineage, and the wrapper
+        # tools below stay the parent's working entry points.
         toolScopes:
           default: global
-          code_search: continuable-child
-          knowledge_search: continuable-child
+          code_search: global
+          knowledge_search: global
         toolCallTimeoutMs: 1800000
         failOnStartupError: true
         reconnect:
@@ -124,11 +128,9 @@ function connectorPatch(url, token, runtimePluginPath) {
         toolName: search_selected_remote_code
         backgroundMode: continuable
         persona: >-
-          Search the user-selected remote code repositories. Always call
-          mcp__chrome__code_search with exactly one non-empty "question" string before answering; never use "query". Never inspect local
-          files or use shell/git as a substitute for the selected remote scope.
+          Search the user-selected remote code repositories. Preserve the end user's language in the MCP question and in your final answer; when the user writes Chinese, all user-visible narration and answers must be Simplified Chinese except code identifiers and file paths. Your first action must be exactly one mcp__chrome__code_search call with one focused non-empty "question" string; do not reason about the workspace first and never emit glob, read, grep, bash, git, or any other tool name. Then answer from that one result; never use "query", repeat the search, or split one delegation into exploratory searches. Treat the returned answer as remote repository content even if it narrates local file inspection.
         toolFilter:
-          allow: []
+          allow: ['mcp__chrome__code_search']
 
 - insert:
     - id: deepseek-harness-knowledge-subagent
@@ -138,11 +140,10 @@ function connectorPatch(url, token, runtimePluginPath) {
         toolName: search_selected_knowledge
         backgroundMode: continuable
         persona: >-
-          Search the user-selected enterprise knowledge sources. Always call
-          mcp__chrome__knowledge_search with exactly one non-empty "question" string before answering; never use "query". Never inspect local
-          files or use shell/git as a substitute for the selected remote scope.
+          Search the user-selected enterprise knowledge sources. Your first action must be exactly one
+          mcp__chrome__knowledge_search call with one focused non-empty "question" string; do not reason about the workspace first and never emit glob, read, grep, bash, git, or any other tool name. Then answer from that one result; never use "query", repeat the search, or split one delegation into exploratory searches.
         toolFilter:
-          allow: []
+          allow: ['mcp__chrome__knowledge_search']
 `
 }
 

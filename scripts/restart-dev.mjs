@@ -78,7 +78,7 @@ function capture(command, args) {
   })
 }
 
-export function devServerAvailable(port = 3001, host = 'localhost') {
+export function devServerAvailable(port = 3001, host = '127.0.0.1') {
   return new Promise((resolvePromise) => {
     const socket = connect({ port, host })
     const finish = (available) => {
@@ -101,7 +101,7 @@ async function waitForDevServer(child, timeoutMs = 60_000) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
   }
   child.kill('SIGTERM')
-  throw new Error('Timed out waiting for the WXT dev server on localhost:3001.')
+  throw new Error('Timed out waiting for the WXT dev server on 127.0.0.1:3001.')
 }
 
 function startDevServer() {
@@ -180,9 +180,9 @@ export async function main(args = process.argv.slice(2)) {
 
   let ownedDevServer
   if (await devServerAvailable()) {
-    console.log('3/4 WXT dev server is already running on localhost:3001.')
+    console.log('3/4 WXT dev server is already running on 127.0.0.1:3001.')
   } else {
-    console.log('3/4 Starting the WXT dev server on localhost:3001...')
+    console.log('3/4 Starting the WXT dev server on 127.0.0.1:3001...')
     ownedDevServer = startDevServer()
     await waitForDevServer(ownedDevServer.child)
   }

@@ -106,6 +106,78 @@ test('publishes office_get_context and correlates a simulated extension response
   }
 })
 
+test('surfaces the probed WebEdit document identity so the model can route tools', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/1' }
+  const identity = { kind: 'webedit_spreadsheet', workbookName: null, sheetName: 'Sheet1', hasContent: true, webeditFrames: 2 }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response',
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        result: {
+          status: 'browser_target_verified',
+          pageIdentity: { title: '未命名文档', url: target.url },
+          documentIdentity: identity,
+          primaryBrowserTarget: target,
+          pages: [{ browserTarget: target, pageIdentity: { title: '未命名文档', url: target.url }, documentIdentity: identity, isPrimary: true }],
+          unavailableBrowserTargets: [],
+        },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-identity', target)
+  const started = await connector.start()
+
+  try {
+    const called = await fetch(`${started.url}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${started.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_get_context', arguments: {} } }),
+    })
+    assert.equal(called.status, 200)
+    const body = await called.json()
+    assert.deepEqual(body.result.structuredContent.officeContext.documentIdentity, identity)
+    assert.deepEqual(body.result.structuredContent.officeContext.pages[0].documentIdentity, identity)
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('still rejects a malformed document identity object', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/broken' }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response',
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        result: { status: 'browser_target_verified', pageIdentity: { title: 'Broken', url: target.url }, documentIdentity: { kind: 'mystery' } },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-broken-identity', target)
+  const started = await connector.start()
+
+  try {
+    const called = await fetch(`${started.url}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${started.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_get_context', arguments: {} } }),
+    })
+    assert.equal(called.status, 200)
+    const body = await called.json()
+    assert.equal(body.result.isError, true)
+    assert.match(body.result.content[0].text, /Office context schema/)
+  } finally {
+    await connector.stop()
+  }
+})
+
 test('publishes every trusted pinned context and unavailable item without model-selected targets', async () => {
   const first = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/one' }
   const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
@@ -166,7 +238,7 @@ test('accepts the official MCP client at the public tools/list and tools/call se
   try {
     await client.connect(transport)
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'office_document', 'office_spreadsheet', 'team_doc_create', 'team_knowledge_item', 'team_knowledge_batch', 'pmd_prd_delivery', 'browser_open_tab', 'knowledge_search', 'code_search'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'office_document', 'office_spreadsheet', 'team_doc_create', 'team_knowledge_item', 'team_knowledge_batch', 'pmd_prd_delivery', 'browser_open_tab', 'knowledge_search', 'code_search', 'selected_source_scope'])
     const spreadsheet = tools.tools.find((tool) => tool.name === 'office_spreadsheet')
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_zoom'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_freeze_panes'))
@@ -196,6 +268,56 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     await client.close()
     await connector.stop()
   }
+})
+
+test('echoes the selected source names from a parent session without searching', async () => {
+  let seen
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      seen = request
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+        result: { enabled: true, codeSelected: true, knowledgeSelected: false, repositories: ['lcrm-frontend'], knowledge: [] },
+      }))
+    },
+  })
+  connector.registerRun('scope-run')
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'selected_source_scope', arguments: {}, _meta: { 'io.deepseek.harness/sessionId': 'parent-1' } },
+      }),
+    })
+    const body = await response.json()
+    assert.deepEqual(body.result.structuredContent, { enabled: true, codeSelected: true, knowledgeSelected: false, repositories: ['lcrm-frontend'], knowledge: [] })
+    assert.equal(seen.tool, 'selected_source_scope')
+    assert.equal(seen.harnessSessionId, 'parent-1')
+    assert.equal(seen.question, undefined)
+  } finally { await connector.stop() }
+})
+
+test('rejects a parent-session code_search call and names the remote-code wrapper', async () => {
+  const connector = new BrowserConnector({ requestExtension: () => {} })
+  connector.registerRun('parent-code-search')
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'code_search', arguments: { question: 'repository overview' }, _meta: { 'io.deepseek.harness/sessionId': 'parent-1' } },
+      }),
+    })
+    const body = await response.json()
+    assert.equal(body.result.isError, true)
+    assert.match(body.result.content[0].text, /Code search is available only inside the continuable remote-code subagent/)
+    assert.match(body.result.content[0].text, /search_selected_remote_code/)
+    assert.match(body.result.content[0].text, /description and prompt/)
+    assert.doesNotMatch(body.result.content[0].text, /Knowledge search is available only inside the continuable Knowledge subagent\.$/)
+  } finally { await connector.stop() }
 })
 
 test('routes a continuable child identity to the knowledge adapter without model-controlled scope arguments', async () => {
@@ -528,6 +650,62 @@ test('surfaces structured spreadsheet failures verbatim instead of no Connector 
     assert.equal(parsed.code, 'invalid_range')
     assert.equal(parsed.message, 'a valid spreadsheet action is required')
     assert.ok(!body.result.content[0].text.includes('no Connector result'), 'a spreadsheet failure must never collapse into the generic message')
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('normalizes a sheet-prefixed spreadsheet range before forwarding and validating', async () => {
+  const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/sheet' }
+  let forwarded = null
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      forwarded = request
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response',
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        result: { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Budget.xlsx', sheetName: 'Sheet1', fingerprint: 'webedit:budget|Sheet1' }, range: { address: 'A1:B2', values: [[1, 2], [3, 4]], formulas: [['', ''], ['', '']], text: [['1', '2'], ['3', '4']], rows: [] } },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-sheet-prefix', target)
+  const endpoint = await connector.start()
+
+  try {
+    const call = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_spreadsheet', arguments: { action: 'range', range: 'Sheet1!A1:B2' } } }),
+    })
+    assert.equal(call.status, 200)
+    const body = await call.json()
+    assert.equal(body.result.structuredContent.status, 'ok')
+    assert.equal(forwarded.range, 'A1:B2')
+    assert.equal(forwarded.sheetName, 'Sheet1')
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('names the missing spreadsheet arguments instead of a generic rejection', async () => {
+  const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/sheet' }
+  const connector = new BrowserConnector({ requestExtension: () => {} })
+  connector.bindBrowserTarget('run-sheet-hint', target)
+  const endpoint = await connector.start()
+
+  try {
+    const call = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_spreadsheet', arguments: { action: 'special_cells', kind: 'lastCell' } } }),
+    })
+    assert.equal(call.status, 200)
+    const body = await call.json()
+    assert.equal(body.error.code, -32602)
+    assert.match(body.error.message, /special_cells requires a bounded bare range/)
   } finally {
     await connector.stop()
   }

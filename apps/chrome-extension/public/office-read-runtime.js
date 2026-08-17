@@ -33,9 +33,27 @@
     let sheet = await call(app, 'getActiveSheet') ?? await property(app, 'ActiveSheet')
     if (parsed.sheetName) sheet = await call(workbook, 'getWorksheet', [parsed.sheetName]) ?? await call(workbook, 'getItem', [parsed.sheetName]) ?? sheet
     if (!sheet) return fail('preview', 'WebEdit does not expose an active spreadsheet sheet')
-    const range = await call(sheet, 'getRange', [rangeAddress]) ?? await call(sheet, 'Range', [rangeAddress])
+    let range
+    // accr-ui parity: the Midea APP runtime's sheet.getRange(address) ignores its
+    // argument and returns the entire worksheet; build an exact internal range from
+    // numeric bounds when the Midea-specific constructors are available.
+    if (sheet && typeof sheet.createRANGE === 'function' && typeof sheet.createRange === 'function') {
+      const core = await call(sheet, 'createRANGE', [parsed.firstRow, parsed.firstRow + parsed.rowCount - 1, parsed.firstColumn, parsed.firstColumn + parsed.columnCount - 1])
+      range = core ? await call(sheet, 'createRange', [core]) : undefined
+    }
+    range = range ?? await call(sheet, 'getRange', [rangeAddress]) ?? await call(sheet, 'Range', [rangeAddress])
     if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
-    const matrix = await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value')
+    let matrix = await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value')
+    if (matrix === undefined || matrix === null) {
+      // accr-ui parity: Midea runtimes expose bulk reads through getRangeContents()
+      // when the Excel-style value APIs return nothing for the exact range.
+      const contents = await call(range, 'getRangeContents')
+      const candidate = contents && typeof contents === 'object'
+        ? (contents.result && Array.isArray(contents.result.Values) ? contents.result.Values : Array.isArray(contents.Values) ? contents.Values : undefined)
+        : undefined
+      if (candidate !== undefined) matrix = candidate
+    }
+    if (parsed.rowCount * parsed.columnCount > 1 && !Array.isArray(matrix)) return fail('unsupported', `WebEdit returned no rectangular values matrix for ${rangeAddress}`)
     const formulas = await call(range, 'getFormula') ?? await property(range, 'Formula')
     const text = await call(range, 'getText') ?? await property(range, 'Text')
     const matrixAt = (source, row, column) => Array.isArray(source) ? (Array.isArray(source[row]) ? source[row][column] : source[row]) : source
@@ -73,7 +91,16 @@
     return { ok: true, result: { status: 'verified_write', resource: after.result.resource, requested: { range: detail.range, values: detail.values }, observed: { range: detail.range, values: observed } } }
   }
   // Instant readiness check for the background frame probe: no polling, no waiting.
-  const readyNow = () => !!(globalThis.APP ?? globalThis.WPSOpenApi?.Application)
+  // Same contract as office-spreadsheet-runtime: APP alone is not a spreadsheet.
+  const readyNow = () => {
+    const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
+    if (!app) return false
+    const path = String(location.pathname || '').toLowerCase()
+    if (path.includes('/weboffice/office/o/')) return false
+    const canvas = app.openApi?.editor?.canvas
+    if (canvas && typeof canvas.getDocXml === 'function') return false
+    return true
+  }
   window.addEventListener(REQUEST, (event) => {
     const detail = event.detail
     if (!detail || typeof detail.id !== 'string') return

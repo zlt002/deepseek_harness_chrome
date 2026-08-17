@@ -177,6 +177,28 @@ test('binds approval and extension readback to the exact operation and payload, 
     assert.equal(retry.result.isError, true); assert.match(retry.result.content[0].text, /uncertain/i); assert.equal(writes, 1)
     const paste = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'paste_image', payload: {} }, 7)
     assert.equal(paste.error.code, -32602)
+    const bare = await call(endpoint, 'office_document', { action: 'inspect_write' }, 8)
+    assert.equal(bare.error.code, -32602)
+    assert.match(bare.error.message, /selection_insert/)
+    const missingFingerprint = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: '演示内容' } }, 9)
+    assert.equal(missingFingerprint.error.code, -32602)
+    assert.match(missingFingerprint.error.message, /expectedSelectionFingerprint/)
+    const emptyReplace = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'replace', payload: { markdown: '演示内容' } }, 10)
+    assert.equal(emptyReplace.result.isError, true)
+    assert.match(emptyReplace.result.content[0].text, /no public replaceable block/)
+    const emptyBlocks = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_replace', payload: { type: 'h1', text: '演示内容' } }, 11)
+    assert.equal(emptyBlocks.result.isError, true)
+    assert.match(emptyBlocks.result.content[0].text, /selection_insert/)
+    const emptyInsert = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: '演示内容', expectedSelectionFingerprint: 'selection-v3-ac78eacf' } }, 12)
+    assert.equal(emptyInsert.result.structuredContent.action, 'inspect_write')
+    assert.ok(emptyInsert.result.structuredContent.challenge)
+    const drawing = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'insert_drawing', payload: { mermaid: 'flowchart TD\n开始 --> 结束' } }, 13)
+    assert.equal(drawing.result.structuredContent.action, 'inspect_write')
+    const blocks = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_insert', payload: { position: 'end', blocks: [{ type: 'h2', text: '项目概述' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] } }, 14)
+    assert.equal(blocks.result.structuredContent.action, 'inspect_write')
+    const missingDrawing = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'insert_drawing', payload: { text: 'flowchart TD' } }, 15)
+    assert.equal(missingDrawing.error.code, -32602)
+    assert.match(missingDrawing.error.message, /mermaid/)
   } finally { await connector.stop() }
 })
 
@@ -280,6 +302,34 @@ test('never dispatches a historical pending checkpoint or two concurrent writes 
     ])
     assert.equal(writes, 1); assert.equal([one, two].filter((value) => value.result?.structuredContent?.status === 'verified_write').length, 1)
     assert.equal([one, two].filter((value) => value.result?.isError).length, 1)
+  } finally { await connector.stop() }
+})
+
+test('blocks_insert and insert_drawing obtain a challenge on empty documents and attest payload-bound XML evidence', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 22, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/110?id=110' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '空文档', fingerprint: 'before' }
+  const drawingPayload = { mermaid: 'flowchart TD\n开始 --> 结束', position: 'end' }
+  const blocksPayload = { position: 'end', blocks: [{ type: 'h2', text: '项目概述' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] }
+  let writes = 0
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 0, offset: 0, limit: 1, hasMore: false, blocks: [] } } })
+    writes += 1
+    const fragments = request.operation === 'insert_drawing' ? ['flowchart', 'TD', '开始', '结束'] : ['项目概述', '负责人', '交付物', '张三', '说明书']
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: `after-${request.operation}` }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: fragments, fragmentEvidence: fragments.map((fragment) => ({ fragment, blockIds: ['inserted'] })), observedBlocks: [{ id: 'inserted', type: request.operation === 'insert_drawing' ? 'codeblock' : 'h2', text: fragments.join(' ') }] } } })
+  }) })
+  connector.bindBrowserTarget('light-doc-insert-run', target); const endpoint = await connector.start()
+  const write = async (operation, payload, identity, id) => {
+    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation, payload }, id)
+    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation, payload }, id + 1)
+  }
+  try {
+    const drawn = await write('insert_drawing', drawingPayload, 'drawing-1', 1)
+    assert.equal(drawn.result.structuredContent.status, 'verified_write')
+    const inserted = await write('blocks_insert', blocksPayload, 'blocks-1', 3)
+    assert.equal(inserted.result.structuredContent.status, 'verified_write')
+    assert.equal(writes, 2)
+    const rejected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_insert', payload: { blocks: [{ type: 'unknown', text: 'x' }] } }, 5)
+    assert.equal(rejected.error.code, -32602)
   } finally { await connector.stop() }
 })
 

@@ -104,6 +104,7 @@ function App(): React.JSX.Element {
   const commandSequenceRef = useRef(0)
   const knowledgeCommandSequenceRef = useRef(0)
   const knowledgeSnapshotSequenceRef = useRef(0)
+  const searchProgressSequenceRef = useRef(0)
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
   const knowledgeLoginTimerRef = useRef<number | undefined>(undefined)
@@ -136,6 +137,19 @@ function App(): React.JSX.Element {
 
   useEffect(() => { void connect(); void loadTargetSettings() }, [connect, loadTargetSettings])
 
+  const replaySearchProgress = useCallback(() => {
+    if (frameOrigin === undefined) return
+    chrome.runtime.sendMessage({ type: 'search-progress-snapshot/v1' }, (response: { ok?: boolean; progress?: unknown[] } | undefined) => {
+      if (chrome.runtime.lastError !== undefined || response?.ok !== true || !Array.isArray(response.progress)) return
+      for (const item of response.progress) {
+        const value = item as { requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown }
+        if (typeof value.requestId !== 'string' || typeof value.harnessSessionId !== 'string' || (value.tool !== 'code_search' && value.tool !== 'knowledge_search') || typeof value.question !== 'string' || (value.phase !== 'querying' && value.phase !== 'streaming' && value.phase !== 'done' && value.phase !== 'error') || typeof value.chars !== 'number' || typeof value.content !== 'string') continue
+        searchProgressSequenceRef.current += 1
+        frameRef.current?.contentWindow?.postMessage({ type: 'search-progress/v1', nonce: frameNonce, sequence: searchProgressSequenceRef.current, progress: value }, frameOrigin)
+      }
+    })
+  }, [frameNonce, frameOrigin])
+
   useEffect(() => {
     const accept = (epoch: unknown, sequence: unknown, tab: unknown): void => {
       if (typeof epoch !== 'string' || epoch.length === 0 || typeof sequence !== 'number' || !Number.isInteger(sequence) || !isActiveTab(tab)) return
@@ -145,14 +159,23 @@ function App(): React.JSX.Element {
     void requestActiveTab().then((response) => { if (response.ok) accept(response.epoch, response.sequence, response.tab) })
     const onMessage = (message: unknown): void => {
       if (!message || typeof message !== 'object') return
-      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown }
+      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
       if (value.type === 'harness-ready' && typeof value.url === 'string') { setUrl(value.url); setStatus('ready'); setError(undefined) }
       if (value.type === 'harness-disconnected') { void connect() }
+      // Relay live selected-source search progress into the Harness iframe,
+      // guarded by the same nonce as every other bridge message.
+      if (value.type === 'search-progress/v1' && typeof value.requestId === 'string' && typeof value.harnessSessionId === 'string' && (value.harnessParentSessionId === undefined || typeof value.harnessParentSessionId === 'string') && (value.tool === 'code_search' || value.tool === 'knowledge_search') && typeof value.question === 'string' && (value.phase === 'querying' || value.phase === 'streaming' || value.phase === 'done' || value.phase === 'error') && typeof value.chars === 'number' && typeof value.content === 'string' && frameOrigin !== undefined && frameRef.current?.contentWindow !== null) {
+        searchProgressSequenceRef.current += 1
+        frameRef.current?.contentWindow?.postMessage({
+          type: 'search-progress/v1', nonce: frameNonce, sequence: searchProgressSequenceRef.current,
+          progress: { requestId: value.requestId, harnessSessionId: value.harnessSessionId, harnessParentSessionId: value.harnessParentSessionId, tool: value.tool, question: value.question, phase: value.phase, chars: value.chars, content: value.content },
+        }, frameOrigin)
+      }
     }
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)
-  }, [connect])
+  }, [connect, frameNonce, frameOrigin])
 
   const sendBrowserTargetSnapshot = useCallback(() => {
     if (frameOrigin === undefined) return
@@ -257,7 +280,7 @@ function App(): React.JSX.Element {
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (
       <section className="harness-frame-shell">
-        <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="DeepSeek Harness Web UI" allow="clipboard-read; clipboard-write" onLoad={sendBrowserTargetSnapshot} />
+        <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="DeepSeek Harness Web UI" allow="clipboard-read; clipboard-write" onLoad={() => { sendBrowserTargetSnapshot(); replaySearchProgress() }} />
       </section>
     ) : (
       <section className="status-card" aria-live="polite">

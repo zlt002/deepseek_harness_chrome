@@ -658,3 +658,75 @@ test('probe reports a blank preloaded editor as unnamed with unknown content', a
   assert.equal(probed.result.identity.sheetName, 'Sheet1')
   assert.equal(probed.result.identity.hasContent, null)
 })
+
+test('probe does not claim spreadsheet ready on a light-document APP', async () => {
+  const run = await runtimeWith({
+    openApi: { editor: { canvas: { getDocXml: async () => '<apcanvas></apcanvas>' } } },
+  })
+  const probed = await run({ action: 'probe' })
+  assert.equal(probed.ok, true)
+  assert.equal(probed.result.status, 'probe')
+  assert.equal(probed.result.ready, false)
+})
+
+test('reads an exact Midea range through createRANGE when getRange ignores its argument', async () => {
+  const grid = [['Name', 'Amount'], ['x', 1], ['y', 2]]
+  const bounds = []
+  const sheet = {
+    Name: 'Sheet1', getName: () => 'Sheet1',
+    getRange: () => ({ getValue2: () => null }),
+    createRANGE: (rowFrom, rowTo, colFrom, colTo) => { bounds.push([rowFrom, rowTo, colFrom, colTo]); return { rowFrom, rowTo, colFrom, colTo } },
+    createRange: (core) => ({ core, getValue2: () => grid.map((row) => [...row]) }),
+  }
+  const workbook = { Name: 'Midea.xlsx', getName: () => 'Midea.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
+  const result = await run.raw({ action: 'range', range: 'Sheet1!A1:B3' })
+  assert.equal(result.ok, true)
+  assert.deepEqual(bounds.map((entry) => [...entry]), [[1, 3, 1, 2]])
+  // Field-wise because the matrices are created inside the VM realm.
+  assert.equal(result.result.range.values.length, 3)
+  assert.equal(result.result.range.values[0][0], 'Name')
+  assert.equal(result.result.range.values[2][1], 2)
+  assert.equal(result.result.range.address, 'A1:B3')
+})
+
+test('falls back to getRangeContents when Excel-style value APIs return nothing', async () => {
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getRange: () => ({ getRangeContents: () => ({ result: { Values: [['a', 'b'], ['c', 'd']] } }) }) }
+  const workbook = { Name: 'W.xlsx', getName: () => 'W.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
+  const result = await run.raw({ action: 'range', range: 'A1:B2' })
+  assert.equal(result.ok, true)
+  assert.equal(result.result.range.values[0][0], 'a')
+  assert.equal(result.result.range.values[1][1], 'd')
+})
+
+test('tolerates a missing formulas API on bounded reads without inventing formulas', async () => {
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getRange: () => ({ getValue2: () => [['a', 'b'], ['c', 'd']] }) }
+  const workbook = { Name: 'W.xlsx', getName: () => 'W.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
+  const result = await run.raw({ action: 'range', range: 'A1:B2' })
+  assert.equal(result.ok, true)
+  assert.equal(result.result.range.formulas.length, 2)
+  assert.equal(result.result.range.formulas[0][0], null)
+  assert.equal(result.result.range.rows[0][0].formula, null)
+})
+
+test('reports expected and observed shapes when the values matrix does not match the address', async () => {
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getRange: () => ({ getValue2: () => null }) }
+  const workbook = { Name: 'W.xlsx', getName: () => 'W.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
+  const result = await run.raw({ action: 'range', range: 'A1:B2' })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'readback_mismatch')
+  assert.match(result.error.message, /expected 2x2, observed 1x1/)
+})
+
+test('view reports the readable active cell when window fields are missing', async () => {
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getRange: () => ({}) }
+  const workbook = { Name: 'W.xlsx', getName: () => 'W.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, ActiveCell: { Row: 3, Column: 2 } })
+  const result = await run.raw({ action: 'view' })
+  assert.equal(result.ok, true)
+  assert.equal(result.result.view.supported, false)
+  assert.equal(result.result.view.activeCell, 'B3')
+})

@@ -36,21 +36,49 @@
     try { const value = await documentApi(current)?.getTitleContent?.(); title = String(value?.text ?? value ?? title) } catch {}
     return { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: document.title || null, fingerprint: await fingerprint(xml, title) }
   }
+  const escapeXml = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const escapeCdata = (value) => String(value || '').replace(/]]>/g, ']]]]><![CDATA[>')
+  const topLevelNodes = (inner) => {
+    const scan = String(inner || '').replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, (match) => ' '.repeat(match.length))
+    const nodes = []; const stack = []; const tagPattern = /<\/?([A-Za-z][\w:-]*)(?:\s[^<>]*)?\/?>/g
+    let startIndex = null; let startTag = null; let match
+    while ((match = tagPattern.exec(scan))) {
+      const fullTag = match[0]; const tagName = match[1].toLowerCase(); const isClosing = fullTag.startsWith('</'); const isSelfClosing = /\/>$/.test(fullTag)
+      if (isClosing) {
+        if (stack.length) stack.pop()
+        if (stack.length === 0 && startIndex !== null) {
+          nodes.push({ type: startTag, start: startIndex, end: tagPattern.lastIndex, xml: inner.slice(startIndex, tagPattern.lastIndex) })
+          startIndex = null; startTag = null
+        }
+        continue
+      }
+      if (stack.length === 0) {
+        startIndex = match.index; startTag = tagName
+        if (isSelfClosing) { nodes.push({ type: tagName, start: match.index, end: tagPattern.lastIndex, xml: fullTag }); startIndex = null; startTag = null }
+        else stack.push(tagName)
+      } else if (!isSelfClosing) stack.push(tagName)
+    }
+    return nodes
+  }
+  const nodeRecord = (node) => {
+    const opening = /^<([A-Za-z][\w:-]*)\b([^>]*)>([\s\S]*)<\/\1>$/i.exec(node.xml) || /^<([A-Za-z][\w:-]*)\b([^>]*)\/>$/i.exec(node.xml)
+    const tag = opening?.[1] || node.type
+    const attrs = opening?.[2] || ''
+    const body = opening?.[3] ?? ''
+    return { start: node.start, end: node.end, xml: node.xml, tag, attrs, body, id: /\bid=["']([^"']*)/i.exec(attrs)?.[1] || null, language: /\blang=["']([^"']*)/i.exec(attrs)?.[1] || null, text: decode(tag.toLowerCase() === 'codeblock' ? body.replace(/^<!\[CDATA\[([\s\S]*)\]\]>$/, '$1') : body) }
+  }
   const blocks = (xml, offset, limit) => {
     const inner = /^<apcanvas>([\s\S]*)<\/apcanvas>$/i.exec(xml)?.[1]
     if (inner === undefined) return null
-    const all = [...inner.matchAll(/<(p|h[1-6]|outlineTitle|li|blockquote|pre|codeBlock|table)\b([^>]*)>([\s\S]*?)<\/\1>/gi)]
-      .filter((match) => match[1].toLowerCase() !== 'outlinetitle')
-      .map((match, index) => { const text = decode(match[3]); return { index, id: /\bid=["']([^"']*)/i.exec(match[2])?.[1] || null, type: match[1].toLowerCase(), text: text.slice(0, 120), textLength: text.length, truncated: text.length > 120, fullText: text } })
+    const all = topLevelNodes(inner).map(nodeRecord).filter((block) => block.tag.toLowerCase() !== 'outlinetitle')
+      .map((block, index) => ({ index, id: block.id, type: block.tag.toLowerCase(), language: block.language, text: block.text.slice(0, 120), textLength: block.text.length, truncated: block.text.length > 120 }))
     const page = all.slice(offset, offset + limit)
-    return { blockCount: all.length, offset, limit, hasMore: offset + page.length < all.length, blocks: page.map(({ fullText, ...block }) => block) }
+    return { blockCount: all.length, offset, limit, hasMore: offset + page.length < all.length, blocks: page }
   }
-  const escapeXml = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   const editableBlocks = (xml) => {
     const inner = /^<apcanvas>([\s\S]*)<\/apcanvas>$/i.exec(xml)?.[1]
     if (inner === undefined) return null
-    const all = [...inner.matchAll(/<(p|h[1-6]|outlineTitle|li|blockquote|pre|codeBlock|table)\b([^>]*)>([\s\S]*?)<\/\1>/gi)]
-      .map((match) => ({ start: match.index, end: match.index + match[0].length, xml: match[0], tag: match[1], attrs: match[2], body: match[3], id: /\bid=["']([^"']*)/i.exec(match[2])?.[1] || null, text: decode(match[3]) }))
+    const all = topLevelNodes(inner).map(nodeRecord)
     // The public read index deliberately excludes the document title.  Keep
     // that invariant here so a model can never replace title by using index 0.
     return { inner, all, list: all.filter((block) => block.tag.toLowerCase() !== 'outlinetitle') }
@@ -129,31 +157,68 @@
     if (!Object.keys(payload).every((key) => ['markdown', 'html', 'text', 'insertBelow', 'expectedSelectionFingerprint'].includes(key)) || (payload.insertBelow !== undefined && typeof payload.insertBelow !== 'boolean')) return null
     return { kind, value, expectedSelectionFingerprint: payload.expectedSelectionFingerprint, insertBelow: payload.insertBelow === true }
   }
-  const verificationFragments = (kind, value) => {
-    const plain = kind === 'html' ? decode(value) : kind === 'markdown' ? value.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[`*_#>~\-]/g, ' ') : value
-    return [...new Set(normalizedSelectionText(plain).split(/[^\p{L}\p{N}]+/u).filter((part) => part.length > 0))].slice(0, 100)
+  const distinctiveFragments = (value) => {
+    const plain = String(value ?? '').replace(/```[\w-]*\n?/g, ' ').replace(/\[[ xX]\]/g, ' ').replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/<[^>]*>/g, ' ').replace(/[`*_#>~\-|:]/g, ' ')
+    return [...new Set(normalizedSelectionText(plain).split(/[^\p{L}\p{N}]+/u).filter((part) => part.length >= 2))].slice(0, 100)
   }
-  const verifySelectionInsert = (beforeXml, afterXml, requested) => {
-    if (typeof afterXml !== 'string' || afterXml === beforeXml) return null
-    const fragments = verificationFragments(requested.kind, requested.value)
-    if (!fragments.length) return null
+  const verificationFragments = (kind, value) => distinctiveFragments(kind === 'html' ? decode(value) : value)
+  const verifyInsertedFragments = (beforeXml, afterXml, fragments) => {
+    if (typeof afterXml !== 'string' || afterXml === beforeXml || !fragments.length) return null
     const parsed = editableBlocks(afterXml)
     if (!parsed) return null
-    const evidence = fragments.map((fragment) => ({ fragment, blockIds: parsed.list.filter((block) => normalizedSelectionText(block.text).includes(fragment)).map((block) => block.id).filter(Boolean) }))
+    const matchesFor = (fragment) => parsed.list.map((block, index) => ({ block, index })).filter(({ block }) => normalizedSelectionText(block.text).includes(fragment))
+    const evidence = fragments.map((fragment) => ({ fragment, blockIds: matchesFor(fragment).map(({ block, index }) => block.id || `index:${index}`) }))
     if (evidence.some((item) => item.blockIds.length === 0)) return null
-    return { verifiedFragments: fragments, fragmentEvidence: evidence, observedBlocks: parsed.list.filter((block) => evidence.some((item) => item.blockIds.includes(block.id))).map((block) => ({ id: block.id, type: block.tag.toLowerCase(), text: block.text.slice(0, 500) })) }
+    const observedIndexes = new Set(evidence.flatMap((item) => item.blockIds.map((id) => (id.startsWith('index:') ? Number(id.slice(6)) : parsed.list.findIndex((block) => block.id === id)))))
+    return { verifiedFragments: fragments, fragmentEvidence: evidence, observedBlocks: parsed.list.map((block, index) => ({ block, index })).filter(({ index }) => observedIndexes.has(index)).map(({ block, index }) => ({ id: block.id || `index:${index}`, type: block.tag.toLowerCase(), language: block.language, text: block.text.slice(0, 500) })) }
+  }
+  const verifySelectionInsert = (beforeXml, afterXml, requested) => verifyInsertedFragments(beforeXml, afterXml, verificationFragments(requested.kind, requested.value))
+  const structuredBlockXml = (item, preserveId = null) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+    const type = String(item.type ?? item.blockType ?? 'p').toLowerCase()
+    const text = typeof item.text === 'string' ? item.text : typeof item.markdown === 'string' ? item.markdown : ''
+    const html = typeof item.html === 'string' ? item.html : ''
+    const id = preserveId ? ` id="${escapeXml(preserveId)}"` : ' id=""'
+    if (/^(h[1-6]|p|blockquote)$/.test(type)) {
+      const content = html.trim() ? html.replace(/<\/?(script|iframe|object|embed)\b[^>]*>/gi, '') : escapeXml(text)
+      if (!decode(content).trim() || content.length > 20_000) return null
+      return `<${type}${id}><span>${content}</span></${type}>`
+    }
+    if (type === 'ul' || type === 'ol') {
+      const items = Array.isArray(item.items) ? item.items : text ? text.split('\n') : []
+      if (items.length < 1 || items.length > 50 || !items.every((line) => typeof line === 'string' && line.trim() && line.length <= 20_000)) return null
+      return items.map((line, index) => `<p id="" paddingLeft="2"><span>${escapeXml(type === 'ol' ? `${index + 1}. ` : '- ')}</span><span>${escapeXml(line.trim())}</span></p>`).join('')
+    }
+    if (type === 'table') {
+      const rows = Array.isArray(item.rows) ? item.rows : text ? text.split('\n').map((line) => line.split('|').map((cell) => cell.trim()).filter(Boolean)) : []
+      if (rows.length < 1 || rows.length > 30 || !rows.every((row) => Array.isArray(row) && row.length >= 1 && row.length <= 12 && row.every((cell) => typeof cell === 'string' && cell.length <= 2_000))) return null
+      return `<table${id} borderStyle="solid">${rows.map((row, rowIndex) => `<tr>${row.map((cell) => `<td><p id="">${rowIndex === 0 ? `<strong>${escapeXml(cell)}</strong>` : escapeXml(cell)}</p></td>`).join('')}</tr>`).join('')}</table>`
+    }
+    if (type === 'codeblock' || type === 'codeBlock' || type === 'pre') {
+      const language = String(item.language || (/\b(flowchart|sequenceDiagram|pie|graph|mindmap|gantt|classDiagram|erDiagram)\b/.test(text) ? 'mermaid' : 'plaintext')).toLowerCase()
+      if (!text.trim() || text.length > 20_000 || !/^[a-z0-9_+#.-]+$/.test(language)) return null
+      return `<codeBlock${id} lang="${escapeXml(language)}"><![CDATA[${escapeCdata(text.replace(/^\n+|\n+$/g, ''))}]]></codeBlock>`
+    }
+    return null
   }
   const blockXml = (payload, preserveId = null) => {
+    if (typeof payload?.mermaid === 'string' && payload.mermaid.trim()) return structuredBlockXml({ type: 'codeblock', language: 'mermaid', text: payload.mermaid }, preserveId)
     const items = Array.isArray(payload?.blocks) ? payload.blocks : [payload]
     if (items.length < 1 || items.length > 50) return null
-    const source = items.map((item, index) => {
-      const text = typeof item?.text === 'string' ? item.text : typeof item?.markdown === 'string' ? item.markdown : null
-      const tag = /^(p|h[1-6]|li|blockquote|pre|codeBlock)$/i.test(String(item?.type ?? item?.blockType ?? 'p')) ? String(item.type ?? item.blockType ?? 'p') : null
-      if (text === null || !text.trim() || text.length > 20_000 || !tag) return null
-      const id = index === 0 && preserveId ? ` id="${escapeXml(preserveId)}"` : ''
-      return `<${tag}${id}>${escapeXml(text)}</${tag}>`
-    })
+    const source = items.map((item, index) => structuredBlockXml(item, index === 0 ? preserveId : null))
     return source.every(Boolean) ? source.join('') : null
+  }
+  const insertPosition = (parsed, payload) => {
+    const position = payload?.position ?? 'end'
+    if (!['start', 'end', 'before', 'after'].includes(position)) return null
+    if (position === 'end') return parsed.inner.length
+    if (position === 'start') {
+      const title = parsed.all.find((block) => block.tag.toLowerCase() === 'outlinetitle')
+      return title ? title.end : 0
+    }
+    const target = Number.isInteger(payload?.index) ? parsed.list[payload.index] : parsed.list.find((block) => block.id && block.id === payload?.id)
+    if (!target) return null
+    return position === 'before' ? target.start : target.end
   }
   const batchBlockItems = (operation, payload) => {
     const source = Array.isArray(payload?.blocks) ? payload.blocks
@@ -207,15 +272,15 @@
       const comments = document?.comments ?? editor?.comments
       const detected = {
         selection: !!(selection && typeof selection.getSelectionContent === 'function' && typeof selection.getSelectionAnchor === 'function'), comments: !!(comments && (typeof comments.getComments === 'function' || typeof comments.getAllComments === 'function')),
-        wordCount: !!(document && typeof document.getWordCount === 'function'), exactBlockRead: true, blockEdits: typeof current?.openApi?.editor?.canvas?.patch === 'function', blockRichHtml: false,
-        selectionRichInsert: !!(selection && typeof selection.getSelectionContent === 'function' && typeof selection.getSelectionAnchor === 'function' && typeof selection.insertContent === 'function'), selectionRichReplace: false,
+        wordCount: !!(document && typeof document.getWordCount === 'function'), exactBlockRead: true, blockEdits: typeof current?.openApi?.editor?.canvas?.patch === 'function', blockRichHtml: true,
+        selectionRichInsert: !!(selection && typeof selection.getSelectionContent === 'function' && typeof selection.getSelectionAnchor === 'function' && typeof selection.insertContent === 'function'),
+        selectionRichReplace: !!(selection && typeof selection.getSelectionContent === 'function' && typeof selection.getSelectionAnchor === 'function' && typeof selection.replaceContent === 'function'),
         // Export URLs are signed, browser-session-only values. No safe artifact
         // delivery handle exists in this MCP surface, so keep exports unavailable.
-        exportPdf: false, exportDocx: false, images: false, pasteImage: false, drawings: false, selectionHighlight: false,
+        exportPdf: false, exportDocx: false, images: false, pasteImage: false, drawings: typeof current?.openApi?.editor?.canvas?.patch === 'function', selectionHighlight: false,
       }
       const detectedButUnsupported = [
-        ...(selection && typeof selection.replaceContent === 'function' ? ['selectionRichReplace'] : []),
-        ...['images', 'drawings', 'exportPdf', 'exportDocx'].filter((name) => (name === 'images' && typeof selection?.insertImage === 'function') || (name === 'drawings' && typeof selection?.insertTextDrawing === 'function') || (name === 'exportPdf' && typeof editor?.exportAsPdf === 'function') || (name === 'exportDocx' && typeof editor?.exportAsDocx === 'function')),
+        ...['images', 'exportPdf', 'exportDocx'].filter((name) => (name === 'images' && typeof selection?.insertImage === 'function') || (name === 'exportPdf' && typeof editor?.exportAsPdf === 'function') || (name === 'exportDocx' && typeof editor?.exportAsDocx === 'function')),
       ]
       return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, capabilities: { ...detected, detectedButUnsupported } } } }
     }
@@ -304,26 +369,40 @@
       }
       return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload, count: items.length }, observed: { verifiedBlocks, verified: true } } }
     }
-    if (input.operation === 'selection_insert') {
+    if (input.operation === 'selection_insert' || input.operation === 'selection_replace') {
       const requested = selectionPayload(input.payload)
       const selection = selectionApi(current)
-      if (!requested || !selection || typeof selection.insertContent !== 'function') return fail('unsupported', 'Light-document selection insert requires one bounded content format, a stable selection fingerprint, and the public insertContent API')
-      // A content read is useful even on runtimes without selection coordinates,
-      // but a mutation is never safe unless the selected range is stable.
+      const mutate = input.operation === 'selection_replace' ? 'replaceContent' : 'insertContent'
+      if (!requested || !selection || typeof selection[mutate] !== 'function') return fail('unsupported', `Light-document ${input.operation} requires one bounded content format, a stable selection fingerprint, and the public ${mutate} API`)
       const snapshot = await readSelection(current, 20_000)
-      if (!snapshot.supported || snapshot.truncated || !snapshot.stable || !snapshot.anchor) return fail('invalid_range', 'Light-document selection insert requires a complete, stable selection or cursor snapshot')
+      if (!snapshot.supported || snapshot.truncated || !snapshot.stable || !snapshot.anchor) return fail('invalid_range', `Light-document ${input.operation} requires a complete, stable selection or cursor snapshot`)
+      if (input.operation === 'selection_replace' && snapshot.isCollapsed) return fail('invalid_range', 'selection_replace requires a non-collapsed selection; use selection_insert at a caret')
       if (snapshot.selectionFingerprint !== requested.expectedSelectionFingerprint) return fail('fingerprint_mismatch', 'The light-document selection changed since inspect_write')
-      const insertContent = { [requested.kind]: requested.value, ...(requested.insertBelow ? { insertBlow: true } : {}) }
-      // Exactly one public mutation follows the final resource and selection
-      // checks. Any throw or failed readback is fenced by the Native side.
-      try { await selection.insertContent(insertContent) } catch { return fail('runtime_error', 'WebEdit rejected the light-document selection insert') }
+      const content = { [requested.kind]: requested.value, ...(requested.insertBelow ? { insertBlow: true } : {}) }
+      try { await selection[mutate](content) } catch { return fail('runtime_error', `WebEdit rejected the light-document ${input.operation}`) }
       let afterXml = await current.openApi.editor.canvas.getDocXml(); const deadline = Date.now() + 3_000
       while (afterXml === beforeXml && Date.now() < deadline) { await sleep(50); afterXml = await current.openApi.editor.canvas.getDocXml() }
       const observed = verifySelectionInsert(beforeXml, afterXml, requested)
-      if (!observed) return fail('readback_mismatch', 'WebEdit selection insert did not produce matching XML content and structural evidence')
-      return { ok: true, result: { status: 'verified_write', resource: await documentResource(afterXml, current), requested: { operation: 'selection_insert', payload: input.payload }, observed: { ...observed, verified: true } } }
+      if (!observed) return fail('readback_mismatch', `WebEdit ${input.operation} did not produce matching XML content and structural evidence`)
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(afterXml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, verified: true } } }
     }
-    if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'insert_drawing' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
+    if (input.operation === 'blocks_insert' || input.operation === 'insert_drawing') {
+      const parsed = editableBlocks(beforeXml)
+      if (!parsed) return fail('unsupported', 'WebEdit did not expose editable light-document blocks')
+      const xml = input.operation === 'insert_drawing' ? structuredBlockXml({ type: 'codeblock', language: 'mermaid', text: input.payload?.mermaid }, null) : blockXml(input.payload)
+      const offset = insertPosition(parsed, input.payload)
+      if (!xml || offset === null) return fail('invalid_range', input.operation === 'insert_drawing'
+        ? 'insert_drawing requires mermaid source and a start/end/before/after position'
+        : 'blocks_insert requires bounded h1-h6/p/blockquote/ul/ol/table/codeblock items and a start/end/before/after position')
+      const fragments = distinctiveFragments(input.operation === 'insert_drawing' ? input.payload?.mermaid : (input.payload?.blocks ?? []).map((item) => Array.isArray(item?.items) ? item.items.join('\n') : Array.isArray(item?.rows) ? item.rows.flat().join('\n') : item?.text ?? item?.markdown ?? item?.html ?? '').join('\n'))
+      if (!fragments.length) return fail('invalid_range', `${input.operation} requires distinctive readable content for XML readback`)
+      const patched = await patchXml(current, beforeXml, `${parsed.inner.slice(0, offset)}${xml}${parsed.inner.slice(offset)}`)
+      if (!patched.ok) return patched
+      const observed = verifyInsertedFragments(beforeXml, patched.xml, fragments)
+      if (!observed) return fail('readback_mismatch', `WebEdit ${input.operation} did not produce matching XML content and structural evidence`)
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, verified: true } } }
+    }
+    if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
     if (input.operation === 'set_title') {
       const document = documentApi(current); const title = typeof input.payload?.title === 'string' ? input.payload.title.trim() : ''
       if (!document || typeof document.getTitleContent !== 'function' || typeof document.setTitleContent !== 'function' || !title || title.length > 500) return fail('unsupported', 'WebEdit does not expose readable title APIs')
@@ -345,7 +424,9 @@
       for (const item of requested) {
         const mode = item?.mode ?? 'replace'
         const located = mode === 'insert' ? null : targetBlock(beforeXml, item)
-        if (mode !== 'insert' && !located) return fail('invalid_range', 'light-document block target was not found')
+        if (mode !== 'insert' && !located) return fail('invalid_range', parsed.list.length === 0
+          ? 'This light document has no public replaceable block. Use selection_insert with expectedSelectionFingerprint from a selection read.'
+          : 'light-document block target was not found')
         if (mode === 'insert') return fail('unsupported', 'block insert requires a stable public inserted-block identity')
         if (mode !== 'delete' && !located?.target?.id) return fail('invalid_range', 'block replacement requires a stable id for readback')
         if (mode === 'delete' && !located?.target?.id) return fail('invalid_range', 'block deletion requires a stable id for readback')
@@ -369,9 +450,11 @@
       if (!afterBlocks || deletedIds.some((id) => afterBlocks.all.some((block) => block.id === id))) return fail('readback_mismatch', 'WebEdit did not remove every requested light-document block')
       return result
     }
-    if (input.operation === 'insert_image' || input.operation === 'insert_drawing' || input.operation === 'highlight_selection') return fail('unsupported', `WebEdit ${input.operation} is detected only when its operation-specific public API and readback contract are available`)
+    if (input.operation === 'insert_image' || input.operation === 'highlight_selection') return fail('unsupported', `WebEdit ${input.operation} is detected only when its operation-specific public API and readback contract are available`)
     const located = input.operation === 'title' ? editableBlocks(beforeXml) : targetBlock(beforeXml, input.payload)
-    if (!located) return fail('invalid_range', 'light-document target block was not found')
+    if (!located) return fail('invalid_range', editableBlocks(beforeXml)?.list.length === 0 && input.operation !== 'title'
+      ? 'This light document has no public replaceable block. Use selection_insert with expectedSelectionFingerprint from a selection read.'
+      : 'light-document target block was not found')
     // A delete must be independently verifiable after CanvasPatch. Without a
     // stable block id it could succeed in the document and still be reported
     // as a failed write, leaving the caller with a dangerous partial result.

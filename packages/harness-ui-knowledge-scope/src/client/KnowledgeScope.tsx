@@ -66,7 +66,6 @@ export function KnowledgeScopeStrip({ session, useKnowledgeScope, request }: Str
   const selectedRepositories = selectedSourceLabel(scope?.repositoryIds ?? [], catalog.repositories)
   const knowledge = selectedSourceLabel(scope?.systemIds ?? [], catalog.systems)
     ?? catalog.domains.find(item => item.id === scope?.domainId)?.name
-    ?? '知识范围'
   return <><div className={css.strip} aria-label="知识检索范围">
     <span className={css.switchWrap} onMouseEnter={() => setRememberOpen(true)} onMouseLeave={() => setRememberOpen(false)}>
     <button className={css.repositoryToggle} type="button" role="switch" aria-label="启用知识查询" aria-checked={enabled} onFocus={() => setRememberOpen(true)} onClick={() => {
@@ -77,8 +76,8 @@ export function KnowledgeScopeStrip({ session, useKnowledgeScope, request }: Str
     <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={selectedRepositories === undefined ? '选择代码库' : `选择代码库：${selectedRepositories}`} title={selectedRepositories} aria-expanded={repositoryOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={repositoryOverlay.toggle}>
       <span aria-hidden>⌘</span><span className={css.scopeLabel}>{selectedRepositories ?? '选择代码库'}</span><span aria-hidden>⌃</span>
     </button>
-    <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={`选择知识范围：${knowledge}`} title={knowledge} aria-expanded={knowledgeOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={knowledgeOverlay.toggle}>
-      <span aria-hidden>⌘</span><span className={css.scopeLabel}>{knowledge}</span><span aria-hidden>⌃</span>
+    <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={knowledge === undefined ? '选择知识范围' : `选择知识范围：${knowledge}`} title={knowledge} aria-expanded={knowledgeOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={knowledgeOverlay.toggle}>
+      <span aria-hidden>⌘</span><span className={css.scopeLabel}>{knowledge ?? '选择知识范围'}</span><span aria-hidden>⌃</span>
     </button>
   </div>{serviceState !== 'ready' && <output className={css.notice}>{serviceState === 'checking'
     ? '正在连接知识服务…'

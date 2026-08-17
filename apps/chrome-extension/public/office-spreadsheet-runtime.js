@@ -37,9 +37,17 @@
   const SPECIAL_CELL_TYPES = { blanks: 4, constants: 2, formulas: -4123, lastCell: 11, visible: 12 }
 
   // Instant readiness check for the background frame probe: no polling, no waiting.
+  // Light-document frames also expose globalThis.APP (openApi.editor.canvas).
+  // Claiming "spreadsheet ready" from APP alone makes office_get_context
+  // misroute a Team Knowledge light document to office_spreadsheet.
   function readyNow() {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
-    return !!app
+    if (!app) return false
+    const path = String(location.pathname || '').toLowerCase()
+    if (path.includes('/weboffice/office/o/')) return false
+    const canvas = app.openApi?.editor?.canvas
+    if (canvas && typeof canvas.getDocXml === 'function') return false
+    return true
   }
 
   async function appAndSheet(requestedSheet) {
@@ -69,9 +77,11 @@
     return await call(sheet, 'getRange', [bare]) ?? await call(sheet, 'Range', [address])
   }
   async function viewSnapshot(resolved) {
-    const activeWindow = await property(resolved.app, 'ActiveWindow') ?? await call(resolved.app, 'getActiveWindow'); const activeCell = await property(resolved.app, 'ActiveCell'); const activeSheet = await property(resolved.app, 'ActiveSheet')
+    const activeWindow = await property(resolved.app, 'ActiveWindow') ?? await call(resolved.app, 'getActiveWindow'); const activeCell = await property(resolved.app, 'ActiveCell') ?? await call(resolved.app, 'getActiveCell') ?? await property(resolved.sheet, 'ActiveCell'); const activeSheet = await property(resolved.app, 'ActiveSheet')
     const sheetName = await call(activeSheet, 'getName') ?? await property(activeSheet, 'Name'); const row = Number(await property(activeCell, 'Row')); const column = Number(await property(activeCell, 'Column')); const freezePanes = await property(activeWindow, 'FreezePanes'); const splitRow = Number(await property(activeWindow, 'SplitRow')); const splitColumn = Number(await property(activeWindow, 'SplitColumn')); const zoom = Number(await property(activeWindow, 'Zoom')); const scrollRow = Number(await property(activeWindow, 'ScrollRow')); const scrollColumn = Number(await property(activeWindow, 'ScrollColumn') )
-    if (!activeWindow || typeof sheetName !== 'string' || sheetName.length === 0 || sheetName !== resolved.resource.sheetName || !Number.isInteger(row) || row < 1 || row > 1048576 || !Number.isInteger(column) || column < 1 || column > 16384 || typeof freezePanes !== 'boolean' || !Number.isInteger(splitRow) || splitRow < 0 || splitRow > 1048575 || !Number.isInteger(splitColumn) || splitColumn < 0 || splitColumn > 16383 || !Number.isInteger(zoom) || zoom < 10 || zoom > 400 || !Number.isInteger(scrollRow) || scrollRow < 1 || scrollRow > 1048576 || !Number.isInteger(scrollColumn) || scrollColumn < 1 || scrollColumn > 16384) return { supported: false, activeWindow: null }
+    const cellReadable = Number.isInteger(row) && row >= 1 && row <= 1048576 && Number.isInteger(column) && column >= 1 && column <= 16384
+    const partial = cellReadable ? { activeCell: `${columnName(column)}${row}` } : null
+    if (!activeWindow || !cellReadable || typeof sheetName !== 'string' || sheetName.length === 0 || sheetName !== resolved.resource.sheetName || typeof freezePanes !== 'boolean' || !Number.isInteger(splitRow) || splitRow < 0 || splitRow > 1048575 || !Number.isInteger(splitColumn) || splitColumn < 0 || splitColumn > 16383 || !Number.isInteger(zoom) || zoom < 10 || zoom > 400 || !Number.isInteger(scrollRow) || scrollRow < 1 || scrollRow > 1048576 || !Number.isInteger(scrollColumn) || scrollColumn < 1 || scrollColumn > 16384) return { supported: false, activeWindow: null, view: partial }
     return { supported: true, activeWindow, view: { sheetName, activeCell: `${columnName(column)}${row}`, freezePanes, splitRow, splitColumn, zoom, scrollRow, scrollColumn } }
   }
   function requestedViewOperation(operation, payload) {
@@ -597,7 +607,7 @@
     if (request.action === 'capabilities') return capabilities(resolved, request.range)
     if (request.action === 'view') {
       const snapshot = await viewSnapshot(resolved)
-      return { ok: true, result: { status: 'ok', resource: resolved.resource, view: snapshot.supported ? { supported: true, ...snapshot.view } : { supported: false } } }
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, view: snapshot.supported ? { supported: true, ...snapshot.view } : { supported: false, ...(snapshot.view ? { activeCell: snapshot.view.activeCell } : {}) } } }
     }
     if (request.action === 'print_settings') {
       const snapshot = await printSettingsSnapshot(resolved)

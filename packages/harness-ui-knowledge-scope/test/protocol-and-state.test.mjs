@@ -10,6 +10,13 @@ test('preserves all selected repository and knowledge names for wide composer la
   assert.deepEqual(scopeLabels(snapshot.scope, snapshot.catalog), { repositories: 'OTP-后端-中台、OTP-前端-1', knowledge: '订单知识库、结算知识库' })
 })
 
+test('keeps unselected composer buttons as empty labels so agents do not probe either side', () => {
+  assert.deepEqual(scopeLabels({ domainId: '', systemIds: [], repositoryIds: [] }, snapshot.catalog), {
+    repositories: undefined,
+    knowledge: undefined,
+  })
+})
+
 test('keeps an already selected repository visible when a catalog refresh omits it', () => {
   assert.deepEqual(scopeLabels(
     { ...snapshot.scope, repositoryIds: ['r1', 'OTP-后端-中台'] },
@@ -24,6 +31,15 @@ test('accepts only an exact parent, nonce, and increasing knowledge snapshot seq
   assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: message }, parent), true)
   assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: message }, parent), false)
   assert.equal(bridge.source.value.sessionId, 'session-1')
+})
+
+test('accepts bounded live search content only from the exact iframe parent', () => {
+  const bridge = createScopeProtocol({ createStore: store, nonce: 'nonce', parentOrigin: 'chrome-extension://abc' }); const parent = {}
+  const progress = { requestId: 'request-1', harnessSessionId: 'child', harnessParentSessionId: 'parent', tool: 'code_search', question: 'where', phase: 'streaming', chars: 5, content: 'hello' }
+  const message = { type: 'search-progress/v1', nonce: 'nonce', sequence: 1, progress }
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: message }, parent), true)
+  assert.deepEqual(bridge.progress.value, [progress])
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { ...message, sequence: 2, progress: { ...progress, content: 'x'.repeat(16_001) } } }, parent), false)
 })
 
 test('sends a scope update with a local increasing command sequence', () => {

@@ -134,16 +134,53 @@ async function loadKnowledgeCatalog(domainId?: string): Promise<{ domains: Array
   return { domains, systems, repositories }
 }
 function sseEvents(buffer: string, chunk: string): { events: string[]; remainder: string } { const parts = `${buffer}${chunk}`.replace(/\r\n/g, '\n').split('\n\n'); const remainder = parts.pop() ?? ''; return { events: parts.map((part) => part.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')).filter(Boolean), remainder } }
-async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scope: KnowledgeScope, priorSessionId: string | undefined, signal: AbortSignal): Promise<{ result: { status: 'complete' | 'partial' | 'truncated'; answer: string; sources: Array<{ id: string; title: string }> }; sessionId?: string }> {
+function mergeStreamText(current: string, incoming: string): string {
+  if (incoming.startsWith(current)) return incoming.slice(0, 16_000)
+  if (current.endsWith(incoming)) return current
+  const limit = Math.min(current.length, incoming.length)
+  let overlap = limit
+  while (overlap > 0 && current.slice(-overlap) !== incoming.slice(0, overlap)) overlap -= 1
+  return `${current}${incoming.slice(overlap)}`.slice(0, 16_000)
+}
+function isAnswerDelta(payload: Record<string, unknown>): boolean {
+  return payload.type !== 'reasoning' && payload.type !== 'thinking' && payload.type !== 'thought' && payload.type !== 'agent_thought'
+}
+function retrievalQuestion(kind: KnowledgeKind, question: string): string {
+  const instruction = kind === 'code'
+    ? '请直接返回从所选远程代码仓库检索到的事实、文件路径和代码依据。'
+    : '请直接返回从所选知识范围检索到的事实和引用依据。'
+  const language = /[\u3400-\u9fff]/u.test(question)
+    ? '所有面向用户的流式内容和最终答案都必须使用简体中文；工具名、代码标识符和文件路径可保留原文。即使转述后的问题包含英文，也不要用英文叙述。'
+    : 'Use the same language as the user question for all user-visible streaming content and the final answer.'
+  return `${instruction}${language}不要输出思考过程、检索计划、工具选择、工作目录判断或是否需要检索的讨论。用户问题：${question}`
+}
+async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scope: KnowledgeScope, priorSessionId: string | undefined, signal: AbortSignal, onProgress?: (progress: { chars: number; content: string; eventType?: string }) => void): Promise<{ result: { status: 'complete' | 'partial' | 'truncated'; answer: string; sources: Array<{ id: string; title: string }> }; sessionId?: string }> {
   if (kind === 'knowledge' && scope.domainId === '') throw new Error('knowledge_scope_requires_domain')
   if (kind === 'code' && scope.repositoryIds.length === 0) throw new Error('knowledge_scope_requires_repository')
-  const body = kind === 'knowledge' ? { question, domain_system_config: { [scope.domainId]: { self: false, systems: scope.systemIds } }, forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
+  const directedQuestion = retrievalQuestion(kind, question)
+  const body = kind === 'knowledge' ? { question: directedQuestion, domain_system_config: { [scope.domainId]: { self: false, systems: scope.systemIds } }, forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question: directedQuestion, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
   const response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(body), signal })
   if (!response.ok || response.body === null) throw new Error(`knowledge_platform_http_${response.status}`)
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let sources: Array<{ id: string; title: string }> = []; let sessionId: string | undefined; let done = false; let marker = false
-  try { while (true) { const read = await reader.read(); if (read.done) break; const parsed = sseEvents(buffer, decoder.decode(read.value, { stream: true })); buffer = parsed.remainder; for (const event of parsed.events) { if (event === '[DONE]') { marker = true; continue }; let payload: Record<string, unknown>; try { payload = JSON.parse(event) as Record<string, unknown> } catch { continue }; if (payload.type === 'error') throw new Error(typeof payload.error === 'string' ? payload.error : 'knowledge_platform_error'); if (typeof payload.delta === 'string') answer = `${answer}${payload.delta}`.slice(0, 16_000); if (payload.type === 'citations' || payload.type === 'done') sources = (Array.isArray(payload.citations) ? payload.citations : []).flatMap((item): Array<{ id: string; title: string }> => { const id = field(item, 'page_id') ?? field(item, 'id'); const title = field(item, 'page_title') ?? field(item, 'title'); return id === undefined || title === undefined ? [] : [{ id, title }] }).slice(0, 20); if (payload.type === 'done') { done = true; sessionId = typeof payload.session_id === 'string' ? payload.session_id : sessionId } } } } finally { reader.releaseLock() }
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let visualContent = ''; let sources: Array<{ id: string; title: string }> = []; let sessionId: string | undefined; let done = false; let marker = false
+  try { while (true) { const read = await reader.read(); if (read.done) break; const parsed = sseEvents(buffer, decoder.decode(read.value, { stream: true })); buffer = parsed.remainder; for (const event of parsed.events) { if (event === '[DONE]') { marker = true; continue }; let payload: Record<string, unknown>; try { payload = JSON.parse(event) as Record<string, unknown> } catch { continue }; if (payload.type === 'error') throw new Error(typeof payload.error === 'string' ? payload.error : 'knowledge_platform_error'); if (typeof payload.delta === 'string' && isAnswerDelta(payload)) { answer = mergeStreamText(answer, payload.delta); visualContent = answer; onProgress?.({ chars: visualContent.length, content: visualContent, eventType: typeof payload.type === 'string' ? payload.type : undefined }) } else if (visualContent === '' && typeof payload.type === 'string' && payload.type !== 'done' && payload.type !== 'citations') onProgress?.({ chars: 0, content: '', eventType: payload.type }); if (payload.type === 'citations' || payload.type === 'done') sources = (Array.isArray(payload.citations) ? payload.citations : []).flatMap((item): Array<{ id: string; title: string }> => { const id = field(item, 'page_id') ?? field(item, 'id'); const title = field(item, 'page_title') ?? field(item, 'title'); return id === undefined || title === undefined ? [] : [{ id, title }] }).slice(0, 20); if (payload.type === 'done') { done = true; sessionId = typeof payload.session_id === 'string' ? payload.session_id : sessionId } } } } finally { reader.releaseLock() }
   if (!done || !marker) throw new Error('knowledge_platform_incomplete_sse')
   return { result: { status: answer.length >= 16_000 ? 'truncated' : 'complete', answer, sources }, ...(sessionId === undefined ? {} : { sessionId }) }
+}
+function selectedScopeNames(ids: string[], entries: Array<{ id: string; name: string }>, fallbackToId = false): string[] {
+  const byId = new Map(entries.map((entry) => [entry.id, entry.name]))
+  return ids.flatMap((id) => {
+    const name = byId.get(id)
+    if (typeof name === 'string' && name.trim().length > 0) return [name]
+    return fallbackToId && id.trim().length > 0 ? [id] : []
+  }).slice(0, 50)
+}
+function selectedSourceScopeEcho(record: { scope: KnowledgeScope; enabled: boolean }, catalog: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string }>; repositories: Array<{ id: string; name: string }> }): { enabled: boolean; codeSelected: boolean; knowledgeSelected: boolean; repositories: string[]; knowledge: string[] } {
+  const repositories = selectedScopeNames(record.scope.repositoryIds, catalog.repositories, true)
+  const systems = selectedScopeNames(record.scope.systemIds, catalog.systems, true)
+  const domainName = catalog.domains.find((domain) => domain.id === record.scope.domainId)?.name
+    ?? (record.scope.domainId.trim().length > 0 ? record.scope.domainId : undefined)
+  const knowledge = systems.length > 0 ? systems : domainName === undefined ? [] : [domainName]
+  return { enabled: record.enabled, codeSelected: repositories.length > 0, knowledgeSelected: knowledge.length > 0, repositories, knowledge }
 }
 
 const NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
@@ -303,8 +340,8 @@ interface OfficeWriteRangeRequest {
 }
 
 type OfficeDocumentAction = 'read' | 'search' | 'selection' | 'inspect_write' | 'write'
-type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format' | 'selection_insert'
-const OFFICE_DOCUMENT_OPERATIONS: readonly OfficeDocumentOperation[] = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'selection_insert']
+type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format' | 'blocks_insert' | 'insert_drawing' | 'selection_insert' | 'selection_replace'
+const OFFICE_DOCUMENT_OPERATIONS: readonly OfficeDocumentOperation[] = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace']
 
 interface LightDocumentResourceIdentity {
   kind: 'webedit_light_document'
@@ -476,10 +513,22 @@ interface KnowledgeQueryRequest {
   question: string
 }
 
+interface SelectedSourceScopeRequest {
+  type: 'connector_request'
+  requestId: string
+  runId: string
+  generation: string
+  tool: 'selected_source_scope'
+  harnessSessionId: string
+  harnessParentSessionId?: string
+}
+
 interface KnowledgeScopeRecord { scope: KnowledgeScope; enabled: boolean }
 interface KnowledgeEnabledPreference { remember: boolean; enabled: boolean }
 interface KnowledgeSessionRecord { sessionId: string; fingerprint: string }
+interface SearchProgressSnapshot { type: 'search-progress/v1'; requestId: string; harnessSessionId: string; harnessParentSessionId?: string; tool: 'knowledge_search' | 'code_search'; question: string; phase: 'querying' | 'streaming' | 'done' | 'error'; chars: number; content: string }
 const activeKnowledgeQueries = new Map<string, AbortController>()
+const searchProgressSnapshots = new Map<string, SearchProgressSnapshot>()
 
 function isConnectorRequest(message: NativeMessage): message is ConnectorRequest {
   const target = message.browserTarget
@@ -786,6 +835,12 @@ function isKnowledgeQueryRequest(message: NativeMessage): message is KnowledgeQu
     && typeof message.question === 'string' && message.question.trim().length > 0 && message.question.length <= 4000
 }
 
+function isSelectedSourceScopeRequest(message: NativeMessage): message is SelectedSourceScopeRequest {
+  return message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
+    && typeof message.generation === 'string' && message.tool === 'selected_source_scope'
+    && validSessionIdentity(message.harnessSessionId) && (message.harnessParentSessionId === undefined || validSessionIdentity(message.harnessParentSessionId))
+}
+
 function isKnowledgeCancel(message: NativeMessage): message is NativeMessage & { type: 'connector_cancel'; requestId: string; runId: string; generation: string } {
   return message.type === 'connector_cancel' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
 }
@@ -951,14 +1006,43 @@ function upstreamSessionKey(sessionId: string, kind: KnowledgeKind, fingerprint:
   return `${sessionId}\u0000${kind}\u0000${fingerprint}`
 }
 
-async function resolveKnowledgeScopeRecord(request: KnowledgeQueryRequest): Promise<KnowledgeScopeRecord | undefined> {
+async function resolveKnowledgeScopeRecord(request: KnowledgeQueryRequest | SelectedSourceScopeRequest): Promise<KnowledgeScopeRecord | undefined> {
   const scopes = await knowledgeScopes()
   return scopes[request.harnessSessionId] ?? (request.harnessParentSessionId === undefined ? undefined : scopes[request.harnessParentSessionId])
+}
+
+async function respondToSelectedSourceScope(port: chrome.runtime.Port, request: SelectedSourceScopeRequest): Promise<void> {
+  try {
+    const record = await resolveKnowledgeScopeRecord(request)
+    const empty = { domainId: '', systemIds: [], repositoryIds: [] }
+    const preference = await knowledgeEnabledPreference()
+    const enabled = record?.enabled ?? (preference.remember ? preference.enabled : true)
+    const scope = record?.scope ?? empty
+    let catalog: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string }>; repositories: Array<{ id: string; name: string }> } = { domains: [], systems: [], repositories: [] }
+    try { catalog = await loadKnowledgeCatalog(scope.domainId || undefined) } catch { /* names fall back to stored ids when the catalog is unavailable */ }
+    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, result: selectedSourceScopeEcho({ scope, enabled }, catalog) })
+  } catch (error) {
+    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: asError(error) })
+  }
 }
 
 async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQueryRequest): Promise<void> {
   const controller = new AbortController()
   activeKnowledgeQueries.set(request.requestId, controller)
+  // Live search progress for the sidepanel UI; throttled because SSE deltas
+  // arrive at answer speed. The callback form tolerates a missing listener.
+  let lastProgressAt = 0
+  const broadcast = (phase: 'querying' | 'streaming' | 'done' | 'error', chars = 0, content = ''): void => {
+    const now = Date.now()
+    if (phase === 'streaming' && now - lastProgressAt < 120) return
+    lastProgressAt = now
+    const snapshot: SearchProgressSnapshot = { type: 'search-progress/v1', requestId: request.requestId, harnessSessionId: request.harnessSessionId, ...(request.harnessParentSessionId === undefined ? {} : { harnessParentSessionId: request.harnessParentSessionId }), tool: request.tool, question: request.question.trim(), phase, chars, content }
+    searchProgressSnapshots.delete(request.requestId)
+    searchProgressSnapshots.set(request.requestId, snapshot)
+    while (searchProgressSnapshots.size > 12) searchProgressSnapshots.delete(searchProgressSnapshots.keys().next().value!)
+    chrome.runtime.sendMessage(snapshot, () => { void chrome.runtime.lastError })
+  }
+  broadcast('querying')
   try {
     const record = await resolveKnowledgeScopeRecord(request)
     if (record === undefined) throw new Error('knowledge_scope_missing')
@@ -969,13 +1053,15 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     const sessions = await knowledgeSessions()
     const key = upstreamSessionKey(request.harnessSessionId, kind, fingerprint)
     const prior = sessions[key]?.sessionId
-    const executed = await executeKnowledgeQuery(kind, request.question.trim(), scope, prior, controller.signal)
+    const executed = await executeKnowledgeQuery(kind, request.question.trim(), scope, prior, controller.signal, (progress) => broadcast('streaming', progress.chars, progress.content))
     if (executed.sessionId !== undefined) {
       sessions[key] = { sessionId: executed.sessionId, fingerprint }
       await targetStorage()?.set({ [KNOWLEDGE_SESSION_STORAGE_KEY]: sessions })
     }
+    broadcast('done', executed.result.answer.length, executed.result.answer)
     port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, result: executed.result })
   } catch (error) {
+    broadcast('error')
     port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: asError(error) })
   } finally {
     activeKnowledgeQueries.delete(request.requestId)
@@ -1109,19 +1195,20 @@ async function readOfficeContext(request: ConnectorRequest): Promise<Record<stri
         unavailable.push({ browserTarget: target, reason: 'closed_or_changed' })
         continue
       }
-      pages.push({ browserTarget: target, pageIdentity: { title: tab.title ?? '', url: target.url }, documentIdentity: null, isPrimary: sameBrowserTarget(target, binding.browserTarget) })
+      pages.push({ browserTarget: target, pageIdentity: { title: tab.title ?? '', url: target.url }, documentIdentity: await probeDocumentIdentity(target.tabId), isPrimary: sameBrowserTarget(target, binding.browserTarget) })
     } catch {
       unavailable.push({ browserTarget: target, reason: 'closed_or_changed' })
     }
   }
   const primaryPage = pages.find((page) => page.isPrimary === true)
   if (primaryPage === undefined) throw new Error('The primary Browser Target changed before Office context could be read.')
-  // Office DOM/range adapters deliberately begin in Issue #3. This tracer
-  // bullet proves the trusted target identity path without exposing cookies.
+  // The primary page's probed WebEdit identity rides along so downstream models
+  // can route to office_spreadsheet / office_document without guessing from the
+  // tab title; null now means no webedit frame answered ready on either channel.
   return {
     status: 'browser_target_verified',
     pageIdentity: primaryPage.pageIdentity,
-    documentIdentity: null,
+    documentIdentity: primaryPage.documentIdentity ?? null,
     primaryBrowserTarget: binding.browserTarget,
     pages,
     unavailableBrowserTargets: unavailable,
@@ -1133,7 +1220,10 @@ async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<Br
   if (settings.mode === 'none') throw new Error('Browser use is disabled for the next Office turn.')
   const binding = settings.mode === 'pinned-tabs'
     ? await pinnedBrowserTargets(settings)
-    : bindingForTarget(settings.candidate ?? await activeBrowserTarget())
+    // The follow-active-tab policy is resolved from Chrome at request time.
+    // A candidate is only a next-Run hint and can be stale when a single tab
+    // navigates between Team Knowledge documents without firing onActivated.
+    : bindingForTarget(await activeBrowserTarget())
   const requestTargets = request.browserTargets ?? [request.browserTarget]
   const requestUnavailable = request.unavailableBrowserTargets ?? []
   if (!sameBrowserTarget(binding.browserTarget, request.browserTarget)
@@ -1201,6 +1291,27 @@ function probeMessageFor(message: Record<string, unknown>): Record<string, unkno
   return { type: 'office-read-range/v1', action: 'probe' }
 }
 
+/**
+ * A "none ready within 8s" failure is ambiguous downstream: the doc.midea.com
+ * page can host a spreadsheet iframe while the caller probed the light-document
+ * channel (or vice versa), and the model then tells the user "the editor is
+ * still loading" when the frames simply host the other document type. When the
+ * requested channel stays silent, ask the sibling channel once: a ready answer
+ * turns the error into an actionable "this Browser Target hosts a spreadsheet /
+ * document, call the other tool" instead of a wrong diagnosis.
+ */
+function siblingProbeType(type: string): string | null {
+  if (type === 'office-document/v1') return 'office-spreadsheet/v1'
+  if (type === 'office-spreadsheet/v1') return 'office-document/v1'
+  return null
+}
+
+function channelReadyLabel(type: string): string {
+  if (type === 'office-document/v1') return 'light-document editor'
+  if (type === 'office-spreadsheet/v1') return 'spreadsheet runtime'
+  return 'editor runtime'
+}
+
 function probeSucceeded(reply: { ok?: unknown; result?: unknown } | undefined): boolean {
   if (reply?.ok !== true) return false
   const result = reply.result as { status?: unknown; ready?: unknown } | undefined
@@ -1228,7 +1339,9 @@ const OFFICE_PROBE_RETRY_MS = 250
  * would permanently skip every still-booting frame, so keep sweeping all
  * candidates within the same 8s budget before declaring none ready. The final
  * error names the frame count so "no iframe at all" and "iframes exist but no
- * editor inside" stay distinguishable downstream.
+ * editor inside" stay distinguishable downstream, and when the sibling channel
+ * answers ready it names the actual document type so the caller switches tools
+ * instead of misreading "wrong document type" as "editor still loading".
  *
  * Several frames can be ready at once (a preloaded blank editor beside the
  * user's real document), so each sweep collects every ready candidate and its
@@ -1239,6 +1352,23 @@ const OFFICE_PROBE_RETRY_MS = 250
  * frame afterwards.
  */
 type ProbeIdentity = { path?: unknown; workbookName?: unknown; sheetName?: unknown; hasContent?: unknown }
+
+function identityPath(identity: ProbeIdentity | undefined): string {
+  return typeof identity?.path === 'string' ? identity.path.toLowerCase() : ''
+}
+
+function pathLooksLikeSpreadsheet(path: string): boolean {
+  return path.includes('/weboffice/office/s/') || path.includes('/moewebv7/document-cloud')
+}
+
+function pathLooksLikeLightDocument(path: string): boolean {
+  return path.includes('/weboffice/office/o/')
+}
+
+function substantialSpreadsheet(identity: ProbeIdentity | undefined): boolean {
+  return identity?.hasContent === true
+    || (typeof identity?.workbookName === 'string' && identity.workbookName.length > 0)
+}
 
 function probeIdentityOf(reply: { ok?: unknown; result?: unknown } | undefined): ProbeIdentity | undefined {
   const identity = (reply?.result as { status?: unknown; identity?: unknown } | undefined)?.identity
@@ -1254,8 +1384,69 @@ function probeIdentityOf(reply: { ok?: unknown; result?: unknown } | undefined):
  * fall back to iteration order when nothing better distinguishes them.
  * Lower rank wins; ties keep getAllFrames order.
  */
-function framePreference(identity: ProbeIdentity | undefined): number {
-  if (identity?.hasContent === true) return 0
+/**
+ * One quick identity sweep for office_get_context: ask every webedit frame on
+ * both editor channels (spreadsheet + light document), without the 8s wait or
+ * healing budget that real operations use. A hardcoded documentIdentity:null
+ * made downstream models read "no WebEdit document here" out of a page whose
+ * spreadsheet editor answers in milliseconds, so report the best ready frame's
+ * kind and identity instead; null now genuinely means "nothing answered".
+ *
+ * accr-ui classifies /weboffice/office/o/ as a light document and /office/s/
+ * as a spreadsheet. A Team Knowledge light-document page also preloads a
+ * blank spreadsheet iframe; prefer the ready light document over that blank
+ * sheet so office_document is used instead of office_spreadsheet.
+ */
+async function probeDocumentIdentity(tabId: number): Promise<Record<string, unknown> | null> {
+  try {
+    const frames = (await chrome.webNavigation.getAllFrames({ tabId }) ?? [])
+      .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+    if (frames.length === 0) return null
+    const spreadsheetCandidates: ProbeIdentity[] = []
+    const lightDocumentCandidates: ProbeIdentity[] = []
+    for (const frame of frames) {
+      for (const channel of ['office-spreadsheet/v1', 'office-document/v1'] as const) {
+        try {
+          const reply = await chrome.tabs.sendMessage(tabId, { type: channel, action: 'probe' }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown } | undefined
+          if (!probeSucceeded(reply)) continue
+          const identity = probeIdentityOf(reply) ?? {}
+          const path = identityPath(identity)
+          // accr-ui: /weboffice/office/o/ is a light document, /office/s/ is a
+          // spreadsheet. A Team Knowledge light-document page also preloads a
+          // blank spreadsheet iframe; never let that blank frame steal identity.
+          if (channel === 'office-spreadsheet/v1') {
+            if (pathLooksLikeLightDocument(path)) continue
+            spreadsheetCandidates.push(identity)
+          } else {
+            if (pathLooksLikeSpreadsheet(path)) continue
+            lightDocumentCandidates.push(identity)
+          }
+        } catch { /* diagnostic-only probe: an unreachable frame simply does not count */ }
+      }
+    }
+    const lightDocumentReady = lightDocumentCandidates.length > 0
+    const substantial = spreadsheetCandidates.filter(substantialSpreadsheet)
+    const spreadsheetKind = (best: ProbeIdentity) => ({
+      kind: 'webedit_spreadsheet',
+      workbookName: typeof best.workbookName === 'string' ? best.workbookName : null,
+      sheetName: typeof best.sheetName === 'string' ? best.sheetName : null,
+      hasContent: best.hasContent === true ? true : best.hasContent === false ? false : null,
+      webeditFrames: frames.length,
+    })
+    if (substantial.length > 0) {
+      const best = substantial.reduce((leader, candidate) => framePreference(candidate) < framePreference(leader) ? candidate : leader)
+      return spreadsheetKind(best)
+    }
+    if (lightDocumentReady) return { kind: 'webedit_light_document', workbookName: null, sheetName: null, hasContent: null, webeditFrames: frames.length }
+    if (spreadsheetCandidates.length > 0) {
+      const best = spreadsheetCandidates.reduce((leader, candidate) => framePreference(candidate) < framePreference(leader) ? candidate : leader)
+      return spreadsheetKind(best)
+    }
+    return null
+  } catch { /* a failed context probe must never break office_get_context itself */ return null }
+}
+
+function framePreference(identity: ProbeIdentity | undefined): number {  if (identity?.hasContent === true) return 0
   if (typeof identity?.workbookName === 'string' && identity.workbookName.length > 0) return 1
   return 2
 }
@@ -1296,7 +1487,23 @@ async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.Ge
     await new Promise((resolve) => setTimeout(resolve, Math.min(OFFICE_PROBE_RETRY_MS, Math.max(0, deadline - Date.now()))))
   }
   if (lastMissingReceiver !== undefined) throw lastMissingReceiver
-  throw { code: 'unsupported', message: `The bound Browser Target has ${frames.length} WebEdit iframe(s), but none exposed a ready editor runtime within ${Math.round(waitBudgetMs / 100) / 10}s.` } satisfies OfficeReadFailure
+  const channel = String(message.type)
+  const siblingType = siblingProbeType(channel)
+  let siblingReadyCount = 0
+  if (siblingType !== null) {
+    for (const frame of frames) {
+      try {
+        const siblingReply = await chrome.tabs.sendMessage(tabId, { type: siblingType, action: 'probe' }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown } | undefined
+        if (probeSucceeded(siblingReply)) siblingReadyCount += 1
+      } catch { /* diagnostic-only probe: an unreachable frame simply does not count */ }
+    }
+  }
+  const hint = siblingType === null || siblingReadyCount === 0
+    ? ''
+    : siblingType === 'office-spreadsheet/v1'
+      ? ` ${siblingReadyCount} of them expose a ready WebEdit spreadsheet runtime instead — this Browser Target hosts a spreadsheet, so call office_spreadsheet (its view action reports the selected cell).`
+      : ` ${siblingReadyCount} of them expose a ready WebEdit light-document editor instead — this Browser Target hosts a document, so call office_document.`
+  throw { code: 'unsupported', message: `The bound Browser Target has ${frames.length} WebEdit iframe(s), but none exposed a ready ${channelReadyLabel(channel)} within ${Math.round(waitBudgetMs / 100) / 10}s.${hint}` } satisfies OfficeReadFailure
 }
 
 async function readOfficeRange(request: OfficeReadRangeRequest): Promise<Record<string, unknown>> {
@@ -2108,10 +2315,22 @@ function respondToTeamDoc(port: chrome.runtime.Port, request: TeamDocRequest): v
 function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnowledgeItemRequest): void {
   void queueNativeLifecycle(async () => {
     if (nativePort !== port) throw new Error('Team Knowledge item request belongs to a stale Native connection.')
-    const result = await runTeamKnowledgeItemRequest(request)
+    // Team Knowledge batch/item calls may be the first tool after the user
+    // selects another document in the same tab. Resolve and migrate the live
+    // Browser Target here instead of requiring an office_get_context preflight.
+    const binding = await resolveOfficeBrowserTarget({
+      type: request.type,
+      requestId: request.requestId,
+      runId: request.runId,
+      generation: request.generation,
+      browserTarget: request.browserTarget,
+      tool: 'office_get_context',
+    })
+    const resolvedRequest = { ...request, browserTarget: binding.browserTarget }
+    const result = await runTeamKnowledgeItemRequest(resolvedRequest)
     if (nativePort !== port) throw new Error('Team Knowledge item request became stale before completion.')
-    return result
-  }).then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
+    return { browserTarget: binding.browserTarget, result }
+  }).then(({ browserTarget, result }) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget, result }))
     .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
 }
 
@@ -2218,6 +2437,10 @@ function connectNativePort(): chrome.runtime.Port {
     }
     if (isKnowledgeQueryRequest(message)) {
       void respondToKnowledge(port, message)
+      return
+    }
+    if (isSelectedSourceScopeRequest(message)) {
+      void respondToSelectedSourceScope(port, message)
       return
     }
     if (isKnowledgeCancel(message)) {
@@ -2383,6 +2606,10 @@ export default defineBackground(() => {
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
+    if (request.type === 'search-progress-snapshot/v1') {
+      sendResponse({ ok: true, progress: [...searchProgressSnapshots.values()] })
+      return false
+    }
     if (request.type === 'knowledge-scope/v1') {
       if (!validSessionIdentity(request.sessionId)) {
         sendResponse({ ok: false, error: 'Invalid Harness session identity.' })
@@ -2469,6 +2696,7 @@ export default defineBackground(() => {
   chrome.tabs?.onCreated?.addListener(saveCandidate)
   chrome.tabs?.onUpdated?.addListener((_tabId, changeInfo, tab) => {
     if (tab.active && (changeInfo.title !== undefined || changeInfo.url !== undefined || changeInfo.favIconUrl !== undefined)) {
+      saveCandidate(tab)
       void refreshCurrentActiveTab().catch(() => {})
     }
   })

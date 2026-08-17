@@ -16,19 +16,43 @@ function snapshot(value) {
     && Array.isArray(catalog.domains) && Array.isArray(catalog.systems) && Array.isArray(catalog.repositories)
 }
 
+/** Live selected-source search progress relayed by the extension shell. */
+function searchProgress(value) {
+  return value !== null && typeof value === 'object' && typeof value.requestId === 'string' && value.requestId.length > 0
+    && typeof value.harnessSessionId === 'string' && value.harnessSessionId.length > 0
+    && (value.harnessParentSessionId === undefined || typeof value.harnessParentSessionId === 'string')
+    && (value.tool === 'code_search' || value.tool === 'knowledge_search')
+    && typeof value.question === 'string'
+    && (value.phase === 'querying' || value.phase === 'streaming' || value.phase === 'done' || value.phase === 'error')
+    && Number.isInteger(value.chars) && value.chars >= 0
+    && typeof value.content === 'string' && value.content.length <= 16_000
+}
+
 export function createScopeProtocol({ createStore, nonce, parentOrigin }) {
   const source = createStore(undefined)
+  const progress = createStore([])
+  let progressEntries = []
   let incoming = 0
+  let progressIncoming = 0
   let outgoing = 0
   return {
     source,
+    progress,
     accept(event, parent) {
       const message = event.data
       if (event.source !== parent || event.origin !== parentOrigin || message === null || typeof message !== 'object') return false
-      if (message.type !== 'knowledge-scope-snapshot/v1' || message.nonce !== nonce || !Number.isInteger(message.sequence) || message.sequence <= incoming || !snapshot(message.snapshot)) return false
-      incoming = message.sequence
-      source.set(message.snapshot)
-      return true
+      if (message.type === 'knowledge-scope-snapshot/v1' && message.nonce === nonce && Number.isInteger(message.sequence) && message.sequence > incoming && snapshot(message.snapshot)) {
+        incoming = message.sequence
+        source.set(message.snapshot)
+        return true
+      }
+      if (message.type === 'search-progress/v1' && message.nonce === nonce && Number.isInteger(message.sequence) && message.sequence > progressIncoming && searchProgress(message.progress)) {
+        progressIncoming = message.sequence
+        progressEntries = [...progressEntries.filter(item => item.requestId !== message.progress.requestId), message.progress].slice(-12)
+        progress.set(progressEntries)
+        return true
+      }
+      return false
     },
     request(sessionId, nextScope, options, parent) {
       outgoing += 1
