@@ -24,6 +24,8 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.match(entries, /runtime\/harness\/apps\/cli\/lib\/workflow-worker\.cjs/m)
   assert.match(entries, /runtime\/native-server\/selected-source-routing-prompt\.mjs/m)
   assert.match(entries, /runtime\/native-server\/harness-runtime\.mjs/m)
+  assert.match(entries, /runtime\/product-plugins\/harness-ui-conversation-shell\/package\.json/m)
+  assert.match(entries, /runtime\/product-plugins\/harness-ui-responsive-sidebar\/package\.json/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-subagent-compact\/lib\/client\.js/m)
 
   const installed = path.join(root, 'installed')
@@ -214,6 +216,12 @@ test('Mac production package boots the real Web surface without node_modules', {
     native.stdout.on('data', (chunk) => {
       const decoded = decodeNativeFrames(Buffer.concat([nativeRemainder, chunk]))
       nativeRemainder = decoded.remainder
+      const failure = decoded.messages.find((candidate) => candidate?.type === 'error')
+      if (failure !== undefined) {
+        clearTimeout(timer)
+        reject(new Error(`Installed Native Host reported an error: ${failure.error ?? JSON.stringify(failure)}`))
+        return
+      }
       const message = decoded.messages.find((candidate) => candidate?.type === 'server_started')
       if (message === undefined) return
       clearTimeout(timer)
