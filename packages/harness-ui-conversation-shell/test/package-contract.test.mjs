@@ -10,6 +10,10 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     readFile(new URL('../src/client/ConversationPresentation.module.css', import.meta.url), 'utf8'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-conversation-shell/)
+  // Cordis only exposes a property when it was declared in `inject`. The
+  // adapter registers a presentation slot before reading its own services.
+  assert.match(source, /export const inject = \['slots', 'settingsQuickActions', 'conversationViewState'\]/)
+  assert.match(source, /ctx\.slots\.inject\('conversation\.presentation'/)
   assert.match(source, /conversationViewState/)
   assert.match(source, /settingsQuickActions/)
   assert.match(source, /id: 'trajectory'/)

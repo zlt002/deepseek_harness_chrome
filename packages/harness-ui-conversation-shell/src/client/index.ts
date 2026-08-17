@@ -8,7 +8,7 @@ import { ConversationPresentation } from './ConversationPresentation.tsx'
  * official view bridge to change the existing per-session store, rather than
  * maintaining a second selected-view state in the product package.
  */
-export const inject = ['settingsQuickActions', 'conversationViewState']
+export const inject = ['slots', 'settingsQuickActions', 'conversationViewState']
 
 export function apply(ctx: ClientContext): void {
   ctx.slots.inject('conversation.presentation', () => ctx.slots.register({
