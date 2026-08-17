@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import {
-  IconAgentPresetOutline16, IconCloseOutline16, IconDataOutline16,
+  IconAgentPresetOutline16, IconCloseOutline16, IconDataOutline16, IconEllipsisOutline16,
   IconPersonalizationOutline16, IconSettingsOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsPresentationOwnerProps, SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
@@ -156,7 +156,9 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
             else setOpen(true)
           }}
         >
-          {renderSlot('settings.trigger', compact ? { wide, compact: true } : { wide })}
+          {compact
+            ? <IconEllipsisOutline16 className={css.compactMoreIcon} size={18} />
+            : renderSlot('settings.trigger', { wide })}
         </button>
         {compact && quickOpen && (
           <div className={css.quickMenu} role="menu" aria-label="快捷操作">

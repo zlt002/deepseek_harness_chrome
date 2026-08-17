@@ -9,7 +9,7 @@ index fae784b..6e85d67 100644
 -import type { SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
 +import type { SettingsPresentationOwnerProps, SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
  import css from './SettingsRoot.module.css'
- 
+
  /** Nav glyph by section id; unknown ids fall back to the settings gear. */
 @@ -101,7 +101,7 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
   * @param props - composed slot props (contract/slots.ts).
@@ -47,7 +47,7 @@ index aaf4e92..c4a26ad 100644
 +  }
 +}
  import type { SettingsQuickAction } from '@deepseek-ai/dsh-client-ui-settings/client'
- 
+
  /** One nav row projected from a settings.section registration's options. */
 @@ -49,7 +55,7 @@ export type SettingsRootInjected = {
   * (hooks compartment bound to useSections). No store is registered — modal
@@ -76,7 +76,7 @@ index 0ebd805..c3a8afc 100644
 +export type { SettingsPresentationOwnerProps, SettingsSectionRow } from './shell-contract.ts'
  export { SettingsDocumentStore } from './settings-document-store.ts'
  export type { SettingsKey } from './locales.ts'
- 
+
 @@ -150,6 +151,7 @@ export function apply(ctx: ClientContext): void {
        'settings.close': { kind: 'single', scope: 'root' },
        'settings.section': { kind: 'list', scope: 'root' },
@@ -94,3 +94,54 @@ diff --git a/packages/client/ui-settings-general/tests/settings-root.client.spec
      renderSlot,
 +    renderSlotChain: ((_key, _owner, options) => options?.fallback ?? null) as never,
    }
+diff --git a/packages/client/ui-settings-general/src/client/chrome.module.css b/packages/client/ui-settings-general/src/client/chrome.module.css
+index 05cb684..3291b3c 100644
+--- a/packages/client/ui-settings-general/src/client/chrome.module.css
++++ b/packages/client/ui-settings-general/src/client/chrome.module.css
+@@ -5,7 +5,3 @@
+   overflow: hidden;
+   white-space: nowrap;
+ }
+-
+-.compactMoreIcon {
+-  transform: rotate(90deg);
+-}
+diff --git a/packages/client/ui-settings-general/src/client/chrome.tsx b/packages/client/ui-settings-general/src/client/chrome.tsx
+index acd5561..9698d90 100644
+--- a/packages/client/ui-settings-general/src/client/chrome.tsx
++++ b/packages/client/ui-settings-general/src/client/chrome.tsx
+@@ -4,7 +4,7 @@
+  * The shell renders the surrounding chrome (button, nav heading row) and
+  * reads each entry's `label` option for aria text.
+  */
+-import { IconEllipsisOutline16, IconSettingsOutline14, IconSettingsOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
++import { IconSettingsOutline14, IconSettingsOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+ import css from './chrome.module.css'
+
+@@ -19,10 +19,10 @@ export type HeaderContentProps = PropsRuntime<'settings.header'> & PropsLocale<'
+  * @param props - composed slot props.
+  * @returns the trigger content fragment.
+  */
+-export function TriggerContent({ wide, compact, t }: TriggerContentProps) {
++export function TriggerContent({ wide, t }: TriggerContentProps) {
+   return (
+     <>
+-      {compact ? <IconEllipsisOutline16 className={css.compactMoreIcon} size={18} /> : wide ? <IconSettingsOutline16 size={16} /> : <IconSettingsOutline14 size={18} />}
++      {wide ? <IconSettingsOutline16 size={16} /> : <IconSettingsOutline14 size={18} />}
+       {wide && <span className={css.triggerLabel}>{t('trigger')}</span>}
+     </>
+   )
+diff --git a/packages/client/ui-settings/src/client/contract/slots.ts b/packages/client/ui-settings/src/client/contract/slots.ts
+index 0e10e05..5413f8c 100644
+--- a/packages/client/ui-settings/src/client/contract/slots.ts
++++ b/packages/client/ui-settings/src/client/contract/slots.ts
+@@ -104,8 +104,6 @@ export interface SettingsPluginsTabOwnerProps {
+ export interface SettingsTriggerOwnerProps {
+   /** Whether the sidebar renders wide content (false = 56px rail, icon only). */
+   wide: boolean
+-  /** Compact-header presentation uses the more-actions trigger instead of settings chrome. */
+-  compact?: boolean
+ }
+
+ /** Owner share of the header title seat (the shell supplies nothing). */

@@ -118,19 +118,6 @@ index ad61b2111a..37cab2eda8 100644
 +
 +export type SettingsRootComponentProps = SettingsPresentationOwnerProps
 +  & PropsRenderSlots<'settings.presentation'>
-diff --git a/packages/client/ui-settings/src/client/contract/slots.ts b/packages/client/ui-settings/src/client/contract/slots.ts
-index 5413f8cb29..0e10e054d9 100644
---- a/packages/client/ui-settings/src/client/contract/slots.ts
-+++ b/packages/client/ui-settings/src/client/contract/slots.ts
-@@ -104,6 +104,8 @@ export interface SettingsPluginsTabOwnerProps {
- export interface SettingsTriggerOwnerProps {
-   /** Whether the sidebar renders wide content (false = 56px rail, icon only). */
-   wide: boolean
-+  /** Compact-header presentation uses the more-actions trigger instead of settings chrome. */
-+  compact?: boolean
- }
- 
- /** Owner share of the header title seat (the shell supplies nothing). */
 diff --git a/packages/client/ui-settings/src/client/index.ts b/packages/client/ui-settings/src/client/index.ts
 index 2ace9e56b1..bbd931ea0d 100644
 --- a/packages/client/ui-settings/src/client/index.ts

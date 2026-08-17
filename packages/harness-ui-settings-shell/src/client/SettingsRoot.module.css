@@ -65,6 +65,7 @@
   border-radius: 50%;
 }
 .trigger.compact { width: 34px; height: 34px; margin: 0; border-radius: 10px; }
+.compactMoreIcon { transform: rotate(90deg); }
 .triggerLabel { overflow: hidden; white-space: nowrap; }
 
 .overlay {
