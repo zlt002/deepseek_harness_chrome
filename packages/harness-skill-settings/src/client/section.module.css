@@ -1,5 +1,6 @@
 .section {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   max-width: 720px;
   color: var(--dsw-alias-label-primary);
@@ -8,12 +9,14 @@
 .section h2,
 .section p { margin: 0; }
 
-.heading { display: grid; gap: 4px; }
-.heading h2 { font-size: 18px; line-height: 26px; font-weight: 600; }
-.intro { color: var(--dsw-alias-label-tertiary); font-size: 13px; line-height: 20px; }
+.intro,
+.row p,
+.row span,
+.status { color: var(--dsw-alias-label-tertiary); font-size: 14px; line-height: 22px; }
 
 .rows {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   margin: 0;
   padding: 0;
@@ -21,22 +24,18 @@
 }
 
 .row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
   padding: 12px 14px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-1);
 }
 
-.skillCopy { min-width: 0; }
-.skillCopy strong { display: block; overflow: hidden; color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 22px; text-overflow: ellipsis; white-space: nowrap; }
-.skillCopy p { color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; }
-.restrictions { display: flex; flex-wrap: wrap; gap: 4px 8px; }
-.restrictions span,
-.status { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.row div { min-width: 0; }
+.row strong { font-size: 14px; line-height: 22px; }
+.row span + span { margin-left: 8px; }
 
 .modeControl {
   display: grid;
@@ -73,6 +72,6 @@
 .modeButton:disabled { color: var(--dsw-alias-label-dimmed); cursor: default; }
 
 @media (max-width: 640px) {
-  .row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .row { flex-direction: column; align-items: stretch; gap: 10px; }
   .modeControl { width: 100%; min-width: 0; }
 }

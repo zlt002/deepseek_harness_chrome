@@ -9,8 +9,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap { 'accrui.settings.skills': keyof typeof zh }
 }
 
-const zh = { nav: '技能', title: '技能管理', intro: '选择 Harness 如何使用已发现的技能。这里不会修改 SKILL.md，也不会影响其他 Agent。', loading: '正在加载技能…', noSession: '请先打开一个项目会话。', failed: '技能设置读取或保存失败。', enabled: '启用', manual: '仅手动', disabled: '停用', authorModel: '作者已禁止模型调用', authorUser: '作者已禁止手动调用' }
-const en: typeof zh = { nav: 'Skills', title: 'Skill settings', intro: 'Choose how Harness may use each discovered skill. These choices do not modify SKILL.md or other agents.', loading: 'Loading skills…', noSession: 'Open a project session first.', failed: 'Could not load or save Skill settings.', enabled: 'Enabled', manual: 'Manual only', disabled: 'Disabled', authorModel: 'Author disabled model use', authorUser: 'Author disabled manual use' }
+const zh = { nav: '技能', title: '技能管理', intro: '选择 Harness 如何使用已发现的技能。这里不会修改 SKILL.md，也不会影响其他 Agent。', loading: '正在加载技能…', noSession: '请先打开一个项目会话。', loadFailed: '技能设置加载失败。', saveFailed: '技能设置保存失败。', retry: '重试', empty: '没有发现可用技能。', enabled: '启用', manual: '仅手动', disabled: '停用', authorModel: '作者已禁止模型调用', authorUser: '作者已禁止手动调用' }
+const en: typeof zh = { nav: 'Skills', title: 'Skill settings', intro: 'Choose how Harness may use each discovered skill. These choices do not modify SKILL.md or other agents.', loading: 'Loading skills…', noSession: 'Open a project session first.', loadFailed: 'Could not load Skill settings.', saveFailed: 'Could not save Skill settings.', retry: 'Retry', empty: 'No skills were discovered.', enabled: 'Enabled', manual: 'Manual only', disabled: 'Disabled', authorModel: 'Author disabled model use', authorUser: 'Author disabled manual use' }
 export type SkillSettingsInjected = { api: Pick<IApiClient, 'skills' | 'settings'>, t: (key: keyof typeof zh) => string, useSessions: SnapshotSelectorHook<SessionListState> }
 export const inject = ['slots', 'locale', 'connection', 'sessions']
 
