@@ -14,6 +14,7 @@ if (!explicitHarnessRoot && !existsSync(join(generatedHarness, '.harness-product
 const packageNames = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
+  'harness-ui-conversation-shell',
   'harness-ui-responsive-sidebar',
   'harness-ui-workspace-picker',
   'harness-ui-knowledge-scope',

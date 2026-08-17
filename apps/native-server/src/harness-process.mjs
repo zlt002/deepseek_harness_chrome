@@ -194,6 +194,7 @@ function productUiPackages(env = process.env) {
     return [
       '@accrui/harness-ui-agent-preset',
       '@accrui/harness-ui-browser-target',
+      '@accrui/harness-ui-conversation-shell',
       '@accrui/harness-ui-responsive-sidebar',
       '@accrui/harness-ui-workspace-picker',
       '@accrui/harness-ui-subagent-compact',
@@ -206,6 +207,7 @@ function productUiPackages(env = process.env) {
   const packages = [
     '@accrui/harness-ui-agent-preset',
     '@accrui/harness-ui-browser-target',
+    '@accrui/harness-ui-conversation-shell',
     '@accrui/harness-ui-responsive-sidebar',
     '@accrui/harness-ui-workspace-picker',
     '@accrui/harness-ui-subagent-compact',
