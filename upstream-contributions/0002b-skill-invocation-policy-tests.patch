@@ -1,0 +1,49 @@
+diff --git a/packages/skill/tool-skill/tests/tool-skill.spec.ts b/packages/skill/tool-skill/tests/tool-skill.spec.ts
+index d8dd9df..2c07f18 100644
+--- a/packages/skill/tool-skill/tests/tool-skill.spec.ts
++++ b/packages/skill/tool-skill/tests/tool-skill.spec.ts
+@@ -951,6 +951,24 @@ describe('dsh-tool-skill', () => {
+     if (vanishedBlock?.type !== 'text') throw new Error('expected text tool result')
+     expect(vanishedBlock.text).toContain('skill "vanishing-skill" is unknown or no longer available')
+   })
++
++  it('refuses a Harness-disabled skill through the loader even when its source allows it', async () => {
++    const home = await tempDir('tool-local-policy')
++    const ctx = await setup(home)
++    ctx.skills.register({ name: 'locally-disabled', description: 'Source allows it', source: 'runtime', content: 'Do not disclose.' })
++    ctx.skills.registerInvocationPolicy({
++      resolve: skill => skill.name === 'locally-disabled'
++        ? { modelInvocable: false, userInvocable: false }
++        : { modelInvocable: true, userInvocable: true },
++    })
++
++    const result = await ctx.tools.execute({ signal: testToolSignal, callId: CallId('local-policy'), name: 'skill', arguments: { name: 'locally-disabled' } })
++    expect(result.isError).toBe(true)
++    const block = result.content[0]
++    if (block?.type !== 'text') throw new Error('expected text tool result')
++    expect(block.text).toContain('is not available for model invocation')
++    expect(block.text).not.toContain('Do not disclose.')
++  })
+ })
+ 
+ describe('user-explicit invocation injection', () => {
+@@ -996,6 +1014,18 @@ describe('user-explicit invocation injection', () => {
+     expect(block.text).not.toContain('what does this do')
+   })
+ 
++  it('leaves a Harness-disabled /name as ordinary user prose', async () => {
++    const { ctx, agent } = await invokeHarness()
++    ctx.skills.registerInvocationPolicy({
++      resolve: skill => skill.name === 'shared-skill'
++        ? { modelInvocable: false, userInvocable: false }
++        : { modelInvocable: true, userInvocable: true },
++    })
++    const decision = await proposeStep(ctx, agent, [gesture('/shared-skill do not inject')])
++    if (decision.kind !== 'enter') throw new Error('expected enter')
++    expect(decision.messages.map(message => (message.source as { kind: string }).kind)).not.toContain('skill-invocation')
++  })
++
+   it('injects an ordinary skill the same way (one uniform user-explicit path)', async () => {
+     const { ctx, agent } = await invokeHarness()
+     const decision = await proposeStep(ctx, agent, [gesture('/shared-skill go')])
+

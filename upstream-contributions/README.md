@@ -8,13 +8,17 @@ immediately above the composer card. Floating panels continue to use the
 existing `conversation.input.overlay` slot, so no product-specific overlay or
 DOM selector enters upstream.
 
-`0002` adds a generic Skill invocation-policy seam. `0003` extends the Skill
-catalog wire and lets any settings owner explicitly opt its namespace into
-configuration-client transports with `configurationExposed`; it contains no
-product namespace or product UI.
+`0002` adds a generic Skill invocation-policy seam, while `0002b` carries its
+model-loader and explicit `/name` boundary regressions. `0003` extends the
+Skill catalog wire and lets any settings owner explicitly opt its namespace
+into configuration-client transports with `configurationExposed`; it contains
+no product namespace or product UI.
 
 `0004` keeps that optional settings surface optional inside the ApiProxy plugin
 fiber, and adds a runtime-context regression test for describe and mutate.
+
+`0005` invalidates the browser Skill catalog when an exposed settings document
+changes, without naming or depending on the AccrUI settings owner.
 
 Verify against the pinned upstream commit:
 
