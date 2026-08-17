@@ -22,18 +22,17 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(source, /id: 'conversation'/)
   assert.match(source, /conversation\.presentation/)
   assert.match(presentation, /matched: ConversationPresentationOwnerProps/)
-  assert.match(presentation, /owner\.renderHeader\(\)/)
+  assert.match(presentation, /className=\{css\.headerSeat\}[\s\S]*owner\.renderHeader\(\)/)
   assert.match(presentation, /owner\.renderHero\(\)/)
   assert.match(presentation, /owner\.renderSession\(\)/)
   assert.match(presentation, /owner\.renderComposer\(\)/)
   assert.match(css, /:global\(\[data-composer-seat\]\)/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)/)
-  // The compact product frame replaces the historical upstream header: that
-  // one slot contains the title/action row and the conversation/trajectory
-  // tablist. Scope the rule to the stable frame marker, not a generic media
-  // query, so standalone Harness Web keeps its header at every width.
-  assert.match(css, /\[data-sidebar-presentation='compact'\][\s\S]*\[data-slot='conversation\.session\.header'\][\s\S]*display: none/)
-  assert.doesNotMatch(css, /@media \(max-width: 999px\)[\s\S]*\[data-slot='conversation\.session\.header'\][\s\S]*display: none/)
+  // The slot anchor carries an inline display value, so the product hides its
+  // own seat in compact mode instead of trying to override upstream markup.
+  assert.match(css, /\.headerSeat\s*\{\s*display: contents;\s*\}/)
+  assert.match(css, /\[data-sidebar-presentation='compact'\][\s\S]*\.headerSeat[\s\S]*display: none/)
+  assert.doesNotMatch(css, /@media \(max-width: 999px\)[\s\S]*\.headerSeat[\s\S]*display: none/)
   // The composer is deliberately a sibling of the scrollport.  Its overlay
   // anchor must form an elevated, visible containing block: without this,
   // long transcript scrolling can paint over (or clip) model/permission/
@@ -78,7 +77,7 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     'the model menu itself carries the generic surface marker, so it must undo the shared zero-height anchor geometry',
   )
   assert.match(overlayHostSeam, /data-composer-overlay-host=\{overlay\.available \|\| undefined\}/)
-  for (const name of ['root', 'scrollBody', 'heroTitleSeat']) {
+  for (const name of ['root', 'headerSeat', 'scrollBody', 'heroTitleSeat']) {
     assert.match(presentation, new RegExp(`css\\.${name}`))
     assert.match(css, new RegExp(`\\.${name}(?:[\\s{.:])`))
   }

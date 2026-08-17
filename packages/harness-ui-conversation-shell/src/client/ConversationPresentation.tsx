@@ -9,7 +9,7 @@ export function ConversationPresentation({ matched: owner }: PropsRuntime<'conve
   const hero = owner.renderHero()
   return (
     <div className={css.root} data-phase={owner.phase} data-conversation-presentation="accrui">
-      {owner.renderHeader()}
+      <div className={css.headerSeat}>{owner.renderHeader()}</div>
       <div className={css.scrollBody} data-conversation-scroll="">
         {hero !== null && <div className={css.heroTitleSeat}>{hero}</div>}
         {owner.renderSession()}

@@ -27,12 +27,13 @@
 
 .root[data-phase='hero'] .scrollBody { justify-content: flex-end; }
 
-/* The compact workspace chrome already identifies the active Session.  The
-   stock conversation header contains both the repeated title/action row and
-   the conversation/trajectory tab strip, so hide its public slot only when
-   the product frame explicitly enters compact-sidepanel presentation.  This
-   preserves the complete header in the standalone Harness Web app. */
-:global([data-sidebar-presentation='compact']) .root > :global([data-slot='conversation.session.header']) {
+/* The slot runtime gives its public anchor an inline `display: contents`, so a
+   product-owned seat is the reliable presentation boundary.  Compact chrome
+   already identifies the Session and owns view actions; hide the repeated
+   title/actions/tabs there while standalone Harness keeps the full header. */
+.headerSeat { display: contents; }
+
+:global([data-sidebar-presentation='compact']) .headerSeat {
   display: none;
 }
 
