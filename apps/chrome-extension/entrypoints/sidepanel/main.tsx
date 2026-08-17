@@ -1,3 +1,6 @@
+// WXT's generated development HTML bypasses Vite's transformIndexHtml hook.
+// Initialise React Refresh from the client entry so HMR has its preamble.
+import '@vitejs/plugin-react/preamble'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { HarnessFrameSource, NormalizeActiveTabForBrowserTarget } from './harness-frame'
