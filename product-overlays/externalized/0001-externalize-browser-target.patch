@@ -844,7 +844,7 @@ diff --git a/packages/bundle/web-app/package.json b/packages/bundle/web-app/pack
 diff --git a/packages/bundle/web-app/cordis.patch.yml b/packages/bundle/web-app/cordis.patch.yml
 --- a/packages/bundle/web-app/cordis.patch.yml
 +++ b/packages/bundle/web-app/cordis.patch.yml
-@@ -201,9 +201,5 @@
+@@ -201,10 +201,6 @@
      - id: ui-conversation
        name: '@deepseek-ai/dsh-client-ui-conversation'
  
