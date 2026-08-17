@@ -77,21 +77,14 @@ test('mounts Harness-native skills before Claude skills so duplicate names resol
   )
 })
 
-test('mounts product UI packages outside upstream with knowledge scope enabled by default', () => {
+test('mounts every product UI package outside upstream by default', () => {
   assert.match(productUiPatch({}), /@accrui\/harness-ui-browser-target/)
   assert.equal(productUiPatch({}).match(/@accrui\/harness-ui-conversation-shell/g)?.length, 1)
   assert.equal(productUiPatch({}).match(/@accrui\/harness-ui-responsive-sidebar/g)?.length, 1)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-subagent-compact/)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-session-log-copy/)
   assert.equal(productUiPatch({}).match(/@accrui\/harness-ui-knowledge-scope/g)?.length, 1)
-})
-
-test('mounts only completed externalizations while the full-source overlay is active', () => {
-  const patch = productUiPatch({
-    DSH_LEGACY_UI_OVERLAY: '1',
-    DSH_ENABLE_KNOWLEDGE_SCOPE_UI: '1',
-    DSH_ENABLE_SKILL_SETTINGS_UI: '1',
-  })
+  const patch = productUiPatch({})
   assert.equal(patch.match(/@accrui\/harness-ui-agent-preset/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-browser-target/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-conversation-shell/g)?.length, 1)

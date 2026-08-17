@@ -26,10 +26,7 @@ test('product profile mounts Claude discovery and the Skill settings plugin exac
   assert.match(patch, /customSkillDirs:/)
   assert.match(patch, /\/tmp\/accrui-skill-settings-home\/.claude\/skills/)
   assert.doesNotMatch(patch, /@accrui\/harness-skill-settings/)
-  assert.doesNotMatch(productUiPatch({}), /@accrui\/harness-skill-settings/)
-  const legacyPatch = productUiPatch({ DSH_LEGACY_UI_OVERLAY: '1' })
-  assert.equal(legacyPatch.match(/name: '@accrui\/harness-skill-settings'/g)?.length, 1)
-  const productPatch = productUiPatch({ DSH_ENABLE_SKILL_SETTINGS_UI: '1' })
+  const productPatch = productUiPatch({})
   assert.equal(productPatch.match(/name: '@accrui\/harness-skill-settings'/g)?.length, 1)
 })
 

@@ -13,11 +13,6 @@ const harnessRoot = resolve(explicitHarnessRoot || generatedHarness)
 if (!explicitHarnessRoot && !existsSync(join(generatedHarness, '.harness-product.json'))) {
   throw new Error(`Generated product Harness is missing: ${generatedHarness}. Run pnpm build:harness-product first, or set DSH_ROOT explicitly for a different Harness checkout.`)
 }
-const harnessManifestPath = join(harnessRoot, '.harness-product.json')
-const harnessManifest = existsSync(harnessManifestPath)
-  ? JSON.parse(await readFile(harnessManifestPath, 'utf8'))
-  : undefined
-const hasLegacyUiOverlay = harnessManifest?.compatibilityOverlay !== undefined
 const distRoot = join(harnessRoot, 'apps/web/dist')
 const distIndex = join(distRoot, 'index.html')
 const outputRoot = join(projectRoot, 'apps', 'chrome-extension', 'public')
@@ -32,10 +27,6 @@ const harness = new HarnessWebProcess({
     ...process.env,
     DSH_HOME: syncHome,
     DSH_ROOT: harnessRoot,
-    DSH_ENABLE_SKILL_SETTINGS_UI: process.env.DSH_ENABLE_SKILL_SETTINGS_UI
-      ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
-    DSH_LEGACY_UI_OVERLAY: process.env.DSH_LEGACY_UI_OVERLAY
-      ?? (hasLegacyUiOverlay ? '1' : undefined),
   },
 })
 const harnessUrl = await harness.start()

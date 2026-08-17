@@ -14,7 +14,6 @@ test('product runtime always mounts knowledge scope through the generic seam', a
   assert.doesNotMatch(cleanConversation, /conversation\.composer\.above/)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-browser-target/)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-knowledge-scope/)
-  assert.match(productUiPatch({ DSH_LEGACY_UI_OVERLAY: '1' }), /@accrui\/harness-ui-knowledge-scope/)
 })
 
 test('product Harness assets deliver both UI plugins through the generic composer seam', async () => {

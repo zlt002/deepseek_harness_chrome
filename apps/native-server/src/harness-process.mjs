@@ -179,32 +179,16 @@ export function claudeSkillsPatch(env = process.env) {
 }
 
 /** Product UI packages stay outside the official Harness checkout. */
-export function productUiPatch(env = process.env) {
-  const packages = productUiPackages(env)
+export function productUiPatch() {
+  const packages = productUiPackages()
   return packages.map((name, index) => `- insert:
     - id: deepseek-harness-product-ui-${index}
       name: '${name}'
 `).join('')
 }
 
-function productUiPackages(env = process.env) {
-  // The generated e327 product tree removes each externalized built-in before
-  // these product-owned packages mount, so no duplicate slot owner remains.
-  if (env.DSH_LEGACY_UI_OVERLAY === '1') {
-    return [
-      '@accrui/harness-ui-agent-preset',
-      '@accrui/harness-ui-browser-target',
-      '@accrui/harness-ui-conversation-shell',
-      '@accrui/harness-ui-responsive-sidebar',
-      '@accrui/harness-ui-workspace-picker',
-      '@accrui/harness-ui-subagent-compact',
-      '@accrui/harness-ui-session-log-copy',
-      '@accrui/harness-ui-settings-shell',
-      '@accrui/harness-ui-knowledge-scope',
-      '@accrui/harness-skill-settings',
-    ]
-  }
-  const packages = [
+function productUiPackages() {
+  return [
     '@accrui/harness-ui-agent-preset',
     '@accrui/harness-ui-browser-target',
     '@accrui/harness-ui-conversation-shell',
@@ -214,9 +198,8 @@ function productUiPackages(env = process.env) {
     '@accrui/harness-ui-session-log-copy',
     '@accrui/harness-ui-settings-shell',
     '@accrui/harness-ui-knowledge-scope',
+    '@accrui/harness-skill-settings',
   ]
-  if (env.DSH_ENABLE_SKILL_SETTINGS_UI === '1') packages.push('@accrui/harness-skill-settings')
-  return packages
 }
 
 /**
@@ -236,7 +219,7 @@ export async function prepareProductUiPackages(env = process.env) {
         // Installed Windows runtime: runtime/native-server/src -> runtime/product-plugins/.
         resolve(THIS_DIR, '../../product-plugins'),
       ].find((candidate) => existsSync(candidate)) ?? resolve(THIS_DIR, '../../../packages')
-  for (const packageName of productUiPackages(env)) {
+  for (const packageName of productUiPackages()) {
     const source = resolve(sourceRoot, packageName.split('/').at(-1))
     for (const required of ['package.json', 'lib/index.js', 'lib/client.js']) {
       if (!existsSync(resolve(source, required))) {

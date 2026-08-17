@@ -5,9 +5,8 @@ import test from 'node:test'
 const text = (path) => readFile(new URL(path, import.meta.url), 'utf8')
 
 test('conversation shell seam keeps product quick actions outside the official patch', async () => {
-  const [generic, externalization, product] = await Promise.all([
+  const [generic, product] = await Promise.all([
     text('../upstream-contributions/0012-conversation-shell-responsive-seam.patch'),
-    text('../product-overlays/externalized/0012-externalize-conversation-shell.patch'),
     text('../packages/harness-ui-conversation-shell/src/client/index.ts'),
   ])
 
@@ -18,7 +17,6 @@ test('conversation shell seam keeps product quick actions outside the official p
   assert.match(generic, /DefaultConversationPresentation/)
   assert.doesNotMatch(generic, /diff --git a\/packages\/client\/(?:ui-conversation\/src\/client\/skeleton\/(?:ConversationRoot|InputBar|PermissionSelect)\.module\.css|ui-model-selection\/src\/client\/ModelSelect\.module\.css)/)
   assert.doesNotMatch(generic, /compact trajectory action|compact conversation action/)
-  assert.doesNotMatch(externalization, /compact trajectory action|compact conversation action/)
   assert.match(product, /id: 'trajectory'/)
   assert.match(product, /id: 'conversation'/)
 })

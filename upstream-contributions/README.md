@@ -2,6 +2,8 @@
 
 These patches contain only generic Harness extension seams. Product behavior
 stays in `packages/`; `upstream/deepseek-harness` remains a clean submodule.
+The materializer always applies these patches to a disposable clone; there is
+no full-source product overlay mode.
 
 `0001-conversation-composer-above-slot.patch` adds one session-scoped list slot
 immediately above the composer card. Floating panels continue to use the

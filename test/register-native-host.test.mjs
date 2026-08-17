@@ -231,7 +231,7 @@ test('records the generated product Harness root when no launch override is supp
     assert.equal(result.code, 0, result.stderr)
     const source = await readFile(launcher, 'utf8')
     assert.match(source, new RegExp(`export DSH_ROOT='${productRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
-    assert.match(source, /export DSH_ENABLE_KNOWLEDGE_SCOPE_UI='1'/)
+    assert.doesNotMatch(source, /DSH_(?:LEGACY_UI_OVERLAY|ENABLE_KNOWLEDGE_SCOPE_UI|ENABLE_SKILL_SETTINGS_UI)/)
   } finally {
     await rm(home, { recursive: true, force: true })
   }
@@ -246,7 +246,7 @@ test('treats a blank Harness root as an absent override', async () => {
     assert.equal(result.code, 0, result.stderr)
     const source = await readFile(launcher, 'utf8')
     assert.match(source, new RegExp(`export DSH_ROOT='${productRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
-    assert.match(source, /export DSH_ENABLE_KNOWLEDGE_SCOPE_UI='1'/)
+    assert.doesNotMatch(source, /DSH_(?:LEGACY_UI_OVERLAY|ENABLE_KNOWLEDGE_SCOPE_UI|ENABLE_SKILL_SETTINGS_UI)/)
   } finally {
     await rm(home, { recursive: true, force: true })
   }
