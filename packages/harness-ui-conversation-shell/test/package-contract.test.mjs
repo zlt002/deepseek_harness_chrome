@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 test('Conversation shell is a product presentation plugin, not a second conversation controller', async () => {
-  const [manifest, source, presentation, css] = await Promise.all([
+  const [manifest, source, presentation, css, overlayHostSeam] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ConversationPresentation.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ConversationPresentation.module.css', import.meta.url), 'utf8'),
+    readFile(new URL('../../../upstream-contributions/0013-composer-overlay-host-marker.patch', import.meta.url), 'utf8'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-conversation-shell/)
   // Cordis only exposes a property when it was declared in `inject`. The
@@ -38,6 +39,24 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(css, /\.root > :global\(\[data-composer-seat\]\)[\s\S]*position: relative[\s\S]*z-index: 7/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)[\s\S]*position: relative[\s\S]*z-index: 8[\s\S]*height: 0[\s\S]*overflow: visible/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\) > \[role='dialog'\],[\s\S]*:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\][\s\S]*position: absolute/)
+  // e327's permission and agent-mode sheets always rise above the card.  The
+  // product owns this presentation rule because the upstream provider merely
+  // supplies one active overlay at a time.
+  assert.match(css, /:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\][\s\S]*bottom: calc\(100% \+ 8px\)[\s\S]*z-index: 100/)
+  assert.match(css, /\[role='menu'\]:has\(> \[role='menuitem'\]\)[\s\S]*padding: 6px[\s\S]*border-radius: 14px/)
+  assert.match(css, /\[role='menuitem'\][\s\S]*min-height: 34px[\s\S]*font-size: 13px/)
+  assert.match(css, /\[role='menuitem'\]\[aria-checked='true'\][\s\S]*interactive-bg-hover/)
+  // The hero permission chip remains icon-first and preserves the old
+  // green/blue/warning semantic state colors without relying on CSS hashes.
+  assert.match(css, /\.root\[data-phase='hero'\][\s\S]*\[data-permission\][\s\S]*width: 28px/)
+  assert.match(css, /\[data-permission='read-only'\][\s\S]*state-success-primary/)
+  assert.match(css, /\[data-permission='workspace-write'\][\s\S]*state-business-primary/)
+  assert.match(css, /\[data-permission='danger-full-access'\][\s\S]*state-warn-primary/)
+  // ModelSelect needs a named product-neutral host so its upward sheet is
+  // anchored to the full composer card rather than its tiny trigger.
+  assert.match(css, /\[data-composer-overlay-host\][\s\S]*position: static/)
+  assert.match(css, /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*width: 100%/)
+  assert.match(overlayHostSeam, /data-composer-overlay-host=\{overlay\.available \|\| undefined\}/)
   for (const name of ['root', 'scrollBody', 'heroTitleSeat']) {
     assert.match(presentation, new RegExp(`css\\.${name}`))
     assert.match(css, new RegExp(`\\.${name}(?:[\\s{.:])`))

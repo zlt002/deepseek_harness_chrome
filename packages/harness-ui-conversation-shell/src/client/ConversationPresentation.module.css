@@ -87,5 +87,91 @@
 }
 
 :global([data-composer-overlay-surface]) > [role='menu'] {
+  bottom: calc(100% + 8px);
+  z-index: 100;
   max-height: min(500px, calc(100vh - 144px));
+}
+
+/* PermissionSelect's compact host panel is deliberately structural: the
+   upstream component exports menu/menuitem semantics but no product CSS.  Keep
+   the exact e327 6px sheet and 34px option geometry, while leaving the Agent
+   mode radio-grid (menuitemradio) untouched. */
+:global([data-composer-overlay-surface]) > [role='menu']:has(> [role='menuitem']) {
+  display: flex;
+  box-sizing: border-box;
+  padding: 6px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 14px;
+  background: var(--dsw-specific-menu);
+  box-shadow: var(--dsw-shadow-lv3);
+}
+
+:global([data-composer-overlay-surface]) > [role='menu'] > [role='menuitem'] {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+:global([data-composer-overlay-surface]) > [role='menu'] > [role='menuitem']:hover,
+:global([data-composer-overlay-surface]) > [role='menu'] > [role='menuitem'][aria-checked='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+:global([data-composer-overlay-surface]) > [role='menu'] > [role='menuitem'] > span:first-child {
+  display: inline-flex;
+  color: inherit;
+}
+
+/* The model chooser renders its sheet beside the provider instead of inside
+   ComposerOverlaySurface.  The generic host marker deliberately clears the
+   tiny trigger's positioning context, so the sheet uses the composer card as
+   its containing block just like the accepted e327 layout. */
+:global([data-composer-overlay-host]) {
+  position: static;
+}
+
+:global([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu']) {
+  position: absolute;
+  right: auto;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 100;
+  width: 100%;
+  max-width: none;
+  max-height: min(500px, calc(100vh - 144px));
+}
+
+/* e327 keeps the new-session permission picker color-first: a 28px shield
+   says safe/write/full at a glance and the tooltip supplies its full label. */
+.root[data-phase='hero'] :global([data-permission]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.root[data-phase='hero'] :global([data-permission='read-only']) {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.root[data-phase='hero'] :global([data-permission='workspace-write']) {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.root[data-phase='hero'] :global([data-permission='danger-full-access']) {
+  color: var(--dsw-alias-state-warn-primary);
 }

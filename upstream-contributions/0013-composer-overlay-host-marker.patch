@@ -1,0 +1,14 @@
+# Generic marker for a composer-local overlay whose rendered panel remains
+# beside its trigger.  Product styling can then anchor it to the composer card
+# without importing this package's CSS module.
+
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.tsx b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.tsx
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+@@ -227,5 +227,5 @@ export function ModelSelect(
+   return (
+-    <div ref={rootRef} className={clsx(css.root, overlay.available && css.rootOverlay)} onKeyDown={onRootKeyDown} onBlur={overlay.available ? undefined : onBlur}>
++    <div ref={rootRef} className={clsx(css.root, overlay.available && css.rootOverlay)} data-composer-overlay-host={overlay.available || undefined} onKeyDown={onRootKeyDown} onBlur={overlay.available ? undefined : onBlur}>
+       <button
+         ref={triggerRef}
+         type="button"
