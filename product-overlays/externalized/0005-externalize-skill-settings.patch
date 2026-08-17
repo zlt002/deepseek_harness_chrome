@@ -1,3 +1,100 @@
+diff --git a/apps/web/tests/skill-settings.e2e.ts b/apps/web/tests/skill-settings.e2e.ts
+deleted file mode 100644
+index 476c98645a..0000000000
+--- a/apps/web/tests/skill-settings.e2e.ts
++++ /dev/null
+@@ -1,79 +0,0 @@
+-// The Skill settings section is a Harness-local policy overlay: this real
+-// browser lane proves the shipped client roster reaches the Host settings
+-// document and that the regular slash source sees the same disabled policy.
+-// No model invocation is part of this configuration flow.
+-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+-import { join } from 'node:path'
+-import type { Browser, Page } from 'playwright'
+-import { chromium } from 'playwright'
+-import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+-import { launchWebScaffold, watchConsole, type WebScaffold } from './scaffold.ts'
+-import { connectFreshWorkspace, newEnglishPage, saveFailureShot } from './support.ts'
+-
+-const SKILL_NAME = 'settings-policy-proof'
+-
+-async function seedSkill(workspaceCwd: string): Promise<void> {
+-  const directory = join(workspaceCwd, 'workspace', '.agents', 'skills', SKILL_NAME)
+-  await mkdir(directory, { recursive: true })
+-  await writeFile(join(directory, 'SKILL.md'), [
+-    '---',
+-    `name: ${SKILL_NAME}`,
+-    'description: A skill controlled by the Harness Settings page.',
+-    '---',
+-    '',
+-    '# Settings policy proof',
+-    '',
+-  ].join('\n'))
+-}
+-
+-describe('web e2e: Skills settings persists the local invocation policy', () => {
+-  let scaffold: WebScaffold
+-  let browser: Browser
+-  let page: Page
+-  let tripwire: ReturnType<typeof watchConsole>
+-
+-  beforeAll(async () => {
+-    scaffold = await launchWebScaffold({})
+-    await seedSkill(scaffold.workspaceCwd)
+-    browser = await chromium.launch()
+-    page = await newEnglishPage(browser)
+-    tripwire = watchConsole(page)
+-    await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
+-    await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+-    await connectFreshWorkspace(page, scaffold.workspaceCwd)
+-  }, 120_000)
+-
+-  afterAll(async () => {
+-    await browser?.close()
+-    await scaffold?.close()
+-  })
+-
+-  it('writes disabled locally and removes the skill from the slash catalogue', async () => {
+-    onTestFailed(() => saveFailureShot(page, 'web-e2e-skill-settings'))
+-    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+-    const dialog = page.getByRole('dialog', { name: 'Settings' })
+-    await dialog.waitFor({ timeout: 10_000 })
+-    await dialog.getByRole('button', { name: 'Skills', exact: true }).click()
+-    await dialog.getByRole('heading', { name: 'Skills', exact: true }).waitFor({ timeout: 10_000 })
+-    const mode = dialog.getByLabel(SKILL_NAME)
+-    await expect.poll(async () => mode.inputValue(), { timeout: 10_000 }).toBe('enabled')
+-    await mode.selectOption('disabled')
+-
+-    await expect.poll(
+-      async () => readFile(join(scaffold.harnessHome, 'settings.yaml'), 'utf8'),
+-      { timeout: 10_000 },
+-    ).toContain(`${SKILL_NAME}: disabled`)
+-
+-    await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+-    await dialog.waitFor({ state: 'detached', timeout: 10_000 })
+-    const input = page.locator('textarea').first()
+-    await input.fill(`/${SKILL_NAME}`)
+-    const menu = page.getByRole('listbox', { name: 'Trigger suggestions' })
+-    await expect.poll(
+-      () => menu.getByRole('option', { name: new RegExp(SKILL_NAME) }).count(),
+-      { timeout: 10_000 },
+-    ).toBe(0)
+-    expect(tripwire.pageErrors).toEqual([])
+-    expect(tripwire.warnings).toEqual([])
+-  }, 60_000)
+-})
+diff --git a/apps/web/tsconfig.json b/apps/web/tsconfig.json
+index 40df61d6b9..6e706c7123 100644
+--- a/apps/web/tsconfig.json
++++ b/apps/web/tsconfig.json
+@@ -64,7 +64,6 @@
+     "tests/markdown-inline-code-links.e2e.ts",
+     "tests/queue-actions.e2e.ts",
+     "tests/skill-invocation-policy.e2e.ts",
+-    "tests/skill-settings.e2e.ts",
+     "tests/skill-user-invoke.e2e.ts",
+     "tests/permission-policy-context.e2e.ts",
+     "tests/access-confirmation.e2e.ts",
 diff --git a/packages/bundle/base/cordis.patch.yml b/packages/bundle/base/cordis.patch.yml
 index f52cb3dc84..e9567d9206 100644
 --- a/packages/bundle/base/cordis.patch.yml
@@ -52,6 +149,498 @@ index 5af5718985..d3893d1abb 100644
      "@deepseek-ai/dsh-client-ui-settings-plugin-inventory": "workspace:^",
      "@deepseek-ai/dsh-client-ui-permission-presets": "workspace:^",
      "@deepseek-ai/dsh-client-ui-plan": "workspace:^",
+diff --git a/packages/client/ui-skill-settings/README.i18n.yaml b/packages/client/ui-skill-settings/README.i18n.yaml
+deleted file mode 100644
+index 56ef14d79f..0000000000
+--- a/packages/client/ui-skill-settings/README.i18n.yaml
++++ /dev/null
+@@ -1,6 +0,0 @@
+-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+-# side as of the last confirmed-consistent state. Both languages carry equal authority;
+-# after editing either side, bring the other along and re-record with:
+-#   pnpm run verify-translation-pairing --write packages/client/ui-skill-settings/README.md
+-README.md: 2aa31f5edfddc33c3c61e1eab8987445e467f0fe
+-README.zh.md: 8e19ee5fdd87be2527025e7731b82a0cfab3c167
+diff --git a/packages/client/ui-skill-settings/README.md b/packages/client/ui-skill-settings/README.md
+deleted file mode 100644
+index 2aa31f5edf..0000000000
+--- a/packages/client/ui-skill-settings/README.md
++++ /dev/null
+@@ -1,20 +0,0 @@
+-# @deepseek-ai/dsh-client-ui-skill-settings
+-
+-English | [中文](README.zh.md)
+-
+-Web Settings page for Harness-local Skill modes. The client reads the active session's complete Skill catalog, including entries hidden from `/`, and the `skill-settings` settings namespace. It renders enabled, manual-only, and disabled choices, then writes only that namespace through the existing settings wire.
+-
+-The page shows author-owned restrictions separately. Selecting enabled never widens those restrictions because the Host registry intersects local modes with `SKILL.md` frontmatter. A rejected write keeps the previous view and a retry reloads the catalog and settings document.
+-
+-## Model Experience
+-
+-None directly. The page changes Host settings; the Host controls future model catalogs and user-invocation checks.
+-
+-#### KV Cache effect
+-
+-None in the browser. A saved model-visible change may make the Host publish the normal replacement Skill catalog on a later agent step.
+-
+-## Known Limitations and Deferred Work
+-
+-- **Active-project view** — the page requires an open project session and lists the Skill winners for that session's cwd and preset.
+-- **No bulk editing** — modes are changed one Skill at a time; search, grouping, and reset of stale stored names are deferred.
+diff --git a/packages/client/ui-skill-settings/README.zh.md b/packages/client/ui-skill-settings/README.zh.md
+deleted file mode 100644
+index 8e19ee5fdd..0000000000
+--- a/packages/client/ui-skill-settings/README.zh.md
++++ /dev/null
+@@ -1,20 +0,0 @@
+-# @deepseek-ai/dsh-client-ui-skill-settings
+-
+-[English](README.md) | 中文
+-
+-Harness 本地 Skill 模式的 Web 设置页。客户端读取当前会话的完整 Skill 目录（包括在 `/` 中隐藏的条目）和 `skill-settings` 设置命名空间，展示启用、仅手动和停用选项，并只通过既有设置 wire 写入该命名空间。
+-
+-页面会单独提示作者拥有的限制。选择启用不会放开这些限制，因为 Host 注册表会把本地模式与 `SKILL.md` frontmatter 取交集。写入被拒绝时保留上一个视图，重试会重新读取目录和设置文档。
+-
+-## 模型体验
+-
+-没有直接影响。页面修改 Host 设置；Host 控制后续模型目录和用户调用检查。
+-
+-#### KV Cache 影响
+-
+-浏览器侧没有影响。保存会改变模型可见性时，Host 可在后续 agent step 发布普通的替换 Skill 目录。
+-
+-## 已知限制与暂缓事项
+-
+-- **当前项目视图** —— 页面需要一个已打开的项目会话，并列出该会话 cwd 与 preset 下胜出的 Skill。
+-- **没有批量编辑** —— 每次只修改一个 Skill；搜索、分组和清理已存储但过期名称仍待实现。
+diff --git a/packages/client/ui-skill-settings/node_modules b/packages/client/ui-skill-settings/node_modules
+deleted file mode 120000
+index 0deeab1361..0000000000
+--- a/packages/client/ui-skill-settings/node_modules
++++ /dev/null
+@@ -1 +0,0 @@
+-../ui-settings-models/node_modules
+\ No newline at end of file
+diff --git a/packages/client/ui-skill-settings/package.json b/packages/client/ui-skill-settings/package.json
+deleted file mode 100644
+index d53a617a95..0000000000
+--- a/packages/client/ui-skill-settings/package.json
++++ /dev/null
+@@ -1,24 +0,0 @@
+-{
+-  "name": "@deepseek-ai/dsh-client-ui-skill-settings",
+-  "description": "Harness-local Skill management Settings page",
+-  "version": "0.1.0-rc.5",
+-  "type": "module",
+-  "main": "lib/index.js",
+-  "types": "lib/types/index.d.ts",
+-  "exports": {
+-    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+-    "./invariant": { "types": "./lib/types/invariant.d.ts", "default": "./lib/invariant.js" },
+-    "./client": { "types": "./lib/types/client/index.d.ts", "default": "./lib/client.js" },
+-    "./src/*": "./src/*", "./package.json": "./package.json"
+-  },
+-  "dsh": { "client": { "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-locale"], "platform": "web" } },
+-  "scripts": { "bundle": "tsdown", "watch": "tsdown --watch" },
+-  "license": "MIT",
+-  "peerDependencies": {
+-    "@deepseek-ai/cordis": "workspace:^", "@deepseek-ai/dsh-api-remotes": "workspace:^", "@deepseek-ai/dsh-client-locale": "workspace:^", "@deepseek-ai/dsh-client-runtime": "workspace:^", "@deepseek-ai/dsh-client-ui-settings": "workspace:^", "@deepseek-ai/dsh-client-ui-slots": "workspace:^", "@deepseek-ai/dsh-client-web-react": "workspace:^", "@deepseek-ai/dsh-invariants": "workspace:^", "react": "^18.2.0"
+-  },
+-  "devDependencies": {
+-    "@deepseek-ai/cordis": "workspace:^", "@deepseek-ai/dsh-api-remotes": "workspace:^", "@deepseek-ai/dsh-client-locale": "workspace:^", "@deepseek-ai/dsh-client-runtime": "workspace:^", "@deepseek-ai/dsh-client-test-runtime": "workspace:^", "@deepseek-ai/dsh-client-ui-settings": "workspace:^", "@deepseek-ai/dsh-client-ui-slots": "workspace:^", "@deepseek-ai/dsh-client-web-react": "workspace:^", "@deepseek-ai/dsh-invariants": "workspace:^", "@types/react": "~18.3.1", "react": "^18.2.0"
+-  },
+-  "files": ["lib/index.js", "lib/invariant.js", "lib/client.js", "lib/types/**/*.d.ts"]
+-}
+diff --git a/packages/client/ui-skill-settings/src/client/SkillSettingsSection.module.css b/packages/client/ui-skill-settings/src/client/SkillSettingsSection.module.css
+deleted file mode 100644
+index 41030bc166..0000000000
+--- a/packages/client/ui-skill-settings/src/client/SkillSettingsSection.module.css
++++ /dev/null
+@@ -1,8 +0,0 @@
+-.section { display: flex; flex-direction: column; gap: 12px; max-width: 720px; color: var(--dsw-alias-label-primary); }
+-.section h2, .section p { margin: 0; }
+-.intro, .row p, .row span, .status { color: var(--dsw-alias-label-tertiary); font-size: 14px; line-height: 22px; }
+-.rows { display: flex; flex-direction: column; gap: 8px; list-style: none; margin: 0; padding: 0; }
+-.row { display: flex; align-items: center; gap: 16px; justify-content: space-between; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; padding: 12px 14px; }
+-.row div { min-width: 0; }.row strong { font-size: 14px; line-height: 22px; }.row span + .row span { margin-left: 8px; }
+-.row select { flex: none; min-width: 104px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-module-platform); color: inherit; padding: 6px 8px; }
+-.status { margin: 0; }
+diff --git a/packages/client/ui-skill-settings/src/client/SkillSettingsSection.tsx b/packages/client/ui-skill-settings/src/client/SkillSettingsSection.tsx
+deleted file mode 100644
+index de26d1098f..0000000000
+--- a/packages/client/ui-skill-settings/src/client/SkillSettingsSection.tsx
++++ /dev/null
+@@ -1,108 +0,0 @@
+-/** Skill management page with one durable, Harness-local mode per skill. */
+-import { useEffect, useState } from 'react'
+-import type { ReactNode } from 'react'
+-import type { IApiClient, SkillEntry } from '@deepseek-ai/dsh-api-remotes/client'
+-import type { SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
+-import type { en } from './locales.ts'
+-import css from './SkillSettingsSection.module.css'
+-
+-const SETTINGS_NAMESPACE = 'skill-settings'
+-type Mode = 'enabled' | 'manual-only' | 'disabled'
+-
+-export interface SkillSettingsInjected {
+-  readonly api: Pick<IApiClient, 'skills' | 'settings'>
+-  readonly t: (key: keyof typeof en) => string
+-  readonly useSessions: SnapshotSelectorHook<SessionListState>
+-}
+-
+-export type SkillSettingsProps = Partial<SkillSettingsInjected>
+-
+-interface View {
+-  readonly writable: boolean
+-  readonly revision: number
+-  readonly modes: Record<string, Mode>
+-  readonly skills: readonly SkillEntry[]
+-}
+-
+-function modeOf(view: View, name: string): Mode { return view.modes[name] ?? 'enabled' }
+-
+-function modesOf(value: unknown): Record<string, Mode> {
+-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+-  const modes = (value as { modes?: unknown }).modes
+-  if (typeof modes !== 'object' || modes === null || Array.isArray(modes)) return {}
+-  return Object.fromEntries(Object.entries(modes).filter((entry): entry is [string, Mode] =>
+-    entry[1] === 'enabled' || entry[1] === 'manual-only' || entry[1] === 'disabled'))
+-}
+-
+-/** Render the per-project Skill management page. */
+-export function SkillSettingsSection(props: SkillSettingsProps): ReactNode {
+-  const { api, t, useSessions } = props
+-  if (api === undefined || t === undefined || useSessions === undefined) return null
+-  return <Loaded api={api} t={t} useSessions={useSessions} />
+-}
+-
+-/** Render only after the slot has supplied every injected dependency. */
+-function Loaded({ api, t, useSessions }: SkillSettingsInjected): ReactNode {
+-  const sessionId = useSessions(state => state.current)
+-  const [view, setView] = useState<View | undefined>()
+-  const [failure, setFailure] = useState(false)
+-  const [pending, setPending] = useState<string | undefined>()
+-  const [request, setRequest] = useState(0)
+-
+-  useEffect(() => {
+-    let current = true
+-    if (sessionId === undefined) {
+-      setView(undefined)
+-      setFailure(false)
+-      return () => { current = false }
+-    }
+-    setFailure(false)
+-    void Promise.all([api.skills.list({ sessionId, includeUnavailable: true }), api.settings.describe({})]).then(
+-      ([catalog, settings]) => {
+-        if (!current) return
+-        if (!catalog.result.ok || !settings.result.ok) { setFailure(true); return }
+-        const section = settings.result.value.namespaces.find(item => item.ns === SETTINGS_NAMESPACE)
+-        if (section === undefined) { setFailure(true); return }
+-        setView({ writable: settings.result.value.writable, revision: section.revision, modes: modesOf(section.value), skills: catalog.result.value.skills })
+-      },
+-      () => { if (current) setFailure(true) },
+-    )
+-    return () => { current = false }
+-  }, [api, request, sessionId])
+-
+-  const change = (skill: SkillEntry, next: Mode): void => {
+-    if (view === undefined || pending !== undefined || !view.writable) return
+-    setPending(skill.name)
+-    void api.settings.update({
+-      ns: SETTINGS_NAMESPACE,
+-      patch: { modes: { [skill.name]: next } },
+-      expectedRevision: view.revision,
+-    }).then((response) => {
+-      if (!response.result.ok) { setFailure(true); return }
+-      setRequest(value => value + 1)
+-    }, () => { setFailure(true) }).finally(() => { setPending(undefined) })
+-  }
+-
+-  if (sessionId === undefined) return <p className={css.status}>{t('noSession')}</p>
+-  if (failure) return <div className={css.status}><p role="alert">{view === undefined ? t('loadFailed') : t('saveFailed')}</p><button type="button" onClick={() => setRequest(value => value + 1)}>{t('retry')}</button></div>
+-  if (view === undefined) return <p className={css.status}>{t('loading')}</p>
+-  return <section className={css.section}>
+-    <h2>{t('title')}</h2><p className={css.intro}>{t('intro')}</p>
+-    {view.skills.length === 0 ? <p className={css.status}>{t('empty')}</p> : <ul className={css.rows}>
+-      {view.skills.map(skill => {
+-        const mode = modeOf(view, skill.name)
+-        const disabled = pending !== undefined || !view.writable
+-        return <li key={skill.name} className={css.row}>
+-          <div><strong>{skill.name}</strong><p>{skill.description}</p>
+-            {skill.authoredModelInvocable === false ? <span>{t('authoredModelOff')}</span> : null}
+-            {skill.authoredUserInvocable === false ? <span>{t('authoredUserOff')}</span> : null}
+-          </div>
+-          <select aria-label={skill.name} value={mode} disabled={disabled} onChange={event => change(skill, event.currentTarget.value as Mode)}>
+-            <option value="enabled">{t('enabled')}</option><option value="manual-only">{t('manualOnly')}</option><option value="disabled">{t('disabled')}</option>
+-          </select>
+-        </li>
+-      })}
+-    </ul>}
+-  </section>
+-}
+diff --git a/packages/client/ui-skill-settings/src/client/index.ts b/packages/client/ui-skill-settings/src/client/index.ts
+deleted file mode 100644
+index 4067859e43..0000000000
+--- a/packages/client/ui-skill-settings/src/client/index.ts
++++ /dev/null
+@@ -1,37 +0,0 @@
+-/** Harness-local Skill management Settings page. */
+-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { ISessions } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+-import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+-import type {} from '@deepseek-ai/dsh-client-locale/client'
+-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+-import { SkillSettingsSection, type SkillSettingsInjected } from './SkillSettingsSection.tsx'
+-import { en, zh, type SkillSettingsKey } from './locales.ts'
+-
+-export type { SkillSettingsInjected, SkillSettingsProps } from './SkillSettingsSection.tsx'
+-
+-declare module '@deepseek-ai/dsh-client-ui-slots' {
+-  interface LocaleNamespaceMap {
+-    /** Skill-management settings copy. */
+-    'settings.skills': SkillSettingsKey
+-  }
+-}
+-
+-const NS = 'settings.skills'
+-export const inject = ['slots', 'locale', 'connection', 'sessions']
+-
+-/** Register the Skill settings page. */
+-export function apply(ctx: ClientContext): void {
+-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-skill-settings: dictionaries')
+-  const api = (ctx.get('connection') as ConnectionHandle).api
+-  const useSessions = bindSnapshotSelector((ctx.get('sessions') as ISessions).list)
+-  const t = ctx.locale.bind(NS) as SkillSettingsInjected['t']
+-  const injected = (): SkillSettingsInjected => ({ api, t, useSessions })
+-  ctx.slots.inject('settings.section', () => ctx.slots.register({
+-    name: 'settings.section',
+-    id: 'skills',
+-    order: 30,
+-    label: () => t('nav'),
+-    inject: injected,
+-  }, SkillSettingsSection))
+-}
+diff --git a/packages/client/ui-skill-settings/src/client/locales.ts b/packages/client/ui-skill-settings/src/client/locales.ts
+deleted file mode 100644
+index 569a099764..0000000000
+--- a/packages/client/ui-skill-settings/src/client/locales.ts
++++ /dev/null
+@@ -1,14 +0,0 @@
+-/** Copy for Harness-local Skill management. */
+-export const en = {
+-  nav: 'Skills', title: 'Skills', intro: 'Choose how Harness may use each discovered skill. These choices do not change SKILL.md or other agents.',
+-  loading: 'Loading skills…', noSession: 'Open a project session to manage its available skills.', empty: 'No skills are available for this project.',
+-  loadFailed: 'Could not load skills.', retry: 'Retry', enabled: 'Enabled', manualOnly: 'Manual only', disabled: 'Disabled',
+-  authoredModelOff: 'Author disabled model use', authoredUserOff: 'Author disabled manual use', saving: 'Saving…', saveFailed: 'The change was not saved. The list has been restored.',
+-}
+-export type SkillSettingsKey = keyof typeof en
+-export const zh: { [Key in SkillSettingsKey]: string } = {
+-  nav: '技能', title: '技能管理', intro: '选择 Harness 如何使用已发现的技能。这里不会修改 SKILL.md，也不会影响其他 Agent。',
+-  loading: '正在加载技能…', noSession: '请先打开一个项目会话，再管理该项目可用的技能。', empty: '当前项目没有可用技能。',
+-  loadFailed: '无法加载技能。', retry: '重试', enabled: '启用', manualOnly: '仅手动', disabled: '停用',
+-  authoredModelOff: '作者已禁止模型自动使用', authoredUserOff: '作者已禁止手动调用', saving: '正在保存…', saveFailed: '保存失败，已恢复为服务器上的设置。',
+-}
+diff --git a/packages/client/ui-skill-settings/src/css-modules.d.ts b/packages/client/ui-skill-settings/src/css-modules.d.ts
+deleted file mode 100644
+index 754a3ef473..0000000000
+--- a/packages/client/ui-skill-settings/src/css-modules.d.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-declare module '*.module.css' { const classes: Record<string, string>; export default classes }
+diff --git a/packages/client/ui-skill-settings/src/index.ts b/packages/client/ui-skill-settings/src/index.ts
+deleted file mode 100644
+index b4422c128b..0000000000
+--- a/packages/client/ui-skill-settings/src/index.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-/** Host loader entry for the Skill management browser implementation. */
+-export function apply(): void {}
+diff --git a/packages/client/ui-skill-settings/src/invariant.ts b/packages/client/ui-skill-settings/src/invariant.ts
+deleted file mode 100644
+index d84e7c2fd1..0000000000
+--- a/packages/client/ui-skill-settings/src/invariant.ts
++++ /dev/null
+@@ -1,7 +0,0 @@
+-/** Package-owned invariant companion for the Skill management page. */
+-import type { Context } from '@deepseek-ai/cordis'
+-import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
+-const install: InvariantInstaller = () => {}
+-export const name = 'client-ui-skill-settings-invariant'
+-export const inject = ['invariants']
+-export const apply = (ctx: Context): Promise<() => void> => Promise.resolve(ctx.invariants.register('@deepseek-ai/dsh-client-ui-skill-settings', install))
+diff --git a/packages/client/ui-skill-settings/tests/apply.client.spec.ts b/packages/client/ui-skill-settings/tests/apply.client.spec.ts
+deleted file mode 100644
+index 9ebbadbbb6..0000000000
+--- a/packages/client/ui-skill-settings/tests/apply.client.spec.ts
++++ /dev/null
+@@ -1,44 +0,0 @@
+-import { Context } from '@deepseek-ai/cordis'
+-import { describe, expect, it } from 'vitest'
+-import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
+-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+-import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
+-import { TestRemote, usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
+-import { apply, inject } from '@deepseek-ai/dsh-client-ui-skill-settings/client'
+-import { SkillSettingsSection } from '../src/client/SkillSettingsSection.tsx'
+-
+-usePinnedBrowserLanguages('zh-CN')
+-
+-async function bench() {
+-  const ctx = new Context()
+-  await ctx.plugin(SlotRegistry).await()
+-  const locale = new LocaleRuntime(ctx)
+-  ctx.provide('locale', locale)
+-  new TestRemote(ctx)
+-  ctx.provide('connection', { api: {} } as never)
+-  ctx.provide('sessions', { list: { getSnapshot: () => ({ current: undefined }), subscribe: () => () => {} } } as never)
+-  return { ctx, slots: ctx.get('slots') as SlotRegistry, locale }
+-}
+-
+-function declare(slots: SlotRegistry): () => void {
+-  return slots.register({
+-    name: 'root', children: { 'settings.section': { kind: 'list', scope: 'root' } },
+-  } as never, () => null)
+-}
+-
+-describe('ui-skill-settings apply', () => {
+-  it('mounts its localized settings section through the real slot ledger', async () => {
+-    const b = await bench()
+-    declare(b.slots)
+-    const fiber = b.ctx.plugin({ inject: [...inject], apply })
+-    await fiber.await()
+-    const entry = b.slots.entries('settings.section').find(candidate => candidate.options.id === 'skills')!
+-    expect(entry.component).toBe(SkillSettingsSection)
+-    expect(entry.options).toMatchObject({ id: 'skills', order: 30 })
+-    expect(resolveSlotLabel(entry.options.label)).toBe('技能')
+-    const injected = entry.inject as unknown as () => { api: unknown; t: (key: 'nav') => string; useSessions: unknown }
+-    expect(injected().t('nav')).toBe('技能')
+-    await fiber.dispose()
+-    expect(b.slots.entries('settings.section').find(candidate => candidate.options.id === 'skills')).toBeUndefined()
+-  })
+-})
+diff --git a/packages/client/ui-skill-settings/tests/components.client.spec.tsx b/packages/client/ui-skill-settings/tests/components.client.spec.tsx
+deleted file mode 100644
+index 96e431aeb9..0000000000
+--- a/packages/client/ui-skill-settings/tests/components.client.spec.tsx
++++ /dev/null
+@@ -1,71 +0,0 @@
+-// @vitest-environment jsdom
+-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+-import { afterEach, describe, expect, it, vi } from 'vitest'
+-import type { SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
+-import { SkillSettingsSection } from '../src/client/SkillSettingsSection.tsx'
+-import type { SkillSettingsInjected } from '../src/client/SkillSettingsSection.tsx'
+-import { en } from '../src/client/locales.ts'
+-
+-afterEach(cleanup)
+-
+-const skills = [
+-  { name: 'shared', description: 'Both', modelInvocable: true, userInvocable: true, authoredModelInvocable: true, authoredUserInvocable: true },
+-  { name: 'authored-user-hidden', description: 'Author owns user denial', modelInvocable: true, userInvocable: false, authoredModelInvocable: true, authoredUserInvocable: false },
+-  { name: 'disabled', description: 'Hidden from slash', modelInvocable: false, userInvocable: false, authoredModelInvocable: true, authoredUserInvocable: true },
+-]
+-
+-function response(value: unknown): never { return { result: { ok: true, value } } as never }
+-function failure(): never { return { result: { ok: false, error: { code: 'settings-conflict', message: 'changed', details: {} } } } as never }
+-
+-function props(overrides: { current?: string; writable?: boolean; update?: () => Promise<unknown> } = {}): SkillSettingsInjected {
+-  const current = overrides.current === undefined ? 'skill-settings-session' : overrides.current
+-  const describe = vi.fn(async () => response({
+-    writable: overrides.writable ?? true, hasDocument: true,
+-    namespaces: [{ ns: 'skill-settings', revision: 4, value: { modes: { shared: 'manual-only', disabled: 'disabled' } } }],
+-  }))
+-  const list = vi.fn(async () => response({ skills }))
+-  return {
+-    t: key => en[key],
+-    useSessions: ((select) => select({ current: current as never } as unknown as SessionListState)) as SkillSettingsInjected['useSessions'],
+-    api: {
+-      skills: { list }, settings: { describe, update: overrides.update ?? (async () => response({})) },
+-    } as never,
+-  }
+-}
+-
+-describe('SkillSettingsSection', () => {
+-  it('loads every mode, including a disabled entry, and labels author restrictions', async () => {
+-    render(<SkillSettingsSection {...props()} />)
+-    const shared = await screen.findByRole('combobox', { name: 'shared' })
+-    expect((shared as HTMLSelectElement).value).toBe('manual-only')
+-    expect((screen.getByRole('combobox', { name: 'disabled' }) as HTMLSelectElement).value).toBe('disabled')
+-    expect(screen.getByText(en.authoredUserOff)).toBeTruthy()
+-  })
+-
+-  it('writes the selected mode and reloads the committed view', async () => {
+-    const update = vi.fn(async () => response({}))
+-    const input = props({ update })
+-    render(<SkillSettingsSection {...input} />)
+-    const shared = await screen.findByRole('combobox', { name: 'shared' })
+-    fireEvent.change(shared, { target: { value: 'disabled' } })
+-    await waitFor(() => expect(update).toHaveBeenCalledWith({
+-      ns: 'skill-settings', patch: { modes: { shared: 'disabled' } }, expectedRevision: 4,
+-    }))
+-    await waitFor(() => expect((input.api as never as { settings: { describe: ReturnType<typeof vi.fn> } }).settings.describe).toHaveBeenCalledTimes(2))
+-  })
+-
+-  it('keeps disabled controls read-only and reloads after a rejected write', async () => {
+-    const update = vi.fn(async () => failure())
+-    render(<SkillSettingsSection {...props({ update, writable: false })} />)
+-    const shared = await screen.findByRole('combobox', { name: 'shared' }) as HTMLSelectElement
+-    expect(shared.disabled).toBe(true)
+-
+-    // A writable attempt that the Host rejects returns to an explicit retry state.
+-    cleanup()
+-    render(<SkillSettingsSection {...props({ update })} />)
+-    fireEvent.change(await screen.findByRole('combobox', { name: 'shared' }), { target: { value: 'enabled' } })
+-    expect((await screen.findByRole('alert')).textContent).toContain(en.saveFailed)
+-    fireEvent.click(screen.getByRole('button', { name: en.retry }))
+-    await waitFor(() => expect(update).toHaveBeenCalledOnce())
+-  })
+-})
+diff --git a/packages/client/ui-skill-settings/tests/invariant.client.spec.ts b/packages/client/ui-skill-settings/tests/invariant.client.spec.ts
+deleted file mode 100644
+index e3f70fbf16..0000000000
+--- a/packages/client/ui-skill-settings/tests/invariant.client.spec.ts
++++ /dev/null
+@@ -1,14 +0,0 @@
+-import { Context } from '@deepseek-ai/cordis'
+-import { describe, expect, it } from 'vitest'
+-import InvariantRegistry from '@deepseek-ai/dsh-invariants'
+-import * as Invariant from '../src/invariant.ts'
+-
+-describe('ui-skill-settings invariant', () => {
+-  it('registers its package ownership and keeps its Host half inert', async () => {
+-    const ctx = new Context()
+-    await ctx.plugin(InvariantRegistry, { enabled: true })
+-    await expect(ctx.plugin(Invariant).await()).resolves.toBeDefined()
+-    const { apply } = await import('../src/index.ts')
+-    apply()
+-  })
+-})
+diff --git a/packages/client/ui-skill-settings/tsconfig.json b/packages/client/ui-skill-settings/tsconfig.json
+deleted file mode 100644
+index 028ee03f22..0000000000
+--- a/packages/client/ui-skill-settings/tsconfig.json
++++ /dev/null
+@@ -1,10 +0,0 @@
+-{
+-  "extends": "../../../tsconfig.base.client.json",
+-  "compilerOptions": { "rootDir": "src", "outDir": "lib/types" },
+-  "include": ["src"],
+-  "references": [
+-    { "path": "../../../vendor/cordis" }, { "path": "../../api/remotes/tsconfig.client.json" },
+-    { "path": "../locale" }, { "path": "../runtime" }, { "path": "../ui-settings" },
+-    { "path": "../ui-slots" }, { "path": "../web-react" }, { "path": "../../runtime-diagnostics/invariants" }
+-  ]
+-}
+diff --git a/packages/client/ui-skill-settings/tsdown.config.ts b/packages/client/ui-skill-settings/tsdown.config.ts
+deleted file mode 100644
+index 2a5e1fcddc..0000000000
+--- a/packages/client/ui-skill-settings/tsdown.config.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-import { clientBundle } from '../tsdown.client.ts'
+-export default clientBundle('@deepseek-ai/dsh-client-ui-skill-settings', ['lib/types/index.js', 'lib/types/invariant.js'])
 diff --git a/packages/client/ui-skill/src/client/index.ts b/packages/client/ui-skill/src/client/index.ts
 index b7db4412ba..f9c8f9db9d 100644
 --- a/packages/client/ui-skill/src/client/index.ts
@@ -176,30 +765,6 @@ index 2ba1aef6a6..0000000000
 -    "@deepseek-ai/dsh-skill": "workspace:^"
 -  }
 -}
-diff --git a/tsconfig.client.json b/tsconfig.client.json
-index 7b2fb60589..e7a4ec76f1 100644
---- a/tsconfig.client.json
-+++ b/tsconfig.client.json
-@@ -92,7 +92,6 @@
-     { "path": "./packages/client/ui-settings-general" },
-     { "path": "./packages/client/ui-settings-models" },
-     { "path": "./packages/client/ui-settings-plugin-inventory" },
--    { "path": "./packages/client/ui-skill-settings" },
-     { "path": "./packages/client/locale" },
-     { "path": "./packages/client/web" },
-     { "path": "./apps/web" }
-diff --git a/tsconfig.host.json b/tsconfig.host.json
-index 8e85283d26..459036247a 100644
---- a/tsconfig.host.json
-+++ b/tsconfig.host.json
-@@ -180,7 +180,6 @@
-     { "path": "./packages/core/tools" },
-     { "path": "./packages/core/agent-tool-presentation" },
-     { "path": "./packages/skill/skill" },
--    { "path": "./packages/skill/skill-settings" },
-     { "path": "./packages/skill/skill-badge" },
-     { "path": "./packages/skill/skill-filesystem" },
-     { "path": "./packages/skill/tool-skill" },
 diff --git a/packages/skill/skill-settings/src/index.ts b/packages/skill/skill-settings/src/index.ts
 deleted file mode 100644
 index 4c251de1f5..0000000000
@@ -372,3 +937,27 @@ index 690026ec5c..0000000000
 -    { "path": "../../runtime-diagnostics/invariants" }
 -  ]
 -}
+diff --git a/tsconfig.client.json b/tsconfig.client.json
+index b49d3490ea..e8cae58f91 100644
+--- a/tsconfig.client.json
++++ b/tsconfig.client.json
+@@ -93,7 +93,6 @@
+     { "path": "./packages/client/ui-settings-general" },
+     { "path": "./packages/client/ui-settings-models" },
+     { "path": "./packages/client/ui-settings-plugin-inventory" },
+-    { "path": "./packages/client/ui-skill-settings" },
+     { "path": "./packages/client/locale" },
+     { "path": "./packages/client/web" },
+     { "path": "./apps/web" }
+diff --git a/tsconfig.host.json b/tsconfig.host.json
+index 8e85283d26..459036247a 100644
+--- a/tsconfig.host.json
++++ b/tsconfig.host.json
+@@ -180,7 +180,6 @@
+     { "path": "./packages/core/tools" },
+     { "path": "./packages/core/agent-tool-presentation" },
+     { "path": "./packages/skill/skill" },
+-    { "path": "./packages/skill/skill-settings" },
+     { "path": "./packages/skill/skill-badge" },
+     { "path": "./packages/skill/skill-filesystem" },
+     { "path": "./packages/skill/tool-skill" },
