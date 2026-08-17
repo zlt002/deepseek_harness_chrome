@@ -1,0 +1,816 @@
+diff --git b/packages/core/tools/src/index.ts a/packages/core/tools/src/index.ts
+index 0ca83a58eb..377015feb3 100644
+--- b/packages/core/tools/src/index.ts
++++ a/packages/core/tools/src/index.ts
+@@ -1062,11 +1062,9 @@ export class ToolRuntime extends Service {
+   }
+ 
+   /**
+-   * Restrict inherited tools for the calling agent scope. Empty filters,
+-   * unknown names, deny-listed scope-local names, and reserved transport names
+-   * fail. Allow-listing a scope-local name is valid intent but does not mask
+-   * that registration; restrictions intersect and scoped registrations remain
+-   * visible.
++   * Restrict global tools for the calling agent scope. Empty filters, unknown
++   * names, scope-local names, and reserved transport names fail. Restrictions
++   * intersect; scoped registrations remain visible.
+    * @param filter - global-tool mask: `allow` (keep only) and/or `deny` (remove).
+    * @returns the exact disposer that lifts this restriction.
+    */
+@@ -1087,19 +1085,10 @@ export class ToolRuntime extends Service {
+     if ([...allow ?? [], ...deny ?? []].includes(RUN_CODE_NAME)) {
+       throw new Error(`tools.restrict() cannot name reserved Code Mode presentation transport "${RUN_CODE_NAME}"; restrict end-capability tools instead`)
+     }
+-    const view = this.view(scope)
+-    // An allow-list can name a child-local setup capability that is already
+-    // visible during the unpublished continuable setup window. It remains
+-    // exempt from filtering, but accepting the name keeps composition from
+-    // racing the capability's declaration. A deny-list still names only an
+-    // inherited/restrictable capability: accepting local names there would
+-    // silently promise to revoke a registration the filter never touches.
+-    const unknown = [
+-      ...(allow ?? []).filter(name => !view.knownNames.has(name)),
+-      ...(deny ?? []).filter(name => !view.restrictableNames.has(name)),
+-    ]
++    const known = this.view(scope).restrictableNames
++    const unknown = [...allow ?? [], ...deny ?? []].filter(name => !known.has(name))
+     if (unknown.length > 0) {
+-      throw new Error(`tools.restrict() names unknown global tool${unknown.length > 1 ? 's' : ''} ${unknown.map(n => `"${n}"`).join(', ')}; known global tools: ${[...view.restrictableNames].sort().join(', ') || '(none)'}`)
++      throw new Error(`tools.restrict() names unknown global tool${unknown.length > 1 ? 's' : ''} ${unknown.map(n => `"${n}"`).join(', ')}; known global tools: ${[...known].sort().join(', ') || '(none)'}`)
+     }
+     return this.layers.effect(
+       this.ctx,
+diff --git b/packages/core/tools/tests/scoped.spec.ts a/packages/core/tools/tests/scoped.spec.ts
+index d86780f25a..353b408fa8 100644
+--- b/packages/core/tools/tests/scoped.spec.ts
++++ a/packages/core/tools/tests/scoped.spec.ts
+@@ -183,19 +183,14 @@ describe('restrict()', () => {
+ 
+   it('fails loud on an unscoped call, an empty filter, and names it does not inherit', async () => {
+     const ctx = await mount()
+-    const { scope, key } = await mintAgentScope(ctx, 'a')
++    const { scope } = await mintAgentScope(ctx, 'a')
+     ctx.tools.register(tool('real'))
+     scope.ctx.tools.register(tool('local'))
+     expect(() => ctx.tools.restrict({ deny: ['real'] })).toThrow(/requires a scoped context/)
+     expect(() => scope.ctx.tools.restrict({})).toThrow(/no-op/)
+-    // A setup capability may be local to this child before its caller's
+-    // allow-list composes. Naming it is a valid intended capability; it stays
+-    // exempt from filtering just like report/structured-output child tools.
+-    expect(() => scope.ctx.tools.restrict({ allow: ['local'] })).not.toThrow()
+-    expect(ctx.tools.get('local', key)).toBeDefined()
+-    // Deny remains a mask for inherited capabilities only: local names still
+-    // fail loud rather than appearing to revoke an exempt registration.
+-    expect(() => scope.ctx.tools.restrict({ deny: ['local'] })).toThrow(/unknown global tool "local"/)
++    // A scope's own registration is exempt from its own filter, so naming it
++    // is a caller error rather than a silent no-op.
++    expect(() => scope.ctx.tools.restrict({ allow: ['local'] })).toThrow(/unknown global tool "local"/)
+     expect(() => scope.ctx.tools.restrict({ allow: ['reall'] })).toThrow(/unknown global tool "reall".*known global tools: real/s)
+     expect(() => scope.ctx.tools.restrict({ deny: ['ghost', 'wraith'] })).toThrow(/unknown global tools "ghost", "wraith"/)
+ 
+diff --git b/packages/mcp/mcp-client/README.md a/packages/mcp/mcp-client/README.md
+index 03ded31816..266c3b7c2b 100644
+--- b/packages/mcp/mcp-client/README.md
++++ a/packages/mcp/mcp-client/README.md
+@@ -45,24 +45,11 @@ The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same
+ | `headers` | http | no | Extra headers (e.g. auth tokens) |
+ | `toolCallTimeoutMs` | both | no | Timeout per `callTool` invocation (default 60000) |
+ | `failOnStartupError` | both | no | Reject plugin activation when initial connection or tool synchronization fails (default `false`) |
+-| `toolScope` | both | no | Legacy scope for every discovered tool: `global` (default) or `continuable-child` |
+-| `toolScopes` | both | no | Raw MCP tool-name overrides; `default` overrides `toolScope` for unmatched tools |
+ | `reconnect.enabled` | both | no | Reconnect automatically after a lost connection (default `true`) |
+ | `reconnect.initialDelayMs` | both | no | First reconnect delay in ms; doubles per consecutive failed attempt (default 500) |
+ | `reconnect.maxDelayMs` | both | no | Backoff ceiling in ms; also the uptime after which the attempt budget resets (default 30000) |
+ | `reconnect.maxAttempts` | both | no | Consecutive failed attempts per outage before giving up for good (default 10) |
+ 
+-Use `toolScopes` when one MCP server exposes both ordinary tools and tools that must only run inside a continuable subagent. Keys match the raw MCP names, not the public `mcp__<serverName>__…` names:
+-
+-```yaml
+-toolScopes:
+-  default: global
+-  code_search: continuable-child
+-  knowledge_search: continuable-child
+-```
+-
+-The parent sees the global tools only. A spawned subagent sees both inherited global tools and the `continuable-child` tools. `toolScope` remains supported for server-wide compatibility; a matching `toolScopes` entry wins, then `toolScopes.default`, then `toolScope`.
+-
+ ## Tool naming
+ 
+ Every MCP tool has two names: the raw MCP name (sent on the wire in `tools/call`) and the public name `mcp__<serverName>__<rawName>` registered on `ctx.tools`. Public names are normalized to the DeepSeek function-name contract (64 chars, `[A-Za-z0-9_-]`); when replacement or truncation changes the name, a deterministic 12-hex-char hash of `(serverName, rawName)` is appended so distinct tools never collapse into one name. Names are pure functions of `(serverName, rawName)` — connection order, re-syncs, and other servers never rename a tool.
+@@ -77,7 +64,6 @@ Every MCP tool has two names: the raw MCP name (sent on the wire in `tools/call`
+ - On connect: plugin activation awaits `listTools()` and registers each tool via `ctx.tools.register()` under its public name before the composition starts its first turn. Initial connection, discovery, or registration failure is always logged; it rejects activation when `failOnStartupError` is true and otherwise activates with no tools.
+ - Listens for `notifications/tools/list_changed` → re-syncs; a fetch-phase failure keeps the previous generation registered, while a registration conflict rolls back the attempted generation and leaves no tools from that server.
+ - Tool execute: `client.callTool({ name: rawName, arguments }, { signal })` with timeout + abort support—the public name is never sent to the server.
+-- Scope registration: `toolScopes` partitions each discovered generation by raw MCP name. Global tools register on the application context; `continuable-child` tools register only on spawned subagent contexts. A `tools/list_changed` re-sync updates both scopes.
+ - Canonical success is `{ content: JsonValue[], structuredContent? }`; complete JSON MCP blocks survive for programmatic callers. A supported advertised `outputSchema` validates `structuredContent`; unsupported schema vocabulary falls back to unconstrained `JsonValue`.
+ - Native/model rendering keeps the existing text projection: text blocks join with newlines while image, audio, resource, and unsupported blocks become placeholders.
+ - On disconnect/crash: the supervisor restarts the original server config with exponential backoff (`reconnect.initialDelayMs` doubling up to `reconnect.maxDelayMs`) and re-runs discovery on success — the recovered generation replaces the previous one, so tools neither duplicate nor leak. During the outage the last good generation stays registered; calls against it fail until recovery.
+@@ -96,7 +82,7 @@ Every MCP tool has two names: the raw MCP name (sent on the wire in `tools/call`
+ 
+ #### What the model sees
+ 
+-After initial discovery succeeds, each advertised MCP tool appears as a native tool named `mcp__<serverName>__<rawName>` (or its deterministic normalized form), with the server-provided description and input schema, in its configured scope. A successful re-sync — including the one after an automatic reconnect — replaces the generation; plugin disposal or an exhausted reconnect budget removes it.
++After initial discovery succeeds, each advertised MCP tool appears as a native tool named `mcp__<serverName>__<rawName>` (or its deterministic normalized form), with the server-provided description and input schema. A successful re-sync — including the one after an automatic reconnect — replaces the generation; plugin disposal or an exhausted reconnect budget removes it.
+ 
+ #### Token effect
+ 
+diff --git b/packages/mcp/mcp-client/README.zh.md a/packages/mcp/mcp-client/README.zh.md
+index 5ee8ea655e..1b5b5c523e 100644
+--- b/packages/mcp/mcp-client/README.zh.md
++++ a/packages/mcp/mcp-client/README.zh.md
+@@ -45,24 +45,11 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
+ | `headers` | http | 否 | 额外标头（例如认证 token） |
+ | `toolCallTimeoutMs` | 两者 | 否 | 每次 `callTool` 调用的超时（默认 60000） |
+ | `failOnStartupError` | 两者 | 否 | 初始连接或工具同步失败时拒绝插件激活（默认 `false`） |
+-| `toolScope` | 两者 | 否 | 每个已发现工具的旧版统一作用域：`global`（默认）或 `continuable-child` |
+-| `toolScopes` | 两者 | 否 | 按原始 MCP 工具名设置的作用域覆盖；`default` 会覆盖未匹配工具的 `toolScope` |
+ | `reconnect.enabled` | 两者 | 否 | 连接丢失后自动重新连接（默认 `true`） |
+ | `reconnect.initialDelayMs` | 两者 | 否 | 首次重连延迟（毫秒）；每次连续失败尝试翻倍（默认 500） |
+ | `reconnect.maxDelayMs` | 两者 | 否 | 退避上限（毫秒）；同时也是重置尝试预算所需的正常运行时长（默认 30000） |
+ | `reconnect.maxAttempts` | 两者 | 否 | 每次中断期间连续失败尝试次数上限，超出后彻底放弃（默认 10） |
+ 
+-当同一 MCP server 同时提供普通工具和只能在可持续子 agent 中运行的工具时，使用 `toolScopes`。键名匹配原始 MCP 工具名，而不是公开的 `mcp__<serverName>__…` 名称：
+-
+-```yaml
+-toolScopes:
+-  default: global
+-  code_search: continuable-child
+-  knowledge_search: continuable-child
+-```
+-
+-父 agent 只能看到全局工具。已创建的子 agent 同时看到继承的全局工具和 `continuable-child` 工具。`toolScope` 仍保持 server 级兼容；匹配的 `toolScopes` 项优先，其次是 `toolScopes.default`，最后是 `toolScope`。
+-
+ ## 工具命名
+ 
+ 每个 MCP 工具都有两个名称：通过 `tools/call` 在协议上传送的原始 MCP 名称，以及公开名称 `mcp__<serverName>__<rawName>`，后者注册到 `ctx.tools`。公开名称会规范化为 DeepSeek 函数名称约定（64 个字符、`[A-Za-z0-9_-]`）；如果替换或截断改变名称，就会追加 `(serverName, rawName)` 的确定性 12 位十六进制 hash，确保不同工具绝不会折叠为同一个名称。名称是 `(serverName, rawName)` 的纯函数：连接顺序、重新同步和其他服务器永远不会重命名工具。
+@@ -77,7 +64,6 @@ toolScopes:
+ - 连接时：插件激活会等待 `listTools()`，并在组合开始首个轮次前通过 `ctx.tools.register()` 以公开名称注册每个工具。初始连接、发现或注册失败始终会记录日志；`failOnStartupError` 为 true 时拒绝激活，否则插件仍会激活但不注册工具。
+ - 监听 `notifications/tools/list_changed` → 重新同步；获取阶段失败时保留上一世代的注册，注册冲突则会回滚本次尝试的世代，并且不保留该服务器的任何工具。
+ - 工具执行：`client.callTool({ name: rawName, arguments }, { signal })`，支持超时 + 中止；公开名称绝不会发给服务器。
+-- 作用域注册：`toolScopes` 按原始 MCP 工具名划分每个已发现世代。全局工具注册到应用 context；`continuable-child` 工具只注册到已创建的子 agent context。`tools/list_changed` 重新同步会更新两个作用域。
+ - 规范成功值是 `{ content: JsonValue[], structuredContent? }`；完整的 JSON MCP 块会保留给编程调用方。受支持且已声明的 `outputSchema` 会验证 `structuredContent`；不受支持的 schema 词汇会回退为不受约束的 `JsonValue`。
+ - Native／模型渲染保留现有文本投影：文本块以换行连接，图片、音频、资源和不受支持的块会变成占位符。
+ - 断开／崩溃时：supervisor 以指数退避（`reconnect.initialDelayMs` 逐次翻倍，上限 `reconnect.maxDelayMs`）重启原始服务器配置，成功后重新执行发现——恢复的世代会替换前一个，因此工具既不会重复也不会泄漏。中断期间最后一个正常世代保持注册；针对它的调用在恢复前会失败。
+@@ -96,7 +82,7 @@ toolScopes:
+ 
+ #### 模型看到的内容
+ 
+-初始发现成功后，每个已声明的 MCP 工具都会在其配置作用域中显示为名为 `mcp__<serverName>__<rawName>`（或其确定性规范化形式）的原生工具，并携带服务器提供的描述和输入 schema。成功的重新同步——包括自动重连后的同步——会替换整个世代；对插件执行 dispose（资源释放）或重连预算耗尽会移除该世代。
++初始发现成功后，每个已声明的 MCP 工具都会显示为名为 `mcp__<serverName>__<rawName>`（或其确定性规范化形式）的原生工具，并携带服务器提供的描述和输入 schema。成功的重新同步——包括自动重连后的同步——会替换整个世代；对插件执行 dispose（资源释放）或重连预算耗尽会移除该世代。
+ 
+ #### Token 影响
+ 
+diff --git b/packages/mcp/mcp-client/package.json a/packages/mcp/mcp-client/package.json
+index 4b22b2248a..d3f8faabb4 100644
+--- b/packages/mcp/mcp-client/package.json
++++ a/packages/mcp/mcp-client/package.json
+@@ -32,7 +32,6 @@
+   ],
+   "license": "MIT",
+   "peerDependencies": {
+-    "@deepseek-ai/dsh-agent": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
+     "@deepseek-ai/dsh-llm": "workspace:^",
+     "@deepseek-ai/dsh-subprocess": "workspace:^",
+@@ -46,7 +45,6 @@
+     "zod": "^4.4.3"
+   },
+   "devDependencies": {
+-    "@deepseek-ai/dsh-agent": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
+     "@deepseek-ai/dsh-llm": "workspace:^",
+     "@deepseek-ai/dsh-subprocess": "workspace:^",
+diff --git b/packages/mcp/mcp-client/src/connection.ts a/packages/mcp/mcp-client/src/connection.ts
+index a41fa470fc..f452e3a81d 100644
+--- b/packages/mcp/mcp-client/src/connection.ts
++++ a/packages/mcp/mcp-client/src/connection.ts
+@@ -18,17 +18,11 @@
+ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+ import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
+ import type { Context } from '@deepseek-ai/cordis'
+-import type { Agent } from '@deepseek-ai/dsh-agent'
+ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+ import { createTransport } from './transport.ts'
+-import { discoverTools, replaceTools } from './tools.ts'
+-import type { ToolBridgeOptions, ToolDefinitions, ToolDisposers } from './tools.ts'
+-import type { Config, ToolScope, ToolScopes } from './index.ts'
+-
+-/** Optional continuable-child setup seam, read structurally to keep MCP generic. */
+-interface ContinuableSetupRegistrar {
+-  registerContinuableSetup(contribution: (childCtx: Context) => () => void): () => void
+-}
++import { syncTools } from './tools.ts'
++import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
++import type { Config } from './index.ts'
+ 
+ /** Automatic reconnect policy for one MCP server connection. */
+ export interface ReconnectConfig {
+@@ -58,43 +52,6 @@ const GENERATION_CLOSE_TIMEOUT_MS = 5_000
+ /** Fully resolved reconnect policy captured at plugin load. */
+ export type ResolvedReconnectPolicy = Readonly<Required<ReconnectConfig>>
+ 
+-/** Resolve raw MCP tool overrides while preserving the legacy server-wide default. */
+-function resolveToolScopes(config: Config): Readonly<ToolScopes> {
+-  const scopes = config.toolScopes ?? {}
+-  for (const [rawName, scope] of Object.entries(scopes)) {
+-    if (rawName.length === 0) throw new Error('mcp-client: toolScopes cannot contain an empty raw tool name')
+-    if (scope !== 'global' && scope !== 'continuable-child') {
+-      throw new Error(`mcp-client: toolScopes.${rawName} must be "global" or "continuable-child"`)
+-    }
+-  }
+-  if (config.toolScope !== undefined && config.toolScope !== 'global' && config.toolScope !== 'continuable-child') {
+-    throw new Error('mcp-client: toolScope must be "global" or "continuable-child"')
+-  }
+-  return scopes
+-}
+-
+-/** Select one scope from raw MCP tool name, an optional `default`, and the legacy default. */
+-function toolScopeFor(rawName: string, scopes: Readonly<ToolScopes>, legacyScope: ToolScope | undefined): ToolScope {
+-  return scopes[rawName] ?? scopes.default ?? legacyScope ?? 'global'
+-}
+-
+-/** Keep one discovered generation separated by its model-visible registration scope. */
+-function splitDefinitions(
+-  definitions: ToolDefinitions,
+-  scopes: Readonly<ToolScopes>,
+-  legacyScope: ToolScope | undefined,
+-): Readonly<Record<ToolScope, ToolDefinitions>> {
+-  const global: ToolDefinitions = new Map()
+-  const continuableChild: ToolDefinitions = new Map()
+-  for (const [publicName, tool] of definitions) {
+-    const destination = toolScopeFor(tool.rawName, scopes, legacyScope) === 'global'
+-      ? global
+-      : continuableChild
+-    destination.set(publicName, tool)
+-  }
+-  return { global, 'continuable-child': continuableChild }
+-}
+-
+ /**
+  * The one explicit resolve step from raw reconnect config to the policy the
+  * supervisor runs. Programmatic construction may bypass Schemastery
+@@ -169,11 +126,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
+     registrationFailure: 'contain',
+     serverName: config.serverName,
+     toolCallTimeoutMs: config.toolCallTimeoutMs,
+-    forwardSessionIdentity: config.forwardSessionIdentity === true,
+   }
+-  const toolScopes = resolveToolScopes(config)
+-  const hasContinuableChildTools = Object.values(toolScopes).includes('continuable-child')
+-    || config.toolScope === 'continuable-child'
+   // The initial sync uses 'throw' when failOnStartupError is configured, so
+   // a registration conflict propagates to the startup-await path. Re-syncs
+   // and reconnect syncs always contain conflicts.
+@@ -186,12 +139,8 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
+   let client: Client | undefined
+   /** Close signal paired with {@link client}; captured by dispose before current ownership is cleared. */
+   let clientClosed: Promise<void> | undefined
+-  /** Live global registrations owned by this server. */
++  /** Live tool registrations owned by this server; only {@link enqueueSync} and dispose swap it. */
+   let disposers: ToolDisposers = new Map()
+-  /** Scoped registrations for live continuable-child setup contexts. */
+-  const childDisposers = new Map<Context, ToolDisposers>()
+-  /** Last complete generation, reused synchronously when a child is announced. */
+-  let definitions: ToolDefinitions | undefined
+   let reconnectTimer: NodeJS.Timeout | undefined
+   /** Consecutive failed connection attempts within the current outage. */
+   let failedAttempts = 0
+@@ -204,7 +153,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
+   const isCurrent = (generation: Client): boolean => !disposed && client === generation
+ 
+   /**
+-   * Serializes every discovery and tool-scope swap — initial syncs and notification re-syncs
++   * Serializes every syncTools call — initial syncs and notification re-syncs
+    * across all generations — so two syncs can never interleave their
+    * dispose-previous/register-next swap (which would double-dispose one
+    * generation and leak another).
+@@ -213,50 +162,13 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
+   function enqueueSync(generation: Client, syncOpts: ToolBridgeOptions = opts): Promise<void> {
+     const run = syncChain.then(async () => {
+       if (!isCurrent(generation)) return
+-      const next = await discoverTools(generation, syncOpts)
+-      definitions = next
+-      const byScope = splitDefinitions(next, toolScopes, config.toolScope)
+-      disposers = replaceTools(ctx, byScope.global, disposers, syncOpts)
+-      for (const [childCtx, previous] of childDisposers) {
+-        childDisposers.set(childCtx, replaceTools(childCtx, byScope['continuable-child'], previous, syncOpts))
+-      }
++      disposers = await syncTools(generation, ctx, syncOpts, disposers)
+     })
+     // The chain tail must survive a failed sync; the enqueuing caller owns reporting.
+     syncChain = run.catch(() => {})
+     return run
+   }
+ 
+-  /** Install one current private generation and return the child-lifetime cleanup. */
+-  const installChildTools = (childCtx: Context): (() => void) => {
+-    const privateDefinitions = definitions === undefined
+-      ? new Map()
+-      : splitDefinitions(definitions, toolScopes, config.toolScope)['continuable-child']
+-    childDisposers.set(childCtx, replaceTools(childCtx, privateDefinitions, new Map(), opts))
+-    return () => {
+-      const owned = childDisposers.get(childCtx)
+-      if (owned === undefined) return
+-      for (const dispose of owned.values()) dispose()
+-      childDisposers.delete(childCtx)
+-    }
+-  }
+-  /** Prefer the continuable setup window; old hosts retain the origin fallback. */
+-  const continuableRegistrar = ctx.get('subagents') as ContinuableSetupRegistrar | undefined
+-  const stopContinuableSetup = hasContinuableChildTools && continuableRegistrar !== undefined
+-    ? continuableRegistrar.registerContinuableSetup(installChildTools)
+-    : undefined
+-  /** Legacy fallback for hosts without the continuable setup seam. */
+-  const isContinuableChild = (agent: Agent): boolean => agent.session.header.origin === 'subagent'
+-  const stopAgentCreated = ctx.on('agent/created', ({ agent }) => {
+-    if (stopContinuableSetup !== undefined || !hasContinuableChildTools || !isContinuableChild(agent)) return
+-    installChildTools(agent.ctx)
+-  }, { global: true })
+-  const stopAgentDisposed = ctx.on('agent/disposed', ({ agent }) => {
+-    const owned = childDisposers.get(agent.ctx)
+-    if (owned === undefined) return
+-    for (const dispose of owned.values()) dispose()
+-    childDisposers.delete(agent.ctx)
+-  }, { global: true })
+-
+   /** One disconnect decision per generation: the isCurrent guard makes racing close/error signals idempotent. */
+   function generationDown(generation: Client): void {
+     if (!isCurrent(generation)) return
+@@ -297,10 +209,6 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
+       syncChain = syncChain.then(() => {
+         for (const dispose of disposers.values()) dispose()
+         disposers = new Map()
+-        for (const owned of childDisposers.values()) {
+-          for (const dispose of owned.values()) dispose()
+-        }
+-        childDisposers.clear()
+       })
+       ctx.logger.error(`${label}: giving up after ${policy.maxAttempts} consecutive failed reconnect attempts — tools unregistered; reload the plugin or restart the Host to reconnect`)
+       return
+@@ -438,13 +346,6 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
+       await syncChain
+       for (const dispose of disposers.values()) dispose()
+       disposers = new Map()
+-      for (const owned of childDisposers.values()) {
+-        for (const dispose of owned.values()) dispose()
+-      }
+-      childDisposers.clear()
+-      stopContinuableSetup?.()
+-      stopAgentCreated()
+-      stopAgentDisposed()
+     },
+   }
+ }
+diff --git b/packages/mcp/mcp-client/src/index.ts a/packages/mcp/mcp-client/src/index.ts
+index ffe1cdc66f..5a2a52f55d 100644
+--- b/packages/mcp/mcp-client/src/index.ts
++++ a/packages/mcp/mcp-client/src/index.ts
+@@ -14,7 +14,6 @@
+  */
+ 
+ import type { Context } from '@deepseek-ai/cordis'
+-import type {} from '@deepseek-ai/dsh-agent'
+ import z from '@deepseek-ai/schemastery'
+ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+ import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
+@@ -25,12 +24,6 @@ import type {} from '@deepseek-ai/dsh-tools'
+ export type { McpResult } from './tools.ts'
+ export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+ 
+-/** The agent scope where an MCP tool is registered. */
+-export type ToolScope = 'global' | 'continuable-child'
+-
+-/** Per-raw-tool scope overrides; `default` covers every unmatched MCP tool. */
+-export type ToolScopes = Record<string, ToolScope>
+-
+ /** Cordis plugin name used by loader diagnostics. */
+ export const name = 'mcp-client'
+ 
+@@ -77,12 +70,6 @@ export interface StdioConfig {
+   failOnStartupError: boolean
+   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
+   reconnect?: ReconnectConfig
+-  /** Attach local Harness session lineage in MCP `_meta`; never model-visible. */
+-  forwardSessionIdentity?: boolean
+-  /** Where every discovered MCP tool is exposed (legacy default). */
+-  toolScope?: ToolScope
+-  /** Per-raw-tool scope overrides; `default` falls back to `toolScope` then `global`. */
+-  toolScopes?: ToolScopes
+ }
+ 
+ /** Config for connecting to an MCP server over Streamable HTTP (SSE). */
+@@ -105,12 +92,6 @@ export interface StreamableHttpConfig {
+   failOnStartupError: boolean
+   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
+   reconnect?: ReconnectConfig
+-  /** Attach local Harness session lineage in MCP `_meta`; never model-visible. */
+-  forwardSessionIdentity?: boolean
+-  /** Where every discovered MCP tool is exposed (legacy default). */
+-  toolScope?: ToolScope
+-  /** Per-raw-tool scope overrides; `default` falls back to `toolScope` then `global`. */
+-  toolScopes?: ToolScopes
+ }
+ 
+ /** Configuration for one stdio or Streamable HTTP MCP server. */
+@@ -134,9 +115,6 @@ export const Config = z.union([
+     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
+     failOnStartupError: z.boolean().default(false),
+     reconnect: Reconnect,
+-    forwardSessionIdentity: z.boolean().default(false),
+-    toolScope: z.union(['global', 'continuable-child'] as const).default('global'),
+-    toolScopes: z.dict(z.union(['global', 'continuable-child'] as const)).default({}),
+   }),
+   z.object({
+     transport: z.const('streamable-http'),
+@@ -146,9 +124,6 @@ export const Config = z.union([
+     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
+     failOnStartupError: z.boolean().default(false),
+     reconnect: Reconnect,
+-    forwardSessionIdentity: z.boolean().default(false),
+-    toolScope: z.union(['global', 'continuable-child'] as const).default('global'),
+-    toolScopes: z.dict(z.union(['global', 'continuable-child'] as const)).default({}),
+   }),
+ ]) as unknown as z<Config>
+ 
+diff --git b/packages/mcp/mcp-client/src/tools.ts a/packages/mcp/mcp-client/src/tools.ts
+index 1cf11f6882..52f2a73738 100644
+--- b/packages/mcp/mcp-client/src/tools.ts
++++ a/packages/mcp/mcp-client/src/tools.ts
+@@ -27,22 +27,11 @@ export interface ToolBridgeOptions {
+   registrationFailure: 'contain' | 'throw'
+   serverName: string
+   toolCallTimeoutMs: number
+-  /** Whether this local connector receives trusted Harness session lineage through MCP `_meta`. */
+-  forwardSessionIdentity?: boolean
+ }
+ 
+ /** State for one sync generation: the current set of disposers keyed by public name. */
+ export type ToolDisposers = Map<string, () => void>
+ 
+-/** One discovered MCP tool, retaining the raw name for scope selection. */
+-export interface DiscoveredTool {
+-  rawName: string
+-  definition: ToolDefinition
+-}
+-
+-/** Discovered tools keyed by their public Harness names. */
+-export type ToolDefinitions = Map<string, DiscoveredTool>
+-
+ /** Canonical MCP result exposed to Code Mode without discarding protocol blocks. */
+ export type McpResult<Structured extends JsonValue = JsonValue> = {
+   content: JsonValue[]
+@@ -81,20 +70,7 @@ function callToolUncached(
+   opts: ToolBridgeOptions,
+ ) {
+   return client.request(
+-    {
+-      method: 'tools/call',
+-      params: {
+-        name: rawName,
+-        arguments: args,
+-        ...(opts.forwardSessionIdentity && exec.agent !== undefined
+-          ? { _meta: {
+-              'io.deepseek.harness/sessionId': String(exec.agent.id),
+-              ...exec.agent.session.header.parentSession === undefined
+-                ? {} : { 'io.deepseek.harness/parentSessionId': String(exec.agent.session.header.parentSession) },
+-            } }
+-          : {}),
+-      },
+-    },
++    { method: 'tools/call', params: { name: rawName, arguments: args } },
+     RawCallToolResultSchema,
+     {
+       signal: exec.signal,
+@@ -155,13 +131,8 @@ export async function syncTools(
+   opts: ToolBridgeOptions,
+   previous: ToolDisposers,
+ ): Promise<ToolDisposers> {
+-  return replaceTools(ctx, await discoverTools(client, opts), previous, opts)
+-}
+-
+-/** Fetch one complete MCP tool generation without mutating any tool scope. */
+-export async function discoverTools(client: Client, opts: ToolBridgeOptions): Promise<ToolDefinitions> {
+   // Phase 1: fetch and build the next generation without touching the registry.
+-  const definitions: ToolDefinitions = new Map()
++  const definitions = new Map<string, ToolDefinition>()
+   let cursor: string | undefined
+   do {
+     const response = await listToolsUncached(client, cursor)
+@@ -173,35 +144,22 @@ export async function discoverTools(client: Client, opts: ToolBridgeOptions): Pr
+         )
+       }
+       definitions.set(publicName, {
+-        rawName: tool.name,
+-        definition: {
+-          name: publicName,
+-          description: tool.description ?? '',
+-          parameters: tool.inputSchema,
+-          output: createOutput(tool.name, supportedOutputSchema(tool.outputSchema)),
+-          execute: createExecutor(client, tool.name, tool.execution?.taskSupport === 'required', opts),
+-        },
++        name: publicName,
++        description: tool.description ?? '',
++        parameters: tool.inputSchema,
++        output: createOutput(tool.name, supportedOutputSchema(tool.outputSchema)),
++        execute: createExecutor(client, tool.name, tool.execution?.taskSupport === 'required', opts),
+       })
+     }
+     cursor = response.nextCursor
+   } while (cursor)
+ 
+-  return definitions
+-}
+-
+-/** Replace one tool scope with an already discovered MCP generation. */
+-export function replaceTools(
+-  ctx: Context,
+-  definitions: ToolDefinitions,
+-  previous: ToolDisposers,
+-  opts: ToolBridgeOptions,
+-): ToolDisposers {
+   // Phase 2: swap generations.
+   for (const dispose of previous.values()) dispose()
+   const disposers: ToolDisposers = new Map()
+   try {
+-    for (const [publicName, tool] of definitions) {
+-      disposers.set(publicName, ctx.tools.register(tool.definition))
++    for (const [publicName, definition] of definitions) {
++      disposers.set(publicName, ctx.tools.register(definition))
+     }
+   } catch (error) {
+     // A conflict on an `mcp__<serverName>__`-qualified name means a foreign
+diff --git b/packages/mcp/mcp-client/tests/apply.spec.ts a/packages/mcp/mcp-client/tests/apply.spec.ts
+index ddba948a8b..9cda54aeab 100644
+--- b/packages/mcp/mcp-client/tests/apply.spec.ts
++++ a/packages/mcp/mcp-client/tests/apply.spec.ts
+@@ -4,13 +4,8 @@
+  */
+ import { describe, expect, it, vi, beforeEach } from 'vitest'
+ import { Context } from '@deepseek-ai/cordis'
+-import { createScope } from '@deepseek-ai/dsh-scope'
+-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+-import { CallId } from '@deepseek-ai/dsh-llm'
+-import AgentRegistry from '@deepseek-ai/dsh-agent'
+ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+ import ToolRuntime from '@deepseek-ai/dsh-tools'
+-import type { Agent } from '@deepseek-ai/dsh-agent'
+ import type { Config } from '@deepseek-ai/dsh-mcp-client'
+ 
+ // ---- Mock MCP SDK ----
+@@ -67,7 +62,6 @@ async function mountRegistry(): Promise<Context> {
+   const ctx = new Context()
+   await ctx.plugin(SystemPrompt)
+   await ctx.plugin(ToolRuntime)
+-  await ctx.plugin(AgentRegistry)
+   return ctx
+ }
+ 
+@@ -80,24 +74,6 @@ function sleep(ms: number): Promise<void> {
+   return gate.promise
+ }
+ 
+-/** Build a scoped, lifecycle-addressable agent without starting a model loop. */
+-async function childAgent(ctx: Context, id: string, origin?: 'subagent'): Promise<Agent> {
+-  const sessionId = SessionId(id)
+-  const session = Session.create(sessionId, [], {
+-    version: 0,
+-    id: sessionId,
+-    createdAt: 0,
+-    ...origin === undefined ? {} : { origin },
+-  })
+-  const agent = { id: session.id, session } as Agent
+-  let agentCtx!: Context
+-  await ctx.plugin(Object.assign((inner: Context) => {
+-    agentCtx = createScope(inner, agent).ctx
+-  }, { inject: ['tools', 'systemPrompt'] }))
+-  Object.assign(agent, { ctx: agentCtx })
+-  return agent
+-}
+-
+ const stdioConfig: Config = {
+   transport: 'stdio',
+   serverName: 'srv',
+@@ -166,19 +142,6 @@ describe('mcp-client plugin module exports', () => {
+     expect(partial.reconnect).toEqual({ enabled: true, initialDelayMs: 100, maxDelayMs: 30_000, maxAttempts: 10 })
+   })
+ 
+-  it('accepts raw MCP tool scope overrides with a global default', () => {
+-    const resolved = ConfigSchema({
+-      transport: 'stdio',
+-      serverName: 'srv',
+-      command: 'echo',
+-      toolScopes: {
+-        default: 'global',
+-        code_search: 'continuable-child',
+-      },
+-    } as never)
+-    expect(resolved.toolScopes).toEqual({ default: 'global', code_search: 'continuable-child' })
+-  })
+-
+   it('Config schema rejects an invalid reconnect block', () => {
+     // schemastery unions wrap branch errors, so assert the throw only.
+     expect(() => ConfigSchema({
+@@ -218,138 +181,6 @@ describe('apply (plugin lifecycle)', () => {
+     expect(ctx.tools.get('remote')).toBeUndefined()
+   })
+ 
+-  it('keeps continuable-only MCP tools out of parents, gives them to subagents, and resyncs/disposes them', async () => {
+-    await apply(ctx, { ...stdioConfig, toolScope: 'continuable-child' })
+-    let observedCreated = 0
+-    ctx.on('agent/created', () => { observedCreated += 1 }, { global: true })
+-
+-    // No direct low-level MCP tool reaches the parent/global tool list.
+-    expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+-
+-    const ordinaryChild = await childAgent(ctx, 'ordinary-child')
+-    ctx.agents.register(ordinaryChild)
+-    await Promise.resolve()
+-    expect(ctx.tools.get('mcp__srv__remote', ordinaryChild)).toBeUndefined()
+-
+-    const continuableChild = await childAgent(ctx, 'continuable-child', 'subagent')
+-    const disposeChild = ctx.agents.register(continuableChild)
+-    await Promise.resolve()
+-    expect(observedCreated).toBe(2)
+-    expect(continuableChild.session.header.origin).toBe('subagent')
+-    expect(ctx.tools.get('mcp__srv__remote', continuableChild)).toBeDefined()
+-
+-    mockListTools.mockResolvedValue({
+-      tools: [{ name: 'updated', inputSchema: { type: 'object' } }],
+-      nextCursor: undefined,
+-    })
+-    const handler = mockSetNotificationHandler.mock.calls[0]![1] as () => Promise<void>
+-    await handler()
+-    expect(ctx.tools.get('mcp__srv__remote', continuableChild)).toBeUndefined()
+-    expect(ctx.tools.get('mcp__srv__updated', continuableChild)).toBeDefined()
+-
+-    disposeChild()
+-    expect(ctx.tools.get('mcp__srv__updated', continuableChild)).toBeUndefined()
+-  })
+-
+-  it('separates raw MCP tools by scope while keeping ordinary tools global', async () => {
+-    mockListTools.mockResolvedValue({
+-      tools: [
+-        { name: 'office_document', inputSchema: { type: 'object' } },
+-        { name: 'code_search', inputSchema: { type: 'object' } },
+-        { name: 'knowledge_search', inputSchema: { type: 'object' } },
+-      ],
+-      nextCursor: undefined,
+-    })
+-    await apply(ctx, {
+-      ...stdioConfig,
+-      toolScopes: {
+-        default: 'global',
+-        code_search: 'continuable-child',
+-        knowledge_search: 'continuable-child',
+-      },
+-    })
+-
+-    expect(ctx.tools.get('mcp__srv__office_document')).toBeDefined()
+-    expect(ctx.tools.get('mcp__srv__code_search')).toBeUndefined()
+-    expect(ctx.tools.get('mcp__srv__knowledge_search')).toBeUndefined()
+-
+-    const ordinaryChild = await childAgent(ctx, 'ordinary-child')
+-    ctx.agents.register(ordinaryChild)
+-    await Promise.resolve()
+-    expect(ctx.tools.get('mcp__srv__code_search', ordinaryChild)).toBeUndefined()
+-
+-    const continuableChild = await childAgent(ctx, 'continuable-child', 'subagent')
+-    ctx.agents.register(continuableChild)
+-    await Promise.resolve()
+-    expect(ctx.tools.get('mcp__srv__office_document', continuableChild)).toBeDefined()
+-    expect(ctx.tools.get('mcp__srv__code_search', continuableChild)).toBeDefined()
+-    expect(ctx.tools.get('mcp__srv__knowledge_search', continuableChild)).toBeDefined()
+-
+-    mockListTools.mockResolvedValue({
+-      tools: [
+-        { name: 'browser_click', inputSchema: { type: 'object' } },
+-        { name: 'code_search_v2', inputSchema: { type: 'object' } },
+-      ],
+-      nextCursor: undefined,
+-    })
+-    const handler = mockSetNotificationHandler.mock.calls[0]![1] as () => Promise<void>
+-    await handler()
+-    expect(ctx.tools.get('mcp__srv__office_document')).toBeUndefined()
+-    expect(ctx.tools.get('mcp__srv__browser_click')).toBeDefined()
+-    expect(ctx.tools.get('mcp__srv__code_search_v2')).toBeDefined()
+-    expect(ctx.tools.get('mcp__srv__code_search', continuableChild)).toBeUndefined()
+-  })
+-
+-  it('installs scoped search tools before a continuable child applies its allow-list', async () => {
+-    const continuableSetups = new Set<(childCtx: Context) => () => void>()
+-    ctx.provide('subagents', {
+-      registerContinuableSetup(setup: (childCtx: Context) => () => void) {
+-        continuableSetups.add(setup)
+-        return () => { continuableSetups.delete(setup) }
+-      },
+-    } as never)
+-    mockListTools.mockResolvedValue({
+-      tools: [
+-        { name: 'office_document', inputSchema: { type: 'object' } },
+-        { name: 'code_search', inputSchema: { type: 'object' } },
+-      ],
+-      nextCursor: undefined,
+-    })
+-    await apply(ctx, {
+-      ...stdioConfig,
+-      toolScopes: { default: 'global', code_search: 'continuable-child' },
+-    })
+-
+-    expect(ctx.tools.get('mcp__srv__code_search')).toBeUndefined()
+-    expect(ctx.tools.get('mcp__srv__office_document')).toBeDefined()
+-    expect(continuableSetups).toHaveLength(1)
+-
+-    const child = await childAgent(ctx, 'continuable-child-without-origin')
+-    const releaseChildTools = [...continuableSetups][0]!(child.ctx)
+-    expect(() => child.ctx.tools.restrict({ allow: ['mcp__srv__code_search'] })).not.toThrow()
+-    expect(ctx.tools.get('mcp__srv__code_search', child)).toBeDefined()
+-    const result = await ctx.tools.execute({
+-      signal: new AbortController().signal,
+-      callId: CallId('scoped-search'),
+-      name: 'mcp__srv__code_search',
+-      arguments: { question: 'bounded question' },
+-      agent: child,
+-    })
+-    expect(result.content).toEqual([{ type: 'text', text: 'ok' }])
+-
+-    mockListTools.mockResolvedValue({
+-      tools: [{ name: 'code_search', description: 'updated search', inputSchema: { type: 'object' } }],
+-      nextCursor: undefined,
+-    })
+-    const handler = mockSetNotificationHandler.mock.calls[0]![1] as () => Promise<void>
+-    await handler()
+-    expect(ctx.tools.get('mcp__srv__office_document')).toBeUndefined()
+-    expect(ctx.tools.get('mcp__srv__code_search', child)?.description).toBe('updated search')
+-
+-    releaseChildTools()
+-    expect(ctx.tools.get('mcp__srv__code_search', child)).toBeUndefined()
+-  })
+-
+   it('keeps the Cordis plugin loading until initial discovery publishes its tools', async () => {
+     const connection: PromiseWithResolvers<void> = Promise.withResolvers()
+     mockConnect.mockImplementation(async () => {
+diff --git b/packages/subagent/subagent/src/continuation.ts a/packages/subagent/subagent/src/continuation.ts
+index 39cad45650..d826efbfdb 100644
+--- b/packages/subagent/subagent/src/continuation.ts
++++ a/packages/subagent/subagent/src/continuation.ts
+@@ -1000,12 +1000,8 @@ export class SubagentContinuationManager {
+       if (create !== undefined) {
+         appendDelegatedPolicyOverrides((childCtx.agent as Agent).session, create.delegatedPolicies)
+       }
+-      // Continuable setup capabilities are child-local. Install them before
+-      // the delegated allow-list validates its intended tool names, while the
+-      // child is still unpublished and rollback-owned by Agent creation.
+-      const setupCommit = this.setupRegistry.apply(childCtx)
+       applyChildComposition(childCtx, parent, inputs.composition)
+-      return setupCommit
++      return this.setupRegistry.apply(childCtx)
+     }
+     const observer = this.host.observeActivation(provider, childId, parent)
+     // Agent creation owns rollback before handle transfer. A rejection leaves
+diff --git b/packages/subagent/tool-subagent-report/tests/tool-subagent-report.spec.ts a/packages/subagent/tool-subagent-report/tests/tool-subagent-report.spec.ts
+index a9bf1bd7b7..b71e8365db 100644
+--- b/packages/subagent/tool-subagent-report/tests/tool-subagent-report.spec.ts
++++ a/packages/subagent/tool-subagent-report/tests/tool-subagent-report.spec.ts
+@@ -177,42 +177,6 @@ describe('dsh-tool-subagent-report', () => {
+     expect(names).not.toContain('send_message')
+   })
+ 
+-  it('installs a continuable setup tool before its declared allow-list validates', async () => {
+-    const { ctx, parent } = await setup({ load: false })
+-    ctx.subagents.registerContinuableSetup(childCtx => childCtx.tools.register({
+-      name: 'private-search',
+-      description: 'child-only fixture search',
+-      parameters: { type: 'object', properties: {} },
+-      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value as string }] },
+-      execute: () => Promise.resolve('private result'),
+-    }))
+-
+-    const started = await ctx.subagents.startContinuable({
+-      provider: 'spawn',
+-      label: 'private search child',
+-      request: {
+-        prompt: [{ type: 'text', text: 'private search child' }],
+-        parent,
+-        toolFilter: { allow: ['private-search'] },
+-      },
+-      signal: testSignal,
+-    })
+-    const child = await vi.waitFor(() => {
+-      const live = ctx.agents.get(started.childId)
+-      expect(live).toBeDefined()
+-      return live as Agent
+-    })
+-    expect(ctx.tools.get('private-search')).toBeUndefined()
+-    const result = await ctx.tools.execute({
+-      signal: testSignal,
+-      callId: CallId('private-search'),
+-      name: 'private-search',
+-      arguments: {},
+-      agent: child,
+-    })
+-    expect(renderedText(result)).toBe('private result')
+-  })
+-
+   it('delivers quiet reports with stable message and sender identities without waking', async () => {
+     const { ctx, parent, adapter } = await setup()
+     const { started, child } = await startChild(ctx, parent)

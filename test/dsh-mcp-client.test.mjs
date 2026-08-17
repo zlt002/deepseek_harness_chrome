@@ -8,9 +8,12 @@ import { pathToFileURL } from 'node:url'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 import { HarnessWebProcess } from '../apps/native-server/src/harness-process.mjs'
 import { Context } from '../upstream/deepseek-harness/vendor/cordis/lib/index.js'
+import { createScope } from '../upstream/deepseek-harness/packages/core/scope/lib/index.js'
+import { Session, SessionId } from '../upstream/deepseek-harness/packages/core/session/lib/index.js'
 import SystemPrompt from '../upstream/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import ToolRuntime from '../upstream/deepseek-harness/packages/core/tools/lib/index.js'
 import * as McpClient from '../upstream/deepseek-harness/packages/mcp/mcp-client/lib/index.js'
+import * as ProductMcpScopes from '../packages/harness-runtime/src/index.mjs'
 
 function target(url = 'https://docs.example.test/dsh-client') {
   return { browser: 'chrome', windowId: 5, tabId: 9, url }
@@ -79,6 +82,59 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
     assert.equal(result.isError, false)
     assert.equal(result.value.structuredContent.runId, 'trusted-dsh-run')
     assert.equal(result.value.structuredContent.officeContext.documentIdentity, null)
+  } finally {
+    await ctx.fiber.dispose()
+    await connector.stop()
+  }
+})
+
+test('the product MCP adapter keeps search tools private on clean official Harness services', async () => {
+  const browserTarget = target('https://docs.example.test/product-mcp')
+  const connector = respondingConnector(browserTarget)
+  const endpoint = await connector.start()
+  const ctx = new Context()
+  let installContinuableChild
+
+  try {
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('subagents', {
+      registerContinuableSetup(setup) {
+        installContinuableChild = setup
+        return () => { installContinuableChild = undefined }
+      },
+    })
+    await ctx.plugin({ inject: ProductMcpScopes.inject, apply: ProductMcpScopes.apply }, {
+      serverName: 'chrome',
+      url: `${endpoint.url}/mcp`,
+      headers: { Authorization: `Bearer ${endpoint.token}` },
+      failOnStartupError: true,
+      toolScopes: {
+        default: 'global',
+        code_search: 'continuable-child',
+        knowledge_search: 'continuable-child',
+      },
+    })
+
+    assert.equal(ctx.tools.get('mcp__chrome__office_get_context') !== undefined, true)
+    assert.equal(ctx.tools.get('mcp__chrome__code_search'), undefined)
+    assert.equal(ctx.tools.get('mcp__chrome__knowledge_search'), undefined)
+    assert.equal(typeof installContinuableChild, 'function')
+
+    const sessionId = SessionId('product-mcp-child')
+    const session = Session.create(sessionId, [], { version: 0, id: sessionId, createdAt: 0, origin: 'subagent' })
+    const child = { id: sessionId, session }
+    const childCtx = createScope(ctx, child).ctx
+    let release
+    const childFiber = childCtx.plugin(Object.assign((injectedChildCtx) => {
+      release = installContinuableChild(injectedChildCtx)
+    }, { inject: ['tools'] }))
+    await childFiber.await()
+    assert.equal(ctx.tools.get('mcp__chrome__code_search', child) !== undefined, true)
+    assert.equal(ctx.tools.get('mcp__chrome__knowledge_search', child) !== undefined, true)
+    release()
+    assert.equal(ctx.tools.get('mcp__chrome__code_search', child), undefined)
+    await childFiber.dispose()
   } finally {
     await ctx.fiber.dispose()
     await connector.stop()
