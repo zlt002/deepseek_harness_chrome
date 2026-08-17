@@ -2,6 +2,7 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { createSnapshotStore, type ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-agent-preset/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { CompactPresetPresentation } from './CompactPresetPresentation.tsx'
 import { PresetFooter, type PresetFooterInjected, type PresetFooterState, type PresetOption } from './PresetFooter.tsx'
 
 export const inject = ['slots', 'connection']
@@ -31,6 +32,9 @@ export function apply(ctx: ClientContext): void {
     hooks: { productAgentPresets: store },
     load,
   })
+  ctx.slots.inject('agent-preset.presentation', () => ctx.slots.register({
+    name: 'agent-preset.presentation', id: 'accrui-agent-preset-presentation', order: 0,
+  }, CompactPresetPresentation))
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
     id: 'accrui-agent-preset',

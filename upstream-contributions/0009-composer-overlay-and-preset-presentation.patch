@@ -1,0 +1,322 @@
+diff --git a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx b/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
+index f7350076c2..fee155524f 100644
+--- a/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
++++ b/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
+@@ -13,8 +13,9 @@
+  */
+ 
+ import { useEffect, useState } from 'react'
++import type { ReactNode } from 'react'
+ import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
++import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+ import { IconAgentPresetOutline16, IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+ // Type-only: pulls the ui-conversation SlotMap merge (the hero seat).
+ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+@@ -22,6 +23,23 @@ import type { AgentPresetSeatState } from './seat-store.ts'
+ import { presetDisplayText } from './locales.ts'
+ import css from './AgentPresetSeat.module.css'
+ 
++export interface AgentPresetPresentationOption { id: string; name: string; description: string }
++/** Presentation-only currency; loading/staging/session adoption stays with AgentPresetSeat. */
++export interface AgentPresetPresentationOwnerProps {
++  state: AgentPresetSeatState
++  options: readonly AgentPresetPresentationOption[]
++  label: string
++  shownLabel: ReactNode
++  introducing: boolean
++  load: () => Promise<void>
++  select: (id: string) => Promise<void>
++  introduced: () => void
++  t: AgentPresetSeatProps['t']
++}
++declare module '@deepseek-ai/dsh-client-ui-slots' {
++  interface SlotMap { 'agent-preset.presentation': { kind: 'chain'; scope: 'root'; owner: AgentPresetPresentationOwnerProps } }
++}
++
+ /** Registration-side business face for the hero chip. */
+ export interface AgentPresetSeatInjected {
+   hooks: {
+@@ -60,17 +78,41 @@ function introStaggerMs(count: number): number {
+ /** Full component props. */
+ export type AgentPresetSeatProps =
+   PropsRuntime<'conversation.hero.agentPreset'>
++  & PropsRenderSlots<'agent-preset.presentation'>
+   & PropsLocale<'settings.agentPreset'>
+   & InjectFace<AgentPresetSeatInjected>
+ 
++/** The upstream presentation remains the exact fallback when no product renderer is registered. */
++function OfficialAgentPresetPresentation({ owner }: { owner: AgentPresetPresentationOwnerProps }) {
++  const [open, setOpen] = useState(false)
++  return <Menu
++    open={open}
++    onClose={() => { setOpen(false) }}
++    items={owner.options.map(option => ({
++      id: option.id,
++      label: <span className={css.item}><span className={css.itemName}>{option.name}</span><span className={css.itemDesc}>{option.description}</span></span>,
++    }))}
++    selectedId={owner.state.current}
++    onSelect={(id) => { setOpen(false); void owner.select(id) }}
++    align="start"
++    portal
++    anchor={(
++      <button type="button" className={css.seat} aria-haspopup="menu" aria-expanded={open}
++        title={owner.state.error ?? owner.t('seatHint')} disabled={owner.state.busy} onClick={() => { setOpen(value => !value) }}>
++        <IconAgentPresetOutline16 className={owner.introducing ? `${css.seatIcon} ${css.introIcon}` : css.seatIcon} />
++        {owner.shownLabel}<IconChevronDownOutline14 className={css.chevron} />
++      </button>
++    )}
++  />
++}
++
+ /**
+  * Render the new-session agent-preset chip.
+  * @param props - composed slot props.
+  * @returns the chip, or null when the deployment composes no presets.
+  */
+-export function AgentPresetSeat({ load, select, introduced, useAgentPresetSeat, t }: AgentPresetSeatProps) {
++export function AgentPresetSeat({ load, select, introduced, useAgentPresetSeat, renderSlotChain, t }: AgentPresetSeatProps) {
+   const state = useAgentPresetSeat(snapshot => snapshot)
+-  const [open, setOpen] = useState(false)
+ 
+   useEffect(() => {
+     void load()
+@@ -125,46 +167,13 @@ export function AgentPresetSeat({ load, select, introduced, useAgentPresetSeat,
+     )
+     : label
+ 
+-  return (
+-    <Menu
+-      open={open}
+-      onClose={() => { setOpen(false) }}
+-      items={state.options.map((option) => {
+-        const text = presetDisplayText(option, t)
+-        return {
+-          id: option.id,
+-          // Name and description together: the id alone never says what a
+-          // preset does, which is why the roster carries display copy.
+-          label: (
+-            <span className={css.item}>
+-              <span className={css.itemName}>{text.name}</span>
+-              <span className={css.itemDesc}>{text.description ?? t('noDescription')}</span>
+-            </span>
+-          ),
+-        }
+-      })}
+-      selectedId={state.current}
+-      onSelect={(id) => {
+-        setOpen(false)
+-        void select(id)
+-      }}
+-      align="start"
+-      portal
+-      anchor={(
+-        <button
+-          type="button"
+-          className={css.seat}
+-          aria-haspopup="menu"
+-          aria-expanded={open}
+-          title={state.error ?? t('seatHint')}
+-          disabled={state.busy}
+-          onClick={() => { setOpen(value => !value) }}
+-        >
+-          <IconAgentPresetOutline16 className={introducing ? `${css.seatIcon} ${css.introIcon}` : css.seatIcon} />
+-          {shownLabel}
+-          <IconChevronDownOutline14 className={css.chevron} />
+-        </button>
+-      )}
+-    />
+-  )
++  const owner: AgentPresetPresentationOwnerProps = {
++    state,
++    options: state.options.map(option => {
++      const text = presetDisplayText(option, t)
++      return { id: option.id, name: text.name, description: text.description ?? t('noDescription') }
++    }),
++    label, shownLabel, introducing, load, select, introduced, t,
++  }
++  return <>{renderSlotChain('agent-preset.presentation', owner, { fallback: <OfficialAgentPresetPresentation owner={owner} /> })}</>
+ }
+diff --git a/packages/client/ui-agent-preset/src/client/index.ts b/packages/client/ui-agent-preset/src/client/index.ts
+index f327479660..0b258a65da 100644
+--- a/packages/client/ui-agent-preset/src/client/index.ts
++++ b/packages/client/ui-agent-preset/src/client/index.ts
+@@ -36,7 +36,7 @@ import { AGENT_PRESET_SETTINGS_NS, AgentPresetSettingsController } from './setti
+ 
+ export type { AgentPresetLabelInjected, AgentPresetLabelProps } from './AgentPresetLabel.tsx'
+ export type { AgentPresetRowInjected, AgentPresetRowProps } from './AgentPresetRow.tsx'
+-export type { AgentPresetSeatInjected, AgentPresetSeatProps } from './AgentPresetSeat.tsx'
++export type { AgentPresetPresentationOption, AgentPresetPresentationOwnerProps, AgentPresetSeatInjected, AgentPresetSeatProps } from './AgentPresetSeat.tsx'
+ export type { AgentPresetSectionInjected, AgentPresetSectionProps } from './AgentPresetSection.tsx'
+ export type { AgentPresetSeatState, SeatSessionSummary } from './seat-store.ts'
+ export {
+@@ -164,6 +164,7 @@ export function apply(ctx: ClientContext): void {
+       }
+       const chip = scope.slots.register({
+         name: 'conversation.hero.agentPreset',
++        children: { 'agent-preset.presentation': { kind: 'chain', scope: 'root' } },
+         locale: 'settings.agentPreset',
+         inject: seatInjected,
+       }, AgentPresetSeat)
+diff --git a/packages/client/ui-agent-preset/tests/components.client.spec.tsx b/packages/client/ui-agent-preset/tests/components.client.spec.tsx
+index 0c29175a60..e82cb0696f 100644
+--- a/packages/client/ui-agent-preset/tests/components.client.spec.tsx
++++ b/packages/client/ui-agent-preset/tests/components.client.spec.tsx
+@@ -61,6 +61,9 @@ function renderSeat(state: Partial<AgentPresetSeatState> = {}) {
+     load: vi.fn(() => Promise.resolve()),
+     select: vi.fn(() => Promise.resolve()),
+     introduced: vi.fn(),
++    // Unit tests exercise the official presentation path: a product may
++    // register this chain, but an unextended Harness must keep its Menu.
++    renderSlotChain: vi.fn((_name, _owner, opts) => opts?.fallback ?? null),
+   }
+   render(<AgentPresetSeat {...({
+     ...actions,
+@@ -209,6 +212,19 @@ describe('the new-session chip', () => {
+     expect(screen.getByRole('button').getAttribute('title')).toBe(en.seatHint)
+   })
+ 
++  it('offers the presentation seam while keeping the official menu as its fallback', () => {
++    const actions = renderSeat()
++
++    expect(actions.renderSlotChain).toHaveBeenCalledWith(
++      'agent-preset.presentation',
++      expect.objectContaining({ label: en.presetStandardName, select: actions.select }),
++      expect.objectContaining({ fallback: expect.anything() }),
++    )
++    // The default fixture returns the fallback, so stock Harness behavior
++    // remains intact without any product presentation registration.
++    expect(screen.getByRole('button').textContent).toContain(en.presetStandardName)
++  })
++
+   it('offers each preset with what it is for', () => {
+     renderSeat()
+ 
+diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+index ef1221cd99..d99dc6be98 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
+@@ -4,6 +4,7 @@
+ 
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import clsx from 'clsx'
++import { ComposerOverlayProvider, ComposerOverlaySurface } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
+ import type { ConversationSlotProps, InputZone } from '../contract/slots.ts'
+ import { HeroGlow, HeroShell, WorkspaceChip, workspaceLabel } from './EmptyHero.tsx'
+@@ -157,13 +158,16 @@ export function ConversationRoot({
+   })
+ 
+   const composerBar = (
+-    <div className={clsx(css.composerStack, hero && css.composerHero)}>
++    <ComposerOverlayProvider>
++      <div className={clsx(css.composerStack, hero && css.composerHero)}>
+       {hero && <HeroGlow className={css.heroGlow} />}
+       {hero && <HeroShell t={t} />}
+       {hero && heroWorkspaceRow}
+       {zone !== undefined && renderSlot('conversation.input.dock', zone)}
++      <ComposerOverlaySurface />
+       {inputBar}
+-    </div>
++      </div>
++    </ComposerOverlayProvider>
+   )
+ 
+   const phase = settling ? 'settling' : hero ? 'hero' : 'active'
+diff --git a/packages/client/ui-primitives/src/ComposerOverlay.tsx b/packages/client/ui-primitives/src/ComposerOverlay.tsx
+new file mode 100644
+index 0000000000..d76433b6ef
+--- /dev/null
++++ b/packages/client/ui-primitives/src/ComposerOverlay.tsx
+@@ -0,0 +1,79 @@
++/** One card-wide upward panel at a time for composer controls. */
++import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
++import type { ReactNode } from 'react'
++
++type OverlayRender = () => ReactNode
++
++interface ComposerOverlayApi {
++  register(id: string, render: OverlayRender): () => void
++  toggle(id: string): void
++  close(id?: string): void
++  refresh(id: string): void
++}
++
++const ApiContext = createContext<ComposerOverlayApi | null>(null)
++const ActiveContext = createContext<string | null>(null)
++const ContentContext = createContext<ReactNode>(null)
++
++export function ComposerOverlayProvider({ children }: { children: ReactNode }) {
++  const entries = useRef(new Map<string, OverlayRender>())
++  const [active, setActive] = useState<string | null>(null)
++  const [, setRevision] = useState(0)
++  const register = useCallback((id: string, render: OverlayRender) => {
++    entries.current.set(id, render)
++    setRevision(value => value + 1)
++    return () => {
++      entries.current.delete(id)
++      setRevision(value => value + 1)
++      setActive(current => current === id ? null : current)
++    }
++  }, [])
++  const api = useMemo<ComposerOverlayApi>(() => ({
++    register,
++    toggle: (id) => { setActive(current => current === id ? null : id) },
++    close: (id) => { setActive(current => id === undefined || current === id ? null : current) },
++    refresh: () => { setRevision(value => value + 1) },
++  }), [register])
++  useEffect(() => {
++    if (active === null) return
++    const closeOutside = (event: PointerEvent): void => {
++      if (!(event.target instanceof Element)) return
++      if (event.target.closest('[data-composer-overlay-surface], [data-composer-overlay-trigger]') !== null) return
++      setActive(null)
++    }
++    const closeEscape = (event: KeyboardEvent): void => {
++      if (event.key === 'Escape') setActive(null)
++    }
++    document.addEventListener('pointerdown', closeOutside, true)
++    document.addEventListener('keydown', closeEscape)
++    return () => { document.removeEventListener('pointerdown', closeOutside, true); document.removeEventListener('keydown', closeEscape) }
++  }, [active])
++  const content = active === null ? null : entries.current.get(active)?.() ?? null
++  return <ApiContext.Provider value={api}><ActiveContext.Provider value={active}><ContentContext.Provider value={content}>{children}</ContentContext.Provider></ActiveContext.Provider></ApiContext.Provider>
++}
++
++/** Register a card-wide panel without moving it out of the composer card. */
++export function useComposerOverlay(id: string, panel?: ReactNode | (() => ReactNode)) {
++  const api = useContext(ApiContext)
++  const active = useContext(ActiveContext)
++  const panelRef = useRef(panel)
++  panelRef.current = panel
++  useEffect(() => api === null || panel === undefined ? undefined : api.register(id, () => {
++    const current = panelRef.current
++    return typeof current === 'function' ? current() : current
++  }), [api, id, panel === undefined])
++  useLayoutEffect(() => {
++    if (active === id) api?.refresh(id)
++  })
++  return {
++    available: api !== null,
++    open: active === id,
++    toggle: () => { api?.toggle(id) },
++    close: () => { api?.close(id) },
++  }
++}
++
++/** Render the active registered panel at the owning card's full-width anchor. */
++export function ComposerOverlaySurface() {
++  return <div data-composer-overlay-surface>{useContext(ContentContext)}</div>
++}
+diff --git a/packages/client/ui-primitives/src/index.ts b/packages/client/ui-primitives/src/index.ts
+index 05baf26f8d..3cf95254d1 100644
+--- a/packages/client/ui-primitives/src/index.ts
++++ b/packages/client/ui-primitives/src/index.ts
+@@ -27,6 +27,7 @@ export { Toast } from './Toast.tsx'
+ export { writeClipboard } from './clipboard.ts'
+ export { JsonTree } from './JsonTree.tsx'
+ export type { JsonTreeProps, JsonTreeLabels } from './JsonTree.tsx'
++export { ComposerOverlayProvider, ComposerOverlaySurface, useComposerOverlay } from './ComposerOverlay.tsx'
+ export { TerminalBlock, DEFAULT_TERMINAL_MAX_LINES } from './TerminalBlock.tsx'
+ export type { TerminalBlockProps, TerminalBlockLabels } from './TerminalBlock.tsx'
+ export { ReadBlock, DEFAULT_READ_MAX_LINES } from './ReadBlock.tsx'
