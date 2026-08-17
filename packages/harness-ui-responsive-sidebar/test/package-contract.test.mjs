@@ -13,6 +13,11 @@ test('responsive sidebar uses the public compact presentation seam without ownin
   ])
   assert.match(manifest, /@accrui\/harness-ui-responsive-sidebar/)
   assert.match(source, /sidebar\.compact\.presentation/)
+  assert.match(
+    source,
+    /name:\s*'sidebar\.compact\.presentation'[\s\S]*?select:\s*owner\s*=>\s*owner[\s\S]*?ResponsiveSidebarPresentation/,
+    'chain presentation registration must select the matched owner',
+  )
   assert.match(presentation, /owner\.renderWorkspace\(\)/)
   assert.match(presentation, /owner\.renderSettings\(\)/)
   assert.match(presentation, /owner\.renderDetailActions\(\)/)

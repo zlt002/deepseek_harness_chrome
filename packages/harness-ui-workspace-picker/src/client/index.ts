@@ -10,6 +10,7 @@ export function apply(ctx: ClientContext): void {
     name: 'sidebar.workspaces.compact',
     id: 'accrui-workspace-picker',
     order: 0,
+    select: owner => owner,
   }, CompactWorkspacePicker))
 }
 

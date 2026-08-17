@@ -10,6 +10,7 @@ export function apply(ctx: ClientContext): void {
     name: 'sidebar.compact.presentation',
     id: 'accrui-responsive-sidebar',
     order: 0,
+    select: owner => owner,
   }, ResponsiveSidebarPresentation))
 }
 

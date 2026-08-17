@@ -9,6 +9,11 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
     read('src/client/index.ts'), read('src/client/CompactWorkspacePicker.tsx'), read('src/client/CompactWorkspacePicker.module.css'),
   ])
   assert.match(client, /sidebar\.workspaces\.compact/)
+  assert.match(
+    client,
+    /name:\s*'sidebar\.workspaces\.compact'[\s\S]*?select:\s*owner\s*=>\s*owner[\s\S]*?CompactWorkspacePicker/,
+    'chain workspace registration must select the matched owner',
+  )
   assert.match(picker, /requestWorkspaceAdd/)
   assert.match(picker, /owner\.directoryFlow/)
   assert.match(picker, /document\.addEventListener\('pointerdown'/)
