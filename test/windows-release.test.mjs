@@ -250,6 +250,10 @@ test('static Windows runtime uses a bundle, keeps native sidecars, and rejects n
   assert.match(banner, /node-pty\/prebuilds\/win32-x64\/pty\.node/)
   assert.match(banner, /win32-x64.*\[\^\\\\\/\]\+/s)
   assert.doesNotMatch(banner, /sharp-libvips-win32-x64/)
+  const builderSource = await readFile(new URL('../release/windows-lite/build-static-harness-runtime.mjs', import.meta.url), 'utf8')
+  assert.match(builderSource, /process\.env\.npm_execpath/)
+  assert.match(builderSource, /'pnpm\.cmd'/)
+  assert.doesNotMatch(builderSource, /run\('pnpm'/)
 })
 
 test('Windows Native Messaging smoke accepts a fragmented pong, writes stop, and exits cleanly', async () => {

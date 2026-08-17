@@ -36,6 +36,11 @@ function run(command, args, options = {}) {
   return result
 }
 
+function runPnpm(args, options = {}) {
+  if (process.env.npm_execpath) return run(process.execPath, [process.env.npm_execpath, ...args], options)
+  return run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', args, options)
+}
+
 async function resetDirectory(target) {
   await rm(target, { recursive: true, force: true })
   await mkdir(target, { recursive: true })
@@ -151,8 +156,8 @@ export async function buildWindowsStaticHarnessRuntime({
 
     const nativeServerPath = path.join(temporary, 'native-server.mjs')
     const pluginManagerPath = path.join(temporary, 'plugin-manager.mjs')
-    run('pnpm', ['exec', 'esbuild', path.join(PROJECT_ROOT, 'apps', 'native-server', 'bin.mjs'), '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${nativeServerPath}`], { cwd: PROJECT_ROOT })
-    run('pnpm', ['exec', 'esbuild', path.join(harnessRoot, 'apps', 'cli', 'lib', 'bin.js'), '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${pluginManagerPath}`], { cwd: PROJECT_ROOT })
+    runPnpm(['exec', 'esbuild', path.join(PROJECT_ROOT, 'apps', 'native-server', 'bin.mjs'), '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${nativeServerPath}`], { cwd: PROJECT_ROOT })
+    runPnpm(['exec', 'esbuild', path.join(harnessRoot, 'apps', 'cli', 'lib', 'bin.js'), '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${pluginManagerPath}`], { cwd: PROJECT_ROOT })
 
     await mkdir(path.join(cliDir, 'lib'), { recursive: true })
     await cp(bundlePath, path.join(cliDir, 'lib', 'server.mjs'))
@@ -172,7 +177,7 @@ export async function buildWindowsStaticHarnessRuntime({
     await writeFile(path.join(cliDir, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.0-rc.5', type: 'module' }, null, 2)}\n`)
     await copyWithoutSourceMaps(path.join(harnessRoot, 'apps', 'web', 'dist'), path.join(harnessDir, 'apps', 'web', 'dist'))
     await mkdir(path.join(harnessDir, 'vendor', 'schemastery', 'lib'), { recursive: true })
-    run('pnpm', ['exec', 'esbuild', path.join(harnessRoot, 'vendor', 'schemastery', 'lib', 'index.mjs'), '--bundle', '--platform=node', '--format=esm', '--target=node22', `--outfile=${path.join(harnessDir, 'vendor', 'schemastery', 'lib', 'index.mjs')}`], { cwd: PROJECT_ROOT })
+    runPnpm(['exec', 'esbuild', path.join(harnessRoot, 'vendor', 'schemastery', 'lib', 'index.mjs'), '--bundle', '--platform=node', '--format=esm', '--target=node22', `--outfile=${path.join(harnessDir, 'vendor', 'schemastery', 'lib', 'index.mjs')}`], { cwd: PROJECT_ROOT })
     await writeFile(path.join(harnessDir, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/dsh-root', private: true, type: 'module' }, null, 2)}\n`)
     await mkdir(path.join(staging, 'native-server'), { recursive: true })
     await cp(nativeServerPath, path.join(staging, 'native-server', 'runtime.mjs'))
