@@ -99,7 +99,7 @@ test('mounts only completed externalizations while the full-source overlay is ac
   assert.equal(patch.match(/@accrui\/harness-ui-subagent-compact/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-session-log-copy/g)?.length, 1)
   assert.doesNotMatch(patch, /harness-ui-knowledge-scope/)
-  assert.doesNotMatch(patch, /harness-skill-settings/)
+  assert.equal(patch.match(/@accrui\/harness-skill-settings/g)?.length, 1)
 })
 
 test('installs a managed product UI link into an isolated Harness profile', async (t) => {
