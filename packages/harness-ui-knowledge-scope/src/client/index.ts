@@ -1,4 +1,4 @@
-import { createSnapshotStore, type ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createKnowledgeScopeBridge, knowledgeScopeBridgeConfig } from './bridge.ts'
 import { KnowledgeScopePanel, KnowledgeScopeStrip, type KnowledgeScopeInjected } from './KnowledgeScope.tsx'
@@ -10,11 +10,9 @@ export function apply(ctx: ClientContext): void {
   const config = knowledgeScopeBridgeConfig()
   if (config === undefined) return
   const bridge = createKnowledgeScopeBridge(config.nonce, config.parentOrigin)
-  const panel = createSnapshotStore<'code' | 'knowledge' | null>(null)
   const injected = (): KnowledgeScopeInjected => ({
-    hooks: { knowledgeScope: bridge.source, knowledgeScopePanel: panel },
+    hooks: { knowledgeScope: bridge.source },
     request: (sessionId, scope, options) => bridge.request(sessionId, scope, options),
-    setPanel: next => panel.set(next),
   })
   ctx.effect(() => {
     const receive = (event: MessageEvent): void => { bridge.accept(event, window.parent) }

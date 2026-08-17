@@ -26,4 +26,5 @@ test('Agent preset projection stays out of upstream and uses the public composer
   assert.match(presentation, /owner\.select\(option\.id\)/)
   assert.doesNotMatch(presentation, /AgentPresetSeatController/)
   assert.match(presentationStyles, /grid-template-columns: repeat\(auto-fit/)
+  assert.match(presentationStyles, /\.panel\s*\{[^}]*max-height:\s*min\(500px, calc\(100vh - 144px\)\)[^}]*overflow-y:\s*auto/s)
 })
