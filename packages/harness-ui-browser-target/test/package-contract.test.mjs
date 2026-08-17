@@ -16,3 +16,19 @@ test('keeps the accepted e327 composer and compact-header interactions in an out
   assert.match(client, /HarnessReconnectAction/)
   assert.doesNotMatch(client, /deepseek-harness\/packages\/.*\/src/)
 })
+
+test('Browser Target DOM and surface geometry match the e327 reference', async () => {
+  const [control, styles] = await Promise.all([
+    source('src/client/BrowserTargetControl.tsx'),
+    source('src/client/ActiveTabDock.module.css'),
+  ])
+
+  assert.equal(control.match(/data-browser-target-control data-composer-overlay-trigger/g)?.length, 2)
+  assert.match(control, /role="radiogroup" aria-label="工作目标模式"/)
+  assert.match(control, /command: 'toggle-pinned-tab'/)
+  assert.match(control, /command: 'set-primary'/)
+  assert.match(styles, /\.trigger\s*\{[^}]*position:\s*relative[^}]*width:\s*28px[^}]*border:\s*1px solid[^}]*border-radius:\s*50%/s)
+  assert.match(styles, /\.badge\s*\{[^}]*top:\s*-5px[^}]*right:\s*-7px/s)
+  assert.match(styles, /\.panel\s*\{[^}]*left:\s*0[^}]*width:\s*100%[^}]*max-height:\s*min\(500px, calc\(100vh - 144px\)\)[^}]*overflow:\s*hidden/s)
+  assert.match(styles, /\.tabList\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s)
+})
