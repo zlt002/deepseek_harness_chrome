@@ -1,6 +1,7 @@
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import { ConversationPresentation } from './ConversationPresentation.tsx'
 
 /**
  * AccrUI's compact header has no room for the stock view tabs.  It uses the
@@ -10,6 +11,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 export const inject = ['settingsQuickActions', 'conversationViewState']
 
 export function apply(ctx: ClientContext): void {
+  ctx.slots.inject('conversation.presentation', () => ctx.slots.register({
+    name: 'conversation.presentation',
+    id: 'accrui-conversation-presentation',
+    order: 0,
+  }, ConversationPresentation))
   const views = ctx.get('conversationViewState')!
   const quickActions = ctx.get('settingsQuickActions')!
   ctx.effect(() => quickActions.register({
@@ -25,3 +31,5 @@ export function apply(ctx: ClientContext): void {
     run: (sessionId: SessionId) => { views.setView(sessionId, 'chat') },
   }), 'accrui-conversation-shell: compact conversation action')
 }
+
+export { ConversationPresentation } from './ConversationPresentation.tsx'

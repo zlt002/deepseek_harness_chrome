@@ -13,10 +13,12 @@ test('conversation shell seam keeps product quick actions outside the official p
 
   assert.match(generic, /ConversationViewState/)
   assert.match(generic, /ComposerOverlayProvider/)
-  assert.match(generic, /conversation\.composer\.above/)
+  assert.match(generic, /conversation\.presentation/)
+  assert.match(generic, /ConversationPresentationOwnerProps/)
+  assert.match(generic, /DefaultConversationPresentation/)
+  assert.doesNotMatch(generic, /diff --git a\/packages\/client\/(?:ui-conversation\/src\/client\/skeleton\/(?:ConversationRoot|InputBar|PermissionSelect)\.module\.css|ui-model-selection\/src\/client\/ModelSelect\.module\.css)/)
   assert.doesNotMatch(generic, /compact trajectory action|compact conversation action/)
-  assert.match(externalization, /compact trajectory action/)
-  assert.match(externalization, /compact conversation action/)
+  assert.doesNotMatch(externalization, /compact trajectory action|compact conversation action/)
   assert.match(product, /id: 'trajectory'/)
   assert.match(product, /id: 'conversation'/)
 })
@@ -24,7 +26,6 @@ test('conversation shell seam keeps product quick actions outside the official p
 test('Composer and transcript retain separate layout responsibilities', async () => {
   const generic = await text('../upstream-contributions/0012-conversation-shell-responsive-seam.patch')
   assert.match(generic, /root-level footer/)
-  assert.match(generic, /overscroll-behavior-y: contain/)
   assert.match(generic, /data-composer-overlay-surface/)
   assert.match(generic, /conversationViewState/)
 })

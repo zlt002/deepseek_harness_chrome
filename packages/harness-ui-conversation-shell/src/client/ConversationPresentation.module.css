@@ -1,0 +1,65 @@
+/* Product-owned root layout. Child UI remains upstream-owned and is targeted
+   only through stable owner attributes, never upstream CSS-module hashes. */
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
+  --dsh-chat-content-width: 748px;
+  --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
+  --dsh-composer-side-clearance: 16px;
+  --dsh-composer-dock-inset: 8px;
+}
+
+.scrollBody {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+.root[data-phase='hero'] .scrollBody { justify-content: flex-end; }
+
+.heroTitleSeat {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.heroTitleSeat > * { height: 100%; }
+
+/* The official callback renders this exact stable marker. The footer is a
+   root sibling, so transcript history cannot scroll the input out of view. */
+.root > :global([data-composer-seat]) {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  position: static;
+  background: transparent;
+  --dsh-composer-text-max-height: 336px;
+}
+
+.root[data-phase='settling'] > :global([data-composer-seat]) { visibility: hidden; }
+
+/* ComposerOverlay is a generic upstream service. These stable attributes are
+   its public product-facing presentation surface for model/permission/context
+   panels, preserving mutual exclusion without owning state. */
+:global([data-composer-overlay-surface]) > [role='dialog'],
+:global([data-composer-overlay-surface]) > [role='menu'] {
+  right: auto;
+  left: 0;
+  width: 100%;
+  max-width: none;
+}
+
+:global([data-composer-overlay-surface]) > [role='menu'] {
+  max-height: min(500px, calc(100vh - 144px));
+}
