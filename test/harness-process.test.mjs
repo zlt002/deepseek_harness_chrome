@@ -80,6 +80,7 @@ test('mounts Harness-native skills before Claude skills so duplicate names resol
 test('mounts product UI packages outside upstream and gates the missing knowledge composer seam', () => {
   assert.match(productUiPatch({}), /@accrui\/harness-ui-browser-target/)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-subagent-compact/)
+  assert.match(productUiPatch({}), /@accrui\/harness-ui-session-log-copy/)
   assert.doesNotMatch(productUiPatch({}), /@accrui\/harness-ui-knowledge-scope/)
   assert.match(
     productUiPatch({ DSH_ENABLE_KNOWLEDGE_SCOPE_UI: '1' }),
@@ -96,6 +97,7 @@ test('mounts only completed externalizations while the full-source overlay is ac
   assert.equal(patch.match(/@accrui\/harness-ui-agent-preset/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-browser-target/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-subagent-compact/g)?.length, 1)
+  assert.equal(patch.match(/@accrui\/harness-ui-session-log-copy/g)?.length, 1)
   assert.doesNotMatch(patch, /harness-ui-knowledge-scope/)
   assert.doesNotMatch(patch, /harness-skill-settings/)
 })

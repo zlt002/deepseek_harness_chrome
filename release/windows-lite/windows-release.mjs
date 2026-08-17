@@ -422,6 +422,7 @@ export async function buildWindowsRelease({
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-browser-target'), path.join(runtimeDir, 'product-plugins', 'harness-ui-browser-target'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-knowledge-scope'), path.join(runtimeDir, 'product-plugins', 'harness-ui-knowledge-scope'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-subagent-compact'), path.join(runtimeDir, 'product-plugins', 'harness-ui-subagent-compact'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-session-log-copy'), path.join(runtimeDir, 'product-plugins', 'harness-ui-session-log-copy'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-skill-settings'), path.join(runtimeDir, 'product-plugins', 'harness-skill-settings'))
   await bundleHarnessRuntimePlugin({
     outfile: path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'),

@@ -5,6 +5,7 @@ import test from 'node:test'
 
 const productRoot = path.resolve('.generated/harness-product')
 const subagentPluginRoot = path.resolve('packages/harness-ui-subagent-compact')
+const sessionLogCopyPluginRoot = path.resolve('packages/harness-ui-session-log-copy')
 
 async function source(relativePath) {
   return readFile(path.join(productRoot, relativePath), 'utf8')
@@ -14,13 +15,18 @@ async function subagentPluginSource(relativePath) {
   return readFile(path.join(subagentPluginRoot, relativePath), 'utf8')
 }
 
+async function sessionLogCopyPluginSource(relativePath) {
+  return readFile(path.join(sessionLogCopyPluginRoot, relativePath), 'utf8')
+}
+
 test('materialized Harness preserves the latest compact product UI contracts', async () => {
-  const [conversation, knowledgeScope, settings, settingsCss, subagent] = await Promise.all([
+  const [conversation, knowledgeScope, settings, settingsCss, subagent, sessionLogCopy] = await Promise.all([
     source('packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx'),
     source('packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.tsx'),
     source('packages/client/ui-settings-general/src/client/SettingsRoot.tsx'),
     source('packages/client/ui-settings-general/src/client/SettingsRoot.module.css'),
     subagentPluginSource('src/client/CompactSubagentAction.tsx'),
+    sessionLogCopyPluginSource('src/client/controller.ts'),
   ])
 
   const scopeSeat = conversation.indexOf("renderSlot('conversation.composer.above', zone)")
@@ -34,6 +40,8 @@ test('materialized Harness preserves the latest compact product UI contracts', a
 
   assert.match(subagent, /PropsRuntime<'sidebar\.compact\.action'>/)
   assert.match(subagent, /openChild/)
+  assert.match(sessionLogCopy, /includeDescendants', 'false'/)
+  assert.match(sessionLogCopy, /unzipSync/)
   await assert.rejects(
     source('packages/client/ui-subagent/src/client/CompactSubagentAction.tsx'),
     error => error?.code === 'ENOENT',

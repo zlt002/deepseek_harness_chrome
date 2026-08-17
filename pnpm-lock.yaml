@@ -71,6 +71,8 @@ importers:
 
   packages/harness-ui-knowledge-scope: {}
 
+  packages/harness-ui-session-log-copy: {}
+
   packages/harness-ui-subagent-compact: {}
 
 packages:
