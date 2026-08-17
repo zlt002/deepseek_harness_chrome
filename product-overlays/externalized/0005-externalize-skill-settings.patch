@@ -176,6 +176,30 @@ index 2ba1aef6a6..0000000000
 -    "@deepseek-ai/dsh-skill": "workspace:^"
 -  }
 -}
+diff --git a/tsconfig.client.json b/tsconfig.client.json
+index 7b2fb60589..e7a4ec76f1 100644
+--- a/tsconfig.client.json
++++ b/tsconfig.client.json
+@@ -92,7 +92,6 @@
+     { "path": "./packages/client/ui-settings-general" },
+     { "path": "./packages/client/ui-settings-models" },
+     { "path": "./packages/client/ui-settings-plugin-inventory" },
+-    { "path": "./packages/client/ui-skill-settings" },
+     { "path": "./packages/client/locale" },
+     { "path": "./packages/client/web" },
+     { "path": "./apps/web" }
+diff --git a/tsconfig.host.json b/tsconfig.host.json
+index 8e85283d26..459036247a 100644
+--- a/tsconfig.host.json
++++ b/tsconfig.host.json
+@@ -180,7 +180,6 @@
+     { "path": "./packages/core/tools" },
+     { "path": "./packages/core/agent-tool-presentation" },
+     { "path": "./packages/skill/skill" },
+-    { "path": "./packages/skill/skill-settings" },
+     { "path": "./packages/skill/skill-badge" },
+     { "path": "./packages/skill/skill-filesystem" },
+     { "path": "./packages/skill/tool-skill" },
 diff --git a/packages/skill/skill-settings/src/index.ts b/packages/skill/skill-settings/src/index.ts
 deleted file mode 100644
 index 4c251de1f5..0000000000
