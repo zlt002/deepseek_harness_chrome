@@ -1,0 +1,46 @@
+diff --git a/packages/host/apiproxy/src/api-proxy.ts b/packages/host/apiproxy/src/api-proxy.ts
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -1954,7 +1954,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+     const exposed = modelProviderNamespaces()
+     for (const ns of WEB_SETTINGS_NAMESPACES) exposed.add(ns)
+     for (const ns of PRODUCT_SETTINGS_NAMESPACES) exposed.add(ns)
+-    for (const descriptor of ctx.settings.describe({ redactSecrets: true })) {
++    const settings = ctx.get('settings')
++    if (settings === undefined) return exposed
++    for (const descriptor of settings.describe({ redactSecrets: true })) {
+       if (descriptor.configurationExposed) exposed.add(String(descriptor.ns))
+     }
+     return exposed
+diff --git a/packages/host/apiproxy/tests/api-proxy-config.spec.ts b/packages/host/apiproxy/tests/api-proxy-config.spec.ts
+--- a/packages/host/apiproxy/tests/api-proxy-config.spec.ts
++++ b/packages/host/apiproxy/tests/api-proxy-config.spec.ts
+@@ -235,6 +235,28 @@ function forwardedSettings(ns: string): HostFrame {
+ }
+ 
+ describe('settings domain', () => {
++  it('reads the optional settings provider from a plugin context without requiring injection', async () => {
++    const ctx = await harness()
++    ctx.settings.register(settingsNamespace('ui-onboarding'), z.object({ welcomeNoticeVersion: z.string() }))
++    let api!: ReturnType<typeof createApiProxy>
++    const fiber = ctx.plugin(Object.assign((gatewayCtx: Context) => {
++      api = createApiProxy(gatewayCtx, DEFAULTS)
++    }, { inject: ['sessions', 'agents', 'llm', 'userQuestions', 'workspaceRegistry'] }))
++    await fiber.await()
++
++    const described = expectOk(await api.settings.describe(request({})))
++    expect(described.writable).toBe(true)
++    expect(described.namespaces.map(view => view.ns)).toContain('ui-onboarding')
++
++    const mutated = expectOk(await api.settings.mutate(request({
++      ns: 'ui-onboarding',
++      ops: [{ op: 'set', path: ['welcomeNoticeVersion'], value: 'accepted' }],
++    })))
++    expect(mutated.value).toEqual({ welcomeNoticeVersion: 'accepted' })
++
++    await fiber.dispose()
++  })
++
+   it('reports an actionable error when no settings provider is mounted', async () => {
+     const ctx = await harness({ settings: false })
+     const api = createApiProxy(ctx, DEFAULTS)

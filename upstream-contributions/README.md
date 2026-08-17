@@ -13,6 +13,9 @@ catalog wire and lets any settings owner explicitly opt its namespace into
 configuration-client transports with `configurationExposed`; it contains no
 product namespace or product UI.
 
+`0004` keeps that optional settings surface optional inside the ApiProxy plugin
+fiber, and adds a runtime-context regression test for describe and mutate.
+
 Verify against the pinned upstream commit:
 
 ```sh
