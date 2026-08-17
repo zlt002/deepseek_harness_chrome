@@ -1,135 +1,128 @@
-### Domain docs
+### 领域文档
 
-This is a single-context repo using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+本仓库是单上下文仓库，使用根目录 `CONTEXT.md` 与 `docs/adr/`。详见 `docs/agents/domain.md`。
 
-## Development practices
+## 开发实践
 
-These practices are mandatory for all AI-driven development in this repository.
-They encode verified lessons from real debugging sessions in this codebase.
+以下实践对本仓库内所有 AI 驱动的开发都是强制性的。
+它们来自本代码库真实调试会话中验证过的教训。
 
-### 1. Layer awareness before editing
+### 1. 改代码前先分清层
 
-This repo has four code layers with different reload paths. Identify the layer
-before changing anything:
+本仓库有四个代码层，各层的生效方式不同。改任何东西之前，先确认你改的是哪一层：
 
-| Layer | Location | How changes take effect |
+| 层 | 位置 | 改动如何生效 |
 | --- | --- | --- |
-| Extension UI | `apps/chrome-extension` | WXT HMR (automatic) |
-| Native Server | `apps/native-server` | Re-register + restart host (`pnpm dev:watch`, or `pnpm dev:restart -- --skip-harness-build`) |
-| Product plugins | `packages/*` | `pnpm dev:refresh -- --fast` |
-| Harness base / seam patches | `upstream-contributions/`, materialized tree | `pnpm dev:refresh` (slowest) |
+| 扩展 UI | `apps/chrome-extension` | WXT HMR（自动） |
+| Native Server | `apps/native-server` | 重新注册 + 重启 host（`pnpm dev:watch`，或 `pnpm dev:restart -- --skip-harness-build`） |
+| 产品插件 | `packages/*` | `pnpm dev:refresh -- --fast` |
+| Harness 基座 / seam 补丁 | `upstream-contributions/`、物化产物树 | `pnpm dev:refresh`（最慢） |
 
-The registered Native Host runs from an installed copy under
-`~/Library/Application Support/DeepSeekHarness/`, not from the source tree.
-Editing `apps/native-server` without re-registering has no effect on the
-running browser session. "I changed it but nothing happened" almost always
-means the wrong reload path for the layer.
+已注册的 Native Host 运行在
+`~/Library/Application Support/DeepSeekHarness/` 下的安装副本里，不是源码树。
+改了 `apps/native-server` 但不重新注册，对正在运行的浏览器会话毫无作用。
+"我改了怎么没反应"几乎总是因为走错了该层的生效路径。
 
-Daily workflow by layer (measured on this machine; full refresh is dominated
-by the deliberate from-scratch materialize: fresh clone + patches + full
-rebuild of all 54 upstream packages, ~3-4 min total; product plugins
-themselves build in ~2 s):
+日常分层工作流（耗时为本机实测；全量 refresh 的大头是刻意的从零物化：
+全新克隆 + 补丁 + 全量重建全部 54 个上游包，共约 3-4 分钟；
+产品插件本身构建只要约 2 秒）：
 
-- Extension UI + Native Server (the daily hot loop): run `pnpm dev` and
-  `pnpm dev:watch` in two terminals. Saving a file takes effect in seconds;
-  the sidepanel reconnects to a restarted Native Host automatically.
-- Product plugins (`packages/*`): `pnpm dev:refresh -- --fast` (~20 s; skips
-  re-materializing the Harness base).
-- Full `pnpm dev:refresh` is only for: seam patch changes, upstream submodule
-  moves, or a corrupted/missing `.generated/harness-product` tree. Do not run
-  it as part of the daily loop. If the sidepanel reports
-  "DeepSeek Harness CLI was not found" right after a refresh, it was a
-  rebuild-window race: the tree completes only in the final seconds, so wait
-  for the refresh to finish and reopen the sidepanel.
+- 扩展 UI + Native Server（日常热循环）：开两个终端分别跑 `pnpm dev` 和
+  `pnpm dev:watch`。保存文件秒级生效；侧边栏会自动重连重启后的 Native Host。
+- 产品插件（`packages/*`）：`pnpm dev:refresh -- --fast`（约 20 秒；
+  跳过 Harness 基座的重新物化）。
+- 完整 `pnpm dev:refresh` 只用于：seam 补丁变更、上游 submodule 升级、
+  或 `.generated/harness-product` 产物树损坏/缺失。不要把它纳入日常循环。
+  如果刷新后侧边栏立刻报 "DeepSeek Harness CLI was not found"，
+  那是重建窗口期的竞态：产物树在最后几秒才完成，等刷新跑完再重开侧边栏即可。
 
-### 1b. Plugin development is the main customization path
+### 1b. 插件开发是主要的定制路径
 
-Most product work is customizing Harness by writing out-of-tree plugins under
-`packages/` — this is the primary development activity, not an edge case.
-Treat the official upstream docs as the authoritative how-to source; do not
-guess Cordis/DSH APIs from memory:
+大部分产品工作就是通过在 `packages/` 下编写外挂（out-of-tree）插件来定制
+Harness —— 这是主要开发活动，不是边缘场景。
+以官方上游文档为权威教程来源；不要凭记忆猜 Cordis/DSH API：
 
-- Read `upstream/deepseek-harness/docs/cookbook/extension-cookbook.zh.md`
-  first for the plugin archetypes (tool plugins, hook plugins, UI plugins).
-- Tool plugins: `upstream/deepseek-harness/docs/cookbook/adding-a-tool.md`.
-- UI plugins / conversation nodes:
-  `upstream/deepseek-harness/docs/cookbook/adding-a-conversation-node.md`.
-- Package structure checklist:
-  `upstream/deepseek-harness/docs/cookbook/adding-a-package.md`.
-- Cordis primer and API reference live under `upstream/deepseek-harness/docs/`
-  (`cordis-primer.zh.md`, `cordis-api/`).
+- 先读 `upstream/deepseek-harness/docs/cookbook/extension-cookbook.zh.md`，
+  了解插件原型（工具插件、钩子插件、UI 插件）。
+- 工具插件：`upstream/deepseek-harness/docs/cookbook/adding-a-tool.md`。
+- UI 插件 / 会话节点：
+  `upstream/deepseek-harness/docs/cookbook/adding-a-conversation-node.md`。
+- 包结构清单：
+  `upstream/deepseek-harness/docs/cookbook/adding-a-package.md`。
+- Cordis 入门与 API 参考在 `upstream/deepseek-harness/docs/` 下
+  （`cordis-primer.zh.md`、`cordis-api/`）。
 
-Plugin authoring rules specific to this repo:
+本仓库特有的插件编写规则：
 
-- Copy an existing sibling plugin (e.g. `packages/harness-ui-browser-target`)
-  as the structural template: `src/` + `tsdown.config.ts` + `lib/` output +
-  `test/` with a package-contract test + `dsh.client.inject` declarations in
-  `package.json`.
-- New plugins must be registered in every plugin list or they will silently
-  not ship: `productPluginNames` in `scripts/register-native-host.mjs`, the
-  plugin list in `scripts/build-harness-client-plugins.mjs`, and the
-  `typecheck:plugins` chain in the root `package.json`.
-- Verify against the materialized tree (`.generated/harness-product`), never
-  against `upstream/` sources directly (see red lines).
-- A new UI plugin usually also needs a seam: check
-  `upstream-contributions/README.md` for the generic slot registry before
-  inventing ad-hoc DOM injection.
+- 照抄一个现有兄弟插件（如 `packages/harness-ui-browser-target`）作为结构
+  模板：`src/` + `tsdown.config.ts` + `lib/` 产物 + `test/` 包含包契约测试
+  + `package.json` 里的 `dsh.client.inject` 声明。
+- 新插件必须注册进每一份插件清单，否则会静默不生效：
+  `scripts/register-native-host.mjs` 里的 `productPluginNames`、
+  `scripts/build-harness-client-plugins.mjs` 里的插件列表、
+  以及根 `package.json` 里的 `typecheck:plugins` 链。
+- 对着物化产物树（`.generated/harness-product`）做校验，绝不直接对着
+  `upstream/` 源码（见红线）。
+- 新 UI 插件通常还需要一个 seam：先查
+  `upstream-contributions/README.md` 的通用插槽注册表，
+  不要自造临时 DOM 注入。
 
-### 2. Verification chain (run before every commit, in order)
+### 2. 验证链（每次提交前按顺序执行）
 
 ```sh
-pnpm verify:upstream        # submodule pinned commit + clean worktree
-pnpm typecheck              # extension types
-pnpm typecheck:plugins      # plugin types
-pnpm test                   # full regression suite
-pnpm build                  # build artifacts
+pnpm verify:upstream        # submodule 钉住的提交 + 干净工作树
+pnpm typecheck              # 扩展类型检查
+pnpm typecheck:plugins      # 插件类型检查
+pnpm test                   # 全量回归测试
+pnpm build                  # 构建产物
 ```
 
-Changed behavior requires a matching test. The suite is built from cross-layer
-contract tests; a behavior change without a test will be flagged in review.
+行为变更必须有配套测试。整套测试由跨层契约测试构成；
+没有测试的行为变更会在评审中被标记出来。
 
-### 3. Architecture red lines (ADR-enforced)
+### 3. 架构红线（ADR 强制）
 
-- Never modify `upstream/deepseek-harness`. `pnpm verify:upstream` is the CI
-  invariant; violations block merges.
-- Product behavior belongs in `packages/`. Only generic, product-neutral
-  seams missing from official Harness go into `upstream-contributions/` as
-  patches; patches must not contain product names.
-- Plugins must not import files under `upstream/deepseek-harness/packages/**/src`.
-  Public Service Definitions only.
-- Use the vocabulary of `CONTEXT.md` (Browser Target, not "active tab";
-  Verified Write, not "write succeeded"). See `docs/agents/domain.md`.
+- 绝不修改 `upstream/deepseek-harness`。`pnpm verify:upstream` 是 CI
+  不变量；违反者阻塞合并。
+- 产品行为归 `packages/`。只有官方 Harness 缺失的、通用且产品中立的
+  seam 才能以补丁形式进 `upstream-contributions/`；
+  补丁里不得出现产品名。
+- 插件不得 import `upstream/deepseek-harness/packages/**/src` 下的文件。
+  只能用公开的 Service Definitions。
+- 使用 `CONTEXT.md` 的词汇（Browser Target，不是"当前标签页"；
+  Verified Write，不是"写入成功"）。见 `docs/agents/domain.md`。
 
-### 4. Connector rules
+### 4. Connector 规则
 
-- Errors must stay transparent end to end. Never replace a specific error
-  with a generic message; downstream models cannot recover information they
-  never receive. If a failure is fast (~20 ms), the real cause exists in the
-  Extension reply; if it is slow (~15 s), it is a pipe timeout.
-- Verified Write is mandatory for mutations: read, verify fingerprint, write,
-  read back. No step may be skipped (ADR-0004, ADR-0006).
-- After changing `apps/native-server`, sync the installed host and stop old
-  host processes before browser verification. Reopen the sidepanel to start
-  the new code.
+- 错误必须端到端透明。绝不用泛化消息替换具体错误；
+  下游模型无法恢复它从未收到的信息。如果失败是快的（约 20 毫秒），
+  真实原因在 Extension 的回复里；如果是慢的（约 15 秒），
+  就是管道超时。
+- 变更类操作必须走 Verified Write：读、核指纹、写、回读。
+  一步都不能省（ADR-0004、ADR-0006）。
+- 改完 `apps/native-server` 后，先同步安装副本并停掉旧 host 进程，
+  再做浏览器验证。重开侧边栏即启动新代码。
 
-### 5. Debugging practices
+### 5. 调试实践
 
-- Register the Native Host with `DSH_NATIVE_LOG=/tmp/deepseek-harness-native-host.log`
-  for frame-level diagnostics (already redacted).
-- For suspected behavior bugs, write a self-contained reproduction script under
-  `output/repro-*.mjs` that instantiates `BrowserConnector` / `NativeHost`
-  directly (no Chrome needed). Existing scripts in `output/` are templates.
-- Timeout errors vs instant errors distinguish pipe timeouts from Extension
-  failures; check tool-call latency before guessing causes.
+- 注册 Native Host 时带上
+  `DSH_NATIVE_LOG=/tmp/deepseek-harness-native-host.log`
+  可获得帧级诊断日志（已脱敏）。
+- 疑似行为 bug 时，在 `output/repro-*.mjs` 下写一个自包含复现脚本，
+  直接实例化 `BrowserConnector` / `NativeHost`（不需要 Chrome）。
+  `output/` 里的现有脚本可作模板。
+- 超时错误与瞬时错误的区分，等价于管道超时与 Extension 失败的区分；
+  先查工具调用耗时再猜原因。
 
-### 6. Release and upstream upgrades
+### 6. 发布与上游升级
 
-- Mac package: `pnpm release:mac-production-poc`.
-- Windows runtime must be materialized on a Windows x64 build host
-  (`pnpm materialize:windows-harness-runtime`); never copy native deps from
-  macOS. CI runs install, registration, upgrade, rollback, and user-data
-  preservation checks.
-- Upgrading upstream: move the pinned submodule commit only, then
-  `pnpm verify:upstream`, `pnpm build:harness-product`, `pnpm typecheck:plugins`,
-  `pnpm test`, `pnpm build`. Update `upstream-contributions/*.patch` on
-  conflict; never fix patches inside the submodule.
+- Mac 安装包：`pnpm release:mac-production-poc`。
+- Windows 运行时必须在 Windows x64 构建机上物化
+  （`pnpm materialize:windows-harness-runtime`）；
+  绝不从 macOS 拷贝原生依赖。CI 会跑安装、注册、升级、回滚
+  与用户数据保全检查。
+- 升级上游：只移动 submodule 钉住的提交，然后依次
+  `pnpm verify:upstream`、`pnpm build:harness-product`、
+  `pnpm typecheck:plugins`、`pnpm test`、`pnpm build`。
+  冲突时更新 `upstream-contributions/*.patch`；
+  绝不在 submodule 内部修补丁。

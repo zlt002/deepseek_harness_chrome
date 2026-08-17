@@ -16,7 +16,11 @@ test('background forwards selection_insert to WebEdit and rejects unknown light-
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } }, runtime: { connectNative: () => port, lastError: undefined, onMessage: { addListener: (listener) => { runtimeListener = listener } }, sendMessage: async () => {} },
     storage: { session: { get: async () => ({ harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }), set: async () => {} } }, windows: { getLastFocused: async () => ({ id: 7 }), onFocusChanged: { addListener: () => {} } },
-    tabs: { query: async () => [{ id: 42, windowId: 7, url: target.url, title: '文档' }], get: async () => ({ id: 42, windowId: 7, url: target.url, title: '文档' }), sendMessage: async (tabId, message, options) => { sent.push({ tabId, message, options }); return { ok: true, result: { status: 'ok', resource, document: {} } } }, onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    tabs: { query: async () => [{ id: 42, windowId: 7, url: target.url, title: '文档' }], get: async () => ({ id: 42, windowId: 7, url: target.url, title: '文档' }), sendMessage: async (tabId, message, options) => {
+      sent.push({ tabId, message, options })
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
+      return { ok: true, result: { status: 'ok', resource, document: {} } }
+    }, onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
     webNavigation: { getAllFrames: async () => [{ frameId: 0, url: target.url }, { frameId: 17, url: 'https://webedit.midea.com/edit/abc' }] }, sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()
@@ -27,7 +31,7 @@ test('background forwards selection_insert to WebEdit and rejects unknown light-
     listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'selection-1', runId: 'light-document-background-run', generation: 'g-1', browserTarget: target, tool: 'office_document', action: 'write', resource, operation: 'selection_insert', payload }))
     listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'unknown-1', runId: 'light-document-background-run', generation: 'g-1', browserTarget: target, tool: 'office_document', action: 'inspect_write', operation: 'unknown_operation', payload }))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    assert.deepEqual(sent, [{ tabId: 42, message: { type: 'office-document/v1', action: 'write', resource, operation: 'selection_insert', payload }, options: { frameId: 17 } }])
+    assert.deepEqual(sent.filter((entry) => entry.message.action !== 'probe'), [{ tabId: 42, message: { type: 'office-document/v1', action: 'write', resource, operation: 'selection_insert', payload }, options: { frameId: 17 } }])
     assert.equal(nativeMessages.filter((message) => message.type === 'connector_response').length, 1)
   } finally { delete globalThis.chrome; delete globalThis.defineBackground }
 })

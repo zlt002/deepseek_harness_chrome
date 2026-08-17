@@ -28,6 +28,7 @@ test('routes office_read_range only to the WebEdit iframe in the exact bound Bro
     tabs: {
       query: async () => [tab], get: async () => tab,
       sendMessage: async (tabId, message, options) => {
+        if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
         sentToFrames.push({ tabId, message, options })
         return { ok: true, result: { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Budget.xlsx', sheetName: 'Summary', fingerprint: 'webedit:budget-summary' }, range: { address: 'Summary!A1:B1', rowCount: 1, columnCount: 2, rows: [{ index: 1, cells: [{ address: 'A1', row: 1, column: 1, text: 'A', value: 'A', formula: null }, { address: 'B1', row: 1, column: 2, text: '2', value: 2, formula: null }] }] } } }
       },

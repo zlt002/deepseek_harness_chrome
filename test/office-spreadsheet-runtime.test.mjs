@@ -57,7 +57,7 @@ function fakeApp() {
     return item
   }
   const sheet = {
-    Name: 'Sheet1', getName: () => 'Sheet1', PageSetup: pageSetup, getRowOutlineLevel: (index) => rowOutline.get(index) ?? 0, getColOutlineLevel: (index) => columnOutline.get(index) ?? 0, getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); const rowMatch = String(address ?? '').match(/^(\d+):(\d+)$/); const columnMatch = String(address ?? '').match(/^([A-Z]+):([A-Z]+)$/i); if (rowMatch) { const from = Number(rowMatch[1]); const to = Number(rowMatch[2]); const member = dimension('row', from, to); return Object.assign(Object.create(range), { EntireRow: member, Rows: Object.assign(member, { Group: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, (rowOutline.get(index) ?? 0) + 1) }, Ungroup: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, Math.max(0, (rowOutline.get(index) ?? 0) - 1)) } }) }) }; if (columnMatch) { const index = (name) => name.toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); const from = index(columnMatch[1]); const to = index(columnMatch[2]); const member = dimension('column', from, to); return Object.assign(Object.create(range), { EntireColumn: member, Columns: Object.assign(member, { Group: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, (columnOutline.get(item) ?? 0) + 1) }, Ungroup: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, Math.max(0, (columnOutline.get(item) ?? 0) - 1)) } }) }) }; return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
+    Name: 'Sheet1', getName: () => 'Sheet1', getLastRow: () => 2, getLastColumn: () => 2, PageSetup: pageSetup, getRowOutlineLevel: (index) => rowOutline.get(index) ?? 0, getColOutlineLevel: (index) => columnOutline.get(index) ?? 0, getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); const rowMatch = String(address ?? '').match(/^(\d+):(\d+)$/); const columnMatch = String(address ?? '').match(/^([A-Z]+):([A-Z]+)$/i); if (rowMatch) { const from = Number(rowMatch[1]); const to = Number(rowMatch[2]); const member = dimension('row', from, to); return Object.assign(Object.create(range), { EntireRow: member, Rows: Object.assign(member, { Group: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, (rowOutline.get(index) ?? 0) + 1) }, Ungroup: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, Math.max(0, (rowOutline.get(index) ?? 0) - 1)) } }) }) }; if (columnMatch) { const index = (name) => name.toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); const from = index(columnMatch[1]); const to = index(columnMatch[2]); const member = dimension('column', from, to); return Object.assign(Object.create(range), { EntireColumn: member, Columns: Object.assign(member, { Group: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, (columnOutline.get(item) ?? 0) + 1) }, Ungroup: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, Math.max(0, (columnOutline.get(item) ?? 0) - 1)) } }) }) }; return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
     getPivotTables: () => pivots,
     addChart: (_style, type, _range, callback) => { const chart = { Id: charts.Count + 1, Name: `Chart ${charts.Count + 1}`, Type: type }; charts.items.push(chart); charts.Count += 1; callback(chart, 'ok') },
     ExportImage: () => ({ result: 'ok', data: { size: 3, type: 'image/png', arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } }),
@@ -631,4 +631,30 @@ test('every unverified AccrUI spreadsheet family fails closed before mutation', 
     assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
   }
   assert.equal(mutations, 0)
+})
+
+test('probe answers with the frame identity so the background can prefer real documents', async () => {
+  const run = await runtimeWith(fakeApp())
+  const probed = await run({ action: 'probe' })
+  assert.equal(probed.ok, true)
+  assert.equal(probed.result.status, 'probe')
+  assert.equal(probed.result.ready, true)
+  // Field-wise because the identity object is created inside the VM realm.
+  assert.equal(probed.result.identity.path, '/sheet/1')
+  assert.equal(probed.result.identity.workbookName, 'Budget.xlsx')
+  assert.equal(probed.result.identity.sheetName, 'Sheet1')
+  assert.equal(probed.result.identity.hasContent, true)
+})
+
+test('probe reports a blank preloaded editor as unnamed with unknown content', async () => {
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1' }
+  const workbook = { getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
+  const probed = await run({ action: 'probe' })
+  assert.equal(probed.ok, true)
+  assert.equal(probed.result.ready, true)
+  assert.equal(probed.result.identity.path, '/sheet/1')
+  assert.equal(probed.result.identity.workbookName, null)
+  assert.equal(probed.result.identity.sheetName, 'Sheet1')
+  assert.equal(probed.result.identity.hasContent, null)
 })

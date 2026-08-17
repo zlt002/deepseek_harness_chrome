@@ -1187,6 +1187,118 @@ function officeReadFailure(error: unknown): OfficeReadFailure {
   }
 }
 
+const OFFICE_CONTENT_SCRIPT_FILES = ['content-scripts/office-read.js']
+
+function isMissingReceivingEnd(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('Receiving end does not exist')
+}
+
+function probeMessageFor(message: Record<string, unknown>): Record<string, unknown> {
+  const type = String(message.type)
+  if (type === 'office-spreadsheet/v1') return { type, action: 'probe' }
+  if (type === 'office-document/v1') return { type, action: 'probe' }
+  if (type === 'office-read-range/v1') return { type, action: 'probe' }
+  return { type: 'office-read-range/v1', action: 'probe' }
+}
+
+function probeSucceeded(reply: { ok?: unknown; result?: unknown } | undefined): boolean {
+  if (reply?.ok !== true) return false
+  const result = reply.result as { status?: unknown; ready?: unknown } | undefined
+  return result?.status === 'probe' && result?.ready === true
+}
+
+const OFFICE_PROBE_WAIT_MS_DEFAULT = 8_000
+const OFFICE_PROBE_RETRY_MS = 250
+
+/**
+ * Chrome never re-injects content scripts into already-loaded frames, so every
+ * extension reload orphans WebEdit iframes in pages opened before it: the frame
+ * still exists but nobody answers. On that exact failure, re-inject the
+ * registered content script into the frame once and retry, instead of failing
+ * until the user manually refreshes the page.
+ *
+ * A doc.midea.com page can host several webedit.midea.com iframes (ad,
+ * footer, hidden bridges) whose editor never finishes mounting — WebEdit can
+ * reset iframes without notice, so getAllFrames order is not stable. Like
+ * accr-ui's MCP-server probe, ask every candidate frame whether its editor
+ * runtime is ready, then talk to the ready one instead of the first match.
+ *
+ * Editor boot is not instant: the in-frame runtimes themselves poll for the
+ * editor global for up to 8s, and accr-ui budgets 30s. A single instant probe
+ * would permanently skip every still-booting frame, so keep sweeping all
+ * candidates within the same 8s budget before declaring none ready. The final
+ * error names the frame count so "no iframe at all" and "iframes exist but no
+ * editor inside" stay distinguishable downstream.
+ *
+ * Several frames can be ready at once (a preloaded blank editor beside the
+ * user's real document), so each sweep collects every ready candidate and its
+ * probe identity, then picks by framePreference below instead of the first
+ * match.
+ *
+ * Returns the frame that actually answered so callers can verify that exact
+ * frame afterwards.
+ */
+type ProbeIdentity = { path?: unknown; workbookName?: unknown; sheetName?: unknown; hasContent?: unknown }
+
+function probeIdentityOf(reply: { ok?: unknown; result?: unknown } | undefined): ProbeIdentity | undefined {
+  const identity = (reply?.result as { status?: unknown; identity?: unknown } | undefined)?.identity
+  return identity && typeof identity === 'object' && !Array.isArray(identity) ? identity as ProbeIdentity : undefined
+}
+
+/**
+ * Rank a ready frame for the "which document did the user mean" choice.
+ * A doc.midea.com page can preload a blank editor iframe (workbookName null,
+ * fresh Sheet1, nothing typed) beside the user's real document, so a blind
+ * "first ready frame wins" reads the wrong spreadsheet and every cell comes
+ * back null. Prefer frames that prove content, then named workbooks; only
+ * fall back to iteration order when nothing better distinguishes them.
+ * Lower rank wins; ties keep getAllFrames order.
+ */
+function framePreference(identity: ProbeIdentity | undefined): number {
+  if (identity?.hasContent === true) return 0
+  if (typeof identity?.workbookName === 'string' && identity.workbookName.length > 0) return 1
+  return 2
+}
+
+async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.GetAllFrameResultDetails[], message: Record<string, unknown>): Promise<{ reply: { ok?: unknown; result?: unknown; error?: unknown } | undefined; frame: chrome.webNavigation.GetAllFrameResultDetails }> {
+  const configuredWaitMs = Number((globalThis as typeof globalThis & { __DSH_OFFICE_PROBE_WAIT_MS?: unknown }).__DSH_OFFICE_PROBE_WAIT_MS)
+  const waitBudgetMs = Number.isFinite(configuredWaitMs) && configuredWaitMs >= 0 ? configuredWaitMs : OFFICE_PROBE_WAIT_MS_DEFAULT
+  const deadline = Date.now() + waitBudgetMs
+  let lastMissingReceiver: unknown
+  const healedFrameIds = new Set<number>()
+  for (;;) {
+    const readyCandidates: Array<{ frame: chrome.webNavigation.GetAllFrameResultDetails; identity: ProbeIdentity | undefined }> = []
+    for (const frame of frames) {
+      let probeReply: { ok?: unknown; result?: unknown; error?: unknown } | undefined
+      try {
+        probeReply = await chrome.tabs.sendMessage(tabId, probeMessageFor(message), { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+      } catch (error) {
+        if (!isMissingReceivingEnd(error)) throw error
+        if (healedFrameIds.has(frame.frameId)) { lastMissingReceiver = error; continue }
+        healedFrameIds.add(frame.frameId)
+        try {
+          await chrome.scripting.executeScript({ target: { tabId, frameIds: [frame.frameId] }, files: OFFICE_CONTENT_SCRIPT_FILES })
+          probeReply = await chrome.tabs.sendMessage(tabId, probeMessageFor(message), { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+        } catch (retryError) {
+          if (!isMissingReceivingEnd(retryError)) throw retryError
+          lastMissingReceiver = retryError
+          continue
+        }
+      }
+      if (probeSucceeded(probeReply)) readyCandidates.push({ frame, identity: probeIdentityOf(probeReply) })
+    }
+    if (readyCandidates.length > 0) {
+      const chosen = readyCandidates.reduce((best, candidate) => framePreference(candidate.identity) < framePreference(best.identity) ? candidate : best)
+      const reply = await chrome.tabs.sendMessage(tabId, message, { frameId: chosen.frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+      return { reply, frame: chosen.frame }
+    }
+    if (Date.now() >= deadline) break
+    await new Promise((resolve) => setTimeout(resolve, Math.min(OFFICE_PROBE_RETRY_MS, Math.max(0, deadline - Date.now()))))
+  }
+  if (lastMissingReceiver !== undefined) throw lastMissingReceiver
+  throw { code: 'unsupported', message: `The bound Browser Target has ${frames.length} WebEdit iframe(s), but none exposed a ready editor runtime within ${Math.round(waitBudgetMs / 100) / 10}s.` } satisfies OfficeReadFailure
+}
+
 async function readOfficeRange(request: OfficeReadRangeRequest): Promise<Record<string, unknown>> {
   const binding = boundBrowserTargets.get(request.runId)
   if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) {
@@ -1196,13 +1308,11 @@ async function readOfficeRange(request: OfficeReadRangeRequest): Promise<Record<
   if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
     throw { code: 'navigation', message: 'The trusted Browser Target navigated before the range could be read.' } satisfies OfficeReadFailure
   }
-  const frames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-  const frame = frames.find((candidate) => {
-    try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false }
-  })
-  if (frame === undefined) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
+  const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
+    .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+  if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
   try {
-    const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, { type: 'office-read-range/v1', range: request.range }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+    const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, { type: 'office-read-range/v1', range: request.range })
     if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while reading.' }
     const latestFrames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
     if (!latestFrames.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) {
@@ -1236,18 +1346,16 @@ async function readOfficeDocument(request: OfficeDocumentRequest): Promise<Recor
   if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
     throw { code: 'navigation', message: 'The trusted Browser Target navigated before the light document could be read.' } satisfies OfficeReadFailure
   }
-  const frames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-  const frame = frames.find((candidate) => {
-    try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false }
-  })
-  if (frame === undefined) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
+  const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
+    .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+  if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
   try {
-    const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, {
+    const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, {
       type: 'office-document/v1', action: request.action,
       ...(request.offset === undefined ? {} : { offset: request.offset }), ...(request.limit === undefined ? {} : { limit: request.limit }),
       ...(request.query === undefined ? {} : { query: request.query }), ...(request.operation === undefined ? {} : { operation: request.operation }),
       ...(request.payload === undefined ? {} : { payload: request.payload }), ...(request.resource === undefined ? {} : { resource: request.resource }),
-    }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+    })
     if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while handling the light document.' }
     const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
     if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) {
@@ -1272,14 +1380,14 @@ async function readOfficeSpreadsheet(request: OfficeSpreadsheetRequest): Promise
   if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) throw { code: 'navigation', message: 'The trusted Browser Target changed before the spreadsheet operation.' } satisfies OfficeReadFailure
   const tab = await chrome.tabs.get(request.browserTarget.tabId)
   if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) throw { code: 'navigation', message: 'The trusted Browser Target navigated before the spreadsheet operation.' } satisfies OfficeReadFailure
-  const frames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-  const frame = frames.find((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
-  if (frame === undefined) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
+  const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
+    .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+  if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
   try {
-    const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, {
+    const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, {
       type: 'office-spreadsheet/v1', action: request.action,
       ...(request.range === undefined ? {} : { range: request.range }), ...(request.axis === undefined ? {} : { axis: request.axis }), ...(request.kind === undefined ? {} : { kind: request.kind }), ...(request.sheetName === undefined ? {} : { sheetName: request.sheetName }), ...(request.query === undefined ? {} : { query: request.query }), ...(request.matchCase === undefined ? {} : { matchCase: request.matchCase }), ...(request.matchEntireCell === undefined ? {} : { matchEntireCell: request.matchEntireCell }), ...(request.searchBy === undefined ? {} : { searchBy: request.searchBy }), ...(request.offset === undefined ? {} : { offset: request.offset }), ...(request.limit === undefined ? {} : { limit: request.limit }), ...(request.resource === undefined ? {} : { resource: request.resource }), ...(request.operation === undefined ? {} : { operation: request.operation }), ...(request.payload === undefined ? {} : { payload: request.payload }), ...(request.precondition === undefined ? {} : { precondition: request.precondition }),
-    }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+    })
     if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while handling the spreadsheet.' }
     const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
     if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while handling the spreadsheet.' } satisfies OfficeReadFailure
@@ -1323,11 +1431,11 @@ async function writeOfficeRange(request: OfficeWriteRangeRequest): Promise<Recor
     if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
       throw { code: 'navigation', message: 'The trusted Browser Target navigated before the write could start.' } satisfies OfficeReadFailure
     }
-    const frames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-    const frame = frames.find((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
-    if (frame === undefined) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
+    const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
+      .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+    if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
     try {
-      const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, { type: 'office-write-range/v1', range: request.range, values: request.values, resource: request.resource }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+      const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, { type: 'office-write-range/v1', range: request.range, values: request.values, resource: request.resource })
       if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while writing.' }
       const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
       if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while writing.' } satisfies OfficeReadFailure
@@ -1895,12 +2003,12 @@ async function readCreatedTeamKnowledgeItem(request: TeamKnowledgeItemRequest, i
   const frame = await teamKnowledgeItemFrame(request.browserTarget.tabId)
   if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
   if (item.kind === 'spreadsheet') {
-    const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, { type: 'office-read-range/v1', range: 'A1' }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+    const { reply } = await sendToWebEditFrame(request.browserTarget.tabId, [frame], { type: 'office-read-range/v1', range: 'A1' })
     const result = reply?.result as { status?: unknown; resource?: unknown; range?: unknown } | undefined
     if (reply?.ok !== true || result?.status !== 'ok' || !isOfficeResourceIdentity(result.resource)) throw new Error('team_knowledge_spreadsheet_identity_unavailable')
     return { resource: result.resource, range: result.range }
   }
-  const reply = await chrome.tabs.sendMessage(request.browserTarget.tabId, { type: 'office-document/v1', action: 'read', offset: 0, limit: 200 }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
+  const { reply } = await sendToWebEditFrame(request.browserTarget.tabId, [frame], { type: 'office-document/v1', action: 'read', offset: 0, limit: 200 })
   const result = reply?.result as { status?: unknown; resource?: unknown; document?: unknown } | undefined
   if (reply?.ok !== true || result?.status !== 'ok' || !isLightDocumentResourceIdentity(result.resource) || !result.document || typeof result.document !== 'object') throw new Error('team_knowledge_document_readback_unavailable')
   return { resource: result.resource, document: result.document }

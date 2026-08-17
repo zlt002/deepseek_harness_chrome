@@ -498,6 +498,41 @@ test('rejects an Extension response that does not satisfy the canonical office_g
   }
 })
 
+test('surfaces structured spreadsheet failures verbatim instead of no Connector result', async () => {
+  const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/sheet' }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response',
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        error: { code: 'invalid_range', message: 'a valid spreadsheet action is required' },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-sheet-error', target)
+  const endpoint = await connector.start()
+
+  try {
+    const failed = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_spreadsheet', arguments: { action: 'view' } } }),
+    })
+    assert.equal(failed.status, 200)
+    const body = await failed.json()
+    assert.equal(body.result.isError, true)
+    const parsed = JSON.parse(body.result.content[0].text)
+    assert.equal(parsed.code, 'invalid_range')
+    assert.equal(parsed.message, 'a valid spreadsheet action is required')
+    assert.ok(!body.result.content[0].text.includes('no Connector result'), 'a spreadsheet failure must never collapse into the generic message')
+  } finally {
+    await connector.stop()
+  }
+})
+
 test('surfaces the Extension error message for office tools instead of a generic reply', async () => {
   const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/error' }
   const connector = new BrowserConnector({

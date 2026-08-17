@@ -10,7 +10,8 @@ test('delivers light-document requests to the discovered WebEdit iframe instead 
     readFile(new URL('../apps/chrome-extension/public/office-light-document-runtime.js', import.meta.url), 'utf8'),
   ])
   assert.match(background, /type: 'office-document\/v1'/)
-  assert.match(background, /\{ frameId: frame\.frameId \}/)
+  assert.match(background, /sendToWebEditFrame\(request\.browserTarget\.tabId, frames/)
+  assert.match(background, /const OFFICE_CONTENT_SCRIPT_FILES = \['content-scripts\/office-read\.js'\]/)
   assert.match(background, /isOfficeDocumentRequest/)
   assert.match(content, /type === 'office-document\/v1'/)
   assert.match(content, /office-light-document-runtime\.js/)

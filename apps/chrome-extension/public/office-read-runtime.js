@@ -72,9 +72,13 @@
     if (JSON.stringify(observed) !== JSON.stringify(detail.values)) return fail('readback_mismatch', 'WebEdit readback differs from the requested values')
     return { ok: true, result: { status: 'verified_write', resource: after.result.resource, requested: { range: detail.range, values: detail.values }, observed: { range: detail.range, values: observed } } }
   }
+  // Instant readiness check for the background frame probe: no polling, no waiting.
+  const readyNow = () => !!(globalThis.APP ?? globalThis.WPSOpenApi?.Application)
   window.addEventListener(REQUEST, (event) => {
     const detail = event.detail
-    if (!detail || typeof detail.id !== 'string' || typeof detail.range !== 'string' || !['read', 'write'].includes(detail.action)) return
+    if (!detail || typeof detail.id !== 'string') return
+    if (detail.action === 'probe') { window.dispatchEvent(new CustomEvent(RESPONSE, { detail: { id: detail.id, ok: true, result: { status: 'probe', ready: readyNow(), identity: { path: location.pathname } } } })); return }
+    if (typeof detail.range !== 'string' || !['read', 'write'].includes(detail.action)) return
     const action = detail.action === 'write' ? write(detail) : run(detail.range)
     void action.then((payload) => window.dispatchEvent(new CustomEvent(RESPONSE, { detail: { id: detail.id, ...payload } }))).catch(() => window.dispatchEvent(new CustomEvent(RESPONSE, { detail: { id: detail.id, ...fail('runtime_error', 'WebEdit operation failed') } })))
   })

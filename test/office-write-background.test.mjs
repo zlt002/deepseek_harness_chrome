@@ -18,7 +18,12 @@ test('routes a fingerprint-bound office_write_range to the exact WebEdit frame a
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } }, runtime: { connectNative: () => port, lastError: undefined, onMessage: { addListener: (listener) => { runtimeListener = listener } }, sendMessage: async () => {} },
     storage: { session: { get: async () => ({ harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }), set: async () => {} } }, windows: { getLastFocused: async () => ({ id: 7 }), onFocusChanged: { addListener: () => {} } },
-    tabs: { query: async () => [tab], get: async () => tab, sendMessage: async (tabId, message, options) => { sent.push({ tabId, message, options }); if (sendCount++ === 0) await new Promise((resolve) => { releaseFirst = resolve }); return { ok: true, result: { status: 'verified_write', resource, requested: { range: 'Summary!A1:B1', values: [['Revenue', 42]] }, observed: { range: 'Summary!A1:B1', values: [['Revenue', 42]] } } } }, onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    tabs: { query: async () => [tab], get: async () => tab, sendMessage: async (tabId, message, options) => {
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
+      sent.push({ tabId, message, options })
+      if (sendCount++ === 0) await new Promise((resolve) => { releaseFirst = resolve })
+      return { ok: true, result: { status: 'verified_write', resource, requested: { range: 'Summary!A1:B1', values: [['Revenue', 42]] }, observed: { range: 'Summary!A1:B1', values: [['Revenue', 42]] } } }
+    }, onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
     webNavigation: { getAllFrames: async () => [{ frameId: 0, url: target.url }, { frameId: 17, url: 'https://webedit.midea.com/edit/abc' }] }, sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()

@@ -151,6 +151,7 @@ test('creates a child spreadsheet only when its default sheet identity can be re
       throw new Error(`unexpected function ${func.name}`)
     },
     sendMessage: async (_tabId, message) => {
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
       assert.deepEqual(message, { type: 'office-read-range/v1', range: 'A1' })
       return { ok: true, result: { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Child.xlsx', sheetName: 'Sheet1', fingerprint: 'sheet-1' }, range: { address: 'Sheet1!A1' } } }
     },
@@ -193,7 +194,7 @@ test('rejects a child spreadsheet when same-parent rediscovery reports the wrong
       if (func.name === 'createTeamDocInPage') return func({ bookId: parent.bookId, parentId: parent.parentId, name: 'Wrong type', kind: 'spreadsheet' })
       throw new Error(`unexpected function ${func.name}`)
     },
-    sendMessage: async () => { readbacks += 1; return { ok: true } },
+    sendMessage: async (_tabId, message) => { readbacks += 1; return message.action === 'probe' ? { ok: true, result: { status: 'probe', ready: true } } : { ok: true } },
   })
   try {
     const response = await harness.sendNative(itemRequest({ requestId: 'item-wrong-type', kind: 'spreadsheet', name: 'Wrong type', body: '' }))
@@ -216,7 +217,10 @@ test('does not verify a spreadsheet when the post-create frame reads back a ligh
       if (func.name === 'createTeamDocInPage') return { ok: true, catalogId: '9007199254740998', documentId: '9007199254740998', kind: 'spreadsheet', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740998?id=9007199254740998' }
       throw new Error(`unexpected function ${func.name}`)
     },
-    sendMessage: async () => ({ ok: true, result: { status: 'ok', resource: { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: 'Wrong page', fingerprint: 'doc-1' } } }),
+    sendMessage: async (_tabId, message) => {
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
+      return { ok: true, result: { status: 'ok', resource: { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: 'Wrong page', fingerprint: 'doc-1' } } }
+    },
   })
   try {
     const response = await harness.sendNative(itemRequest({ requestId: 'item-wrong-readback', kind: 'spreadsheet', name: 'Wrong page', body: '' }))

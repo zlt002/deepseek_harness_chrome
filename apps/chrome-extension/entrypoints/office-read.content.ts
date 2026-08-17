@@ -113,7 +113,7 @@ export default defineContentScript({
       if (!message || typeof message !== 'object') return false
       if ((message as { type?: unknown }).type === 'office-document/v1') {
         const input = message as { action?: unknown; offset?: unknown; limit?: unknown; query?: unknown; operation?: unknown; payload?: unknown; resource?: unknown }
-        if (!['read', 'search', 'selection', 'inspect_write', 'write'].includes(String(input.action))) {
+        if (!['read', 'search', 'selection', 'inspect_write', 'write', 'probe'].includes(String(input.action))) {
           sendResponse({ ok: false, error: { code: 'invalid_range', message: 'a valid light-document action is required' } }); return false
         }
         void loadDocumentRuntime().then(() => invokeDocumentRuntime({
@@ -129,7 +129,7 @@ export default defineContentScript({
       }
       if ((message as { type?: unknown }).type === 'office-spreadsheet/v1') {
         const input = message as { action?: unknown; range?: unknown; sheetName?: unknown; query?: unknown; matchCase?: unknown; matchEntireCell?: unknown; searchBy?: unknown; offset?: unknown; limit?: unknown; resource?: unknown; operation?: unknown; payload?: unknown }
-        if (!['context', 'range', 'search', 'sheets', 'capabilities', 'inspect_write', 'write'].includes(String(input.action))) {
+        if (!['context', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write', 'probe'].includes(String(input.action))) {
           sendResponse({ ok: false, error: { code: 'invalid_range', message: 'a valid spreadsheet action is required' } }); return false
         }
         void loadSpreadsheetRuntime().then(() => invokeSpreadsheetRuntime({
@@ -144,6 +144,12 @@ export default defineContentScript({
       }
       if (!['office-read-range/v1', 'office-write-range/v1'].includes(String((message as { type?: unknown }).type))) return false
       const input = message as { type: string; range?: unknown; values?: unknown; resource?: unknown }
+      if ((input as { action?: unknown }).action === 'probe') {
+        void invokeRuntime({ action: 'probe' }).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
+          sendResponse({ ok: false, error: { code: 'runtime_error', message: error instanceof Error ? error.message : 'WebEdit probe failed' } })
+        })
+        return true
+      }
       const range = input.range
       if (typeof range !== 'string') { sendResponse({ ok: false, error: { code: 'invalid_range', message: 'range is required' } }); return false }
       const action = input.type === 'office-write-range/v1' ? 'write' : 'read'

@@ -36,6 +36,12 @@
   const PRINT_PROPERTY = { printArea: 'PrintArea', printTitleRows: 'PrintTitleRows', printTitleColumns: 'PrintTitleColumns', orientation: 'Orientation', zoom: 'Zoom', fitToPagesWide: 'FitToPagesWide', fitToPagesTall: 'FitToPagesTall', centerHorizontally: 'CenterHorizontally', centerVertically: 'CenterVertically', leftMargin: 'LeftMargin', rightMargin: 'RightMargin', topMargin: 'TopMargin', bottomMargin: 'BottomMargin', headerMargin: 'HeaderMargin', footerMargin: 'FooterMargin' }
   const SPECIAL_CELL_TYPES = { blanks: 4, constants: 2, formulas: -4123, lastCell: 11, visible: 12 }
 
+  // Instant readiness check for the background frame probe: no polling, no waiting.
+  function readyNow() {
+    const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
+    return !!app
+  }
+
   async function appAndSheet(requestedSheet) {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
     if (!app) return { error: fail('unsupported', 'WebEdit spreadsheet runtime is unavailable') }
@@ -47,7 +53,21 @@
     const sheetName = await call(sheet, 'getName') ?? await property(sheet, 'Name') ?? requestedSheet ?? null
     return { app, workbook, sheet, resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: typeof workbookName === 'string' ? workbookName : null, sheetName: typeof sheetName === 'string' ? sheetName : null, fingerprint: resourceFingerprint(workbookName, sheetName) } }
   }
-  async function rangeFor(sheet, address) { return await call(sheet, 'getRange', [address]) ?? await call(sheet, 'Range', [address]) }
+  async function rangeFor(sheet, address) {
+    const bare = splitSheetPrefix(address).range
+    // accr-ui parity: the Midea APP runtime exposes sheet.getRange(address), but it
+    // ignores its argument and returns the entire worksheet. When the Midea-specific
+    // constructors are available, build an exact internal range from numeric bounds.
+    if (sheet && typeof sheet.createRANGE === 'function' && typeof sheet.createRange === 'function') {
+      const parsed = parseAddress(bare)
+      if (parsed) {
+        const core = await call(sheet, 'createRANGE', [parsed.rowFrom, parsed.rowTo, parsed.colFrom, parsed.colTo])
+        const exact = core ? await call(sheet, 'createRange', [core]) : null
+        if (exact) return exact
+      }
+    }
+    return await call(sheet, 'getRange', [bare]) ?? await call(sheet, 'Range', [address])
+  }
   async function viewSnapshot(resolved) {
     const activeWindow = await property(resolved.app, 'ActiveWindow') ?? await call(resolved.app, 'getActiveWindow'); const activeCell = await property(resolved.app, 'ActiveCell'); const activeSheet = await property(resolved.app, 'ActiveSheet')
     const sheetName = await call(activeSheet, 'getName') ?? await property(activeSheet, 'Name'); const row = Number(await property(activeCell, 'Row')); const column = Number(await property(activeCell, 'Column')); const freezePanes = await property(activeWindow, 'FreezePanes'); const splitRow = Number(await property(activeWindow, 'SplitRow')); const splitColumn = Number(await property(activeWindow, 'SplitColumn')); const zoom = Number(await property(activeWindow, 'Zoom')); const scrollRow = Number(await property(activeWindow, 'ScrollRow')); const scrollColumn = Number(await property(activeWindow, 'ScrollColumn') )
@@ -93,7 +113,7 @@
   function insideAddress(area, target) { return area.rowFrom >= target.rowFrom && area.rowTo <= target.rowTo && area.colFrom >= target.colFrom && area.colTo <= target.colTo }
   async function specialCells(resolved, request) {
     const requested = specialCellsRequest(request); if (!requested) return fail('invalid_range', 'special_cells requires a simple bounded range, supported kind, offset, and limit')
-    const input = await rangeSnapshot(resolved.sheet, request.range); if (input.error) return input.error
+    const input = await rangeSnapshot(resolved.sheet, request.range, { tolerateMissingFormulas: true }); if (input.error) return input.error
     if (!specialCellCandidateExists(input.snapshot, requested.kind)) return { ok: true, result: { status: 'ok', resource: resolved.resource, specialCells: { range: request.range, sheetName: resolved.resource.sheetName, kind: requested.kind, count: 0, areaCount: 0, offset: requested.offset, limit: requested.limit, returned: 0, hasMore: false, nextOffset: null, truncated: false, areas: [] } } }
     if (typeof input.range.SpecialCells !== 'function') return fail('unsupported', 'WebEdit does not expose Range.SpecialCells')
     let specialRange; try { specialRange = await resolve(input.range.SpecialCells(requested.type)) } catch { return fail('unsupported', 'WebEdit SpecialCells did not return a readable collection') }
@@ -169,15 +189,35 @@
     const levels = []; for (let index = target.from; index <= target.to; index += 1) { const level = await call(resolved.sheet, method, [index]); if (!Number.isInteger(level) || level < 0 || level > 8) return { supported: false }; levels.push(level) }
     return { supported: true, outline: { sheetName: resolved.resource.sheetName, range: target.range, axis: target.axis, levels } }
   }
-  async function rangeSnapshot(sheet, address) {
-    const range = await rangeFor(sheet, address)
+  async function rangeSnapshot(sheet, address, options = {}) {
+    const bare = splitSheetPrefix(address).range
+    const range = await rangeFor(sheet, bare)
     if (!range) return { error: fail('invalid_range', 'WebEdit could not resolve the requested range') }
-    const values = matrix(await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value'))
-    const formulas = matrix(await call(range, 'getFormula') ?? await property(range, 'Formula'))
+    let values = await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value')
+    if (values === undefined || values === null) {
+      // accr-ui parity: Midea runtimes expose bulk reads through getRangeContents()
+      // when the Excel-style value APIs return nothing for the exact range.
+      const contents = await call(range, 'getRangeContents')
+      const candidate = contents && typeof contents === 'object'
+        ? (contents.result && Array.isArray(contents.result.Values) ? contents.result.Values : Array.isArray(contents.Values) ? contents.Values : undefined)
+        : undefined
+      if (candidate !== undefined) values = candidate
+    }
+    const formulasSource = await call(range, 'getFormula') ?? await property(range, 'Formula')
+    const valuesMatrix = matrix(values)
+    const formulasMatrix = formulasSource === undefined || formulasSource === null ? undefined : matrix(formulasSource)
     const text = matrix(await call(range, 'getText') ?? await property(range, 'Text'))
-    if (!matrixMatchesAddress(values, address) || !matrixMatchesAddress(formulas, address)) return { error: fail('readback_mismatch', 'WebEdit returned a non-rectangular or wrong-sized values/formulas matrix') }
-    const rows = values.map((row, rowIndex) => row.map((cell, columnIndex) => ({ value: cell ?? null, text: valueOf(text, rowIndex, columnIndex) == null ? (cell == null ? '' : String(cell)) : String(valueOf(text, rowIndex, columnIndex)), formula: typeof valueOf(formulas, rowIndex, columnIndex) === 'string' ? valueOf(formulas, rowIndex, columnIndex) : null })))
-    return { range, snapshot: { address, values, formulas, text, rows } }
+    const parsed = parseAddress(bare)
+    const expected = parsed ? `${parsed.rowTo - parsed.rowFrom + 1}x${parsed.colTo - parsed.colFrom + 1}` : 'unbounded'
+    const shapeOf = (source) => Array.isArray(source) ? `${source.length}x${source[0] instanceof Array ? source[0].length : '?'}` : `non-matrix (${source === undefined ? 'undefined' : typeof source})`
+    if (!matrixMatchesAddress(valuesMatrix, bare)) return { error: fail('readback_mismatch', `WebEdit returned a wrong-sized values matrix for ${bare}: expected ${expected}, observed ${shapeOf(valuesMatrix)}`) }
+    let formulas = formulasMatrix
+    if (!matrixMatchesAddress(formulas, bare)) {
+      if (options.tolerateMissingFormulas !== true) return { error: fail('readback_mismatch', `WebEdit returned a wrong-sized formulas matrix for ${bare}: expected ${expected}, observed ${shapeOf(formulas)}`) }
+      formulas = valuesMatrix.map((row) => row.map(() => null))
+    }
+    const rows = valuesMatrix.map((row, rowIndex) => row.map((cell, columnIndex) => ({ value: cell ?? null, text: valueOf(text, rowIndex, columnIndex) == null ? (cell == null ? '' : String(cell)) : String(valueOf(text, rowIndex, columnIndex)), formula: typeof valueOf(formulas, rowIndex, columnIndex) === 'string' ? valueOf(formulas, rowIndex, columnIndex) : null })))
+    return { range, snapshot: { address: bare, values: valuesMatrix, formulas, text, rows } }
   }
   function hasProperty(target, name) { try { return !!target && name in Object(target) } catch { return false } }
   async function validationSnapshot(range) {
@@ -256,6 +296,12 @@
     if (!match) return null
     const rowFrom = Number(match[2]); const colFrom = columnNumber(match[1]); const rowTo = Number(match[4] ?? match[2]); const colTo = columnNumber(match[3] ?? match[1])
     return rowFrom > 0 && rowTo >= rowFrom && rowTo <= 1048576 && colFrom > 0 && colTo >= colFrom && colTo <= 16384 ? { rowFrom, rowTo, colFrom, colTo } : null
+  }
+  function splitSheetPrefix(address) {
+    if (typeof address !== 'string') return { sheetName: null, range: address }
+    const match = /^\s*(?:'((?:[^']|'')+)'|([^'!:\s]+))!\s*(.+?)\s*$/.exec(address)
+    if (!match) return { sheetName: null, range: address.trim() }
+    return { sheetName: (match[1] ?? match[2]).replace(/''/g, "'"), range: match[3] }
   }
   function requestedBatchWrite(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['sheetName', 'cells'].includes(key)) || !Array.isArray(payload.cells) || payload.cells.length < 1 || payload.cells.length > 500) return null
@@ -536,6 +582,11 @@
     return { ok: true, result: { status: 'ok', resource: resolved.resource, sheets: snapshot.sheets } }
   }
   async function read(request) {
+    // Strip an optional 'Sheet name!' prefix so every downstream A1 parser and the
+    // exact-range constructor see bare addresses; an explicit sheetName wins.
+    const prefix = splitSheetPrefix(request.range)
+    if (prefix.sheetName && request.sheetName === undefined) request = { ...request, sheetName: prefix.sheetName }
+    if (request.range !== prefix.range) request = { ...request, range: prefix.range }
     if (request.action === 'context') return context()
     if (request.action === 'sheets') return listSheets()
     const resolved = await appAndSheet(request.sheetName); if (resolved.error) return resolved.error
@@ -573,12 +624,12 @@
     }
     if (request.action === 'range') {
       if (typeof request.range !== 'string' || request.range.length > 128) return fail('invalid_range', 'range is required and bounded')
-      const read = await rangeSnapshot(resolved.sheet, request.range); if (read.error) return read.error
+      const read = await rangeSnapshot(resolved.sheet, request.range, { tolerateMissingFormulas: true }); if (read.error) return read.error
       return { ok: true, result: { status: 'ok', resource: resolved.resource, range: read.snapshot } }
     }
     if (request.action === 'search') {
       if (typeof request.query !== 'string' || !request.query.trim() || typeof request.range !== 'string') return fail('invalid_range', 'query and bounded range are required')
-      const read = await rangeSnapshot(resolved.sheet, request.range); if (read.error) return read.error
+      const read = await rangeSnapshot(resolved.sheet, request.range, { tolerateMissingFormulas: true }); if (read.error) return read.error
       const query = request.matchCase ? request.query : request.query.toLowerCase(); const field = request.searchBy === 'formula' ? 'formulas' : request.searchBy === 'text' ? 'text' : 'values'
       const matches = []
       read.snapshot[field].forEach((row, rowIndex) => row.forEach((cell, columnIndex) => {
@@ -1241,7 +1292,27 @@
     if (!result.ok && result.error) return result
     return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
   }
-  async function run(request) { return request?.action === 'write' ? write(request) : request?.action === 'inspect_write' ? inspectWrite(request) : read(request ?? {}) }
+  // Probe identity lets the background disambiguate several ready WebEdit
+  // frames: a doc.midea.com page can preload a blank editor (workbookName
+  // null, fresh Sheet1, no content) next to the user's real document, and a
+  // blind "first ready frame wins" reads the wrong one. hasContent is a
+  // best-effort scalar signal (null = unknown, never guessed): any content
+  // signal beyond the first row/column marks the frame as the real document.
+  async function probeIdentity() {
+    const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
+    try {
+      const resolved = await appAndSheet()
+      if (resolved.error) return { path: location.pathname, workbookName: null, sheetName: null, hasContent: null }
+      const lastRow = Number(await call(resolved.sheet, 'getLastRow') ?? await property(resolved.sheet, 'LastRow') ?? await call(app, 'getLastRow'))
+      const lastColumn = Number(await call(resolved.sheet, 'getLastColumn') ?? await property(resolved.sheet, 'LastColumn') ?? await call(app, 'getLastCol'))
+      const hasContent = (Number.isInteger(lastRow) && lastRow > 1) || (Number.isInteger(lastColumn) && lastColumn > 1)
+      return { path: location.pathname, workbookName: resolved.resource.workbookName, sheetName: resolved.resource.sheetName, hasContent: hasContent === false ? null : true }
+    } catch { return { path: location.pathname, workbookName: null, sheetName: null, hasContent: null } }
+  }
+  async function run(request) {
+    if (request?.action === 'probe') return { ok: true, result: { status: 'probe', ready: readyNow(), identity: await probeIdentity() } }
+    return request?.action === 'write' ? write(request) : request?.action === 'inspect_write' ? inspectWrite(request) : read(request ?? {})
+  }
   globalThis.__deepseekHarnessOfficeSpreadsheet = { run }
   const REQUEST = 'deepseek-harness-office-spreadsheet-request/v1'; const RESPONSE = 'deepseek-harness-office-spreadsheet-response/v1'
   window.addEventListener?.(REQUEST, (event) => { const detail = event.detail; if (!detail || typeof detail.id !== 'string') return; void run(detail).then((payload) => window.dispatchEvent(new CustomEvent(RESPONSE, { detail: { id: detail.id, ...payload } }))).catch(() => window.dispatchEvent(new CustomEvent(RESPONSE, { detail: { id: detail.id, ...fail('runtime_error', 'WebEdit spreadsheet operation failed') } }))) })

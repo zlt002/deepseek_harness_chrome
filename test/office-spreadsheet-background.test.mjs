@@ -19,7 +19,11 @@ test('routes office_spreadsheet writes only to the WebEdit iframe and forwards r
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } }, runtime: { connectNative: () => port, lastError: undefined, onMessage: { addListener: (listener) => { runtimeListener = listener } }, sendMessage: async () => {} },
     storage: { session: { get: async () => ({ harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }), set: async () => {} } }, windows: { getLastFocused: async () => ({ id: 7 }), onFocusChanged: { addListener: () => {} } },
-    tabs: { query: async () => [{ id: 42, windowId: 7, url: target.url, title: 'Budget' }], get: async () => ({ id: 42, windowId: 7, url: target.url, title: 'Budget' }), sendMessage: async (tabId, message, options) => { sent.push({ tabId, message, options }); return { ok: false, error: { code: 'readback_mismatch', message: 'readback differs' } } }, onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    tabs: { query: async () => [{ id: 42, windowId: 7, url: target.url, title: 'Budget' }], get: async () => ({ id: 42, windowId: 7, url: target.url, title: 'Budget' }), sendMessage: async (tabId, message, options) => {
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
+      sent.push({ tabId, message, options })
+      return { ok: false, error: { code: 'readback_mismatch', message: 'readback differs' } }
+    }, onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
     webNavigation: { getAllFrames: async () => [{ frameId: 0, url: target.url }, { frameId: 9, url: 'https://wrong.example/' }, { frameId: 17, url: 'https://webedit.midea.com/edit/abc' }] }, sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()

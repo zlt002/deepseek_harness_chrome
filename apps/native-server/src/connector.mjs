@@ -1332,7 +1332,11 @@ export class BrowserConnector {
     clearTimeout(pending.timeout)
     this.pending.delete(response.requestId)
     if (!Object.hasOwn(response, 'result')) {
-      if ((isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest) && validOfficeReadFailure(response.error)) {
+      // Office failures carry a structured {code, message} from the runtime;
+      // transparency requires surfacing it verbatim (AGENTS §4) for every
+      // office tool, not only the range/document ones. A spreadsheet failure
+      // must never collapse into a generic "no Connector result".
+      if ((isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest) && validOfficeReadFailure(response.error)) {
         pending.reject(new Error(JSON.stringify(response.error)))
       } else if (typeof response.error === 'string' && response.error.length > 0) {
         pending.reject(new Error(response.error))

@@ -26,6 +26,11 @@
     }
     return null
   }
+  // Instant readiness check for the background frame probe: no polling, no waiting.
+  const readyNow = () => {
+    const candidate = globalThis.APP
+    return !!(candidate && candidate.openApi && candidate.openApi.editor && candidate.openApi.editor.canvas && typeof candidate.openApi.editor.canvas.getDocXml === 'function')
+  }
   const documentResource = async (xml, current) => {
     let title = document.title || ''
     try { const value = await documentApi(current)?.getTitleContent?.(); title = String(value?.text ?? value ?? title) } catch {}
@@ -186,6 +191,7 @@
     return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested, observed: { verifiedBlocks: expected, verified: true } } }
   }
   const read = async (input) => {
+    if (input.action === 'probe') return { ok: true, result: { status: 'probe', ready: readyNow(), identity: { path: location.pathname } } }
     const current = await app()
     if (!current) return fail('unsupported', 'WebEdit light-document runtime is not ready')
     const xml = await current.openApi.editor.canvas.getDocXml()
