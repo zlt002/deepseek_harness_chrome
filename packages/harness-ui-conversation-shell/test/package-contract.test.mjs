@@ -38,7 +38,17 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   // context panels.
   assert.match(css, /\.root > :global\(\[data-composer-seat\]\)[\s\S]*position: relative[\s\S]*z-index: 7/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)[\s\S]*position: relative[\s\S]*z-index: 8[\s\S]*height: 0[\s\S]*overflow: visible/)
+  assert.match(
+    css,
+    /calc\(100% - var\(--dsh-composer-side-clearance\) - var\(--dsh-composer-side-clearance\)\)/,
+    'Chrome must receive valid subtraction so the shared overlay stays card-wide instead of shrink-to-fit',
+  )
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\) > \[role='dialog'\],[\s\S]*:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\][\s\S]*position: absolute/)
+  assert.match(
+    css,
+    /\[role='dialog'\],[\s\S]*\[role='menu'\][\s\S]*transform:\s*none/,
+    'the full-card host must clear trigger-centered transforms or only half the chooser remains visible',
+  )
   // e327's permission and agent-mode sheets always rise above the card.  The
   // product owns this presentation rule because the upstream provider merely
   // supplies one active overlay at a time.
