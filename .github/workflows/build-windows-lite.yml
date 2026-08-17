@@ -108,18 +108,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
           [System.IO.File]::WriteAllText("$zip.sha256", "$hash  accr-ui-windows-lite-x64.zip`n", [System.Text.UTF8Encoding]::new($false))
 
-      - name: Upload Windows package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: accr-ui-windows-lite-x64
-          path: |
-            deepseek_harness_chrome/release/accr-ui-windows-lite-x64.zip
-            deepseek_harness_chrome/release/accr-ui-windows-lite-x64.zip.sha256
-          if-no-files-found: error
-          compression-level: 0
-
-      - name: Upload Windows candidate to draft release
-        if: ${{ inputs.full_validation == true }}
+      - name: Upload Windows package to draft release
         working-directory: deepseek_harness_chrome
         shell: pwsh
         env:

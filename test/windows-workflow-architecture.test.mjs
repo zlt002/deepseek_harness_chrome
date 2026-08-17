@@ -27,6 +27,8 @@ test('Windows CI builds from the recursive upstream submodule and materialized p
   assert.doesNotMatch(workflow, /Cache harness product/)
   assert.doesNotMatch(workflow, /cache-harness-product/)
   assert.match(workflow, /Build materialized Harness product[\s\S]*?if: steps\.cache-harness-static-runtime\.outputs\.cache-hit != 'true'/)
+  assert.doesNotMatch(workflow, /actions\/upload-artifact/)
+  assert.match(workflow, /Upload Windows package to draft release/)
   const install = workflow.indexOf('run: pnpm install --frozen-lockfile')
   const buildProduct = workflow.indexOf('run: pnpm build:harness-product')
   const materializeRuntime = workflow.indexOf('pnpm materialize:windows-harness-static-runtime --')
