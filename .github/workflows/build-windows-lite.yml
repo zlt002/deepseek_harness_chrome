@@ -65,18 +65,24 @@ jobs:
           path: deepseek_harness_chrome/.generated/harness-product
           key: harness-product-v1-${{ hashFiles('deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/scripts/materialize-harness-product.mjs', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
 
-      - name: Build materialized Harness product
-        if: steps.cache-harness-product.outputs.cache-hit != 'true'
-        working-directory: deepseek_harness_chrome
-        shell: pwsh
-        run: pnpm build:harness-product
-
       - name: Cache static Windows Harness runtime
         id: cache-harness-static-runtime
         uses: actions/cache@v4
         with:
           path: deepseek_harness_chrome/release/windows-lite/harness-static-win32-x64
           key: harness-static-web-v1-${{ hashFiles('deepseek_harness_chrome/release/windows-lite/build-static-harness-runtime.mjs', 'deepseek_harness_chrome/release/mac-lite/build-mac-production.mjs', 'deepseek_harness_chrome/scripts/bundle-harness-runtime-plugin.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/scripts/materialize-harness-product.mjs', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
+
+      - name: Build materialized Harness product
+        if: steps.cache-harness-product.outputs.cache-hit != 'true'
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: pnpm build:harness-product
+
+      - name: Restore cached Harness product dependencies for static bundling
+        if: steps.cache-harness-product.outputs.cache-hit == 'true' && steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
+        working-directory: deepseek_harness_chrome/.generated/harness-product
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
 
       - name: Bundle static Windows Harness runtime
         if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
