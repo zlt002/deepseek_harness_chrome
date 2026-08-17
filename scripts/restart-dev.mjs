@@ -160,10 +160,6 @@ export async function main(args = process.argv.slice(2)) {
       ...process.env,
       DEEPSEEK_HARNESS_EXTENSION_ID: extensionIds.join(','),
       DSH_ROOT: process.env.DSH_ROOT?.trim() || harnessRoot,
-      DSH_ENABLE_KNOWLEDGE_SCOPE_UI: process.env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI
-        ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
-      DSH_ENABLE_SKILL_SETTINGS_UI: process.env.DSH_ENABLE_SKILL_SETTINGS_UI
-        ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
     },
   })
 
