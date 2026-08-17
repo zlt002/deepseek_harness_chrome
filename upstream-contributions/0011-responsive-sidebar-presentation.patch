@@ -1,8 +1,7 @@
 diff --git a/packages/client/ui-layout/src/client/AppFrame.tsx b/packages/client/ui-layout/src/client/AppFrame.tsx
-index 2696dc91fa..e110230bfe 100644
 --- a/packages/client/ui-layout/src/client/AppFrame.tsx
 +++ b/packages/client/ui-layout/src/client/AppFrame.tsx
-@@ -134,12 +134,13 @@ export function AppFrame({
+@@ -134,12 +134,13 @@
    // (or the default when the wide preference is closed) and the center
    // absorbs the squeeze.
    const narrow = viewport < SIDEBAR_AUTO_COLLAPSE
@@ -17,7 +16,7 @@ index 2696dc91fa..e110230bfe 100644
    const colsRef = useRef(cols)
    colsRef.current = cols
  
-@@ -165,8 +166,9 @@ export function AppFrame({
+@@ -165,8 +166,9 @@
      <div
        ref={frameRef}
        className={css.frame}
@@ -29,7 +28,7 @@ index 2696dc91fa..e110230bfe 100644
        data-details-collapsed={cols.details === 0 || undefined}
        data-dragging={dragging || undefined}
      >
-@@ -176,7 +178,8 @@ export function AppFrame({
+@@ -176,7 +178,8 @@
              component sees its rendered state as owner params decided here
              (collapsed follows the resolved rail, so a derived auto-collapse
              renders the rail UI too). */}
@@ -39,7 +38,7 @@ index 2696dc91fa..e110230bfe 100644
            collapsed: sidebarCollapsed,
            width: cols.sidebar,
          })}
-@@ -187,14 +190,21 @@ export function AppFrame({
+@@ -187,14 +190,21 @@
              the shell's own pending rendering. The conversation
              is session-maybe; the strict details entry naturally renders
              empty while no session is current. */}
@@ -64,10 +63,9 @@ index 2696dc91fa..e110230bfe 100644
      </div>
    )
 diff --git a/packages/client/ui-layout/src/client/columns.ts b/packages/client/ui-layout/src/client/columns.ts
-index 374ce64703..722ef15bba 100644
 --- a/packages/client/ui-layout/src/client/columns.ts
 +++ b/packages/client/ui-layout/src/client/columns.ts
-@@ -30,7 +30,7 @@ export const SIDEBAR_COLLAPSED = 56
+@@ -30,7 +30,7 @@
  /** Viewport width below which the sidebar auto-collapses to the rail (deepsuite
   * LG breakpoint); a manual toggle below it re-expands over the squeezed center
   * (stores.ts narrowExpanded). */
@@ -77,10 +75,9 @@ index 374ce64703..722ef15bba 100644
  export const DETAILS_MIN = 300
  /** Details drag clamp ceiling. */
 diff --git a/packages/client/ui-layout/src/client/index.ts b/packages/client/ui-layout/src/client/index.ts
-index c56d83bfbb..93abc91013 100644
 --- a/packages/client/ui-layout/src/client/index.ts
 +++ b/packages/client/ui-layout/src/client/index.ts
-@@ -92,6 +92,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+@@ -92,6 +92,8 @@
  
  /** Sidebar owner share: live column state from the frame's concession solve. */
  export interface SidebarOwnerProps {
@@ -90,10 +87,9 @@ index c56d83bfbb..93abc91013 100644
    collapsed: boolean
    /** Rendered column width in px (SIDEBAR_COLLAPSED when collapsed). */
 diff --git a/packages/client/ui-layout/tests/app-frame.client.spec.tsx b/packages/client/ui-layout/tests/app-frame.client.spec.tsx
-index 65de5a640e..21a6e622d5 100644
 --- a/packages/client/ui-layout/tests/app-frame.client.spec.tsx
 +++ b/packages/client/ui-layout/tests/app-frame.client.spec.tsx
-@@ -216,7 +216,7 @@ describe('AppFrame', () => {
+@@ -216,7 +216,7 @@
  
    it('sidebar slot receives live concession output as owner props', () => {
      const { slotCalls } = mountFrame()
@@ -102,7 +98,7 @@ index 65de5a640e..21a6e622d5 100644
    })
  
    it('sidebar drag widens through rAF-batched pointer moves', () => {
-@@ -258,7 +258,7 @@ describe('AppFrame', () => {
+@@ -258,7 +258,7 @@
      expect(getByTestId('sidebar-content')).toBeTruthy()
      expect(frame.hasAttribute('data-sidebar-collapsed')).toBe(true)
      const lastSidebarCall = slotCalls.filter(c => c.key === 'sidebar').at(-1)!
@@ -111,7 +107,7 @@ index 65de5a640e..21a6e622d5 100644
    })
  
    it('viewport shrink triggers the concession chain via ResizeObserver', () => {
-@@ -285,34 +285,38 @@ describe('AppFrame', () => {
+@@ -285,34 +285,38 @@
  })
  
  describe('AppFrame — narrow-viewport auto-collapse', () => {
@@ -160,7 +156,7 @@ index 65de5a640e..21a6e622d5 100644
      expect(instance.getSnapshot().sidebar).toBe(0) // preference untouched
    })
  
-@@ -321,7 +325,7 @@ describe('AppFrame — narrow-viewport auto-collapse', () => {
+@@ -321,7 +325,7 @@
      act(() => { instance.actions.setSidebar(400) })
      frameWidth = 980
      act(() => { fireResize?.(); vi.advanceTimersByTime(20) })
@@ -170,13 +166,14 @@ index 65de5a640e..21a6e622d5 100644
      act(() => { fireResize?.(); vi.advanceTimersByTime(20) })
      expect(tracks(frame)).toEqual([400, 0])
 diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.module.css b/packages/client/ui-sidebar/src/client/SidebarRoot.module.css
-index 300075b88d..3c008a41cf 100644
 --- a/packages/client/ui-sidebar/src/client/SidebarRoot.module.css
 +++ b/packages/client/ui-sidebar/src/client/SidebarRoot.module.css
-@@ -22,6 +22,56 @@
+@@ -20,8 +20,58 @@
+      scrollbar uses the l2 pair. .quietBars hides it without changing layout. */
+   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
    --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
- }
- 
++}
++
 +.compactFallback {
 +  position: relative;
 +  z-index: 10;
@@ -221,8 +218,8 @@ index 300075b88d..3c008a41cf 100644
 +  background: transparent;
 +  color: var(--dsw-alias-label-primary);
 +  cursor: pointer;
-+}
-+
+ }
+ 
 +.compactFallbackAction:hover {
 +  background: var(--dsw-alias-interactive-bg-hover);
 +}
@@ -231,10 +228,9 @@ index 300075b88d..3c008a41cf 100644
     rail (10px side padding), 12px vertical rhythm, 18px from the rail top to
     the whale's box (24px to the 24-wide whale glyph itself). */
 diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-index d3fe6a63c1..17379a1bdd 100644
 --- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
 +++ b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-@@ -22,7 +22,7 @@ import {
+@@ -22,7 +22,7 @@
    IconNewChatOutline16, IconPanelLeftOutline16,
    Tooltip,
  } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -243,7 +239,7 @@ index d3fe6a63c1..17379a1bdd 100644
  import css from './SidebarRoot.module.css'
  
  /** Wide-content unmount delay; matches the 150ms wide-content fade-out. */
-@@ -41,7 +41,8 @@ const SCROLLBAR_LINGER_MS = 2000
+@@ -41,7 +41,8 @@
   * @param props - composed slot props (runtime share + injected callbacks, contract/slots.ts).
   * @returns the sidebar element tree.
   */
@@ -253,7 +249,7 @@ index d3fe6a63c1..17379a1bdd 100644
    collapsed,
    width,
    startSession,
-@@ -190,3 +191,65 @@ export function SidebarRoot({
+@@ -190,3 +191,65 @@
      </div>
    )
  }
@@ -320,7 +316,6 @@ index d3fe6a63c1..17379a1bdd 100644
 +    : <ColumnSidebarRoot {...props} />
 +}
 diff --git a/packages/client/ui-sidebar/src/client/contract/slots.ts b/packages/client/ui-sidebar/src/client/contract/slots.ts
-index a8c4f2894d..a2c1ea7d87 100644
 --- a/packages/client/ui-sidebar/src/client/contract/slots.ts
 +++ b/packages/client/ui-sidebar/src/client/contract/slots.ts
 @@ -7,11 +7,13 @@
@@ -338,7 +333,7 @@ index a8c4f2894d..a2c1ea7d87 100644
  
  declare module '@deepseek-ai/dsh-client-ui-slots' {
    interface SlotMap {
-@@ -33,6 +35,22 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+@@ -33,6 +35,22 @@
       * package's 'sidebar' entry; each action receives only the column state.
       */
      'sidebar.footer.action': { kind: 'list'; scope: 'root'; owner: SidebarFooterActionOwnerProps }
@@ -361,25 +356,16 @@ index a8c4f2894d..a2c1ea7d87 100644
    }
  }
  
-@@ -43,6 +61,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+@@ -43,7 +61,7 @@
  export interface SidebarSectionOwnerProps {
    /** Shell fold-state output: wide renders the full browser, rail the icon column. */
    wide: boolean
+-  /** Optional narrow header presentation; absent retains the official rail. */
 +  /** Compact top-header presentation used by narrow side panels. */
-+  compact?: boolean
+   compact?: boolean
    /** Rail icons request expansion; the browser rides the wide flip for focus. */
    expandSidebar: () => void
- }
-@@ -54,6 +74,8 @@ export interface SidebarSectionOwnerProps {
- export interface SidebarSettingsOwnerProps {
-   /** Whether the sidebar renders wide content (false = 56px rail). */
-   wide: boolean
-+  /** Compact top-header presentation used by narrow side panels. */
-+  compact?: boolean
- }
- 
- /** Owner share of an action rendered beside Settings at the sidebar foot. */
-@@ -62,12 +84,47 @@ export interface SidebarFooterActionOwnerProps {
+@@ -66,12 +84,47 @@
    wide: boolean
  }
  
@@ -427,7 +413,7 @@ index a8c4f2894d..a2c1ea7d87 100644
    /**
     * Start a New Session: with a workspace, reuse-or-create its blank session
     * and open it; without one, inherit the current Session Workspace, then the
-@@ -85,5 +142,13 @@ export type SidebarRootInjected = {
+@@ -89,5 +142,13 @@
   */
  export type SidebarRootComponentProps =
    PropsRuntime<'sidebar'>
@@ -444,7 +430,6 @@ index a8c4f2894d..a2c1ea7d87 100644
 +  >
 +  & InjectFace<SidebarRootInjected> & PropsLocale<'sidebar'>
 diff --git a/packages/client/ui-sidebar/src/client/index.ts b/packages/client/ui-sidebar/src/client/index.ts
-index 0bd2c98295..8fe29ec857 100644
 --- a/packages/client/ui-sidebar/src/client/index.ts
 +++ b/packages/client/ui-sidebar/src/client/index.ts
 @@ -1,5 +1,6 @@
@@ -454,7 +439,7 @@ index 0bd2c98295..8fe29ec857 100644
  // Type-only: pulls the locale plugin's Context merge (ctx.locale).
  import type {} from '@deepseek-ai/dsh-client-locale/client'
  import type { SidebarRootInjected } from './contract/slots.ts'
-@@ -7,6 +8,7 @@ import { SidebarRoot } from './SidebarRoot.tsx'
+@@ -7,6 +8,7 @@
  import { en, zh, type SidebarKey } from './locales.ts'
  
  export type {
@@ -462,7 +447,7 @@ index 0bd2c98295..8fe29ec857 100644
    SidebarFooterActionOwnerProps, SidebarRootComponentProps, SidebarRootInjected,
    SidebarSectionOwnerProps, SidebarSettingsOwnerProps,
  } from './contract/slots.ts'
-@@ -19,11 +21,20 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+@@ -19,11 +21,20 @@
    }
  }
  
@@ -484,7 +469,7 @@ index 0bd2c98295..8fe29ec857 100644
  
  /** Registers the sidebar shell and its service callbacks.
   * @param ctx - Client root context.
-@@ -32,6 +43,7 @@ export function apply(ctx: ClientContext): void {
+@@ -32,6 +43,7 @@
    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-sidebar: dictionaries')
  
    const injectProps = (): SidebarRootInjected => ({
@@ -492,7 +477,7 @@ index 0bd2c98295..8fe29ec857 100644
      // The shell's New Session button rides the runtime's shared action
      // (current Session Workspace, then recent Workspace).
      startSession: (workspaceId) => { ctx.workspaces.startSession(workspaceId) },
-@@ -48,6 +60,10 @@ export function apply(ctx: ClientContext): void {
+@@ -48,6 +60,10 @@
          'sidebar.workspaces': { kind: 'single', scope: 'root' },
          'sidebar.settings': { kind: 'single', scope: 'root' },
          'sidebar.footer.action': { kind: 'list', scope: 'root' },
@@ -504,10 +489,9 @@ index 0bd2c98295..8fe29ec857 100644
        inject: injectProps,
      }, SidebarRoot),
 diff --git a/packages/client/ui-sidebar/tests/apply.client.spec.tsx b/packages/client/ui-sidebar/tests/apply.client.spec.tsx
-index dc4fd3e27b..594332a522 100644
 --- a/packages/client/ui-sidebar/tests/apply.client.spec.tsx
 +++ b/packages/client/ui-sidebar/tests/apply.client.spec.tsx
-@@ -15,6 +15,9 @@ async function bench(declare = true) {
+@@ -15,6 +15,9 @@
    ctx.provide('layout', layout)
    ctx.provide('sessions', sessions as never)
    ctx.provide('workspaces', workspaces as never)
@@ -517,7 +501,7 @@ index dc4fd3e27b..594332a522 100644
    ctx.provide('locale', new LocaleRuntime(ctx))
    const slots = ctx.get('slots') as SlotRegistry
    if (declare) {
-@@ -28,7 +31,7 @@ async function bench(declare = true) {
+@@ -28,7 +31,7 @@
  
  describe('ui-sidebar apply', () => {
    it('declares only the services it uses', () => {
@@ -526,7 +510,7 @@ index dc4fd3e27b..594332a522 100644
    })
  
    it('registers the shell and declares its child seats', async () => {
-@@ -38,10 +41,14 @@ describe('ui-sidebar apply', () => {
+@@ -38,10 +41,14 @@
      expect(b.slots.spec('sidebar.workspaces')).toEqual({ kind: 'single', scope: 'root' })
      expect(b.slots.spec('sidebar.settings')).toEqual({ kind: 'single', scope: 'root' })
      expect(b.slots.spec('sidebar.footer.action')).toEqual({ kind: 'list', scope: 'root' })
@@ -542,7 +526,7 @@ index dc4fd3e27b..594332a522 100644
      // Both arms delegate to the runtime's shared New Session action.
      injected.startSession('workspace' as never)
      expect(b.workspaces.startSession).toHaveBeenCalledWith('workspace')
-@@ -64,5 +71,9 @@ describe('ui-sidebar apply', () => {
+@@ -64,5 +71,9 @@
      expect(b.slots.entries('sidebar')).toHaveLength(0)
      expect(b.slots.spec('sidebar.workspaces')).toBeUndefined()
      expect(b.slots.spec('sidebar.footer.action')).toBeUndefined()
@@ -553,10 +537,9 @@ index dc4fd3e27b..594332a522 100644
    })
  })
 diff --git a/packages/client/ui-sidebar/tests/pointer-scrollbars.client.spec.tsx b/packages/client/ui-sidebar/tests/pointer-scrollbars.client.spec.tsx
-index dace9db04a..5e6585481c 100644
 --- a/packages/client/ui-sidebar/tests/pointer-scrollbars.client.spec.tsx
 +++ b/packages/client/ui-sidebar/tests/pointer-scrollbars.client.spec.tsx
-@@ -32,10 +32,11 @@ function mountColumn(): { column: HTMLElement; quiet: () => boolean } {
+@@ -32,10 +32,11 @@
    const view = render(
      <SidebarRoot
        collapsed={false} width={300}
@@ -570,7 +553,6 @@ index dace9db04a..5e6585481c 100644
    )
    const column = view.container.firstElementChild
 diff --git a/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx b/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx
-index 8f53c92a83..bef56e86c1 100644
 --- a/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx
 +++ b/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx
 @@ -1,10 +1,14 @@
@@ -590,7 +572,7 @@ index 8f53c92a83..bef56e86c1 100644
  import { SidebarRoot } from '../src/client/SidebarRoot.tsx'
  import { en } from '../src/client/locales.ts'
  
-@@ -21,34 +25,81 @@ afterEach(() => {
+@@ -21,34 +25,81 @@
  // props share; stub them as never-called functions.
  const neverHook = (() => { throw new Error('shell must not read global hooks') }) as never
  
@@ -687,7 +669,7 @@ index 8f53c92a83..bef56e86c1 100644
    )
    const view = render(root())
    return {
-@@ -66,6 +117,12 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
+@@ -66,6 +117,12 @@
        if (footerActionOwner === undefined) throw new Error('footer action owner not rendered')
        return footerActionOwner
      },
@@ -700,7 +682,7 @@ index 8f53c92a83..bef56e86c1 100644
      rerender(next: Partial<typeof current>) {
        current = { ...current, ...next }
        view.rerender(root())
-@@ -74,6 +131,12 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
+@@ -74,6 +131,12 @@
  }
  
  describe('SidebarRoot shell', () => {
@@ -713,7 +695,7 @@ index 8f53c92a83..bef56e86c1 100644
    it('routes New Session (capsule + wordmark) and the column toggle', () => {
      const b = mountShell()
      // Expanded, both the wordmark and the capsule start a session.
-@@ -116,4 +179,86 @@ describe('SidebarRoot shell', () => {
+@@ -116,4 +179,86 @@
      expect(b.regionOwner().wide).toBe(false)
      expect(screen.getByRole('button', { name: 'Open sidebar' })).toBeTruthy()
    })
