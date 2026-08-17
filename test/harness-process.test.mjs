@@ -197,6 +197,18 @@ test('keeps an empty pmd-prd invocation free of workspace scans and manifest rec
   assert.match(processState, /空 `\/pmd-prd` 不是恢复请求/)
 })
 
+test('keeps pmd-prd project-agnostic and bounds Code Mode execution', async () => {
+  const skill = await readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8')
+
+  assert.match(skill, /可在任意项目目录中使用/)
+  assert.match(skill, /当前工作目录只用于绑定本 Run/)
+  assert.match(skill, /不得要求切换到固定仓库或固定目录/)
+  assert.match(skill, /只规划当前阶段到下一阶段的转换/)
+  assert.match(skill, /不得重新推演已完成阶段或预先展开后续阶段/)
+  assert.match(skill, /每次顶层 `run_code` 调用都必须同时提供 `code` 和 `description`/)
+  assert.match(skill, /不得使用相同参数重复调用/)
+})
+
 test('advertises distinct selected-source routes with isolated MCP tools', async () => {
   const source = await readFile(new URL('../apps/native-server/src/harness-process.mjs', import.meta.url), 'utf8')
   assert.match(source, /deepseek-harness-selected-source-routing/)

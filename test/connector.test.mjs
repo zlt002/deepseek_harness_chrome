@@ -497,3 +497,29 @@ test('rejects an Extension response that does not satisfy the canonical office_g
     await connector.stop()
   }
 })
+
+test('surfaces the Extension error message for office tools instead of a generic reply', async () => {
+  const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/error' }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response',
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        error: 'No Browser Target is bound to this Run by the Extension.',
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-error-text', target)
+  const endpoint = await connector.start()
+
+  try {
+    const failed = await callOfficeGetContext(endpoint)
+    assert.equal(failed.result.isError, true)
+    assert.equal(failed.result.content[0].text, 'No Browser Target is bound to this Run by the Extension.')
+  } finally {
+    await connector.stop()
+  }
+})

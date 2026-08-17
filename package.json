@@ -23,10 +23,12 @@
     "test:windows-release": "node --test test/windows-release.test.mjs",
     "test:windows-runtime": "node --test test/materialize-harness-runtime.test.mjs",
     "typecheck": "pnpm --dir apps/chrome-extension run typecheck",
-    "typecheck:plugins": "pnpm --filter @accrui/harness-ui-browser-target run typecheck && pnpm --filter @accrui/harness-ui-subagent-compact run typecheck && pnpm --filter @accrui/harness-ui-knowledge-scope run typecheck && pnpm --filter @accrui/harness-ui-agent-preset run typecheck && pnpm --filter @accrui/harness-skill-settings run typecheck",
+    "typecheck:plugins": "pnpm --filter @accrui/harness-ui-browser-target run typecheck && pnpm --filter @accrui/harness-ui-subagent-compact run typecheck && pnpm --filter @accrui/harness-ui-knowledge-scope run typecheck && pnpm --filter @accrui/harness-ui-agent-preset run typecheck && pnpm --filter @accrui/harness-ui-settings-shell run typecheck && pnpm --filter @accrui/harness-skill-settings run typecheck",
     "test": "node --test test/*.test.mjs",
     "register-native-host": "node scripts/register-native-host.mjs",
-    "dev:restart": "node scripts/restart-dev.mjs"
+    "dev:restart": "node scripts/restart-dev.mjs",
+    "dev:watch": "node scripts/watch-dev.mjs",
+    "dev:refresh": "node scripts/refresh-dev.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

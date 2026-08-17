@@ -49,6 +49,13 @@ export function processTree(processes, commandFragment) {
   })
 }
 
+// Harness CLI children spawned by the native host carry a temporary connector
+// patch argument. When the host dies without a graceful stop, those children
+// are orphaned (ppid becomes 1) and escape a pure process-tree walk, so match
+// the connector marker directly. Sessions started outside the native host
+// (for example a manual `dsh web`) never carry this marker and are never hit.
+const HARNESS_CONNECTOR_MARKER = 'deepseek-harness-connector-'
+
 function run(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { stdio: 'inherit', ...options })
@@ -109,7 +116,7 @@ function startDevServer() {
   return { child, closed }
 }
 
-async function installedPaths() {
+export async function installedPaths() {
   if (platform() !== 'darwin') throw new Error('dev:restart currently supports the macOS Chrome/Edge development setup.')
   const installRoot = join(homedir(), 'Library/Application Support/DeepSeekHarness')
   const manifestPaths = [
@@ -122,19 +129,27 @@ async function installedPaths() {
   return { installRoot, extensionIds }
 }
 
-async function stopInstalledHost(installRoot) {
+export async function stopInstalledHost(installRoot) {
   const output = await capture('ps', ['-axo', 'pid=,ppid=,command='])
   const processes = output.split('\n').flatMap((line) => {
     const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)
     return match === null ? [] : [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }]
   })
-  const target = processTree(processes, join(installRoot, 'native-server/bin.mjs'))
+  const target = [
+    ...processTree(processes, join(installRoot, 'native-server/bin.mjs')),
+    // Also stop Harness CLI children the host spawned. A graceful host stop
+    // terminates them itself; direct SIGTERM to the host orphans them.
+    ...processes.filter((entry) => entry.command.includes(HARNESS_CONNECTOR_MARKER)),
+  ]
+  const seen = new Set()
   for (const entry of target) {
+    if (seen.has(entry.pid)) continue
+    seen.add(entry.pid)
     try { process.kill(entry.pid, 'SIGTERM') } catch (error) {
       if (error?.code !== 'ESRCH') throw error
     }
   }
-  return target.length
+  return seen.size
 }
 
 export async function main(args = process.argv.slice(2)) {

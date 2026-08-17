@@ -1334,7 +1334,7 @@ export class BrowserConnector {
     if (!Object.hasOwn(response, 'result')) {
       if ((isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest) && validOfficeReadFailure(response.error)) {
         pending.reject(new Error(JSON.stringify(response.error)))
-      } else if (isKnowledgeRequest && typeof response.error === 'string') {
+      } else if (typeof response.error === 'string' && response.error.length > 0) {
         pending.reject(new Error(response.error))
       } else {
         pending.reject(new Error('Extension peer returned no Connector result'))

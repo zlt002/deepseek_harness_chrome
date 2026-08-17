@@ -80,6 +80,19 @@ WXT，需要保持终端运行。只修改扩展或 Native Server、确定不需
 pnpm dev:restart -- --skip-harness-build
 ```
 
+需要让所有层级的修改一起生效时，使用一键完整刷新：
+
+```sh
+pnpm dev:refresh
+```
+
+它会重新生成 Harness、构建产品插件、同步 Web 资源，并重启 WXT 和 Native Host。
+如果只修改了产品插件、扩展或 Native Server，可跳过较慢的 Harness 重生成：
+
+```sh
+pnpm dev:refresh -- --fast
+```
+
 扩展页面和样式由 WXT 热更新；Native Server、Harness Host 插件和配置变更需要执行上面的
 一键重启。排查 Native Messaging 时可以设置日志文件：
 
