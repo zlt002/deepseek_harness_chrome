@@ -36,6 +36,8 @@ test('Windows CI builds from the recursive upstream submodule and materialized p
   assert.doesNotMatch(workflow, /actions\/upload-artifact/)
   assert.match(workflow, /Upload Windows package to draft release/)
   assert.match(workflow, /attempt -le 4/)
+  assert.match(workflow, /Draft release ZIP upload[\s\S]*?gh release upload \$env:RELEASE_TAG \$zip --repo \$repo --clobber/)
+  assert.match(workflow, /Draft release checksum upload[\s\S]*?gh release upload \$env:RELEASE_TAG \$checksum --repo \$repo --clobber/)
   const install = workflow.indexOf('run: pnpm install --frozen-lockfile')
   const buildProduct = workflow.indexOf('run: pnpm build:harness-product')
   const materializeRuntime = workflow.indexOf('pnpm materialize:windows-harness-static-runtime --')

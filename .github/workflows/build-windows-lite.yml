@@ -181,6 +181,9 @@ jobs:
               --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
           }
 
-          Invoke-GhRetry -Label 'Draft release upload' -Command {
-            gh release upload $env:RELEASE_TAG $zip $checksum --repo $repo --clobber
+          Invoke-GhRetry -Label 'Draft release ZIP upload' -Command {
+            gh release upload $env:RELEASE_TAG $zip --repo $repo --clobber
+          }
+          Invoke-GhRetry -Label 'Draft release checksum upload' -Command {
+            gh release upload $env:RELEASE_TAG $checksum --repo $repo --clobber
           }
