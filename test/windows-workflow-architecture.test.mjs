@@ -6,8 +6,6 @@ import { fileURLToPath } from 'node:url'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const workflowPath = resolve(projectRoot, '.github/workflows/build-windows-lite.yml')
-const officialRevision = '47f943859bef60e4160492346772ded9b24f765a'
-
 test('Windows CI builds from the recursive upstream submodule and materialized product tree', async () => {
   const workflow = await readFile(workflowPath, 'utf8')
 
@@ -21,10 +19,14 @@ test('Windows CI builds from the recursive upstream submodule and materialized p
   assert.match(workflow, /run:\s*pnpm verify:upstream/)
   assert.match(workflow, /run:\s*pnpm build:harness-product/)
   assert.match(workflow, /--source \.generated\/harness-product/)
-  assert.match(workflow, new RegExp(`--revision ${officialRevision}`))
+  assert.match(workflow, /--revision \$\{\{ steps\.upstream-hash\.outputs\.sha \}\}/)
+  assert.match(workflow, /pnpm materialize:windows-harness-static-runtime --/)
+  assert.doesNotMatch(workflow, /pnpm materialize:windows-harness-runtime --/)
+  assert.doesNotMatch(workflow, /harness-runtime-win32-x64/)
+  assert.match(workflow, /harness-static-win32-x64/)
   const install = workflow.indexOf('run: pnpm install --frozen-lockfile')
   const buildProduct = workflow.indexOf('run: pnpm build:harness-product')
-  const materializeRuntime = workflow.indexOf('pnpm materialize:windows-harness-runtime --')
+  const materializeRuntime = workflow.indexOf('pnpm materialize:windows-harness-static-runtime --')
   const buildRelease = workflow.indexOf('pnpm release:windows-lite --')
   const acceptRelease = workflow.indexOf('./release/windows-lite/acceptance-windows.ps1')
   const checksum = workflow.indexOf("$zip = 'release/accr-ui-windows-lite-x64.zip'")

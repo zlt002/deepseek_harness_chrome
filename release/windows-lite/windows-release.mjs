@@ -11,7 +11,6 @@ import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { bundleHarnessRuntimePlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -26,12 +25,16 @@ export const LEGACY_NATIVE_HOST_NAME = 'com.chromemcp.nativehost'
 export const HARNESS_RUNTIME_MARKER = 'harness-runtime.json'
 
 const REQUIRED_HARNESS_PATHS = [
-  'package.json',
-  'apps/cli/lib/bin.js',
-  'apps/web/dist/index.html',
-  'node_modules/@deepseek-ai/dsh-app-boot',
-  'node_modules/@deepseek-ai/dsh-web-app',
-  'node_modules/@deepseek-ai/dsh-web-frontend',
+  'harness/package.json',
+  'harness/apps/cli/lib/server.mjs',
+  'harness/apps/cli/lib/plugin-manager.mjs',
+  'harness/apps/web/dist/index.html',
+  'native-server/runtime.mjs',
+  'native-server/harness-runtime.mjs',
+  'native/node-pty/prebuilds/win32-x64/pty.node',
+  'native/sharp/sharp.node',
+  'native/koffi/koffi.node',
+  'native/ripgrep/rg.exe',
 ]
 
 function chromeExtensionIdFromManifestKey(manifestKey) {
@@ -98,12 +101,13 @@ export async function validateHarnessRuntime(harnessRuntimeDir) {
   }
   const marker = await readJson(markerPath)
   const markerErrors = []
-  if (marker.format !== 'deepseek-harness-windows-runtime-v1') markerErrors.push('format')
+  if (marker.format !== 'deepseek-harness-windows-static-web-v1') markerErrors.push('format')
   if (marker.platform !== 'win32') markerErrors.push('platform')
   if (marker.arch !== 'x64') markerErrors.push('arch')
   if (typeof marker.revision !== 'string' || marker.revision.trim() === '') markerErrors.push('revision')
-  if (marker.entrypoint !== 'apps/cli/lib/bin.js') markerErrors.push('entrypoint')
-  if (marker.closureComplete !== true) markerErrors.push('closureComplete')
+  if (marker.entrypoint !== 'harness/apps/cli/lib/server.mjs') markerErrors.push('entrypoint')
+  if (marker.bundled !== true) markerErrors.push('bundled')
+  if (marker.nodeModulesIncluded !== false) markerErrors.push('nodeModulesIncluded')
   if (markerErrors.length > 0) {
     throw new Error(`Harness runtime marker is invalid: ${markerErrors.join(', ')}`)
   }
@@ -111,7 +115,13 @@ export async function validateHarnessRuntime(harnessRuntimeDir) {
   if (missing.length > 0) {
     throw new Error(`Harness runtime is incomplete: missing ${missing.join(', ')}`)
   }
-  const manifest = await readJson(path.join(root, 'package.json'))
+  if (existsSync(path.join(root, 'harness', 'node_modules'))) {
+    throw new Error('Static Harness runtime must not contain harness/node_modules.')
+  }
+  if (existsSync(path.join(root, '.build'))) {
+    throw new Error('Static Harness runtime must not contain its temporary build directory.')
+  }
+  const manifest = await readJson(path.join(root, 'harness', 'package.json'))
   if (manifest.name !== '@deepseek-ai/dsh-root') {
     throw new Error(`Harness runtime package.json must identify @deepseek-ai/dsh-root, received ${String(manifest.name)}`)
   }
@@ -119,7 +129,11 @@ export async function validateHarnessRuntime(harnessRuntimeDir) {
 }
 
 function nativeHostBat() {
-  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\bin.js"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace"\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\bin.mjs"\r\n`
+  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server.mjs"\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace"\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"\r\n`
+}
+
+function pluginManagerBat() {
+  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" exit /b 1\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" exit /b 1\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%harness\\apps\\cli\\lib\\plugin-manager.mjs" plugin --profile web %*\r\n`
 }
 
 function nativeHostManifest(nativeHostName) {
@@ -184,7 +198,7 @@ function startVbs() {
 }
 
 function releaseReadme(version) {
-  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- 不包含旧的 AccrUI Agent Backend。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
+  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- Harness 核心为静态 JavaScript bundle，不包含 \`runtime/harness/node_modules\`。\n- 原生 Windows 文件仅在 \`runtime/native\`；用户后安装的插件写入 \`%APPDATA%\\accr-ui-harness\\profile\`，升级主程序不会删除。\n- 在 \`runtime\` 目录可执行 \`dsh-plugin.bat add <插件包名>\` 安装兼容插件，无需重新发布主包。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
 }
 
 function runZip(cwd, outputPath, input) {
@@ -271,7 +285,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   }
   const payloadZipPath = path.join(packageDir, 'payload.zip')
   const manifestEntry = 'extension/manifest.json'
-  const runtimeCliEntry = 'runtime/harness/apps/cli/lib/bin.js'
+  const runtimeCliEntry = 'runtime/harness/apps/cli/lib/server.mjs'
   const nativeLauncherEntry = 'runtime/run_native_host.bat'
   const registerNativeHostEntry = 'runtime/register-native-host.ps1'
   const startEntry = 'runtime/start.vbs'
@@ -318,7 +332,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   }
   if (payloadEntries.includes(nativeLauncherEntry)) {
     const launcher = readZipText(payloadZipPath, nativeLauncherEntry)
-    for (const requiredText of ['NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt', 'set /p "NODE_EXEC=" < "%NODE_PATH_FILE%"', '"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\bin.mjs"']) {
+    for (const requiredText of ['NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt', 'set /p "NODE_EXEC=" < "%NODE_PATH_FILE%"', 'DSH_HOME=%APPDATA%\\accr-ui-harness\\profile', '"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"']) {
       if (!launcher.includes(requiredText)) errors.push(`run_native_host.bat is missing ${requiredText}`)
     }
     if (launcher.includes('node "%PACKAGE_DIR%native-server')) errors.push('run_native_host.bat must not fall back to Chrome PATH node')
@@ -385,7 +399,6 @@ export async function buildWindowsRelease({
   projectRoot = PROJECT_ROOT,
   releaseDir = path.join(projectRoot, 'release'),
   extensionDir = path.join(projectRoot, 'apps', 'chrome-extension', '.output', 'chrome-mv3'),
-  nativeServerDir = path.join(projectRoot, 'apps', 'native-server'),
   harnessRuntimeDir,
   version = ACCR_UI_REPLACEMENT_MIN_VERSION,
 } = {}) {
@@ -393,9 +406,6 @@ export async function buildWindowsRelease({
   const runtimeSource = await validateHarnessRuntime(harnessRuntimeDir)
   if (!existsSync(path.join(extensionDir, 'manifest.json'))) {
     throw new Error(`Missing extension build output: ${path.join(extensionDir, 'manifest.json')}. Run pnpm build first.`)
-  }
-  if (!existsSync(path.join(nativeServerDir, 'bin.mjs'))) {
-    throw new Error(`Missing native-server entry: ${path.join(nativeServerDir, 'bin.mjs')}`)
   }
 
   const packageDir = path.join(releaseDir, ACCR_UI_WINDOWS_PACKAGE_NAME)
@@ -417,23 +427,24 @@ export async function buildWindowsRelease({
   }
   await writeFile(manifestPath, `${JSON.stringify(packagedManifest, null, 2)}\n`, 'utf8')
 
-  await copyDereferenced(nativeServerDir, path.join(runtimeDir, 'native-server'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-agent-preset'), path.join(runtimeDir, 'product-plugins', 'harness-ui-agent-preset'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-browser-target'), path.join(runtimeDir, 'product-plugins', 'harness-ui-browser-target'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-conversation-shell'), path.join(runtimeDir, 'product-plugins', 'harness-ui-conversation-shell'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-responsive-sidebar'), path.join(runtimeDir, 'product-plugins', 'harness-ui-responsive-sidebar'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-workspace-picker'), path.join(runtimeDir, 'product-plugins', 'harness-ui-workspace-picker'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-knowledge-scope'), path.join(runtimeDir, 'product-plugins', 'harness-ui-knowledge-scope'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-subagent-compact'), path.join(runtimeDir, 'product-plugins', 'harness-ui-subagent-compact'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-session-log-copy'), path.join(runtimeDir, 'product-plugins', 'harness-ui-session-log-copy'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-settings-shell'), path.join(runtimeDir, 'product-plugins', 'harness-ui-settings-shell'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-skill-settings'), path.join(runtimeDir, 'product-plugins', 'harness-skill-settings'))
-  await bundleHarnessRuntimePlugin({
-    outfile: path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'),
-    projectRoot,
-  })
-  await copyDereferenced(runtimeSource, path.join(runtimeDir, 'harness'))
+  await rm(path.join(runtimeDir, 'native-server'), { recursive: true, force: true })
+  await copyDereferenced(path.join(runtimeSource, 'native-server'), path.join(runtimeDir, 'native-server'))
+  await copyDereferenced(path.join(runtimeSource, 'harness'), path.join(runtimeDir, 'harness'))
+  await copyDereferenced(path.join(runtimeSource, 'native'), path.join(runtimeDir, 'native'))
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
   await writeFile(path.join(runtimeDir, 'run_native_host.bat'), nativeHostBat(), 'utf8')
+  await writeFile(path.join(runtimeDir, 'dsh-plugin.bat'), pluginManagerBat(), 'utf8')
   await writeFile(path.join(runtimeDir, 'register-native-host.ps1'), registerNativeHostPs1(), 'utf8')
   await writeFile(path.join(runtimeDir, 'start.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(startVbs(), 'utf16le')]))
   await writeFile(path.join(runtimeDir, `${NATIVE_HOST_NAME}.json`), nativeHostManifest(NATIVE_HOST_NAME), 'utf8')

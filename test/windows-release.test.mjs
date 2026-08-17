@@ -20,6 +20,8 @@ import {
   validateWindowsRelease,
 } from '../release/windows-lite/windows-release.mjs'
 import { encodeNativeMessage, smokeNativeMessageChild } from '../release/windows-lite/native-message-smoke.mjs'
+import { buildWindowsStaticHarnessRuntime, parseStaticRuntimeArgs } from '../release/windows-lite/build-static-harness-runtime.mjs'
+import { nativeResolverBanner } from '../release/mac-lite/build-mac-production.mjs'
 
 async function writeFixture(root, relativePath, content = '') {
   const target = path.join(root, relativePath)
@@ -114,25 +116,25 @@ function runFakeSmoke(child, timers, killTree = () => ({ ok: true })) {
 async function createFixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'harness-windows-release-'))
   const extensionDir = path.join(root, 'extension')
-  const nativeServerDir = path.join(root, 'apps', 'native-server')
   const harnessRuntimeDir = path.join(root, 'harness-runtime')
   await writeFixture(extensionDir, 'manifest.json', JSON.stringify({ manifest_version: 3, name: 'fixture', version: '0.1.0' }))
-  await writeFixture(nativeServerDir, 'bin.mjs', 'console.log("native")\n')
-  await writeFixture(harnessRuntimeDir, 'package.json', JSON.stringify({ name: '@deepseek-ai/dsh-root' }))
   await writeFixture(harnessRuntimeDir, HARNESS_RUNTIME_MARKER, JSON.stringify({
-    format: 'deepseek-harness-windows-runtime-v1',
+    format: 'deepseek-harness-windows-static-web-v1',
     platform: 'win32',
     arch: 'x64',
     revision: 'fixture-revision',
-    entrypoint: 'apps/cli/lib/bin.js',
-    closureComplete: true,
+    entrypoint: 'harness/apps/cli/lib/server.mjs',
+    bundled: true,
+    nodeModulesIncluded: false,
   }))
-  await writeFixture(harnessRuntimeDir, 'apps/cli/lib/bin.js', 'console.log("dsh")\n')
-  await writeFixture(harnessRuntimeDir, 'apps/web/dist/index.html', '<!doctype html>')
-  for (const packageName of ['dsh-app-boot', 'dsh-web-app', 'dsh-web-frontend']) {
-    await writeFixture(harnessRuntimeDir, `node_modules/@deepseek-ai/${packageName}/package.json`, JSON.stringify({ name: `@deepseek-ai/${packageName}` }))
-  }
-  return { root, extensionDir, nativeServerDir, harnessRuntimeDir }
+  await writeFixture(harnessRuntimeDir, 'harness/package.json', JSON.stringify({ name: '@deepseek-ai/dsh-root' }))
+  await writeFixture(harnessRuntimeDir, 'harness/apps/cli/lib/server.mjs', 'console.log("dsh")\n')
+  await writeFixture(harnessRuntimeDir, 'harness/apps/cli/lib/plugin-manager.mjs', 'console.log("plugin")\n')
+  await writeFixture(harnessRuntimeDir, 'harness/apps/web/dist/index.html', '<!doctype html>')
+  await writeFixture(harnessRuntimeDir, 'native-server/runtime.mjs', 'console.log("native")\n')
+  await writeFixture(harnessRuntimeDir, 'native-server/harness-runtime.mjs', 'export {}\n')
+  for (const relativePath of ['native/node-pty/prebuilds/win32-x64/pty.node', 'native/sharp/sharp.node', 'native/koffi/koffi.node', 'native/ripgrep/rg.exe']) await writeFixture(harnessRuntimeDir, relativePath, 'native')
+  return { root, extensionDir, harnessRuntimeDir }
 }
 
 test('rejects a missing or incomplete Harness runtime instead of silently packaging a sibling checkout', async () => {
@@ -146,9 +148,15 @@ test('rejects a missing or incomplete Harness runtime instead of silently packag
 test('rejects a runtime that lacks the Windows closure marker even when its files look plausible', async () => {
   const fixture = await createFixture()
   await writeFile(path.join(fixture.harnessRuntimeDir, HARNESS_RUNTIME_MARKER), JSON.stringify({
-    format: 'deepseek-harness-windows-runtime-v1', platform: 'darwin', arch: 'arm64', revision: '', entrypoint: 'bin.js', closureComplete: false,
+    format: 'deepseek-harness-windows-static-web-v1', platform: 'darwin', arch: 'arm64', revision: '', entrypoint: 'bin.js', bundled: false, nodeModulesIncluded: true,
   }), 'utf8')
-  await assert.rejects(validateHarnessRuntime(fixture.harnessRuntimeDir), /Harness runtime marker is invalid: platform, arch, revision, entrypoint, closureComplete/)
+  await assert.rejects(validateHarnessRuntime(fixture.harnessRuntimeDir), /Harness runtime marker is invalid: platform, arch, revision, entrypoint, bundled, nodeModulesIncluded/)
+})
+
+test('rejects temporary build files from the static Windows runtime', async () => {
+  const fixture = await createFixture()
+  await writeFixture(fixture.harnessRuntimeDir, '.build/server.mjs', 'temporary')
+  await assert.rejects(validateHarnessRuntime(fixture.harnessRuntimeDir), /must not contain its temporary build directory/)
 })
 
 test('buildWindowsRelease creates the AccrUI updater contract with the fixed extension identity', async () => {
@@ -165,10 +173,13 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.equal(manifest.version, '1.1.63')
   assert.equal(manifest.name, 'accr-ui Harness UI')
   const launcher = execFileSync('unzip', ['-p', payloadZip, 'runtime/run_native_host.bat'], { encoding: 'utf8' })
-  const payloadEntries = execFileSync('unzip', ['-Z1', payloadZip], { encoding: 'utf8' })
+  const payloadEntries = execFileSync('unzip', ['-Z1', payloadZip], { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)
   assert.ok(payloadEntries.includes('runtime/native-server/harness-runtime.mjs'))
+  assert.ok(payloadEntries.includes('runtime/dsh-plugin.bat'))
+  assert.equal(payloadEntries.some((entry) => entry.startsWith('runtime/harness/node_modules/')), false)
   assert.match(launcher, /DSH_ROOT=%PACKAGE_DIR%harness/)
-  assert.match(launcher, /DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\bin\.js/)
+  assert.match(launcher, /DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server\.mjs/)
+  assert.match(launcher, /DSH_HOME=%APPDATA%\\accr-ui-harness\\profile/)
   assert.doesNotMatch(launcher, /DSH_(?:LEGACY_UI_OVERLAY|ENABLE_KNOWLEDGE_SCOPE_UI|ENABLE_SKILL_SETTINGS_UI)/)
   assert.match(launcher, /DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins/)
   assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.ps1`), true)
@@ -203,7 +214,7 @@ test('the in-place updater start script re-registers both native-host names thro
   assert.match(registerScript, /UTF8Encoding\]::new\(\$false\)/)
   assert.match(launcher, /NODE_PATH_FILE=%PACKAGE_DIR%node-path\.txt/)
   assert.match(launcher, /set \/p "NODE_EXEC=" < "%NODE_PATH_FILE%"/)
-  assert.match(launcher, /"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\bin\.mjs"/)
+  assert.match(launcher, /"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime\.mjs"/)
   assert.equal(launcher.includes('node "%PACKAGE_DIR%native-server'), false)
   assert.match(installer, /param\(\[switch\]\$Rollback\)/)
   assert.match(installer, /Register-ReleaseTree \$installRoot/)
@@ -228,6 +239,17 @@ test('release CLI requires an explicit runtime input', () => {
     harnessRuntimeDir: 'C:\\harness-runtime', version: '1.1.63',
   })
   assert.throws(() => parseWindowsReleaseArgs(['--runtime', 'C:\\harness-runtime']), /Unknown argument/)
+})
+
+test('static Windows runtime uses a bundle, keeps native sidecars, and rejects non-Windows materialization', async () => {
+  assert.deepEqual(parseStaticRuntimeArgs(['--source', 'C:\\product', '--out', 'C:\\runtime', '--revision', 'abc']), {
+    sourceDir: 'C:\\product', outputDir: 'C:\\runtime', revision: 'abc',
+  })
+  await assert.rejects(buildWindowsStaticHarnessRuntime({ platform: 'darwin', arch: 'arm64' }), /must build on Windows x64/)
+  const banner = nativeResolverBanner('win32-x64')
+  assert.match(banner, /node-pty\/prebuilds\/win32-x64\/pty\.node/)
+  assert.match(banner, /win32-x64.*\[\^\\\\\/\]\+/s)
+  assert.doesNotMatch(banner, /sharp-libvips-win32-x64/)
 })
 
 test('Windows Native Messaging smoke accepts a fragmented pong, writes stop, and exits cleanly', async () => {

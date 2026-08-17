@@ -21,12 +21,12 @@ const HARNESS_ROOT = path.resolve(EXPLICIT_HARNESS_ROOT || GENERATED_HARNESS_ROO
 const PACKAGE_NAME = 'accr-ui-mac-production-poc'
 const EXTENSION_VERSION = '1.1.63'
 const EXTENSION_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtjVzlR9cE9zV44l999YtraoKbQ77NfaFgwJmpeABPL2HxUK82pD0DFRSv/7FfZ4nEZRDlgZz1zj1yIF4HLnftCZyf/xYIrwhXDojQfYULE8miIGufKEJf/IUBkpFdFKHgfKgowV0M72wNzqaYd27MdR6DczCR5PQKwi5G2JKUJxx4xc2+KD3GOUjpE8DrhzliD3gYcwEZ8lphtOuCUIx5kI97etKEiixqrwFGRoUbHFLXT14+Fqg7jmSu/HaUVWbl/Dx1VbI1hgVZdnJI//UJY+T0qMLV8hcfHPpwBum0lf1rfP+FQwnqoV2wf4k+6f70dE/Xrlckddpkl0IWDSEdwIDAQAB'
-const STATIC_REGISTRY_PACKAGE_OVERRIDES = [
+export const STATIC_REGISTRY_PACKAGE_OVERRIDES = [
   '@deepseek-ai/dsh-client-ui-skill-settings',
   '@deepseek-ai/dsh-client-ui-browser-target',
   '@deepseek-ai/dsh-client-ui-knowledge-scope',
 ]
-const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
+export const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
   '@deepseek-ai/dsh-host-directory-picker-native',
   '@deepseek-ai/dsh-client-ui-directory-picker-native',
   '@deepseek-ai/dsh-host-directory-picker-browse',
@@ -71,14 +71,14 @@ function rewriteConfigPackageNames(config, aliases) {
   })
 }
 
-function staticPluginRegistry(config, additionalConfigs = []) {
+export function staticPluginRegistry(config, additionalConfigs = []) {
   const names = [...new Set([config, ...additionalConfigs].flatMap(pluginNamesFromConfig))]
   const aliases = new Map(names.map((name, index) => [name, `p${index}`]))
   const staticConfig = rewriteConfigPackageNames(config, aliases)
   return { aliases, staticConfig }
 }
 
-async function shippedPresetConfigs(configDir) {
+export async function shippedPresetConfigs(configDir) {
   const presetRoot = path.join(configDir, 'agent-presets')
   const configs = []
   for (const entry of await readdir(presetRoot, { withFileTypes: true })) {
@@ -90,7 +90,7 @@ async function shippedPresetConfigs(configDir) {
   return configs
 }
 
-async function staticTypertPackages(aliases) {
+export async function staticTypertPackages(aliases) {
   const packageRoot = path.join(HARNESS_ROOT, 'node_modules', '.pnpm', 'node_modules')
   const packages = []
   for (const name of aliases.keys()) {
@@ -106,7 +106,7 @@ async function staticTypertPackages(aliases) {
   return packages
 }
 
-function staticWebRunner(aliases, typertPackages) {
+export function staticWebRunner(aliases, typertPackages) {
   const imports = [...aliases].map(([name, alias]) => `import * as ${alias} from ${JSON.stringify(name)};`).join('\n')
   const runtimeImports = RUNTIME_SELECTED_PLUGIN_PACKAGES.map((name, index) => `import * as d${index} from ${JSON.stringify(name)};`).join('\n')
   const typertImports = typertPackages.map((entry, index) => `import { TYPERT as t${index} } from ${JSON.stringify(`${entry.name}/typert`)};`).join('\n')
@@ -289,7 +289,7 @@ main().catch((error) => {
 `
 }
 
-async function copyWebClientPackages(aliases, configDir) {
+export async function copyWebClientPackages(aliases, configDir) {
   const packageRoot = path.join(HARNESS_ROOT, 'node_modules', '.pnpm', 'node_modules')
   for (const name of aliases.keys()) {
     const sourceDir = path.join(packageRoot, ...name.split('/'))
@@ -307,7 +307,18 @@ async function copyWebClientPackages(aliases, configDir) {
   }
 }
 
-function nativeResolverBanner() {
+export function nativeResolverBanner(target = 'darwin-arm64') {
+  const windows = target === 'win32-x64'
+  const nodePty = windows ? 'win32-x64' : 'darwin-arm64'
+  const sharp = windows ? 'win32-x64' : 'darwin-arm64'
+  const koffi = windows ? 'win32-x64' : 'darwin-arm64'
+  const requireBuiltin = windows ? 'win32-x64-msvc' : 'darwin-arm64'
+  const ripgrep = windows ? 'win32-x64' : 'darwin-arm64'
+  const nodePtyRoot = windows ? `node-pty/prebuilds/${nodePty}/pty.node` : 'node-pty/pty.node'
+  const sharpLibvipsMappings = windows ? '' : `
+  ['@img/sharp-libvips-${sharp}/lib', __dshResolve(__dshNativeRoot, 'sharp-libvips/lib/index.js')],
+  ['@img/sharp-libvips-${sharp}/package', __dshResolve(__dshNativeRoot, 'sharp-libvips/package.json')],
+  ['@img/sharp-libvips-${sharp}/versions', __dshResolve(__dshNativeRoot, 'sharp-libvips/versions.json')],`
   return `import { existsSync as __dshExistsSync } from 'node:fs';
 import { createRequire as __dshCreateRequire, Module as __dshModule } from 'node:module';
 import { dirname as __dshDirname, resolve as __dshResolve } from 'node:path';
@@ -317,14 +328,12 @@ const __dshBundleDir = __dshDirname(__dshFileURLToPath(import.meta.url));
 const __dshNativeRoot = __dshResolve(__dshBundleDir, '../../../../native');
 const __dshClientPackageRoot = __dshResolve(__dshBundleDir, '../config/client-packages');
 const __dshNativeModules = new Map([
-  ['../prebuilds/darwin-arm64/pty.node', __dshResolve(__dshNativeRoot, 'node-pty/pty.node')],
-  ['@img/sharp-darwin-arm64/sharp.node', __dshResolve(__dshNativeRoot, 'sharp/sharp.node')],
-  ['@img/sharp-libvips-darwin-arm64/lib', __dshResolve(__dshNativeRoot, 'sharp-libvips/lib/index.js')],
-  ['@img/sharp-libvips-darwin-arm64/package', __dshResolve(__dshNativeRoot, 'sharp-libvips/package.json')],
-  ['@img/sharp-libvips-darwin-arm64/versions', __dshResolve(__dshNativeRoot, 'sharp-libvips/versions.json')],
-  ['@koromix/koffi-darwin-arm64', __dshResolve(__dshNativeRoot, 'koffi/koffi.node')],
-  ['node-addon-require-builtin-darwin-arm64', __dshResolve(__dshNativeRoot, 'node-addon-require-builtin/addon.node')],
-  ['@vscode/ripgrep-darwin-arm64/bin/rg', __dshResolve(__dshNativeRoot, 'ripgrep/rg')],
+  ['../prebuilds/${nodePty}/pty.node', __dshResolve(__dshNativeRoot, '${nodePtyRoot}')],
+  ['@img/sharp-${sharp}/sharp.node', __dshResolve(__dshNativeRoot, 'sharp/sharp.node')],
+  ${sharpLibvipsMappings}
+  ['@koromix/koffi-${koffi}', __dshResolve(__dshNativeRoot, 'koffi/koffi.node')],
+  ['node-addon-require-builtin-${requireBuiltin}', __dshResolve(__dshNativeRoot, 'node-addon-require-builtin/addon.node')],
+  ['@vscode/ripgrep-${ripgrep}/bin/rg${windows ? '.exe' : ''}', __dshResolve(__dshNativeRoot, 'ripgrep/rg${windows ? '.exe' : ''}')],
   ['@deepseek-ai/dsh-web-frontend/dist/index.html', __dshResolve(__dshNativeRoot, '../harness/apps/web/dist/index.html')],
 ]);
 const __dshOriginalResolveFilename = __dshModule._resolveFilename;
@@ -332,14 +341,16 @@ __dshModule._resolveFilename = function(request, parent, isMain, options) {
   const clientManifest = /^(@[^/]+\\/)?[^/]+\\/package\\.json$/.test(request)
     ? __dshResolve(__dshClientPackageRoot, request)
     : undefined;
+  const windowsNodePtyAsset = ${windows ? "typeof request === 'string' ? request.match(/(?:^|[\\\\/])prebuilds[\\\\/]win32-x64[\\\\/]([^\\\\/]+)\\.node$/)?.[1] : undefined" : 'undefined'};
   const mapped = (__dshExistsSync(clientManifest ?? '') ? clientManifest : undefined)
     ?? __dshNativeModules.get(request)
-    ?? (/prebuilds\\/darwin-arm64\\/+pty\\.node$/.test(request) ? __dshResolve(__dshNativeRoot, 'node-pty/pty.node') : undefined);
+    ?? (windowsNodePtyAsset ? __dshResolve(__dshNativeRoot, 'node-pty/prebuilds/win32-x64/' + windowsNodePtyAsset + '.node') : undefined)
+    ?? (/prebuilds\\/${nodePty}\\/+pty\\.node$/.test(request) ? __dshResolve(__dshNativeRoot, '${nodePtyRoot}') : undefined);
   return mapped ?? __dshOriginalResolveFilename.call(this, request, parent, isMain, options);
 };`
 }
 
-function bundleWithHarnessEsbuild({ contents, sourcefile, resolveDir, outfile, aliases = {} }) {
+export function bundleWithHarnessEsbuild({ contents, sourcefile, resolveDir, outfile, aliases = {}, nativeTarget = 'darwin-arm64' }) {
   const program = `
 import { build } from 'esbuild';
 const chunks = [];
@@ -365,12 +376,12 @@ await build({
       DSH_ESBUILD_RESOLVE_DIR: resolveDir,
       DSH_ESBUILD_OUTFILE: outfile,
       DSH_ESBUILD_ALIASES: JSON.stringify(aliases),
-      DSH_ESBUILD_BANNER: nativeResolverBanner(),
+      DSH_ESBUILD_BANNER: nativeResolverBanner(nativeTarget),
     },
   })
 }
 
-async function patchBundledWorkerPaths(bundlePath) {
+export async function patchBundledWorkerPaths(bundlePath) {
   let source = await readFile(bundlePath, 'utf8')
   const replacements = [
     {
@@ -449,7 +460,7 @@ async function resetDirectory(target) {
   await mkdir(target, { recursive: true })
 }
 
-async function copyWithoutSourceMaps(source, destination) {
+export async function copyWithoutSourceMaps(source, destination) {
   await cp(source, destination, {
     recursive: true,
     dereference: true,

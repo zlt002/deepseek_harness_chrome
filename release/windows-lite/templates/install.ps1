@@ -10,7 +10,7 @@ $managedNames = @('extension', 'runtime', 'release.json')
 
 function Assert-ReleaseTree([string]$Root) {
   $extensionManifest = Join-Path $Root 'extension\manifest.json'
-  $cli = Join-Path $Root 'runtime\harness\apps\cli\lib\bin.js'
+  $cli = Join-Path $Root 'runtime\harness\apps\cli\lib\server.mjs'
   $registerScript = Join-Path $Root 'runtime\register-native-host.ps1'
   if (-not (Test-Path -LiteralPath $extensionManifest -PathType Leaf)) { throw "安装内容不完整：缺少 $extensionManifest" }
   if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "安装内容不完整：缺少 $cli" }
