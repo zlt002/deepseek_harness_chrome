@@ -28,10 +28,12 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(presentation, /owner\.renderComposer\(\)/)
   assert.match(css, /:global\(\[data-composer-seat\]\)/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)/)
-  // The compact shell replaces the historical upstream header at side-panel
-  // widths.  The public slot marker, rather than an upstream CSS-module name,
-  // keeps that product rule stable across Harness upgrades.
-  assert.match(css, /@media \(max-width: 999px\)[\s\S]*\[data-slot='conversation\.session\.header'\][\s\S]*display: none/)
+  // The compact product frame replaces the historical upstream header: that
+  // one slot contains the title/action row and the conversation/trajectory
+  // tablist. Scope the rule to the stable frame marker, not a generic media
+  // query, so standalone Harness Web keeps its header at every width.
+  assert.match(css, /\[data-sidebar-presentation='compact'\][\s\S]*\[data-slot='conversation\.session\.header'\][\s\S]*display: none/)
+  assert.doesNotMatch(css, /@media \(max-width: 999px\)[\s\S]*\[data-slot='conversation\.session\.header'\][\s\S]*display: none/)
   // The composer is deliberately a sibling of the scrollport.  Its overlay
   // anchor must form an elevated, visible containing block: without this,
   // long transcript scrolling can paint over (or clip) model/permission/
