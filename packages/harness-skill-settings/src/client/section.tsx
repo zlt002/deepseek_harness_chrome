@@ -7,6 +7,11 @@ import css from './section.module.css'
 type Mode = 'enabled' | 'manual-only' | 'disabled'
 type View = { writable: boolean, revision: number, modes: Record<string, Mode>, skills: readonly SkillEntry[] }
 const NS = 'skill-settings'
+const MODE_OPTIONS = [
+  { value: 'enabled', label: 'enabled' },
+  { value: 'manual-only', label: 'manual' },
+  { value: 'disabled', label: 'disabled' },
+] as const
 function modesOf(value: unknown): Record<string, Mode> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
   const modes = (value as { modes?: unknown }).modes
@@ -43,10 +48,19 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
       else setRevision(value => value + 1)
     }, () => setFailed(true)).finally(() => setPending(undefined))
   }
-  return <section className={css.section}><h2>{t('title')}</h2><ul>{view.skills.map(skill => {
+  return <section className={css.section}><div className={css.heading}><h2>{t('title')}</h2><p className={css.intro}>{t('intro')}</p></div><ul className={css.rows}>{view.skills.map(skill => {
     const mode = view.modes[skill.name] ?? 'enabled'
-    return <li key={skill.name}><div><strong>{skill.name}</strong><p>{skill.description}</p>{skill.authoredModelInvocable === false ? <span>{t('authorModel')}</span> : null}{skill.authoredUserInvocable === false ? <span>{t('authorUser')}</span> : null}</div>
-      <select aria-label={skill.name} value={mode} disabled={!view.writable || pending !== undefined} onChange={event => change(skill, event.currentTarget.value as Mode)}><option value="enabled">{t('enabled')}</option><option value="manual-only">{t('manual')}</option><option value="disabled">{t('disabled')}</option></select>
+    const disabled = !view.writable || pending !== undefined
+    return <li key={skill.name} className={css.row}><div className={css.skillCopy}><strong>{skill.name}</strong><p>{skill.description}</p><div className={css.restrictions}>{skill.authoredModelInvocable === false ? <span>{t('authorModel')}</span> : null}{skill.authoredUserInvocable === false ? <span>{t('authorUser')}</span> : null}</div></div>
+      <div className={css.modeControl} role="radiogroup" aria-label={skill.name}>{MODE_OPTIONS.map(option => <button
+        key={option.value}
+        type="button"
+        role="radio"
+        aria-checked={mode === option.value}
+        className={css.modeButton}
+        disabled={disabled}
+        onClick={() => change(skill, option.value)}
+      >{t(option.label)}</button>)}</div>
     </li>
   })}</ul></section>
 }
