@@ -28,7 +28,8 @@
     "register-native-host": "node scripts/register-native-host.mjs",
     "dev:restart": "node scripts/restart-dev.mjs",
     "dev:watch": "node scripts/watch-dev.mjs",
-    "dev:refresh": "node scripts/refresh-dev.mjs"
+    "dev:refresh": "node scripts/refresh-dev.mjs",
+    "dev:setup:windows": "pnpm install --frozen-lockfile && pnpm build:harness-product && pnpm register-native-host"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
