@@ -14,6 +14,11 @@ test('Agent preset projection stays out of upstream and uses the public composer
   assert.match(source, /conversation\.composer\.dock/)
   assert.match(source, /agentPresets\.list/)
   assert.match(source, /agent-preset\.presentation/)
+  assert.match(
+    source,
+    /name:\s*'agent-preset\.presentation'[\s\S]*?select:\s*owner\s*=>\s*owner[\s\S]*?CompactPresetPresentation/,
+    'chain presentation registration must select the matched owner',
+  )
   assert.match(styles, /background: var\(--dsw-alias-fill-tsp-secondary\)/)
   assert.match(styles, /@media \(max-width: 999px\)/)
   assert.doesNotMatch(source, /upstream\/deepseek-harness/)

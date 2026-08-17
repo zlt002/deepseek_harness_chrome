@@ -33,7 +33,10 @@ export function apply(ctx: ClientContext): void {
     load,
   })
   ctx.slots.inject('agent-preset.presentation', () => ctx.slots.register({
-    name: 'agent-preset.presentation', id: 'accrui-agent-preset-presentation', order: 0,
+    name: 'agent-preset.presentation',
+    id: 'accrui-agent-preset-presentation',
+    order: 0,
+    select: owner => owner,
   }, CompactPresetPresentation))
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
