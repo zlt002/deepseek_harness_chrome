@@ -1,13 +1,15 @@
 import { loadHarnessClientBundle } from '../../scripts/load-harness-client-bundle.mjs'
-import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const clientBundle = await loadHarnessClientBundle()
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const harnessRoot = resolve(process.env.DSH_ROOT?.trim() || resolve(projectRoot, '.generated/harness-product'))
-const fflateBrowser = resolve(harnessRoot, 'node_modules/.pnpm/fflate@0.8.3/node_modules/fflate/esm/browser.js')
-if (!existsSync(fflateBrowser)) throw new Error(`Harness fflate browser runtime is missing: ${fflateBrowser}`)
+// Resolve from the official Web app's declared dependency, then inline that
+// third-party browser library. This keeps the product package self-contained
+// and does not depend on pnpm's internal store layout or upstream source files.
+const fflateBrowser = createRequire(pathToFileURL(resolve(harnessRoot, 'apps/web/package.json'))).resolve('fflate/browser')
 const base = clientBundle('@accrui/harness-ui-session-log-copy', ['src/index.ts'])
 
 export default (inline: { env?: Record<string, string | undefined> }) => base(inline).map(config => {
