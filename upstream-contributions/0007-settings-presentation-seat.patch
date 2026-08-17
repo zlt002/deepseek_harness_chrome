@@ -80,7 +80,7 @@ diff --git a/packages/client/ui-settings-general/src/client/shell-contract.ts b/
 index ad61b2111a..37cab2eda8 100644
 --- a/packages/client/ui-settings-general/src/client/shell-contract.ts
 +++ b/packages/client/ui-settings-general/src/client/shell-contract.ts
-@@ -12,6 +12,13 @@ import type { HostObservable, InjectFace, PropsRenderSlots, PropsRuntime } from
+@@ -12,6 +12,14 @@ import type { HostObservable, InjectFace, PropsRenderSlots, PropsRuntime } from
  import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
  // Type-only: pulls the settings slot declarations the shell renders into.
  import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -88,6 +88,7 @@ index ad61b2111a..37cab2eda8 100644
 +
 +declare module '@deepseek-ai/dsh-client-ui-slots' {
 +  interface SlotMap {
++    /** Register a replacement shell receiving owner state/actions; absence renders the official Settings fallback. */
 +    'settings.presentation': { kind: 'chain'; scope: 'root'; owner: SettingsPresentationOwnerProps }
 +  }
 +}

@@ -13,7 +13,7 @@ index f7350076c2..fee155524f 100644
  import { IconAgentPresetOutline16, IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
  // Type-only: pulls the ui-conversation SlotMap merge (the hero seat).
  import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-@@ -22,6 +23,23 @@ import type { AgentPresetSeatState } from './seat-store.ts'
+@@ -22,6 +23,26 @@ import type { AgentPresetSeatState } from './seat-store.ts'
  import { presetDisplayText } from './locales.ts'
  import css from './AgentPresetSeat.module.css'
  
@@ -31,7 +31,10 @@ index f7350076c2..fee155524f 100644
 +  t: AgentPresetSeatProps['t']
 +}
 +declare module '@deepseek-ai/dsh-client-ui-slots' {
-+  interface SlotMap { 'agent-preset.presentation': { kind: 'chain'; scope: 'root'; owner: AgentPresetPresentationOwnerProps } }
++  interface SlotMap {
++    /** Register a replacement preset chip receiving owner state/actions; absence renders the official preset fallback. */
++    'agent-preset.presentation': { kind: 'chain'; scope: 'root'; owner: AgentPresetPresentationOwnerProps }
++  }
 +}
 +
  /** Registration-side business face for the hero chip. */
