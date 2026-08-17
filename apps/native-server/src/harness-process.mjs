@@ -225,15 +225,17 @@ export async function prepareProductUiPackages(env = process.env) {
     }
     const link = resolve(dshHome, 'profiles/web/node_modules', ...packageName.split('/'))
     await mkdir(dirname(link), { recursive: true })
+    let needsLink = true
     try {
       const info = await lstat(link)
       if (!info.isSymbolicLink()) throw new Error(`Refusing to replace unmanaged Harness plugin path: ${link}`)
       const current = resolve(dirname(link), await readlink(link))
-      if (current !== source) throw new Error(`Harness product plugin link points elsewhere: ${link} -> ${current}`)
+      if (current === source) needsLink = false
+      else await rm(link, { recursive: true, force: true })
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
-      await symlink(source, link, process.platform === 'win32' ? 'junction' : 'dir')
     }
+    if (needsLink) await symlink(source, link, process.platform === 'win32' ? 'junction' : 'dir')
   }
 }
 

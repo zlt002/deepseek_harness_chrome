@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { claudeSkillsPatch, harnessArgs, prepareProductUiPackages, productUiPatch, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin } from '../apps/native-server/src/harness-process.mjs'
-import { mkdtemp, readFile, readlink, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -94,6 +94,21 @@ test('installs a managed product UI link into an isolated Harness profile', asyn
   assert.equal(
     resolve(dirname(link), await readlink(link)),
     resolve(projectRoot, 'packages/harness-ui-browser-target'),
+  )
+})
+
+test('migrates a managed product UI symlink when the installed package root changes', async (t) => {
+  const dshHome = await mkdtemp(resolve(tmpdir(), 'harness-product-ui-migrate-'))
+  t.after(() => rm(dshHome, { recursive: true, force: true }))
+  const link = resolve(dshHome, 'profiles/web/node_modules/@accrui/harness-ui-agent-preset')
+  await mkdir(dirname(link), { recursive: true })
+  await symlink('/tmp/old-harness-ui-agent-preset', link, process.platform === 'win32' ? 'junction' : 'dir')
+
+  await prepareProductUiPackages({ DSH_HOME: dshHome })
+
+  assert.equal(
+    resolve(dirname(link), await readlink(link)),
+    resolve(projectRoot, 'packages/harness-ui-agent-preset'),
   )
 })
 

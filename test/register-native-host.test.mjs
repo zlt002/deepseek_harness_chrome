@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -124,6 +124,28 @@ test('can reinstall over a pnpm-linked native host dependency', async () => {
     const second = await runRegister(home)
     assert.equal(second.code, 0, second.stderr)
     assert.equal((await lstat(installedSdk)).isDirectory(), true)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('installed native host resolves self-contained product UI packages', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
+  const nativeServer = join(home, 'Library/Application Support/DeepSeekHarness/native-server')
+  const dshHome = join(home, '.dsh')
+  try {
+    const result = await runRegister(home)
+    assert.equal(result.code, 0, result.stderr)
+
+    const harnessProcessUrl = `${pathToFileURL(join(nativeServer, 'src/harness-process.mjs')).href}?test=${Date.now()}`
+    const { prepareProductUiPackages } = await import(harnessProcessUrl)
+    await prepareProductUiPackages({ HOME: home, DSH_HOME: dshHome })
+
+    const link = join(dshHome, 'profiles/web/node_modules/@accrui/harness-ui-agent-preset')
+    assert.equal(
+      resolve(dirname(link), await readlink(link)),
+      await realpath(join(nativeServer, 'product-plugins/harness-ui-agent-preset')),
+    )
   } finally {
     await rm(home, { recursive: true, force: true })
   }

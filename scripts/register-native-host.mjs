@@ -15,6 +15,13 @@ const extensionIds = [...new Set(
 )]
 const nativeServerSource = resolve(projectRoot, 'apps', 'native-server')
 const skillsSource = resolve(projectRoot, 'skills')
+const productPluginsSource = resolve(projectRoot, 'packages')
+const productPluginNames = [
+  'harness-ui-agent-preset',
+  'harness-ui-browser-target',
+  'harness-ui-knowledge-scope',
+  'harness-skill-settings',
+]
 const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined
 const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim() || undefined
 const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
@@ -133,9 +140,25 @@ async function replaceDirectory(source, destination, prepare) {
   await rm(backup, { recursive: true, force: true })
 }
 
+async function installProductPlugins(destination) {
+  for (const packageName of productPluginNames) {
+    const source = resolve(productPluginsSource, packageName)
+    for (const required of ['package.json', 'lib/index.js', 'lib/client.js']) {
+      if (!existsSync(resolve(source, required))) {
+        throw new Error(`Product Harness UI package is not built: ${resolve(source, required)}. Run pnpm build:harness-client-plugins.`)
+      }
+    }
+    const target = resolve(destination, packageName)
+    await mkdir(target, { recursive: true })
+    await cp(resolve(source, 'package.json'), resolve(target, 'package.json'))
+    await cp(resolve(source, 'lib'), resolve(target, 'lib'), { recursive: true, dereference: true })
+  }
+}
+
 await mkdir(installRoot, { recursive: true })
 await replaceDirectory(nativeServerSource, nativeServer, async (staging) => {
   await bundleHarnessRuntimePlugin({ outfile: join(staging, 'harness-runtime.mjs'), projectRoot })
+  await installProductPlugins(join(staging, 'product-plugins'))
 })
 await replaceDirectory(skillsSource, skills)
 await writeFile(launcher, `${launcherLines.join('\n')}\n`, 'utf8')
