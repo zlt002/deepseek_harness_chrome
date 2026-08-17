@@ -10,8 +10,8 @@ on:
         description: AccrUI-compatible extension version
         required: true
         default: 1.1.63
-      quick_build:
-        description: Skip acceptance tests for a faster build (~38 min saved)
+      full_validation:
+        description: Run full acceptance tests (~38 min added) for pre-release validation
         required: false
         type: boolean
         default: false
@@ -75,7 +75,7 @@ jobs:
           --version "${{ inputs.version || '1.1.63' }}"
 
       - name: Accept Windows install, Native Messaging, upgrade, and rollback
-        if: ${{ inputs.quick_build != true }}
+        if: ${{ inputs.full_validation == true }}
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: >-
@@ -110,7 +110,7 @@ jobs:
               --draft `
               --target '${{ github.sha }}' `
               --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
-              --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. The Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention. Visual Chrome/Edge sidepanel UAT on a target Windows machine remains required."
+              --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
@@ -118,7 +118,7 @@ jobs:
             --repo $repo `
             --target '${{ github.sha }}' `
             --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
-            --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. The Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention. Visual Chrome/Edge sidepanel UAT on a target Windows machine remains required."
+            --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           gh release upload $env:RELEASE_TAG $zip $checksum --repo $repo --clobber
