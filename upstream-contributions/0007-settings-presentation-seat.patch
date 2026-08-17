@@ -168,9 +168,14 @@ index a8c4f2894d..ad01ee23da 100644
 diff --git a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx b/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
 --- a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
 +++ b/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
-@@ -63,4 +63,5 @@ function mount({
+@@ -63,4 +63,10 @@ function mount({
        return select(current)
      },
      renderSlot,
-+    renderSlotChain: ((_key, _owner, options) => options?.fallback ?? null) as never,
++    useQuickActions: select => select([]),
++    renderSlotChain: ((
++      _key: unknown,
++      _owner: unknown,
++      options?: { fallback?: unknown },
++    ) => options?.fallback ?? null) as never,
    }
