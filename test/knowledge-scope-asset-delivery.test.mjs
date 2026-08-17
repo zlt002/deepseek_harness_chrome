@@ -5,7 +5,7 @@ import { productUiPatch } from '../apps/native-server/src/harness-process.mjs'
 
 const publicFile = (path) => readFile(new URL(`../apps/chrome-extension/public/${path}`, import.meta.url), 'utf8')
 
-test('clean upstream defaults to the browser plugin until the generic knowledge seam is enabled', async () => {
+test('product runtime always mounts knowledge scope through the generic seam', async () => {
   const cleanConversation = await readFile(new URL(
     '../upstream/deepseek-harness/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx',
     import.meta.url,
@@ -13,7 +13,8 @@ test('clean upstream defaults to the browser plugin until the generic knowledge 
 
   assert.doesNotMatch(cleanConversation, /conversation\.composer\.above/)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-browser-target/)
-  assert.doesNotMatch(productUiPatch({}), /@accrui\/harness-ui-knowledge-scope/)
+  assert.match(productUiPatch({}), /@accrui\/harness-ui-knowledge-scope/)
+  assert.match(productUiPatch({ DSH_LEGACY_UI_OVERLAY: '1' }), /@accrui\/harness-ui-knowledge-scope/)
 })
 
 test('product Harness assets deliver both UI plugins through the generic composer seam', async () => {
@@ -33,6 +34,6 @@ test('product Harness assets deliver both UI plugins through the generic compose
   assert.match(browserTarget, /conversation\.input\.overlay/)
   assert.match(productConversation, /conversation\.composer\.above/)
   assert.match(knowledgeScope, /conversation\.composer\.above/)
-  assert.match(productUiPatch({ DSH_ENABLE_KNOWLEDGE_SCOPE_UI: '1' }), /@accrui\/harness-ui-knowledge-scope/)
+  assert.match(productUiPatch({}), /@accrui\/harness-ui-knowledge-scope/)
   await access(new URL('../packages/harness-ui-knowledge-scope/lib/client.js', import.meta.url))
 })

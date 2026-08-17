@@ -21,9 +21,9 @@ The clean upstream already owns and renders the card-wide
 `conversation.input.overlay` list. The picker uses that existing slot; no new
 overlay primitive, DOM query, or component replacement is required.
 
-Until that seam lands, do not load this package in clean upstream. No DOM
-selector, component override, or internal `src` import is an acceptable
-substitute.
+The product materializer applies that generic seam before this package loads.
+No environment flag, DOM selector, component override, or internal `src`
+import is required.
 
 ## Runtime contract
 

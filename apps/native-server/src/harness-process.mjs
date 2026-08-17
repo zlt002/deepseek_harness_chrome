@@ -188,9 +188,8 @@ export function productUiPatch(env = process.env) {
 }
 
 function productUiPackages(env = process.env) {
-  // Browser Target is the first completed externalization. The generated e327
-  // product tree removes its built-in package before this product package is
-  // mounted; all other replacements remain disabled to avoid duplicate slots.
+  // The generated e327 product tree removes each externalized built-in before
+  // these product-owned packages mount, so no duplicate slot owner remains.
   if (env.DSH_LEGACY_UI_OVERLAY === '1') {
     return [
       '@accrui/harness-ui-agent-preset',
@@ -199,6 +198,7 @@ function productUiPackages(env = process.env) {
       '@accrui/harness-ui-subagent-compact',
       '@accrui/harness-ui-session-log-copy',
       '@accrui/harness-ui-settings-shell',
+      '@accrui/harness-ui-knowledge-scope',
       '@accrui/harness-skill-settings',
     ]
   }
@@ -209,13 +209,9 @@ function productUiPackages(env = process.env) {
     '@accrui/harness-ui-subagent-compact',
     '@accrui/harness-ui-session-log-copy',
     '@accrui/harness-ui-settings-shell',
+    '@accrui/harness-ui-knowledge-scope',
   ]
   if (env.DSH_ENABLE_SKILL_SETTINGS_UI === '1') packages.push('@accrui/harness-skill-settings')
-  // Knowledge Scope needs the generic composer-above/card-overlay seam. Keep
-  // the package built, but do not mount it against an older clean upstream.
-  if (env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI === '1') {
-    packages.push('@accrui/harness-ui-knowledge-scope')
-  }
   return packages
 }
 

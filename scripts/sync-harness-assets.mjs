@@ -32,8 +32,6 @@ const harness = new HarnessWebProcess({
     ...process.env,
     DSH_HOME: syncHome,
     DSH_ROOT: harnessRoot,
-    DSH_ENABLE_KNOWLEDGE_SCOPE_UI: process.env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI
-      ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
     DSH_ENABLE_SKILL_SETTINGS_UI: process.env.DSH_ENABLE_SKILL_SETTINGS_UI
       ?? (existsSync(join(harnessRoot, '.harness-product.json')) ? '1' : '0'),
     DSH_LEGACY_UI_OVERLAY: process.env.DSH_LEGACY_UI_OVERLAY

@@ -3,9 +3,10 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 
-const productRoot = path.resolve('.generated/harness-product')
+const productRoot = path.resolve(process.env.DSH_ROOT?.trim() || '.generated/harness-product')
 const subagentPluginRoot = path.resolve('packages/harness-ui-subagent-compact')
 const sessionLogCopyPluginRoot = path.resolve('packages/harness-ui-session-log-copy')
+const knowledgeScopePluginRoot = path.resolve('packages/harness-ui-knowledge-scope')
 
 async function source(relativePath) {
   return readFile(path.join(productRoot, relativePath), 'utf8')
@@ -19,10 +20,14 @@ async function sessionLogCopyPluginSource(relativePath) {
   return readFile(path.join(sessionLogCopyPluginRoot, relativePath), 'utf8')
 }
 
+async function knowledgeScopePluginSource(relativePath) {
+  return readFile(path.join(knowledgeScopePluginRoot, relativePath), 'utf8')
+}
+
 test('materialized Harness preserves the latest compact product UI contracts', async () => {
   const [conversation, knowledgeScope, settings, settingsCss, subagent, sessionLogCopy] = await Promise.all([
     source('packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx'),
-    source('packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.tsx'),
+    knowledgeScopePluginSource('src/client/KnowledgeScope.tsx'),
     source('packages/client/ui-settings-general/src/client/SettingsRoot.tsx'),
     source('packages/client/ui-settings-general/src/client/SettingsRoot.module.css'),
     subagentPluginSource('src/client/CompactSubagentAction.tsx'),
@@ -33,6 +38,11 @@ test('materialized Harness preserves the latest compact product UI contracts', a
   const inputSeat = conversation.indexOf('{inputBar}')
   assert.ok(scopeSeat >= 0 && inputSeat > scopeSeat, 'knowledge/code scope must stay above the input card')
   assert.match(knowledgeScope, /PropsRuntime<'conversation\.composer\.above'>/)
+  await assert.rejects(
+    source('packages/client/ui-knowledge-scope/package.json'),
+    error => error?.code === 'ENOENT',
+    'knowledge scope must stay outside the official Harness package tree',
+  )
 
   assert.match(settings, /quickActions\.filter\(action => action\.id !== 'conversation'\)/)
   assert.match(settingsCss, /@media \(max-width: 999px\)[\s\S]*?\.panel \{[\s\S]*?width: 100%;[\s\S]*?height: 100%;/)

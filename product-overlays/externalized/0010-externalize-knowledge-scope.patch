@@ -1,0 +1,775 @@
+diff --git a/packages/bundle/web-app/cordis.patch.yml b/packages/bundle/web-app/cordis.patch.yml
+index 83fcbf4..b06e63b 100644
+--- a/packages/bundle/web-app/cordis.patch.yml
++++ b/packages/bundle/web-app/cordis.patch.yml
+@@ -198,9 +198,6 @@
+     - id: ui-conversation
+       name: '@deepseek-ai/dsh-client-ui-conversation'
+
+-    - id: ui-knowledge-scope
+-      name: '@deepseek-ai/dsh-client-ui-knowledge-scope'
+-
+     # Tool call tree, generic fallback, and keyed business Tool views.
+     - id: ui-tool
+       name: '@deepseek-ai/dsh-client-ui-tool'
+diff --git a/packages/bundle/web-app/package.json b/packages/bundle/web-app/package.json
+index 7ff4859..ca4709a 100644
+--- a/packages/bundle/web-app/package.json
++++ b/packages/bundle/web-app/package.json
+@@ -53,7 +53,6 @@
+     "@deepseek-ai/dsh-client-modules": "workspace:^",
+     "@deepseek-ai/dsh-client-runtime": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-agent-preset": "workspace:^",
+-    "@deepseek-ai/dsh-client-ui-knowledge-scope": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-commands": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-conversation": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-cordis": "workspace:^",
+diff --git a/packages/client/ui-knowledge-scope/README.i18n.yaml b/packages/client/ui-knowledge-scope/README.i18n.yaml
+deleted file mode 100644
+index 0915d77..0000000
+--- a/packages/client/ui-knowledge-scope/README.i18n.yaml
++++ /dev/null
+@@ -1,6 +0,0 @@
+-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+-# side as of the last confirmed-consistent state. Both languages carry equal authority;
+-# after editing either side, bring the other along and re-record with:
+-#   pnpm run verify-translation-pairing --write packages/client/ui-knowledge-scope/README.md
+-README.md: 48f2ad0a9447d3e0c4a926bbd15d1c967d887e22
+-README.zh.md: 833b06fa8f584a399ca66effd9f20cafa092eabb
+diff --git a/packages/client/ui-knowledge-scope/README.md b/packages/client/ui-knowledge-scope/README.md
+deleted file mode 100644
+index 48f2ad0..0000000
+--- a/packages/client/ui-knowledge-scope/README.md
++++ /dev/null
+@@ -1,26 +0,0 @@
+-# @deepseek-ai/dsh-client-ui-knowledge-scope
+-
+-English | [中文](README.zh.md)
+-
+-Chrome-extension-only composer control for selecting code repositories directly and, when needed, a knowledge domain and knowledge-base systems before a continuable Knowledge subagent searches them. A persistent scope row is the composer card's immediately preceding sibling, with separate repository and knowledge triggers; each opens its own upward panel. Repositories support multi-selection through a domain → system → repository tree when the extension catalog supplies the optional relations; otherwise they stay in an explicit ungrouped branch. It starts only in the nonce-bound loopback iframe, requests catalog and selection snapshots from the extension, and sends scope updates back over the same origin- and nonce-checked channel. The control does not fetch Knowledge Platform data, persist selection, add prompt text, or add model tool arguments.
+-
+-## Model Experience
+-
+-### Extension scope command
+-
+-#### What the model sees
+-
+-`knowledge-scope-command/v1` is a loopback UI message and never becomes prompt text, a model tool argument, or a session event.
+-
+-#### Token effect
+-
+-Zero direct token effect; the Connector adapter, not this UI package, supplies the selected scope to an executed search.
+-
+-#### KV Cache effect
+-
+-None; the package does not alter a provider request or a reusable prompt prefix.
+-
+-## Known Limitations and Deferred Work
+-
+-- **Extension-only availability** — ordinary Web sessions do not register the selector because they have no trusted Chrome-extension parent.
+-- **Extension-owned data** — catalog availability, selection persistence, and authenticated Knowledge Platform requests depend on the companion Chrome extension.
+diff --git a/packages/client/ui-knowledge-scope/README.zh.md b/packages/client/ui-knowledge-scope/README.zh.md
+deleted file mode 100644
+index 833b06f..0000000
+--- a/packages/client/ui-knowledge-scope/README.zh.md
++++ /dev/null
+@@ -1,26 +0,0 @@
+-# @deepseek-ai/dsh-client-ui-knowledge-scope
+-
+-[English](README.md) | 中文
+-
+-仅用于 Chrome 扩展的输入区控件：范围栏是输入框卡片正上方、紧贴卡片的独立同级区域，代码库与知识范围各有独立入口并向上展开。代码库支持多选；扩展目录提供可选关系字段时，按“领域 → 系统 → 仓库”树展示，否则明确落入未分组分支；需要知识查询时再选择知识领域和知识库系统。它只在带 nonce 绑定的本地 iframe 中启动，从扩展请求目录和选择快照，并通过同一个校验来源和 nonce 的通道回传范围更新。该控件不获取知识中台数据、不持久化选择、不添加提示词文本，也不添加模型工具参数。
+-
+-## 模型体验
+-
+-### 扩展范围命令
+-
+-#### 模型可见内容
+-
+-`knowledge-scope-command/v1` 是本地 UI 消息，绝不会成为提示词文本、模型工具参数或会话事件。
+-
+-#### token 影响
+-
+-直接 token 影响为零；由 Connector 适配器而非该 UI 包在执行查询时提供已选范围。
+-
+-#### KV Cache 影响
+-
+-无；该包不改变提供方请求或可复用的提示词前缀。
+-
+-## 已知限制与延后工作
+-
+-- **仅扩展可用** — 普通 Web 会话没有可信的 Chrome 扩展父级，因此不会注册该选择器。
+-- **数据归扩展所有** — 目录可用性、选择持久化和已认证的知识中台请求依赖配套 Chrome 扩展。
+diff --git a/packages/client/ui-knowledge-scope/package.json b/packages/client/ui-knowledge-scope/package.json
+deleted file mode 100644
+index c33edb9..0000000
+--- a/packages/client/ui-knowledge-scope/package.json
++++ /dev/null
+@@ -1,15 +0,0 @@
+-{
+-  "name": "@deepseek-ai/dsh-client-ui-knowledge-scope",
+-  "description": "Knowledge and code scope picker above the opt-in Chrome extension Harness composer card",
+-  "version": "0.1.0-rc.5",
+-  "private": true,
+-  "type": "module",
+-  "main": "lib/index.js",
+-  "types": "lib/types/index.d.ts",
+-  "exports": { ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" }, "./client": { "types": "./lib/types/client/index.d.ts", "default": "./lib/client.js" }, "./src/*": "./src/*", "./package.json": "./package.json" },
+-  "dsh": { "client": { "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-conversation"], "platform": "web" } },
+-  "scripts": { "bundle": "tsdown", "watch": "tsdown --watch" },
+-  "dependencies": { "@deepseek-ai/dsh-client-runtime": "workspace:^", "@deepseek-ai/dsh-client-ui-conversation": "workspace:^", "@deepseek-ai/dsh-client-ui-primitives": "workspace:^", "@deepseek-ai/dsh-client-ui-slots": "workspace:^", "@deepseek-ai/cordis": "workspace:^", "react": "^18.2.0" },
+-  "devDependencies": { "@deepseek-ai/dsh-client-runtime": "workspace:^", "@deepseek-ai/dsh-client-ui-conversation": "workspace:^", "@deepseek-ai/dsh-client-ui-primitives": "workspace:^", "@deepseek-ai/dsh-client-ui-slots": "workspace:^", "@deepseek-ai/cordis": "workspace:^", "@testing-library/react": "^16.1.0", "@types/react": "~18.3.1", "react": "^18.2.0" },
+-  "files": ["lib/index.js", "lib/client.js", "lib/types/**/*.d.ts"]
+-}
+diff --git a/packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.module.css b/packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.module.css
+deleted file mode 100644
+index 731c467..0000000
+--- a/packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.module.css
++++ /dev/null
+@@ -1,45 +0,0 @@
+-.strip { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 8px; box-sizing: border-box; width: 100%; max-width: var(--dsh-composer-card-max-width); margin: 0 auto; padding: 2px 12px; font-size: 12px; }
+-.repositoryToggle, .scopeTrigger { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font: inherit; white-space: nowrap; }
+-.repositoryToggle:hover, .scopeTrigger:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+-.repositoryToggle[aria-checked='true'] { color: var(--dsw-alias-state-business-primary); }
+-.repositoryToggle:disabled { cursor: not-allowed; opacity: .55; }
+-.switchTrack { display: inline-flex; align-items: center; width: 27px; height: 15px; padding: 2px; border-radius: 999px; background: var(--dsw-alias-border-l2); }
+-.switchTrack > span { width: 11px; height: 11px; border-radius: 50%; background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-shadow-lv1); transition: transform .15s ease; }
+-.repositoryToggle[aria-checked='true'] .switchTrack { background: var(--dsw-alias-state-business-primary); }
+-.repositoryToggle[aria-checked='true'] .switchTrack > span { transform: translateX(12px); }
+-.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+-.switchWrap { position: relative; display: inline-flex; }
+-.remember { position: absolute; bottom: calc(100% + 6px); left: 0; display: flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 7px; background: var(--dsw-specific-menu); box-shadow: var(--dsw-shadow-lv2); white-space: nowrap; }
+-.notice { display: block; width: min(100%, var(--dsh-composer-card-max-width)); margin: 0 auto; padding: 0 12px; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+-.scopeTrigger:disabled { cursor: not-allowed; opacity: .55; }
+-.login { border: 0; background: transparent; color: var(--dsw-alias-state-business-primary); cursor: pointer; font: inherit; }
+-.scopeTrigger { min-width: 0; width: 100%; justify-content: center; overflow: hidden; text-overflow: ellipsis; }
+-.scopeLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+-.panel { position: absolute; bottom: calc(100% + 8px); left: 50%; z-index: 100; box-sizing: border-box; width: min(100%, var(--dsh-composer-card-max-width)); max-height: min(480px, calc(100vh - 140px)); overflow: auto; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; background: var(--dsw-specific-menu); color: var(--dsw-alias-label-primary); box-shadow: var(--dsw-shadow-lv3); transform: translateX(-50%); }
+-.panelHeader { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 14px; }
+-.panelHeader span, .sectionHint { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+-.section { padding-top: 10px; }
+-.sectionHint { margin: 0 0 10px; line-height: 18px; }
+-.domainGrid { display: flex; flex-wrap: wrap; gap: 6px; }
+-.choice, .choiceActive { min-width: 0; padding: 6px 9px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 7px; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+-.choiceActive { border-color: var(--dsw-alias-state-business-primary); background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-state-business-primary); }
+-.group { margin-top: 12px; }
+-.groupTitle { display: block; margin-bottom: 6px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+-.optionList { display: grid; gap: 4px; }
+-.option { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 2px 6px; border-radius: 7px; cursor: pointer; }
+-.option:hover { background: var(--dsw-alias-interactive-bg-hover); }
+-.option input { accent-color: var(--dsw-alias-state-business-primary); }
+-.tree { display: grid; gap: 8px; }
+-.domainGroup { border-top: 1px solid var(--dsw-alias-border-l2); }
+-.domainTitle { padding: 8px 6px 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; }
+-.systemGroup { border-top: 1px solid var(--dsw-alias-border-l2); }
+-.systemRow { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 2px 6px; border-radius: 7px; font-size: 13px; }
+-.systemRow:hover, .systemRow:has(input:checked) { background: var(--dsw-alias-interactive-bg-hover); }
+-.systemRow input { accent-color: var(--dsw-alias-state-business-primary); }
+-.expand { display: inline-grid; flex: 0 0 20px; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; cursor: pointer; }
+-.expandIcon { display: block; font-size: 16px; line-height: 1; transform: translateY(-1px); }
+-.expand:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+-.count, .repositoryType { margin-left: auto; color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+-.repositoryList { margin-left: 18px; padding-left: 9px; border-left: 1px solid var(--dsw-alias-border-l2); }
+-.repositoryName { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+-@media (max-width: 480px) { .panel { width: 100%; border-radius: 12px; } .repositoryToggle { padding-left: 4px; } .scopeTrigger { padding-right: 4px; } }
+diff --git a/packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.tsx b/packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.tsx
+deleted file mode 100644
+index c91f86c..0000000
+--- a/packages/client/ui-knowledge-scope/src/client/KnowledgeScopeControl.tsx
++++ /dev/null
+@@ -1,150 +0,0 @@
+-import { useEffect, useMemo, useState } from 'react'
+-import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
+-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { Catalog, KnowledgeScopeOptions, Scope, Snapshot } from './bridge.ts'
+-import css from './KnowledgeScopeControl.module.css'
+-
+-export interface KnowledgeScopeInjected { hooks: { knowledgeScope: SnapshotStore<Snapshot | undefined> }; request: (sessionId: string, scope?: Scope, options?: KnowledgeScopeOptions) => void }
+-type ControlProps = PropsRuntime<'conversation.composer.above'> & InjectFace<KnowledgeScopeInjected>
+-type PanelProps = PropsRuntime<'conversation.input.overlay'> & InjectFace<KnowledgeScopeInjected>
+-const emptyCatalog: Catalog = { domains: [], systems: [], repositories: [] }
+-const scopeFor = (snapshot: Snapshot | undefined, sessionId: string) => snapshot?.sessionId === sessionId ? snapshot.scope : undefined
+-const toggle = (values: readonly string[], id: string, checked: boolean) => checked ? [...new Set([...values, id])] : values.filter(value => value !== id)
+-
+-/** Preserve all chosen source names; the trigger truncates visually only when needed. */
+-function selectedSourceLabel(ids: readonly string[], entries: ReadonlyArray<{ id: string; name: string }>): string | undefined {
+-  const names = ids.flatMap(id => {
+-    const name = entries.find(entry => entry.id === id)?.name
+-    return name === undefined ? [] : [name]
+-  })
+-  if (names.length === 0) return undefined
+-  return names.join('、')
+-}
+-
+-interface RepositoryGroup { domainId: string; domainName: string; systems: Array<{ id: string; name: string; repositories: Catalog['repositories'] }> }
+-
+-function repositoryGroups(catalog: Catalog): RepositoryGroup[] {
+-  const domainNames = new Map(catalog.domains.map(domain => [domain.id, domain.name]))
+-  const systemNames = new Map(catalog.systems.map(system => [system.id, system.name]))
+-  const domains = new Map<string, Map<string, Catalog['repositories']>>()
+-  for (const repository of catalog.repositories) {
+-    const domainId = repository.domainId ?? 'unassigned'
+-    const systemId = repository.systemId ?? 'unassigned'
+-    const systems = domains.get(domainId) ?? new Map<string, Catalog['repositories']>()
+-    const entries = systems.get(systemId) ?? []
+-    entries.push(repository)
+-    systems.set(systemId, entries)
+-    domains.set(domainId, systems)
+-  }
+-  return [...domains].map(([domainId, systems]) => ({
+-    domainId,
+-    domainName: domainNames.get(domainId) ?? (domainId === 'unassigned' ? '未分组领域' : domainId),
+-    systems: [...systems].map(([id, repositories]) => ({ id, name: systemNames.get(id) ?? (id === 'unassigned' ? '未分组系统' : id), repositories })),
+-  }))
+-}
+-
+-function typeLabel(type: string | undefined): string | undefined {
+-  if (type === 'frontend') return '前端'
+-  if (type === 'backend') return '后端'
+-  return type
+-}
+-
+-/** Compact, always-visible scope summary in the card-external composer bar. */
+-export function KnowledgeScopeControl({ session, useKnowledgeScope, request }: ControlProps) {
+-  const [rememberOpen, setRememberOpen] = useState(false)
+-  const snapshot = useKnowledgeScope(value => value)
+-  const knowledgeOverlay = useComposerOverlay('knowledge-scope')
+-  const repositoryOverlay = useComposerOverlay('repository-scope')
+-  const sessionId = String(session.sessionId)
+-  useEffect(() => { request(sessionId) }, [request, sessionId])
+-  const catalog = snapshot?.catalog ?? emptyCatalog
+-  const scope = scopeFor(snapshot, sessionId)
+-  const enabled = snapshot?.enabled === true
+-  const serviceState = snapshot?.serviceState ?? 'checking'
+-  const ready = serviceState === 'ready'
+-  const selectedRepositories = selectedSourceLabel(scope?.repositoryIds ?? [], catalog.repositories)
+-  const knowledge = selectedSourceLabel(scope?.systemIds ?? [], catalog.systems)
+-    ?? catalog.domains.find(item => item.id === scope?.domainId)?.name
+-    ?? '知识范围'
+-  return <><div className={css.strip} aria-label="知识检索范围">
+-    <span className={css.switchWrap} onMouseEnter={() => setRememberOpen(true)} onMouseLeave={() => setRememberOpen(false)}>
+-    <button className={css.repositoryToggle} type="button" role="switch" aria-label="启用知识查询" aria-checked={enabled} onFocus={() => setRememberOpen(true)} onClick={() => {
+-      request(sessionId, scope ?? { domainId: '', systemIds: [], repositoryIds: [] }, { enabled: !enabled })
+-    }}>
+-      <span aria-hidden className={css.switchTrack}><span /></span><span className={css.srOnly}>启用知识查询</span>
+-    </button>{rememberOpen && <label className={css.remember}><input aria-label="记住知识库开关状态" type="checkbox" checked={snapshot?.remember === true} onChange={(event) => request(sessionId, scope, { remember: event.target.checked })}/>是否记住</label>}</span>
+-    <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={selectedRepositories === undefined ? '选择代码库' : `选择代码库：${selectedRepositories}`} title={selectedRepositories} aria-expanded={repositoryOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={repositoryOverlay.toggle}>
+-      <span aria-hidden>⌘</span><span className={css.scopeLabel}>{selectedRepositories ?? '选择代码库'}</span><span aria-hidden>⌃</span>
+-    </button>
+-    <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={`选择知识范围：${knowledge}`} title={knowledge} aria-expanded={knowledgeOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={knowledgeOverlay.toggle}>
+-      <span aria-hidden>⌘</span><span className={css.scopeLabel}>{knowledge}</span><span aria-hidden>⌃</span>
+-    </button>
+-  </div>{serviceState !== 'ready' && <output className={css.notice}>{serviceState === 'checking'
+-    ? '正在连接知识服务…'
+-    : serviceState === 'unauthenticated'
+-      ? <>知识库登录已失效，请<button className={css.login} type="button" onClick={() => request(sessionId, undefined, { action: 'login' })}>重新登录</button></>
+-      : <>知识服务暂不可用，请<button className={css.login} type="button" onClick={() => request(sessionId, undefined, { action: 'login' })}>登录知识库</button><button className={css.login} type="button" onClick={() => request(sessionId, undefined, { action: 'retry' })}>重新检测</button></>}</output>}</>
+-}
+-
+-function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, section }: PanelProps & { section: 'knowledge' | 'repositories' }) {
+-  const snapshot = useKnowledgeScope(value => value)
+-  const id = String(sessionId)
+-  const catalog = snapshot?.catalog ?? emptyCatalog
+-  const scope = scopeFor(snapshot, id) ?? { domainId: '', systemIds: [], repositoryIds: [] }
+-  // Keep the chooser responsive while the extension snapshot makes its round trip.
+-  // The snapshot remains authoritative and resynchronizes this draft when it changes.
+-  const [draftScope, setDraftScope] = useState<Scope>(scope)
+-  const snapshotScopeKey = `${scope.domainId}|${scope.systemIds.join(',')}|${scope.repositoryIds.join(',')}`
+-  useEffect(() => { setDraftScope(scope) }, [snapshot?.sessionId, snapshotScopeKey])
+-  const update = (next: Scope) => { setDraftScope(next); request(id, next) }
+-  const [expandedSystems, setExpandedSystems] = useState<Set<string>>(() => new Set())
+-  const [expandedDomains, setExpandedDomains] = useState<Set<string>>(() => new Set())
+-  const groups = useMemo(() => repositoryGroups(catalog), [catalog])
+-  return <div className={css.panel} role="dialog" aria-label={section === 'knowledge' ? '知识范围' : '代码库范围'}>
+-    <div className={css.panelHeader}><strong>{section === 'knowledge' ? '知识范围' : '选择代码库'}</strong><span>{section === 'knowledge' ? `${draftScope.systemIds.length} 项已选` : `${draftScope.repositoryIds.length} 个已选`}</span></div>
+-    {section === 'knowledge' ? <div className={css.section} aria-label="知识库范围">
+-      <p className={css.sectionHint}>选择一个领域，再勾选需要查询的知识库系统。</p>
+-      <div className={css.tree}>{catalog.domains.map(domain => {
+-        const expanded = expandedDomains.has(domain.id)
+-        const selected = draftScope.domainId === domain.id
+-        const systems = catalog.systems.filter(system => system.domainId === undefined || system.domainId === domain.id)
+-        return <div key={domain.id} className={css.systemGroup}>
+-          <div className={css.systemRow}>
+-            <input aria-label={domain.name} type="radio" name="knowledge-domain" checked={selected} onChange={() => update({ domainId: domain.id, systemIds: [], repositoryIds: draftScope.repositoryIds })}/>
+-            <button type="button" className={css.expand} aria-label={`${expanded ? '收起' : '展开'}${domain.name}`} onClick={() => setExpandedDomains(current => { const next = new Set(current); if (next.has(domain.id)) next.delete(domain.id); else next.add(domain.id); return next })}><span className={css.expandIcon} aria-hidden>{expanded ? '⌄' : '›'}</span></button>
+-            <span>{domain.name}</span><span className={css.count}>({systems.length})</span>
+-          </div>
+-          {expanded && <div className={css.repositoryList}>{systems.map(system => <label key={system.id} className={css.option}><input aria-label={system.name} type="checkbox" disabled={!selected} checked={selected && draftScope.systemIds.includes(system.id)} onChange={(event) => update({ ...draftScope, systemIds: toggle(draftScope.systemIds, system.id, event.target.checked) })}/><span>{system.name}</span></label>)}</div>}
+-        </div>
+-      })}</div>
+-    </div> : <div className={css.section} aria-label="代码库范围">
+-      <p className={css.sectionHint}>可多选；代码查询仅使用这里勾选的远程仓库。</p>
+-      <div className={css.tree}>{groups.map(domain => <div key={domain.domainId} className={css.domainGroup}>
+-        <div className={css.domainTitle}>{domain.domainName}</div>
+-        {domain.systems.map(system => {
+-          const key = `${domain.domainId}:${system.id}`
+-          const expanded = expandedSystems.has(key)
+-          const repositoryIds = system.repositories.map(repository => repository.id)
+-          const selected = repositoryIds.filter(repositoryId => draftScope.repositoryIds.includes(repositoryId)).length
+-          return <div key={key} className={css.systemGroup}>
+-            <div className={css.systemRow}>
+-              <input aria-label={`${system.name}全部代码库`} type="checkbox" checked={repositoryIds.length > 0 && selected === repositoryIds.length} onChange={(event) => update({ ...draftScope, repositoryIds: event.target.checked ? [...new Set([...draftScope.repositoryIds, ...repositoryIds])] : draftScope.repositoryIds.filter(repositoryId => !repositoryIds.includes(repositoryId)) })}/>
+-              <button type="button" className={css.expand} aria-label={`${expanded ? '收起' : '展开'}${system.name}`} onClick={() => setExpandedSystems(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next })}><span className={css.expandIcon} aria-hidden>{expanded ? '⌄' : '›'}</span></button>
+-              <span>{system.name}</span><span className={css.count}>({repositoryIds.length})</span>
+-            </div>
+-            {expanded && <div className={css.repositoryList}>{system.repositories.map(repository => <label key={repository.id} className={css.option}><input aria-label={repository.name} type="checkbox" checked={draftScope.repositoryIds.includes(repository.id)} onChange={(event) => update({ ...draftScope, repositoryIds: toggle(draftScope.repositoryIds, repository.id, event.target.checked) })}/><span className={css.repositoryName}>{repository.name}</span>{typeLabel(repository.type) !== undefined && <span className={css.repositoryType}>{typeLabel(repository.type)}</span>}</label>)}</div>}
+-          </div>
+-        })}
+-      </div>)}</div>
+-    </div>}
+-  </div>
+-}
+-
+-/** Registers the chooser with InputBar's shared upward overlay surface. */
+-export function KnowledgeScopePanel(props: PanelProps) {
+-  const knowledge = useComposerOverlay('knowledge-scope', <KnowledgeScopePanelBody {...props} section="knowledge" />)
+-  const repositories = useComposerOverlay('repository-scope', <KnowledgeScopePanelBody {...props} section="repositories" />)
+-  if (knowledge.available || repositories.available) return null
+-  return knowledge.open ? <KnowledgeScopePanelBody {...props} section="knowledge" /> : repositories.open ? <KnowledgeScopePanelBody {...props} section="repositories" /> : null
+-}
+diff --git a/packages/client/ui-knowledge-scope/src/client/bridge.ts b/packages/client/ui-knowledge-scope/src/client/bridge.ts
+deleted file mode 100644
+index fbaeff7..0000000
+--- a/packages/client/ui-knowledge-scope/src/client/bridge.ts
++++ /dev/null
+@@ -1,47 +0,0 @@
+-import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+-
+-export interface Scope { domainId: string; systemIds: string[]; repositoryIds: string[] }
+-export interface Catalog {
+-  domains: Array<{ id: string; name: string }>
+-  systems: Array<{ id: string; name: string; domainId?: string }>
+-  repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }>
+-}
+-export type KnowledgeServiceState = 'checking' | 'ready' | 'unauthenticated' | 'unavailable'
+-export type KnowledgeScopeOptions = { enabled?: boolean; remember?: boolean; action?: 'login' | 'retry' }
+-export interface Snapshot { sessionId: string; scope?: Scope; enabled?: boolean; remember?: boolean; serviceState?: KnowledgeServiceState; error?: string; catalog: Catalog }
+-
+-function validSnapshot(value: unknown): value is Snapshot {
+-  const item = value as Partial<Snapshot> | undefined
+-  return !!item && typeof item.sessionId === 'string'
+-    && (item.enabled === undefined || typeof item.enabled === 'boolean')
+-    && (item.remember === undefined || typeof item.remember === 'boolean')
+-    && (item.serviceState === undefined || ['checking', 'ready', 'unauthenticated', 'unavailable'].includes(item.serviceState))
+-    && !!item.catalog && Array.isArray(item.catalog.domains) && Array.isArray(item.catalog.systems) && Array.isArray(item.catalog.repositories)
+-}
+-
+-/** Nonce- and origin-checked channel between the loopback iframe and its extension owner. */
+-export function createKnowledgeScopeBridge(nonce: string, parentOrigin: string): { source: SnapshotStore<Snapshot | undefined>; request: (sessionId: string, scope?: Scope, options?: KnowledgeScopeOptions) => void; accept: (event: Pick<MessageEvent, 'source' | 'origin' | 'data'>, parent: WindowProxy) => boolean } {
+-  const source = createSnapshotStore<Snapshot | undefined>(undefined)
+-  let incoming = 0; let outgoing = 0
+-  return {
+-    source,
+-    request(sessionId, scope, options) {
+-      outgoing += 1
+-      window.parent.postMessage({ type: 'knowledge-scope-command/v1', nonce, sequence: outgoing, sessionId, ...(scope === undefined ? {} : { scope }), ...options }, parentOrigin)
+-    },
+-    accept(event, parent) {
+-      if (event.source !== parent || event.origin !== parentOrigin || !event.data || typeof event.data !== 'object') return false
+-      const message = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; snapshot?: unknown }
+-      if (message.type !== 'knowledge-scope-snapshot/v1' || message.nonce !== nonce || typeof message.sequence !== 'number' || message.sequence <= incoming || !validSnapshot(message.snapshot)) return false
+-      incoming = message.sequence; source.set(message.snapshot); return true
+-    },
+-  }
+-}
+-
+-export function knowledgeScopeBridgeConfig(location: Location = window.location): { nonce: string; parentOrigin: string } | undefined {
+-  const query = new URLSearchParams(location.search)
+-  if (query.get('dshBrowserTargetBridge') !== '1') return undefined
+-  const nonce = query.get('dshBrowserTargetNonce'); const parentOrigin = query.get('dshBrowserTargetParentOrigin')
+-  if (nonce === null || parentOrigin === null) return undefined
+-  try { const parsed = new URL(parentOrigin); return parsed.protocol === 'chrome-extension:' && `${parsed.protocol}//${parsed.host}` === parentOrigin ? { nonce, parentOrigin } : undefined } catch { return undefined }
+-}
+diff --git a/packages/client/ui-knowledge-scope/src/client/index.ts b/packages/client/ui-knowledge-scope/src/client/index.ts
+deleted file mode 100644
+index 85c5408..0000000
+--- a/packages/client/ui-knowledge-scope/src/client/index.ts
++++ /dev/null
+@@ -1,17 +0,0 @@
+-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+-import { KnowledgeScopeControl, KnowledgeScopePanel, type KnowledgeScopeInjected } from './KnowledgeScopeControl.tsx'
+-import { createKnowledgeScopeBridge, knowledgeScopeBridgeConfig } from './bridge.ts'
+-
+-export const inject = ['slots']
+-
+-/** Mount the card-external scope bar and its chooser in the shared upward overlay. */
+-export function apply(ctx: ClientContext): void {
+-  const config = knowledgeScopeBridgeConfig()
+-  if (config === undefined) return
+-  const bridge = createKnowledgeScopeBridge(config.nonce, config.parentOrigin)
+-  const injected = (): KnowledgeScopeInjected => ({ hooks: { knowledgeScope: bridge.source }, request: bridge.request })
+-  ctx.effect(() => { const receive = (event: MessageEvent) => { bridge.accept(event, window.parent) }; window.addEventListener('message', receive); return () => window.removeEventListener('message', receive) }, 'ui-knowledge-scope: iframe bridge')
+-  ctx.slots.inject('conversation.composer.above', () => ctx.slots.register({ name: 'conversation.composer.above', id: 'knowledge-scope-control', order: 20, inject: injected }, KnowledgeScopeControl))
+-  ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({ name: 'conversation.input.overlay', id: 'knowledge-scope-panel', order: 20, inject: injected }, KnowledgeScopePanel))
+-}
+diff --git a/packages/client/ui-knowledge-scope/src/css-modules.d.ts b/packages/client/ui-knowledge-scope/src/css-modules.d.ts
+deleted file mode 100644
+index 754a3ef..0000000
+--- a/packages/client/ui-knowledge-scope/src/css-modules.d.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-declare module '*.module.css' { const classes: Record<string, string>; export default classes }
+diff --git a/packages/client/ui-knowledge-scope/src/index.ts b/packages/client/ui-knowledge-scope/src/index.ts
+deleted file mode 100644
+index eedfadf..0000000
+--- a/packages/client/ui-knowledge-scope/src/index.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-/** Host half: Knowledge scope presentation is extension-iframe-only. */
+-export function apply(): void {}
+diff --git a/packages/client/ui-knowledge-scope/tests/bridge.client.spec.ts b/packages/client/ui-knowledge-scope/tests/bridge.client.spec.ts
+deleted file mode 100644
+index 11d3569..0000000
+--- a/packages/client/ui-knowledge-scope/tests/bridge.client.spec.ts
++++ /dev/null
+@@ -1,17 +0,0 @@
+-import { describe, expect, it } from 'vitest'
+-import { createKnowledgeScopeBridge } from '../src/client/bridge.ts'
+-
+-const parent = {} as WindowProxy
+-const snapshot = { sessionId: 'child-1', scope: { domainId: 'supply', systemIds: ['order'], repositoryIds: ['repo'] }, catalog: { domains: [{ id: 'supply', name: '供应链' }], systems: [], repositories: [] } }
+-
+-describe('Knowledge scope iframe bridge', () => {
+-  it('admits only parent-origin nonce-bound snapshots and keeps sessions isolated', () => {
+-    const bridge = createKnowledgeScopeBridge('nonce', 'chrome-extension://abcdefghijklmnop')
+-    const event = (overrides: object = {}) => ({ source: parent, origin: 'chrome-extension://abcdefghijklmnop', data: { type: 'knowledge-scope-snapshot/v1', nonce: 'nonce', sequence: 1, snapshot, ...overrides } }) as MessageEvent
+-    expect(bridge.accept(event({ nonce: 'wrong' }), parent)).toBe(false)
+-    expect(bridge.accept({ ...event(), source: null }, parent)).toBe(false)
+-    expect(bridge.accept(event(), parent)).toBe(true)
+-    expect(bridge.source.getSnapshot()?.sessionId).toBe('child-1')
+-    expect(bridge.accept(event({ sequence: 1, snapshot: { ...snapshot, sessionId: 'other' } }), parent)).toBe(false)
+-  })
+-})
+diff --git a/packages/client/ui-knowledge-scope/tests/composer-scope-contract.spec.ts b/packages/client/ui-knowledge-scope/tests/composer-scope-contract.spec.ts
+deleted file mode 100644
+index 56fc586..0000000
+--- a/packages/client/ui-knowledge-scope/tests/composer-scope-contract.spec.ts
++++ /dev/null
+@@ -1,46 +0,0 @@
+-import { readFileSync } from 'node:fs'
+-import { resolve } from 'node:path'
+-import { describe, expect, it } from 'vitest'
+-
+-const root = resolve(import.meta.dirname, '../..')
+-const source = (path: string) => readFileSync(resolve(root, path), 'utf8')
+-
+-describe('knowledge scope composer seam', () => {
+-  it('renders the scope bar as the composer card\'s immediately preceding sibling', () => {
+-    expect(source('ui-conversation/src/client/contract/slots.ts')).toContain("'conversation.composer.above': { kind: 'list'; scope: 'session'; owner: InputZone }")
+-    expect(source('ui-conversation/src/client/apply.ts')).toContain("'conversation.composer.above': { kind: 'list', scope: 'session' }")
+-    const root = source('ui-conversation/src/client/skeleton/ConversationRoot.tsx')
+-    expect(root).toContain("renderSlot('conversation.composer.above', zone)")
+-    expect(root).toContain('<ComposerOverlayProvider>')
+-    expect(root).toContain("renderSlot('conversation.input.overlay', {})}<ComposerOverlaySurface />")
+-    const input = source('ui-conversation/src/client/skeleton/InputBar.tsx')
+-    expect(input).not.toContain('ComposerOverlayProvider')
+-    expect(input).not.toContain('<ComposerOverlaySurface />')
+-    expect(input).not.toContain('scope?: ReactNode')
+-    expect(input).not.toContain('{scope !== undefined && <div className={css.scope}>{scope}</div>}')
+-
+-    const index = source('ui-knowledge-scope/src/client/index.ts')
+-    expect(index).toContain("name: 'conversation.composer.above'")
+-    expect(index).toContain("name: 'conversation.input.overlay'")
+-    expect(index).not.toContain("name: 'conversation.input.left'")
+-
+-    const control = source('ui-knowledge-scope/src/client/KnowledgeScopeControl.tsx')
+-    expect(control).toContain('代码库')
+-    expect(control).toContain('知识范围')
+-    expect(control).toContain('role="switch"')
+-    expect(control).toContain("useComposerOverlay('repository-scope')")
+-    expect(control).toContain("'选择代码库'")
+-    expect(control).toContain('aria-label={`选择知识范围：${knowledge}`}')
+-    expect(control).toContain('代码库范围')
+-    expect(control).toContain('repositoryIds: toggle(draftScope.repositoryIds')
+-    expect(control).toContain('{ enabled: !enabled }')
+-    expect(control).not.toContain("repositoryIds: [] })\n      else if (repositoryOverlay.available)")
+-    expect(control).not.toContain('mcp__chrome__')
+-
+-    const style = source('ui-knowledge-scope/src/client/KnowledgeScopeControl.module.css')
+-    expect(style).toContain('grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr)')
+-    expect(style).toContain('.scopeTrigger { min-width: 0; width: 100%; justify-content: center;')
+-    expect(style).toContain('min-height: 28px; padding: 2px 6px')
+-    expect(style).toContain('.expandIcon')
+-  })
+-})
+diff --git a/packages/client/ui-knowledge-scope/tests/knowledge-scope-control.client.spec.tsx b/packages/client/ui-knowledge-scope/tests/knowledge-scope-control.client.spec.tsx
+deleted file mode 100644
+index c07127b..0000000
+--- a/packages/client/ui-knowledge-scope/tests/knowledge-scope-control.client.spec.tsx
++++ /dev/null
+@@ -1,189 +0,0 @@
+-// @vitest-environment jsdom
+-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+-import { afterEach, describe, expect, it, vi } from 'vitest'
+-import { ComposerOverlayProvider, ComposerOverlaySurface } from '@deepseek-ai/dsh-client-ui-primitives'
+-import { KnowledgeScopeControl, KnowledgeScopePanel } from '../src/client/KnowledgeScopeControl.tsx'
+-
+-afterEach(cleanup)
+-
+-const snapshot = {
+-  sessionId: 'session-1',
+-  enabled: true,
+-  remember: false,
+-  serviceState: 'ready' as const,
+-  scope: { domainId: 'supply', systemIds: ['orders'], repositoryIds: ['harness'] },
+-  catalog: {
+-    domains: [{ id: 'supply', name: '供应链' }],
+-    systems: [{ id: 'orders', name: '订单知识库' }],
+-    repositories: [{ id: 'harness', name: 'Harness' }],
+-  },
+-}
+-
+-describe('KnowledgeScopeControl', () => {
+-  it('shows knowledge domains as expandable rows with system checkboxes', () => {
+-    const request = vi.fn()
+-    const useKnowledgeScope = (select: (value: typeof snapshot) => unknown) => select(snapshot)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    const panelProps = { sessionId: 'session-1', useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopePanel>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /><KnowledgeScopePanel {...panelProps} /><ComposerOverlaySurface /></ComposerOverlayProvider>)
+-
+-    fireEvent.click(screen.getByRole('button', { name: /选择知识范围/ }))
+-    fireEvent.click(screen.getByRole('button', { name: '展开供应链' }))
+-    expect(screen.getByRole('checkbox', { name: '订单知识库' })).toBeTruthy()
+-  })
+-
+-  it('groups repositories by domain then system, with expandable repository leaves', () => {
+-    const request = vi.fn()
+-    const groupedSnapshot = {
+-      ...snapshot,
+-      catalog: {
+-        domains: [{ id: 'supply', name: '供应链' }],
+-        systems: [{ id: 'orders', name: '订单系统', domainId: 'supply' }],
+-        repositories: [
+-          { id: 'harness', name: 'Harness', domainId: 'supply', systemId: 'orders', type: 'backend' },
+-          { id: 'web', name: 'Web', domainId: 'supply', systemId: 'orders', type: 'frontend' },
+-        ],
+-      },
+-    }
+-    const useKnowledgeScope = (select: (value: typeof groupedSnapshot) => unknown) => select(groupedSnapshot)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    const panelProps = { sessionId: 'session-1', useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopePanel>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /><KnowledgeScopePanel {...panelProps} /><ComposerOverlaySurface /></ComposerOverlayProvider>)
+-
+-    fireEvent.click(screen.getByRole('button', { name: /选择代码库/ }))
+-    expect(screen.getByText('供应链')).toBeTruthy()
+-    fireEvent.click(screen.getByRole('button', { name: /展开订单系统/ }))
+-    expect(screen.getByRole('checkbox', { name: 'Harness' })).toBeTruthy()
+-    expect(screen.getByText('后端')).toBeTruthy()
+-    expect(screen.getByText('前端')).toBeTruthy()
+-  })
+-
+-  it('reflects a repository selection immediately while the snapshot request is in flight', () => {
+-    const request = vi.fn()
+-    const groupedSnapshot = {
+-      ...snapshot,
+-      scope: { ...snapshot.scope, repositoryIds: [] },
+-      catalog: {
+-        ...snapshot.catalog,
+-        systems: [{ id: 'orders', name: '订单系统', domainId: 'supply' }],
+-        repositories: [{ id: 'harness', name: 'Harness', domainId: 'supply', systemId: 'orders' }],
+-      },
+-    }
+-    const useKnowledgeScope = (select: (value: typeof groupedSnapshot) => unknown) => select(groupedSnapshot)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    const panelProps = { sessionId: 'session-1', useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopePanel>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /><KnowledgeScopePanel {...panelProps} /><ComposerOverlaySurface /></ComposerOverlayProvider>)
+-
+-    fireEvent.click(screen.getByRole('button', { name: /选择代码库/ }))
+-    fireEvent.click(screen.getByRole('button', { name: /展开订单系统/ }))
+-    const repository = screen.getByRole('checkbox', { name: 'Harness' })
+-    fireEvent.click(repository)
+-    expect((repository as HTMLInputElement).checked).toBe(true)
+-    expect(request).toHaveBeenLastCalledWith('session-1', { domainId: 'supply', systemIds: ['orders'], repositoryIds: ['harness'] })
+-  })
+-
+-  it('keeps code and knowledge scope in one compact closed composer strip, then opens the selector upward', () => {
+-    const request = vi.fn()
+-    const useKnowledgeScope = (select: (value: typeof snapshot) => unknown) => select(snapshot)
+-    const controlProps = {
+-      session: { sessionId: 'session-1' },
+-      input: undefined,
+-      useKnowledgeScope,
+-      request,
+-    } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    const panelProps = {
+-      sessionId: 'session-1',
+-      useKnowledgeScope,
+-      request,
+-    } as unknown as Parameters<typeof KnowledgeScopePanel>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /><KnowledgeScopePanel {...panelProps} /><ComposerOverlaySurface /></ComposerOverlayProvider>)
+-
+-    expect(screen.getByRole('switch', { name: '启用知识查询' })).toBeTruthy()
+-    expect(screen.getByRole('button', { name: /选择代码库：Harness/ })).toBeTruthy()
+-    const knowledge = screen.getByRole('button', { name: /选择知识范围：订单知识库/ })
+-    expect(knowledge.getAttribute('aria-expanded')).toBe('false')
+-    expect(screen.queryByRole('dialog', { name: '知识范围' })).toBeNull()
+-
+-    fireEvent.click(screen.getByRole('button', { name: /选择代码库/ }))
+-    expect(screen.getByRole('dialog', { name: '代码库范围' })).toBeTruthy()
+-    fireEvent.click(screen.getByRole('button', { name: '展开未分组系统' }))
+-    fireEvent.click(screen.getByLabelText('Harness'))
+-    expect(request).toHaveBeenLastCalledWith('session-1', { domainId: 'supply', systemIds: ['orders'], repositoryIds: [] })
+-
+-    fireEvent.click(knowledge)
+-    expect(screen.getByRole('dialog', { name: '知识范围' })).toBeTruthy()
+-  })
+-
+-  it('keeps every selected source name in the trigger so wide layouts can show them all', () => {
+-    const request = vi.fn()
+-    const multiple = {
+-      ...snapshot,
+-      scope: { domainId: 'supply', systemIds: ['orders', 'billing'], repositoryIds: ['harness', 'web'] },
+-      catalog: {
+-        ...snapshot.catalog,
+-        systems: [{ id: 'orders', name: '订单知识库' }, { id: 'billing', name: '结算知识库' }],
+-        repositories: [{ id: 'harness', name: 'Harness' }, { id: 'web', name: 'Web' }],
+-      },
+-    }
+-    const useKnowledgeScope = (select: (value: typeof multiple) => unknown) => select(multiple)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /></ComposerOverlayProvider>)
+-
+-    expect(screen.getByRole('button', { name: '选择代码库：Harness、Web' })).toBeTruthy()
+-    expect(screen.getByRole('button', { name: '选择知识范围：订单知识库、结算知识库' })).toBeTruthy()
+-  })
+-
+-  it('switches knowledge queries off without clearing the saved scope', () => {
+-    const request = vi.fn()
+-    const useKnowledgeScope = (select: (value: typeof snapshot) => unknown) => select(snapshot)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    const panelProps = { sessionId: 'session-1', useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopePanel>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /><KnowledgeScopePanel {...panelProps} /><ComposerOverlaySurface /></ComposerOverlayProvider>)
+-
+-    fireEvent.click(screen.getByRole('switch', { name: '启用知识查询' }))
+-    expect(request).toHaveBeenLastCalledWith('session-1', { domainId: 'supply', systemIds: ['orders'], repositoryIds: ['harness'] }, { enabled: false })
+-  })
+-
+-  it('keeps remember in the switch popover and persists it without changing scope', () => {
+-    const request = vi.fn()
+-    const useKnowledgeScope = (select: (value: typeof snapshot) => unknown) => select(snapshot)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /></ComposerOverlayProvider>)
+-
+-    fireEvent.mouseEnter(screen.getByRole('switch', { name: '启用知识查询' }).parentElement!)
+-    fireEvent.click(screen.getByRole('checkbox', { name: '记住知识库开关状态' }))
+-    expect(request).toHaveBeenLastCalledWith('session-1', snapshot.scope, { remember: true })
+-  })
+-
+-  it('shows an expired-login status outside the strip and opens the login flow', () => {
+-    const request = vi.fn()
+-    const unauthenticated = { ...snapshot, serviceState: 'unauthenticated' as const }
+-    const useKnowledgeScope = (select: (value: typeof unauthenticated) => unknown) => select(unauthenticated)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /></ComposerOverlayProvider>)
+-
+-    expect(screen.getByText(/知识库登录已失效/)).toBeTruthy()
+-    const toggle = screen.getByRole('switch', { name: '启用知识查询' })
+-    expect(toggle.hasAttribute('disabled')).toBe(false)
+-    fireEvent.click(toggle)
+-    expect(request).toHaveBeenLastCalledWith('session-1', snapshot.scope, { enabled: false })
+-    fireEvent.mouseEnter(toggle.parentElement!)
+-    expect(screen.getByRole('checkbox', { name: '记住知识库开关状态' }).hasAttribute('disabled')).toBe(false)
+-    expect(screen.getByRole('button', { name: /选择代码库/ }).hasAttribute('disabled')).toBe(true)
+-    fireEvent.click(screen.getByRole('button', { name: '重新登录' }))
+-    expect(request).toHaveBeenLastCalledWith('session-1', undefined, { action: 'login' })
+-  })
+-
+-  it('offers login and retry when the knowledge service cannot classify the failure', () => {
+-    const request = vi.fn()
+-    const unavailable = { ...snapshot, serviceState: 'unavailable' as const }
+-    const useKnowledgeScope = (select: (value: typeof unavailable) => unknown) => select(unavailable)
+-    const controlProps = { session: { sessionId: 'session-1' }, input: undefined, useKnowledgeScope, request } as unknown as Parameters<typeof KnowledgeScopeControl>[0]
+-    render(<ComposerOverlayProvider><KnowledgeScopeControl {...controlProps} /></ComposerOverlayProvider>)
+-
+-    fireEvent.click(screen.getByRole('button', { name: '登录知识库' }))
+-    expect(request).toHaveBeenLastCalledWith('session-1', undefined, { action: 'login' })
+-    fireEvent.click(screen.getByRole('button', { name: '重新检测' }))
+-    expect(request).toHaveBeenLastCalledWith('session-1', undefined, { action: 'retry' })
+-  })
+-})
+diff --git a/packages/client/ui-knowledge-scope/tsconfig.json b/packages/client/ui-knowledge-scope/tsconfig.json
+deleted file mode 100644
+index c52b0ac..0000000
+--- a/packages/client/ui-knowledge-scope/tsconfig.json
++++ /dev/null
+@@ -1,8 +0,0 @@
+-{
+-  "extends": "../../../tsconfig.base.client.json",
+-  "compilerOptions": { "rootDir": "src", "outDir": "lib/types" },
+-  "include": ["src"],
+-  "references": [
+-    { "path": "../../../vendor/cordis" }, { "path": "../runtime" }, { "path": "../ui-conversation" }, { "path": "../ui-primitives" }, { "path": "../ui-slots" }
+-  ]
+-}
+diff --git a/packages/client/ui-knowledge-scope/tsdown.config.ts b/packages/client/ui-knowledge-scope/tsdown.config.ts
+deleted file mode 100644
+index 0e4f3d5..0000000
+--- a/packages/client/ui-knowledge-scope/tsdown.config.ts
++++ /dev/null
+@@ -1,3 +0,0 @@
+-import { clientBundle } from '../tsdown.client.ts'
+-
+-export default clientBundle('@deepseek-ai/dsh-client-ui-knowledge-scope', ['lib/types/index.js'])
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 952f009..931de2a 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1318,9 +1318,6 @@ importers:
+       '@deepseek-ai/dsh-client-ui-jobs':
+         specifier: workspace:^
+         version: link:../../client/ui-jobs
+-      '@deepseek-ai/dsh-client-ui-knowledge-scope':
+-        specifier: workspace:^
+-        version: link:../../client/ui-knowledge-scope
+       '@deepseek-ai/dsh-client-ui-layout':
+         specifier: workspace:^
+         version: link:../../client/ui-layout
+@@ -2157,34 +2154,6 @@ importers:
+         specifier: ~18.3.1
+         version: 18.3.31
+
+-  packages/client/ui-knowledge-scope:
+-    dependencies:
+-      '@deepseek-ai/cordis':
+-        specifier: workspace:^
+-        version: link:../../../vendor/cordis
+-      '@deepseek-ai/dsh-client-runtime':
+-        specifier: workspace:^
+-        version: link:../runtime
+-      '@deepseek-ai/dsh-client-ui-conversation':
+-        specifier: workspace:^
+-        version: link:../ui-conversation
+-      '@deepseek-ai/dsh-client-ui-primitives':
+-        specifier: workspace:^
+-        version: link:../ui-primitives
+-      '@deepseek-ai/dsh-client-ui-slots':
+-        specifier: workspace:^
+-        version: link:../ui-slots
+-      react:
+-        specifier: ^18.2.0
+-        version: 18.3.1
+-    devDependencies:
+-      '@testing-library/react':
+-        specifier: ^16.1.0
+-        version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+-      '@types/react':
+-        specifier: ~18.3.1
+-        version: 18.3.31
+-
+   packages/client/ui-layout:
+     devDependencies:
+       '@deepseek-ai/cordis':
+diff --git a/tsconfig.client.json b/tsconfig.client.json
+index 91e704c..e599f76 100644
+--- a/tsconfig.client.json
++++ b/tsconfig.client.json
+@@ -65,7 +65,6 @@
+     { "path": "./packages/client/ui-layout" },
+     { "path": "./packages/client/ui-sidebar" },
+     { "path": "./packages/client/ui-conversation" },
+-    { "path": "./packages/client/ui-knowledge-scope" },
+     { "path": "./packages/client/ui-tool" },
+     { "path": "./packages/client/ui-deliverables" },
+     { "path": "./packages/client/ui-workflow-run" },
