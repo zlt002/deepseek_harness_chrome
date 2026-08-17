@@ -76,7 +76,7 @@ async function copyWindowsNativeAssets(harnessRoot, nativeDir) {
   await cp(await onlyFile(sharpLib, (name) => name.endsWith('.node'), 'Sharp addon'), path.join(nativeDir, 'sharp', 'sharp.node'))
   await cp(path.join(nodePty, 'prebuilds', 'win32-x64'), path.join(nativeDir, 'node-pty', 'prebuilds', 'win32-x64'), { recursive: true, dereference: true })
   await mkdir(path.join(nativeDir, 'koffi'), { recursive: true })
-  await cp(await onlyFile(koffi, (name) => name.endsWith('.node'), 'Koffi addon'), path.join(nativeDir, 'koffi', 'koffi.node'))
+  await cp(path.join(koffi, 'win32_x64', 'koffi.node'), path.join(nativeDir, 'koffi', 'koffi.node'))
   await mkdir(path.join(nativeDir, 'node-addon-require-builtin'), { recursive: true })
   await cp(await onlyFile(path.join(requireBuiltin, 'prebuilt'), (name) => name.endsWith('.node'), 'node-addon-require-builtin addon'), path.join(nativeDir, 'node-addon-require-builtin', 'addon.node'))
   await mkdir(path.join(nativeDir, 'ripgrep'), { recursive: true })
