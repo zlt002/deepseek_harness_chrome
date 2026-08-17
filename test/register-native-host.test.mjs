@@ -10,14 +10,15 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const script = join(projectRoot, 'scripts/register-native-host.mjs')
 const extensionId = 'abcdefghijklmnopabcdefghijklmnop'
 const devExtensionId = 'ponmlkjihgfedcbaponmlkjihgfedcba'
+const currentChromeDevExtensionId = 'lmignogiadonjcpigkehfnmdindgfckn'
 
-function runRegister(home, overrides = {}) {
+function runRegister(home, overrides = {}, args = []) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, HOME: home, DEEPSEEK_HARNESS_EXTENSION_ID: extensionId, ...overrides }
     for (const [name, value] of Object.entries(env)) {
       if (value === undefined) delete env[name]
     }
-    const child = spawn(process.execPath, [script], {
+    const child = spawn(process.execPath, [script, ...args], {
       env,
       stdio: 'pipe',
     })
@@ -28,6 +29,35 @@ function runRegister(home, overrides = {}) {
     child.once('close', (code) => resolve({ code, stderr }))
   })
 }
+
+test('check command catches and clears the exact Chrome forbidden-origin failure', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
+  const manifestPath = join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')
+  try {
+    await mkdir(dirname(manifestPath), { recursive: true })
+    await writeFile(manifestPath, JSON.stringify({
+      name: 'com.deepseek.harness.chrome',
+      allowed_origins: [`chrome-extension://${extensionId}/`],
+    }))
+
+    const forbidden = await runRegister(home, {
+      DEEPSEEK_HARNESS_EXTENSION_ID: currentChromeDevExtensionId,
+    }, ['--check'])
+    assert.equal(forbidden.code, 1)
+    assert.match(forbidden.stderr, new RegExp(`chrome-extension://${currentChromeDevExtensionId}/ is not allowed`))
+
+    const registered = await runRegister(home, {
+      DEEPSEEK_HARNESS_EXTENSION_ID: currentChromeDevExtensionId,
+    })
+    assert.equal(registered.code, 0, registered.stderr)
+    const allowed = await runRegister(home, {
+      DEEPSEEK_HARNESS_EXTENSION_ID: currentChromeDevExtensionId,
+    }, ['--check'])
+    assert.equal(allowed.code, 0, allowed.stderr)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
 
 function pingLauncher(launcher) {
   return new Promise((resolve, reject) => {

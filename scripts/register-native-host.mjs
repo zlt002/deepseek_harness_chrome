@@ -46,11 +46,6 @@ if (invalidExtensionId !== undefined) {
   console.error(`Invalid Chrome extension id: ${invalidExtensionId}`)
   process.exit(2)
 }
-if (!explicitHarnessRoot && !explicitHarnessCli && inferredHarnessRoot === undefined) {
-  console.error(`Generated product Harness is missing or not built: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set DSH_ROOT/DSH_CLI_PATH explicitly for a different Harness checkout.`)
-  process.exit(2)
-}
-
 function shellQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
@@ -71,6 +66,40 @@ const installRoot = platform() === 'darwin'
 const nativeServer = join(installRoot, 'native-server')
 const skills = join(installRoot, 'skills')
 const launcher = join(installRoot, 'com.deepseek.harness.chrome')
+
+if (process.argv.includes('--check')) {
+  const expectedOrigins = extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`)
+  const errors = []
+  for (const target of targets) {
+    const manifestPath = join(target, 'com.deepseek.harness.chrome.json')
+    if (!existsSync(manifestPath)) {
+      errors.push(`manifest is missing: ${manifestPath}`)
+      continue
+    }
+    try {
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+      for (const origin of expectedOrigins) {
+        if (!Array.isArray(manifest.allowed_origins) || !manifest.allowed_origins.includes(origin)) {
+          errors.push(`${origin} is not allowed by ${manifestPath}`)
+        }
+      }
+    } catch (error) {
+      errors.push(`manifest is unreadable: ${manifestPath}: ${error.message}`)
+    }
+  }
+  if (errors.length > 0) {
+    console.error(`Native Messaging host is forbidden for the requested extension:\n${errors.join('\n')}`)
+    process.exit(1)
+  }
+  console.log(`Native Messaging origins verified: ${expectedOrigins.join(', ')}`)
+  process.exit(0)
+}
+
+if (!explicitHarnessRoot && !explicitHarnessCli && inferredHarnessRoot === undefined) {
+  console.error(`Generated product Harness is missing or not built: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set DSH_ROOT/DSH_CLI_PATH explicitly for a different Harness checkout.`)
+  process.exit(2)
+}
+
 const launcherLines = [
   '#!/bin/sh',
   `exec ${shellQuote(process.execPath)} ${shellQuote(join(nativeServer, 'bin.mjs'))}`,
