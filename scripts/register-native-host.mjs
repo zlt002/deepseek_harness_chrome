@@ -30,6 +30,11 @@ const inferredHarnessRoot = !explicitHarnessRoot && !explicitHarnessCli
   && existsSync(join(generatedHarnessRoot, 'apps/cli/lib/bin.js'))
   ? generatedHarnessRoot
   : undefined
+const activeHarnessRoot = explicitHarnessRoot ?? inferredHarnessRoot
+const generatedHarnessManifest = activeHarnessRoot !== generatedHarnessRoot
+  ? undefined
+  : JSON.parse(await readFile(join(generatedHarnessRoot, '.harness-product.json'), 'utf8'))
+const hasLegacyUiOverlay = generatedHarnessManifest?.compatibilityOverlay !== undefined
 if (extensionIds.length === 0) {
   console.error('Set DEEPSEEK_HARNESS_EXTENSION_ID to one or more comma-separated Chrome extension ids.')
   process.exit(2)
@@ -74,6 +79,8 @@ for (const [name, value] of [
   ['DSH_CWD', process.env.DSH_CWD?.trim()],
   ['DSH_NATIVE_LOG', process.env.DSH_NATIVE_LOG?.trim()],
   ['DSH_HARNESS_RUNTIME_PLUGIN', process.env.DSH_HARNESS_RUNTIME_PLUGIN?.trim()],
+  ['DSH_LEGACY_UI_OVERLAY', process.env.DSH_LEGACY_UI_OVERLAY?.trim()
+    || (hasLegacyUiOverlay ? '1' : undefined)],
   ['DSH_ENABLE_KNOWLEDGE_SCOPE_UI', process.env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI?.trim()
     || ((explicitHarnessRoot ?? inferredHarnessRoot) === generatedHarnessRoot ? '1' : undefined)],
   ['DSH_ENABLE_SKILL_SETTINGS_UI', process.env.DSH_ENABLE_SKILL_SETTINGS_UI?.trim()

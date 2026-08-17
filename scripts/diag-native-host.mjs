@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 // 手动模拟 Chrome Native Messaging：启动 launcher，发 start，打印 host 的所有响应与 stderr。
 import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const launcher = resolve(here, '..', 'native-host', 'com.deepseek.harness.chrome')
+const launcher = process.env.DSH_NATIVE_LAUNCHER?.trim()
+  || (process.platform === 'darwin'
+    ? resolve(homedir(), 'Library/Application Support/DeepSeekHarness/com.deepseek.harness.chrome')
+    : resolve(here, '..', 'native-host', 'com.deepseek.harness.chrome'))
 
 const host = spawn(launcher, [], { stdio: ['pipe', 'pipe', 'pipe'] })
 host.on('error', (e) => { console.log('SPAWN ERROR:', e.message); process.exit(1) })

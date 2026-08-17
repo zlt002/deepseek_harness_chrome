@@ -16,16 +16,21 @@ product source files.
 | Agent preset labels | `packages/harness-ui-agent-preset` | External compact footer projection complete; existing `conversation.composer.dock` seam is sufficient |
 | Subagent UI | official `ui-subagent` | The catalog/header action and read-only child flow are already upstream; the old duplicate compact-header entry is deliberately dropped |
 | Session export | official `session-log-export` | The official Session Header utility and `/export` flow remain bundled; the old duplicate Settings quick action is deliberately dropped |
-| Responsive shell and styling | official layout/sidebar/theme modules | Keep the official responsive shell; the old product-wide visual rewrite is deliberately dropped to preserve upgradeability |
+| Responsive shell and styling | `product-overlays` latest-source snapshot, then out-of-tree UI packages | The active snapshot is independent Harness `e327898`, not the historical Windows release patch. Preserve it until each replacement passes side-by-side browser acceptance; upgradeability alone is not a reason to drop product behavior |
 
-## Legacy release patch removal
+## Historical release patch replaced
 
-The former `release/windows-lite/harness-ui.patch` product snapshot has been
-removed. Windows CI now checks out the official submodule recursively, runs
-`pnpm build:harness-product`, and materializes its runtime from
-`.generated/harness-product`. Product behavior lives in `packages/`; the small,
-generic seams still needed from Harness live as ordered patches in
-`upstream-contributions/`.
+The former `release/windows-lite/harness-ui.patch` snapshot was an old UI and
+is no longer used. `product-overlays/` now contains the full source difference
+from official `47f943859b` to the independent Harness's accepted latest commit
+`e327898`. It is applied only to the disposable `.generated/harness-product`
+tree; the official submodule itself remains clean.
+
+The four patches in `upstream-contributions/` are retained for a dedicated
+rebase. They cannot be applied on top of `e327898` without conflicts, so the
+materializer intentionally uses the complete latest-source overlay alone and
+records that fact in `.harness-product.json`; it does not delete or modify
+those patches.
 
 Generated lockfiles, build output, historical notes, and test-only injection
 changes are not migration targets.

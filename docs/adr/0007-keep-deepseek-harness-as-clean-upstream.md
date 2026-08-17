@@ -16,6 +16,12 @@ Product behavior is added through out-of-tree Cordis plugins and bundles under
 upstream as a generic interface; product-specific behavior does not enter the
 upstream checkout.
 
+Until those plugins reach side-by-side visual and interaction parity, the
+accepted pre-migration UI is preserved as a compatibility overlay under
+`product-overlays/`. The overlay applies only to the disposable generated
+product tree. Removing an accepted behavior requires parity evidence, not only
+an architectural replacement.
+
 `pnpm verify:upstream` is the local and CI invariant for the recorded upstream
 commit and a clean submodule worktree.
 

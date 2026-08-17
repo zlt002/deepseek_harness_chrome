@@ -188,6 +188,10 @@ export function productUiPatch(env = process.env) {
 }
 
 function productUiPackages(env = process.env) {
+  // The accepted full-source overlay already contains agent preset, browser
+  // target, knowledge scope, and Skill settings. Mounting product replacements
+  // on top duplicates their singleton registrations and prevents Harness boot.
+  if (env.DSH_LEGACY_UI_OVERLAY === '1') return []
   const packages = [
     '@accrui/harness-ui-agent-preset',
     '@accrui/harness-ui-browser-target',
@@ -195,7 +199,9 @@ function productUiPackages(env = process.env) {
   if (env.DSH_ENABLE_SKILL_SETTINGS_UI === '1') packages.push('@accrui/harness-skill-settings')
   // Knowledge Scope needs the generic composer-above/card-overlay seam. Keep
   // the package built, but do not mount it against an older clean upstream.
-  if (env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI === '1') packages.push('@accrui/harness-ui-knowledge-scope')
+  if (env.DSH_ENABLE_KNOWLEDGE_SCOPE_UI === '1') {
+    packages.push('@accrui/harness-ui-knowledge-scope')
+  }
   return packages
 }
 
