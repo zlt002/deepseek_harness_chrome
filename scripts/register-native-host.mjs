@@ -20,6 +20,7 @@ const productPluginNames = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
   'harness-ui-knowledge-scope',
+  'harness-ui-subagent-compact',
   'harness-skill-settings',
 ]
 const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined

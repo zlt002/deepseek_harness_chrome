@@ -43,6 +43,7 @@ const PRODUCT_UI_PACKAGE_NAMES = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
   'harness-ui-knowledge-scope',
+  'harness-ui-subagent-compact',
   'harness-skill-settings',
 ]
 function run(command, args, options = {}) {
@@ -500,6 +501,7 @@ fi
 export DSH_ROOT="$PACKAGE_DIR/harness"
 export DSH_CLI_PATH="$DSH_ROOT/apps/cli/lib/server.mjs"
 export DSH_CWD="$PACKAGE_DIR/../workspace"
+export DSH_LEGACY_UI_OVERLAY="1"
 export DSH_ENABLE_KNOWLEDGE_SCOPE_UI="1"
 export DSH_ENABLE_SKILL_SETTINGS_UI="1"
 export DSH_PRODUCT_PLUGIN_ROOT="$PACKAGE_DIR/product-plugins"

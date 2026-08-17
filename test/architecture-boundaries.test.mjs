@@ -83,6 +83,7 @@ test('Harness client plugins execute the portable tsdown JavaScript entrypoint',
     'harness-ui-agent-preset',
     'harness-ui-browser-target',
     'harness-ui-knowledge-scope',
+    'harness-ui-subagent-compact',
     'harness-skill-settings',
   ]) {
     const config = await readFile(resolve(root, 'packages', name, 'tsdown.config.ts'), 'utf8')

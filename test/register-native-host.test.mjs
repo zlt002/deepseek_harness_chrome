@@ -141,11 +141,13 @@ test('installed native host resolves self-contained product UI packages', async 
     const { prepareProductUiPackages } = await import(harnessProcessUrl)
     await prepareProductUiPackages({ HOME: home, DSH_HOME: dshHome })
 
-    const link = join(dshHome, 'profiles/web/node_modules/@accrui/harness-ui-agent-preset')
-    assert.equal(
-      resolve(dirname(link), await readlink(link)),
-      await realpath(join(nativeServer, 'product-plugins/harness-ui-agent-preset')),
-    )
+    for (const packageName of ['harness-ui-agent-preset', 'harness-ui-subagent-compact']) {
+      const link = join(dshHome, `profiles/web/node_modules/@accrui/${packageName}`)
+      assert.equal(
+        resolve(dirname(link), await readlink(link)),
+        await realpath(join(nativeServer, 'product-plugins', packageName)),
+      )
+    }
   } finally {
     await rm(home, { recursive: true, force: true })
   }

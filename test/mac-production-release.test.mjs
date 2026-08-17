@@ -24,6 +24,7 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.match(entries, /runtime\/harness\/apps\/cli\/lib\/workflow-worker\.cjs/m)
   assert.match(entries, /runtime\/native-server\/selected-source-routing-prompt\.mjs/m)
   assert.match(entries, /runtime\/native-server\/harness-runtime\.mjs/m)
+  assert.match(entries, /runtime\/product-plugins\/harness-ui-subagent-compact\/lib\/client\.js/m)
 
   const installed = path.join(root, 'installed')
   await mkdir(installed)
@@ -32,6 +33,8 @@ test('Mac production package boots the real Web surface without node_modules', {
   const serverSource = await readFile(server, 'utf8')
   assert.match(serverSource, /\.\/code-runtime-worker\.cjs/)
   assert.match(serverSource, /\.\/workflow-worker\.cjs/)
+  const packagedLauncher = await readFile(path.join(installed, 'runtime/run-native-host.sh'), 'utf8')
+  assert.match(packagedLauncher, /DSH_LEGACY_UI_OVERLAY="1"/)
   const helper = path.join(installed, 'runtime/native/node-pty/spawn-helper')
   const home = path.join(root, 'home')
   const profile = path.join(home, 'profiles/web')

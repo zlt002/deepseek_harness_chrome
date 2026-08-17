@@ -171,6 +171,7 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.match(launcher, /DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\bin\.js/)
   assert.match(launcher, /DSH_ENABLE_KNOWLEDGE_SCOPE_UI=1/)
   assert.match(launcher, /DSH_ENABLE_SKILL_SETTINGS_UI=1/)
+  assert.match(launcher, /DSH_LEGACY_UI_OVERLAY=1/)
   assert.match(launcher, /DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins/)
   assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.ps1`), true)
   assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/payload/extension/manifest.json`), false)
