@@ -85,3 +85,12 @@ index 0ebd805..c3a8afc 100644
      },
      inject: shellInjected,
    }, SettingsRoot))
+diff --git a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx b/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
+--- a/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
++++ b/packages/client/ui-settings-general/tests/settings-root.client.spec.tsx
+@@ -78,4 +78,5 @@ function mount({
+     },
+     useQuickActions: select => select(quickActions),
+     renderSlot,
++    renderSlotChain: ((_key, _owner, options) => options?.fallback ?? null) as never,
+   }
