@@ -26,6 +26,46 @@ are no longer used. Their accepted behavior now lives in product-owned packages.
 revision and applies the ordered generic seams in `upstream-contributions/`.
 There is no legacy overlay environment switch or fallback build mode.
 
+## Final architecture
+
+The runtime now has one composition path:
+
+1. Clean `upstream/deepseek-harness` at the pinned revision.
+2. Product-neutral extension seams from `upstream-contributions/`.
+3. Ten product UI packages mounted from `packages/`:
+   `harness-ui-agent-preset`, `harness-ui-browser-target`,
+   `harness-ui-conversation-shell`, `harness-ui-knowledge-scope`,
+   `harness-ui-responsive-sidebar`, `harness-ui-session-log-copy`,
+   `harness-ui-settings-shell`, `harness-ui-subagent-compact`,
+   `harness-ui-workspace-picker`, and `harness-skill-settings`.
+
+The official checkout owns stores, controllers, and default fallbacks. Product
+packages own AccrUI presentation and behavior; they attach only through the
+generic seams.
+
+## Acceptance status
+
+Real macOS Chrome acceptance has passed from the extension through Native
+Messaging into the Harness UI. The accepted surface visibly includes the top
+compact shell, knowledge/code scope above the composer, model and permission
+controls, Browser Target, and Session Log.
+
+This evidence does **not** yet claim real-browser acceptance for Settings,
+trajectory, subagent presentation, or the Windows package. Their focused tests
+and builds are useful gates, but they are not substitutes for those pending
+acceptance runs.
+
+Startup regression gates:
+
+- Before opening Chrome, verify the exact loaded extension identity with
+  `DEEPSEEK_HARNESS_EXTENSION_ID=<extension-id> node scripts/register-native-host.mjs --check`.
+  It must find the exact `chrome-extension://<extension-id>/` origin in the
+  installed Chrome and Edge Native Messaging manifests.
+- Chain-slot product presentations must register through `slots.inject(...)`
+  and provide `select` so the matched owner is passed into the product
+  presentation. The product package contract tests lock down both parts and
+  prevent a silent fallback or an empty shell after startup.
+
 Generated lockfiles, build output, historical notes, and test-only injection
 changes are not migration targets.
 
