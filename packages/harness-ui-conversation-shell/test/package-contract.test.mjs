@@ -14,6 +14,7 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   // adapter registers a presentation slot before reading its own services.
   assert.match(source, /export const inject = \['slots', 'settingsQuickActions', 'conversationViewState'\]/)
   assert.match(source, /ctx\.slots\.inject\('conversation\.presentation'/)
+  assert.match(source, /select: owner => owner/)
   assert.match(source, /conversationViewState/)
   assert.match(source, /settingsQuickActions/)
   assert.match(source, /id: 'trajectory'/)

@@ -15,6 +15,7 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.presentation',
     id: 'accrui-conversation-presentation',
     order: 0,
+    select: owner => owner,
   }, ConversationPresentation))
   const views = ctx.get('conversationViewState')!
   const quickActions = ctx.get('settingsQuickActions')!
