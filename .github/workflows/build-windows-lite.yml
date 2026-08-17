@@ -35,6 +35,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: pnpm
 
       - name: Enable pnpm
         shell: pwsh
@@ -52,19 +53,41 @@ jobs:
         shell: pwsh
         run: pnpm verify:upstream
 
+      - name: Compute upstream submodule hash
+        id: upstream-hash
+        working-directory: deepseek_harness_chrome
+        shell: bash
+        run: echo "sha=$(git ls-tree HEAD upstream/deepseek-harness | awk '{print $3}')" >> $GITHUB_OUTPUT
+
+      - name: Cache harness product
+        id: cache-harness-product
+        uses: actions/cache@v4
+        with:
+          path: deepseek_harness_chrome/.generated/harness-product
+          key: harness-product-v1-${{ hashFiles('deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/scripts/materialize-harness-product.mjs', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
+
       - name: Build materialized Harness product
+        if: steps.cache-harness-product.outputs.cache-hit != 'true'
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: pnpm build:harness-product
 
+      - name: Cache Windows Harness runtime
+        id: cache-harness-runtime
+        uses: actions/cache@v4
+        with:
+          path: deepseek_harness_chrome/release/windows-lite/harness-runtime-win32-x64
+          key: harness-runtime-v1-${{ hashFiles('deepseek_harness_chrome/release/windows-lite/materialize-harness-runtime.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/scripts/materialize-harness-product.mjs', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
+
       - name: Materialize Windows Harness runtime
+        if: steps.cache-harness-runtime.outputs.cache-hit != 'true'
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: >-
           pnpm materialize:windows-harness-runtime --
           --source .generated/harness-product
           --out release/windows-lite/harness-runtime-win32-x64
-          --revision 47f943859bef60e4160492346772ded9b24f765a
+          --revision ${{ steps.upstream-hash.outputs.sha }}
 
       - name: Build AccrUI-compatible Windows package
         working-directory: deepseek_harness_chrome
