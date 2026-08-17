@@ -174,3 +174,109 @@ diff --git a/packages/session-query/session-log-export/src/client/locales.ts b/p
    'dialog.errorTitle': 'Session export failed',
    'dialog.close': 'Close',
    'dialog.commandFailed': 'Could not start the Session export.',
+diff --git a/packages/session-query/session-log-export/tests/client-apply.client.spec.tsx b/packages/session-query/session-log-export/tests/client-apply.client.spec.tsx
+--- a/packages/session-query/session-log-export/tests/client-apply.client.spec.tsx
++++ b/packages/session-query/session-log-export/tests/client-apply.client.spec.tsx
+@@ -4,6 +4,5 @@ import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+ import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+ import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+-import * as Settings from '@deepseek-ai/dsh-client-ui-settings/client'
+ import { SessionLogDownloadHeaderAction } from '../src/client/HeaderAction.tsx'
+ import { apply, inject } from '../src/client/index.ts'
+@@ -28,7 +27,6 @@ async function bench() {
+   const slots = ctx.get('slots') as SlotRegistry
+   const declaration = declare(slots)
+   ctx.provide('locale', new LocaleRuntime(ctx))
+-  await ctx.plugin(Settings).await()
+   const fiber = ctx.plugin({ inject: [...inject], apply })
+   await fiber.await()
+   return { ctx, slots, declaration, fiber }
+@@ -38,5 +36,5 @@ describe('session-log-download browser plugin', () => {
+   it('provides one controller and removes its Header contribution on disposal', async () => {
+     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 500 })))
+     const b = await bench()
+-    expect(inject).toEqual(['slots', 'locale', 'settingsQuickActions'])
++    expect(inject).toEqual(['slots', 'locale'])
+     expect(b.ctx.sessionLogDownload).toBeDefined()
+diff --git a/packages/session-query/session-log-export/tests/controller.client.spec.ts b/packages/session-query/session-log-export/tests/controller.client.spec.ts
+--- a/packages/session-query/session-log-export/tests/controller.client.spec.ts
++++ b/packages/session-query/session-log-export/tests/controller.client.spec.ts
+@@ -6,3 +6,2 @@ import {
+ } from '../src/client/controller.ts'
+-import { zipSync, strToU8 } from 'fflate'
+ 
+@@ -131,19 +130,4 @@ describe('SessionLogDownloadController', () => {
+     await failureRun
+     expect(failing.store.getSnapshot().bySession[SID]?.open).toBe(true)
+   })
+-
+-  it('copies only the current Session raw export to the clipboard', async () => {
+-    const clipboard = { writeText: vi.fn(async () => {}) }
+-    const archive = zipSync({ 'session-export-controller.jsonl': strToU8('{"type":"event"}\n') })
+-    const fetcher = vi.fn(async () => new Response(archive, { status: 200 }))
+-    const controller = new SessionLogDownloadController(fetcher, vi.fn(), clipboard)
+-
+-    await controller.copy(SID)
+-
+-    const [url] = fetcher.mock.calls[0] as unknown as [URL]
+-    expect(url.searchParams.get('sessionId')).toBe(SID)
+-    expect(url.searchParams.get('includeDescendants')).toBe('false')
+-    expect(clipboard.writeText).toHaveBeenCalledWith('{"type":"event"}\n')
+-    expect(controller.store.getSnapshot().bySession[SID]).toEqual({ open: true, status: 'copied', error: null })
+-  })
+ })
+diff --git a/packages/session-query/session-log-export/package.json b/packages/session-query/session-log-export/package.json
+--- a/packages/session-query/session-log-export/package.json
++++ b/packages/session-query/session-log-export/package.json
+@@ -21,16 +21,12 @@
+   "files": ["lib/index.js", "lib/invariant.js", "lib/client.js", "lib/types/**/*.d.ts"],
+   "scripts": { "bundle": "tsdown", "watch": "tsdown --watch" },
+   "license": "MIT",
+-  "dependencies": {
+-    "fflate": "^0.8.2"
+-  },
+   "peerDependencies": {
+     "@deepseek-ai/cordis": "workspace:^",
+     "@deepseek-ai/dsh-client-locale": "workspace:^",
+     "@deepseek-ai/dsh-client-runtime": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-commands": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-conversation": "workspace:^",
+-    "@deepseek-ai/dsh-client-ui-settings": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-primitives": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-slots": "workspace:^",
+     "@deepseek-ai/dsh-commands": "workspace:^",
+@@ -45,7 +41,6 @@
+     "@deepseek-ai/dsh-client-runtime": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-commands": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-conversation": "workspace:^",
+-    "@deepseek-ai/dsh-client-ui-settings": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-primitives": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-slots": "workspace:^",
+     "@deepseek-ai/dsh-commands": "workspace:^",
+@@ -60,6 +55,5 @@
+         "@deepseek-ai/dsh-client-locale",
+         "@deepseek-ai/dsh-client-runtime",
+         "@deepseek-ai/dsh-client-ui-commands",
+-        "@deepseek-ai/dsh-client-ui-conversation",
+-        "@deepseek-ai/dsh-client-ui-settings"
++        "@deepseek-ai/dsh-client-ui-conversation"
+       ],
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -5972,6 +5972,2 @@ importers:
+   packages/session-query/session-log-export:
+-    dependencies:
+-      fflate:
+-        specifier: ^0.8.2
+-        version: 0.8.3
+     devDependencies:
+@@ -5999,7 +5995,4 @@ importers:
+       '@deepseek-ai/dsh-client-ui-primitives':
+         specifier: workspace:^
+         version: link:../../client/ui-primitives
+-      '@deepseek-ai/dsh-client-ui-settings':
+-        specifier: workspace:^
+-        version: link:../../client/ui-settings
+       '@deepseek-ai/dsh-client-ui-slots':
