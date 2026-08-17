@@ -2,9 +2,12 @@
   display: none;
   align-items: center;
   gap: 4px;
-  max-width: min(220px, 40vw);
+  max-width: 180px;
   height: 22px;
+  padding: 0 2px 0 0;
   overflow: hidden;
+  border-radius: 6px;
+  background: var(--dsw-alias-fill-tsp-secondary);
   color: var(--dsw-alias-label-secondary);
   font-size: 12px;
   line-height: 22px;
@@ -18,5 +21,7 @@
 }
 
 @media (max-width: 999px) {
-  .label { display: inline-flex; }
+  .label {
+    display: inline-flex;
+  }
 }

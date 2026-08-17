@@ -193,6 +193,7 @@ function productUiPackages(env = process.env) {
   // mounted; all other replacements remain disabled to avoid duplicate slots.
   if (env.DSH_LEGACY_UI_OVERLAY === '1') {
     return [
+      '@accrui/harness-ui-agent-preset',
       '@accrui/harness-ui-browser-target',
       '@accrui/harness-ui-subagent-compact',
     ]

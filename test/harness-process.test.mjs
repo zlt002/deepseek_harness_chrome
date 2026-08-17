@@ -93,7 +93,7 @@ test('mounts only completed externalizations while the full-source overlay is ac
     DSH_ENABLE_KNOWLEDGE_SCOPE_UI: '1',
     DSH_ENABLE_SKILL_SETTINGS_UI: '1',
   })
-  assert.doesNotMatch(patch, /harness-ui-agent-preset/)
+  assert.equal(patch.match(/@accrui\/harness-ui-agent-preset/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-browser-target/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-subagent-compact/g)?.length, 1)
   assert.doesNotMatch(patch, /harness-ui-knowledge-scope/)

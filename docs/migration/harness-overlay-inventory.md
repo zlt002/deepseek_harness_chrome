@@ -13,8 +13,8 @@ product source files.
 | Browser Target controls | `packages/harness-ui-browser-target` | Public composer slots are sufficient; reconnect uses the existing `sidebar.footer.action` seat instead of a compact-shell fork |
 | Knowledge/code scope | `packages/harness-ui-knowledge-scope` | Product plugin and bundle are complete. Clean upstream already provides the card-wide overlay; only the generic composer-above slot remains in `upstream-contributions/0001-*` |
 | Skill three-state settings | `packages/harness-skill-settings` and client plugin | Host/client product plugins wired. Generic Registry and `skill.list` seams live in ordered `upstream-contributions` patches; Claude roots use existing `customSkillDirs` |
-| Agent preset labels | `packages/harness-ui-agent-preset` | External compact footer projection complete; existing `conversation.composer.dock` seam is sufficient |
-| Subagent UI | official `ui-subagent` | The catalog/header action and read-only child flow are already upstream; the old duplicate compact-header entry is deliberately dropped |
+| Agent preset labels | `packages/harness-ui-agent-preset` | Compact footer projection is externalized through `conversation.composer.dock`; the remaining hero/header/settings behavior stays in the accepted overlay until its shared Composer Overlay seam is externalized |
+| Subagent UI | `packages/harness-ui-subagent-compact` plus official `ui-subagent` | Compact child navigation and trajectory actions are externalized; the official package keeps the catalog/header action and read-only child flow |
 | Session export | official `session-log-export` | The official Session Header utility and `/export` flow remain bundled; the old duplicate Settings quick action is deliberately dropped |
 | Responsive shell and styling | `product-overlays` latest-source snapshot, then out-of-tree UI packages | The active snapshot is independent Harness `e327898`, not the historical Windows release patch. Preserve it until each replacement passes side-by-side browser acceptance; upgradeability alone is not a reason to drop product behavior |
 
