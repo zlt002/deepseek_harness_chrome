@@ -30,6 +30,11 @@ function Assert-Equal($Actual, $Expected, [string]$Message) {
   if ($Actual -ne $Expected) { throw "$Message Expected=$Expected Actual=$Actual" }
 }
 
+function Invoke-NativeMessageSmoke {
+  & node (Join-Path $PSScriptRoot 'native-message-smoke.mjs') --launcher (Join-Path $installRoot 'runtime\run_native_host.bat')
+  if ($LASTEXITCODE -ne 0) { throw "Native Messaging smoke failed with exit code $LASTEXITCODE." }
+}
+
 try {
   if (Test-Path -LiteralPath $acceptanceRoot) { Remove-Item -LiteralPath $acceptanceRoot -Recurse -Force }
   New-Item -ItemType Directory -Path $seedRoot -Force | Out-Null
@@ -67,14 +72,14 @@ try {
       Assert-Equal $manifest.path (Join-Path $installRoot 'runtime\run_native_host.bat') 'Native Messaging launcher path mismatch.'
     }
   }
-  & node (Join-Path $PSScriptRoot 'native-message-smoke.mjs') --launcher (Join-Path $installRoot 'runtime\run_native_host.bat')
+  Invoke-NativeMessageSmoke
 
   $manager = Join-Path $installRoot 'manage-install.ps1'
   & $manager -Rollback
   Assert-Equal (Read-Version $installRoot) '1.1.62' 'Rollback did not restore the previous version.'
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) $ExpectedVersion 'Rollback did not retain the candidate for recovery.'
   Assert-Equal (Get-ItemPropertyValue -Path $productKey -Name Version) '1.1.62' 'Product registry version is stale after rollback.'
-  & node (Join-Path $PSScriptRoot 'native-message-smoke.mjs') --launcher (Join-Path $installRoot 'runtime\run_native_host.bat')
+  Invoke-NativeMessageSmoke
 
   & $manager -Rollback
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Second rollback did not restore the candidate.'

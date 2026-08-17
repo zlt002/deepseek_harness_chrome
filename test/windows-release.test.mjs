@@ -277,6 +277,15 @@ test('Windows Native Messaging smoke accepts a fragmented pong, writes stop, and
   assertSmokeClean(child, timers)
 })
 
+test('Windows Native Messaging acceptance preserves cmd launcher quoting and fails closed on smoke errors', async () => {
+  const smokeSource = await readFile(new URL('../release/windows-lite/native-message-smoke.mjs', import.meta.url), 'utf8')
+  const acceptanceSource = await readFile(new URL('../release/windows-lite/acceptance-windows.ps1', import.meta.url), 'utf8')
+  assert.match(smokeSource, /windowsVerbatimArguments:\s*true/)
+  assert.match(acceptanceSource, /function Invoke-NativeMessageSmoke/)
+  assert.match(acceptanceSource, /if \(\$LASTEXITCODE -ne 0\) \{ throw "Native Messaging smoke failed with exit code \$LASTEXITCODE\." \}/)
+  assert.equal((acceptanceSource.match(/Invoke-NativeMessageSmoke/g) ?? []).length, 3)
+})
+
 test('Windows Native Messaging smoke rejects invalid JSON and terminates the tree', async () => {
   const timers = timerHarness()
   const child = fakeNativeChild()

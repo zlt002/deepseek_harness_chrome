@@ -194,6 +194,9 @@ export async function main(argv = process.argv.slice(2)) {
     env: process.env,
     stdio: 'pipe',
     windowsHide: true,
+    // cmd.exe needs to receive the surrounding quotes literally. Without
+    // this, Node escapes them as \" and cmd treats that as part of the path.
+    windowsVerbatimArguments: true,
   })
   await smokeNativeMessageChild({ child, killTree: () => killWindowsProcessTree(child) })
   console.log('Native Messaging launcher answered pong and stopped cleanly.')
