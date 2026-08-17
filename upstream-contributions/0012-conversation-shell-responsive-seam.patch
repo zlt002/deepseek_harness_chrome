@@ -595,27 +595,51 @@ index 5230f59..cfc4108 100644
    const [pick, setPick] = useState<string | null>(null)
    const [open, setOpen] = useState(false)
    const [confirmation, setConfirmation] = useState<string | null>(null)
-@@ -87,6 +90,7 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
-   const currentValue = pick ?? value.currentValue
-   const current = value.options.find(option => option.value === currentValue)
+@@ -82,18 +85,20 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
+     setConfirmation(null)
+   }, [locked, value])
+
+-  if (value === undefined) return null
+-
+-  const currentValue = pick ?? value.currentValue
+-  const current = value.options.find(option => option.value === currentValue)
++  // The permissions projection is absent during initial composer hydration.
++  // Keep this hook's call position stable across its later arrival: passing no
++  // panel suppresses registration until the concrete options are available.
++  const currentValue = pick ?? value?.currentValue ?? ''
++  const current = value?.options.find(option => option.value === currentValue)
    const busy = pick !== null || confirmation !== null
 +  const currentLabel = current === undefined ? displayName(currentValue) : optionLabel(current)
  
-   const items: MenuEntry[] = value.options
+-  const items: MenuEntry[] = value.options
++  const items: MenuEntry[] = value?.options
      .filter(o => o.value !== 'custom')
-@@ -104,6 +108,7 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
+     .map((option) => {
+       const icon = permissionGlyph(option.value)
+       return { id: option.value, label: optionLabel(option), ...icon === undefined ? {} : { icon } }
+-    })
++    }) ?? []
+
+   const submit = (id: string): void => {
+     setPick(id)
+@@ -103,8 +108,11 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
  
    const choose = (id: string): void => {
++    const permissions = value
++    if (permissions === undefined) return
      setOpen(false)
+-    if (id === value.currentValue) return
 +    hosted.close()
-     if (id === value.currentValue) return
++    if (id === permissions.currentValue) return
      if (id === FULL_ACCESS) {
        setAcknowledged(false)
-@@ -125,9 +130,22 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
+       setConfirmation(id)
+       return
+@@ -125,9 +133,24 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
      submit(id)
    }
  
-+  const panel = (
++  const panel = value === undefined ? undefined : (
 +    <div className={css.panel} role="menu" aria-label={t('input.accessMode', { name: currentLabel })}>
 +      {items.map(item => 'type' in item ? null : (
 +        <button key={item.id} type="button" role="menuitem" aria-checked={item.id === currentValue}
@@ -628,6 +652,8 @@ index 5230f59..cfc4108 100644
 +  const hosted = useComposerOverlay('permission', panel)
 +  const panelOpen = hosted.available ? hosted.open : open
 +
++  if (value === undefined) return null
++
    return (
      <>
 -      <Menu
@@ -635,7 +661,7 @@ index 5230f59..cfc4108 100644
          open={open}
          items={items}
          selectedId={currentValue}
-@@ -135,25 +153,38 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
+@@ -135,25 +158,38 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
          onClose={() => { setOpen(false) }}
          side="top"
          anchor={
@@ -991,3 +1017,44 @@ index 0000000..c37e2c6
 +    this.sources.clear()
 +  }
 +}
+
+diff --git a/packages/client/ui-conversation/tests/input-bar.client.spec.tsx b/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
+--- a/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
+@@ -18,6 +18,7 @@ import type { ComposerAttachment } from '../src/client/contract/slots.ts'
+ import type { DraftAttachmentId } from '../src/client/input/contract.ts'
+ import { InputBar } from '../src/client/skeleton/InputBar.tsx'
+ import type { InputBarProps } from '../src/client/skeleton/InputBar.tsx'
++import { PermissionSelect } from '../src/client/skeleton/PermissionSelect.tsx'
+ import { zh } from '../src/client/locales.ts'
+
+ afterEach(cleanup)
+@@ -1167,6 +1168,28 @@ describe('command launcher chrome and control seats', () => {
+     expect(view.queryByLabelText('Model')).toBeNull()
+   })
+
++  it('keeps the permission control mounted while its projection loads after the composer renders', () => {
++    const permissions = {
++      options: [
++        { value: 'read-only', name: 'read-only' },
++        { value: 'workspace-write', name: 'workspace-write' },
++      ],
++      currentValue: 'read-only',
++    }
++    const common = {
++      locked: false,
++      command: vi.fn(() => Promise.resolve(true)),
++      t: makeTranslate(zh, commonZh),
++    }
++    const view = render(<PermissionSelect {...common} value={undefined} />)
++    expect(view.queryByLabelText(/^访问模式/)).toBeNull()
++
++    expect(() => {
++      view.rerender(<PermissionSelect {...common} value={permissions} />)
++    }).not.toThrow()
++    expect(view.getByLabelText(/^访问模式/)).toBeTruthy()
++  })
++
+   it('passes the textarea selection to the command menu launcher and reflects its expanded state', () => {
+     const toggleCommandMenu = vi.fn()
+     const { view, textarea, menuLauncher } = bench({ draft: 'draft text', toggleCommandMenu })
