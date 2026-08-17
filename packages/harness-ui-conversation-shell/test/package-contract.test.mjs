@@ -27,10 +27,21 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(presentation, /owner\.renderComposer\(\)/)
   assert.match(css, /:global\(\[data-composer-seat\]\)/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)/)
+  // The compact shell replaces the historical upstream header at side-panel
+  // widths.  The public slot marker, rather than an upstream CSS-module name,
+  // keeps that product rule stable across Harness upgrades.
+  assert.match(css, /@media \(max-width: 999px\)[\s\S]*\[data-slot='conversation\.session\.header'\][\s\S]*display: none/)
+  // The composer is deliberately a sibling of the scrollport.  Its overlay
+  // anchor must form an elevated, visible containing block: without this,
+  // long transcript scrolling can paint over (or clip) model/permission/
+  // context panels.
+  assert.match(css, /\.root > :global\(\[data-composer-seat\]\)[\s\S]*position: relative[\s\S]*z-index: 7/)
+  assert.match(css, /:global\(\[data-composer-overlay-surface\]\)[\s\S]*position: relative[\s\S]*z-index: 8[\s\S]*height: 0[\s\S]*overflow: visible/)
+  assert.match(css, /:global\(\[data-composer-overlay-surface\]\) > \[role='dialog'\],[\s\S]*:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\][\s\S]*position: absolute/)
   for (const name of ['root', 'scrollBody', 'heroTitleSeat']) {
     assert.match(presentation, new RegExp(`css\\.${name}`))
     assert.match(css, new RegExp(`\\.${name}(?:[\\s{.:])`))
   }
-  assert.doesNotMatch(css, /\.header|\.tabs|\.viewArea|\.composerStack|\.overlayAnchor/)
+  assert.doesNotMatch(css, /(?:^|\n)\.(?:header|tabs|viewArea|composerStack|overlayAnchor)\b/m)
   assert.doesNotMatch(`${source}\n${presentation}`, /createChatStore|ConversationController|defineStore|useSession\(/)
 })

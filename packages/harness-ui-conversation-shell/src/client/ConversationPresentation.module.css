@@ -27,6 +27,16 @@
 
 .root[data-phase='hero'] .scrollBody { justify-content: flex-end; }
 
+/* The compact workspace chrome already identifies the active Session.  The
+   stock conversation header would repeat it (and its tab strip) in a narrow
+   side panel, so mirror the accepted e327 compact rule through the public
+   slot marker rather than an upstream CSS-module class. */
+@media (max-width: 999px) {
+  .root > :global([data-slot='conversation.session.header']) {
+    display: none;
+  }
+}
+
 .heroTitleSeat {
   position: absolute;
   inset: 0;
@@ -42,18 +52,34 @@
   display: flex;
   flex: none;
   flex-direction: column;
-  position: static;
+  /* The footer paints above a long transcript.  It is not a child of the
+     scrollport, therefore its open surfaces are never clipped by history. */
+  position: relative;
+  z-index: 7;
   background: transparent;
   --dsh-composer-text-max-height: 336px;
 }
 
 .root[data-phase='settling'] > :global([data-composer-seat]) { visibility: hidden; }
 
-/* ComposerOverlay is a generic upstream service. These stable attributes are
-   its public product-facing presentation surface for model/permission/context
-   panels, preserving mutual exclusion without owning state. */
+/* ComposerOverlay is a generic upstream service. Its stable attributes expose
+   a product-facing surface for model/permission/context panels, preserving
+   mutual exclusion without owning state. */
+:global([data-composer-overlay-surface]) {
+  position: relative;
+  z-index: 8;
+  align-self: center;
+  width: min(
+    var(--dsh-composer-card-max-width),
+    calc(100% - 2 * var(--dsh-composer-side-clearance))
+  );
+  height: 0;
+  overflow: visible;
+}
+
 :global([data-composer-overlay-surface]) > [role='dialog'],
 :global([data-composer-overlay-surface]) > [role='menu'] {
+  position: absolute;
   right: auto;
   left: 0;
   width: 100%;
