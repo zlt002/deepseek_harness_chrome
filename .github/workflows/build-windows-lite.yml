@@ -66,7 +66,7 @@ jobs:
             deepseek_harness_chrome/release/windows-lite/harness-static-win32-x64
             deepseek_harness_chrome/apps/chrome-extension/.output/chrome-mv3
             deepseek_harness_chrome/packages/*/lib
-          key: windows-lite-ready-v1-${{ hashFiles('deepseek_harness_chrome/apps/chrome-extension/**', 'deepseek_harness_chrome/apps/native-server/**', 'deepseek_harness_chrome/packages/**', 'deepseek_harness_chrome/release/windows-lite/**', 'deepseek_harness_chrome/release/mac-lite/build-mac-production.mjs', 'deepseek_harness_chrome/scripts/*.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/package.json', 'deepseek_harness_chrome/pnpm-lock.yaml', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
+          key: windows-lite-ready-v2-${{ hashFiles('deepseek_harness_chrome/apps/chrome-extension/**', 'deepseek_harness_chrome/apps/native-server/**', 'deepseek_harness_chrome/packages/**', 'deepseek_harness_chrome/release/windows-lite/build-static-harness-runtime.mjs', 'deepseek_harness_chrome/release/mac-lite/build-mac-production.mjs', 'deepseek_harness_chrome/scripts/*.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/package.json', 'deepseek_harness_chrome/pnpm-lock.yaml', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
 
       - name: Build materialized Harness product
         if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'

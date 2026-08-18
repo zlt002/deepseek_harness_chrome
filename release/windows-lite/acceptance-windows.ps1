@@ -58,14 +58,20 @@ try {
   }
 
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
-  & cscript.exe //NoLogo $installLauncher
-  if ($LASTEXITCODE -ne 0) {
+  $vbsOutput = & cscript.exe //NoLogo $installLauncher 2>&1
+  $vbsExitCode = $LASTEXITCODE
+  $vbsOutput | ForEach-Object { Write-Host $_ }
+  if ($vbsExitCode -ne 0) {
     $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
     if (Test-Path -LiteralPath $installLog -PathType Leaf) {
       Write-Host 'VBS installer error log:'
       Get-Content -LiteralPath $installLog | Write-Host
+    } else {
+      Write-Host 'VBS installer created no error log; probing install.ps1 with Windows PowerShell directly.'
+      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+      Write-Host "Direct Windows PowerShell installer exit code: $LASTEXITCODE"
     }
-    throw "VBS installer failed with exit code $LASTEXITCODE."
+    throw "VBS installer failed with exit code $vbsExitCode."
   }
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Upgrade did not install the candidate.'
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) '1.1.62' 'Previous version was not retained for rollback.'
