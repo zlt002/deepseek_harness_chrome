@@ -209,6 +209,10 @@ function runZip(cwd, outputPath, input) {
   execFileSync('zip', ['-qr', outputPath, input], { cwd, stdio: 'pipe' })
 }
 
+function utf8Bom(content) {
+  return Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(content, 'utf8')])
+}
+
 function archiveEntries(zipPath, requiredEntries) {
   try {
     if (process.platform === 'win32') {
@@ -445,7 +449,7 @@ export async function buildWindowsRelease({
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
   await writeFile(path.join(runtimeDir, 'run_native_host.bat'), nativeHostBat(), 'utf8')
   await writeFile(path.join(runtimeDir, 'dsh-plugin.bat'), pluginManagerBat(), 'utf8')
-  await writeFile(path.join(runtimeDir, 'register-native-host.ps1'), registerNativeHostPs1(), 'utf8')
+  await writeFile(path.join(runtimeDir, 'register-native-host.ps1'), utf8Bom(registerNativeHostPs1()))
   await writeFile(path.join(runtimeDir, 'start.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(startVbs(), 'utf16le')]))
   await writeFile(path.join(runtimeDir, `${NATIVE_HOST_NAME}.json`), nativeHostManifest(NATIVE_HOST_NAME), 'utf8')
   await writeFile(path.join(runtimeDir, `${LEGACY_NATIVE_HOST_NAME}.json`), nativeHostManifest(LEGACY_NATIVE_HOST_NAME), 'utf8')
@@ -461,7 +465,7 @@ export async function buildWindowsRelease({
 
   await mkdir(releaseDir, { recursive: true })
   runZip(payloadDir, path.join(packageDir, 'payload.zip'), '.')
-  await writeFile(path.join(packageDir, 'install.ps1'), await installPs1(), 'utf8')
+  await writeFile(path.join(packageDir, 'install.ps1'), utf8Bom(await installPs1()))
   await writeFile(path.join(packageDir, 'install.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(installVbs(), 'utf16le')]))
   await writeFile(path.join(packageDir, 'README.zh-CN.md'), releaseReadme(version), 'utf8')
   runZip(releaseDir, zipPath, ACCR_UI_WINDOWS_PACKAGE_NAME)
