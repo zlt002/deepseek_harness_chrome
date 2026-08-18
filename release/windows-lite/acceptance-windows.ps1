@@ -51,6 +51,25 @@ function Invoke-DirectoryPickerSmoke {
   if ($LASTEXITCODE -ne 0) { throw "Directory-picker worker smoke failed with exit code $LASTEXITCODE." }
 }
 
+function Invoke-InstallerUiSmoke {
+  $probePath = Join-Path $env:RUNNER_TEMP 'accrui-harness-installer-ui-visible.txt'
+  Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:DSH_INSTALL_NONINTERACTIVE -ErrorAction SilentlyContinue
+  $env:DSH_INSTALL_UI_PROBE_PATH = $probePath
+  $process = Start-Process -FilePath cscript.exe -ArgumentList @('//NoLogo', ('"' + $installLauncher + '"')) -PassThru
+  try {
+    if (-not $process.WaitForExit(15000)) { throw 'Interactive installer did not show and close within 15 seconds.' }
+    if ($process.ExitCode -ne 0) { throw "Interactive installer exited with code $($process.ExitCode)." }
+    if (-not (Test-Path -LiteralPath $probePath -PathType Leaf)) { throw 'Interactive installer did not report its window visibility.' }
+    Assert-Equal (Get-Content -LiteralPath $probePath -Raw) 'visible' 'Interactive installer window was hidden.'
+    Write-Host 'Interactive installer window reported visible.'
+  } finally {
+    if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+    Remove-Item Env:DSH_INSTALL_UI_PROBE_PATH -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+  }
+}
+
 try {
   if (Test-Path -LiteralPath $acceptanceRoot) { Remove-Item -LiteralPath $acceptanceRoot -Recurse -Force }
   New-Item -ItemType Directory -Path $seedRoot -Force | Out-Null
@@ -71,6 +90,7 @@ try {
     Set-Content -LiteralPath $sentinel -Value 'preserve-me' -NoNewline
   }
 
+  Invoke-InstallerUiSmoke
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
   $vbsOutput = & cscript.exe //NoLogo $installLauncher 2>&1
   $vbsExitCode = $LASTEXITCODE

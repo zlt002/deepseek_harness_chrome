@@ -237,7 +237,18 @@ $installButton.Add_Click({
   }
 })
 
-$form.Add_Shown({ Refresh-Requirements })
+$form.Add_Shown({
+  Write-LauncherLog 'installer UI visible'
+  $form.Activate()
+  $form.BringToFront()
+  if (-not [string]::IsNullOrWhiteSpace($env:DSH_INSTALL_UI_PROBE_PATH)) {
+    $visibility = if ($form.Visible -and $form.WindowState -ne [System.Windows.Forms.FormWindowState]::Minimized) { 'visible' } else { 'hidden' }
+    [System.IO.File]::WriteAllText($env:DSH_INSTALL_UI_PROBE_PATH, $visibility, [System.Text.UTF8Encoding]::new($false))
+    $form.Close()
+    return
+  }
+  Refresh-Requirements
+})
 $form.Add_FormClosing({
   param($sender, $eventArgs)
   if ($script:isInstalling) {
@@ -250,5 +261,5 @@ $form.Add_FormClosed({
   if (Test-Path -LiteralPath $progressPath) { Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue }
 })
 
-Write-LauncherLog 'installer UI shown'
+Write-LauncherLog 'show installer dialog'
 [void]$form.ShowDialog()

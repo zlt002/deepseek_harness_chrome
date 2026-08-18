@@ -195,7 +195,34 @@ async function installUiPs1() {
 }
 
 function installVbs() {
-  return `Option Explicit\r\nDim shell, fso, scriptDir, scriptPath, command, exitCode, nonInteractive, logPath, stream, windowStyle\r\nSet shell = CreateObject("WScript.Shell")\r\nSet fso = CreateObject("Scripting.FileSystemObject")\r\nscriptDir = fso.GetParentFolderName(WScript.ScriptFullName)\r\nnonInteractive = (shell.ExpandEnvironmentStrings("%DSH_INSTALL_NONINTERACTIVE%") = "1")\r\nIf nonInteractive Then\r\n  scriptPath = fso.BuildPath(scriptDir, "install.ps1")\r\n  windowStyle = 1\r\nElse\r\n  scriptPath = fso.BuildPath(scriptDir, "install-ui.ps1")\r\n  windowStyle = 0\r\nEnd If\r\nlogPath = fso.BuildPath(scriptDir, "install-launch.log")\r\nIf Not fso.FileExists(scriptPath) Then\r\n  MsgBox "Harness UI 安装器文件缺失：" & vbCrLf & scriptPath, vbCritical, "Harness UI 安装失败"\r\n  WScript.Quit 1\r\nEnd If\r\nSet stream = fso.OpenTextFile(logPath, 8, True)\r\nstream.WriteLine Now & " launch " & scriptPath\r\nstream.Close\r\ncommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File """ & scriptPath & """"\r\nexitCode = shell.Run(command, windowStyle, True)\r\nIf nonInteractive And exitCode <> 0 Then\r\n  MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看错误日志。", vbCritical, "Harness UI 安装失败"\r\nEnd If\r\nWScript.Quit exitCode\r\n`
+  return `Option Explicit
+Dim shell, fso, scriptDir, scriptPath, command, exitCode, nonInteractive, logPath, stream, windowStyle
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+nonInteractive = (shell.ExpandEnvironmentStrings("%DSH_INSTALL_NONINTERACTIVE%") = "1")
+If nonInteractive Then
+  scriptPath = fso.BuildPath(scriptDir, "install.ps1")
+  windowStyle = 1
+Else
+  scriptPath = fso.BuildPath(scriptDir, "install-ui.ps1")
+  windowStyle = 1
+End If
+logPath = fso.BuildPath(scriptDir, "install-launch.log")
+If Not fso.FileExists(scriptPath) Then
+  MsgBox "Harness UI 安装器文件缺失：" & vbCrLf & scriptPath, vbCritical, "Harness UI 安装失败"
+  WScript.Quit 1
+End If
+Set stream = fso.OpenTextFile(logPath, 8, True)
+stream.WriteLine Now & " launch " & scriptPath
+stream.Close
+command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File """ & scriptPath & """"
+exitCode = shell.Run(command, windowStyle, True)
+If nonInteractive And exitCode <> 0 Then
+  MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看错误日志。", vbCritical, "Harness UI 安装失败"
+End If
+WScript.Quit exitCode
+`.replaceAll('\n', '\r\n')
 }
 
 function startVbs() {
