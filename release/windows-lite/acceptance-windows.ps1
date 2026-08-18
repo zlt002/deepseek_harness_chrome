@@ -6,8 +6,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $packageRoot = [System.IO.Path]::GetFullPath($PackageDir)
 $installer = Join-Path $packageRoot 'install.ps1'
+$installLauncher = Join-Path $packageRoot 'install.vbs'
 $payloadZip = Join-Path $packageRoot 'payload.zip'
 if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Missing installer: $installer" }
+if (-not (Test-Path -LiteralPath $installLauncher -PathType Leaf)) { throw "Missing VBS installer: $installLauncher" }
 if (-not (Test-Path -LiteralPath $payloadZip -PathType Leaf)) { throw "Missing payload: $payloadZip" }
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -55,7 +57,9 @@ try {
     Set-Content -LiteralPath $sentinel -Value 'preserve-me' -NoNewline
   }
 
-  & $installer
+  $env:DSH_INSTALL_NONINTERACTIVE = '1'
+  & cscript.exe //NoLogo $installLauncher
+  if ($LASTEXITCODE -ne 0) { throw "VBS installer failed with exit code $LASTEXITCODE." }
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Upgrade did not install the candidate.'
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) '1.1.62' 'Previous version was not retained for rollback.'
   foreach ($relativePath in @('workspace\user.txt', 'logs\user.txt', '.webmcp\user.txt')) {

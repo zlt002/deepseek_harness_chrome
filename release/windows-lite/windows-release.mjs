@@ -190,7 +190,7 @@ async function installPs1() {
 }
 
 function installVbs() {
-  return `Option Explicit\r\nDim shell, fso, scriptPath, command, exitCode\r\nSet shell = CreateObject("WScript.Shell")\r\nSet fso = CreateObject("Scripting.FileSystemObject")\r\nscriptPath = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "install.ps1")\r\ncommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & scriptPath & """ -Interactive"\r\nexitCode = shell.Run(command, 1, True)\r\nIf exitCode <> 0 Then\r\n  MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看安装窗口中的具体错误和日志位置。", vbCritical, "Harness UI 安装失败"\r\nElse\r\n  MsgBox "Harness UI 安装完成。请重新加载 AccrUI 扩展。", vbInformation, "Harness UI 安装完成"\r\nEnd If\r\n`
+  return `Option Explicit\r\nDim shell, fso, scriptPath, command, exitCode, nonInteractive\r\nSet shell = CreateObject("WScript.Shell")\r\nSet fso = CreateObject("Scripting.FileSystemObject")\r\nscriptPath = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "install.ps1")\r\nnonInteractive = (shell.ExpandEnvironmentStrings("%DSH_INSTALL_NONINTERACTIVE%") = "1")\r\ncommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & scriptPath & """"\r\nIf Not nonInteractive Then command = command & " -Interactive"\r\nexitCode = shell.Run(command, 1, True)\r\nIf Not nonInteractive Then\r\n  If exitCode <> 0 Then\r\n    MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看安装窗口中的具体错误和日志位置。", vbCritical, "Harness UI 安装失败"\r\n  Else\r\n    MsgBox "Harness UI 安装完成。请重新加载 AccrUI 扩展。", vbInformation, "Harness UI 安装完成"\r\n  End If\r\nEnd If\r\nWScript.Quit exitCode\r\n`
 }
 
 function startVbs() {
