@@ -456,16 +456,21 @@ export async function patchBundledWorkerPaths(bundlePath, { includeDirectoryPick
       to: '? "./worker.ts" : "./code-runtime-worker.cjs"',
     },
     ...(includeDirectoryPicker ? [{
-      marker: '// packages/host/directory-picker-native/src/win32-dialog-host.ts',
+      markers: [
+        '// packages/host/directory-picker-native/lib/index.js',
+        '// packages/host/directory-picker-native/src/win32-dialog-host.ts',
+      ],
       from: 'new URL("./worker.cjs", import.meta.url)',
       to: 'new URL("./directory-picker-worker.cjs", import.meta.url)',
     }] : []),
   ]
   for (const replacement of replacements) {
-    const markerIndex = source.indexOf(replacement.marker)
-    if (markerIndex < 0) throw new Error(`Bundled worker marker is missing: ${replacement.marker}`)
+    const markers = replacement.markers ?? [replacement.marker]
+    const marker = markers.find(candidate => source.includes(candidate))
+    if (marker === undefined) throw new Error(`Bundled worker marker is missing: ${markers.join(' or ')}`)
+    const markerIndex = source.indexOf(marker)
     const workerIndex = source.indexOf(replacement.from, markerIndex)
-    if (workerIndex < 0) throw new Error(`Bundled worker path is missing after ${replacement.marker}`)
+    if (workerIndex < 0) throw new Error(`Bundled worker path is missing after ${marker}`)
     source = source.slice(0, workerIndex) + replacement.to + source.slice(workerIndex + replacement.from.length)
   }
   await writeFile(bundlePath, source)

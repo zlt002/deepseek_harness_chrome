@@ -302,7 +302,7 @@ test('static runtime rewrites and carries the Win32 directory-picker worker with
 new URL("./worker.cjs", import.meta.url)
 // packages/code-runtime/code-runtime-worker-thread/src/index.ts
 import.meta.url.endsWith('.ts') ? "./worker.ts" : "./worker.cjs"
-// packages/host/directory-picker-native/src/win32-dialog-host.ts
+// packages/host/directory-picker-native/lib/index.js
 new URL("./worker.cjs", import.meta.url)
 `)
   await patchBundledWorkerPaths(server, { includeDirectoryPicker: true })
