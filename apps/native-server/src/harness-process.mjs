@@ -75,6 +75,11 @@ export function resolveSchemasteryUrl(cliPath) {
   return pathToFileURL(join(harnessRoot, 'vendor/schemastery/lib/index.mjs')).href
 }
 
+/** Convert a local Cordis loader entry to a cross-platform ESM specifier. */
+export function loaderModuleSpecifier(value, platform = process.platform) {
+  return pathToFileURL(value, { windows: platform === 'win32' }).href
+}
+
 /** Arguments owned by this integration, kept separate from the Harness CLI. */
 export function harnessArgs(port, connectorPatchPath, extraPatchPaths = []) {
   return [
@@ -105,11 +110,11 @@ function connectorPatch(url, token, runtimePluginPath) {
 
 - insert:
     - id: deepseek-harness-selected-source-routing
-      name: ${yamlString(resolve(THIS_DIR, 'selected-source-routing-prompt.mjs'))}
+      name: ${yamlString(loaderModuleSpecifier(resolve(THIS_DIR, 'selected-source-routing-prompt.mjs')))}
 
 - insert:
     - id: deepseek-harness-browser-connector
-      name: ${yamlString(runtimePluginPath)}
+      name: ${yamlString(loaderModuleSpecifier(runtimePluginPath))}
       config:
         serverName: chrome
         url: '${url}'
@@ -214,7 +219,7 @@ export function claudeSkillsPatch(env = process.env) {
 export function effectiveSessionTrackingPatch(env = process.env) {
   return `- insert:
     - id: deepseek-harness-effective-session-tracking
-      name: ${yamlString(resolveHarnessTrackingPlugin(env))}
+      name: ${yamlString(loaderModuleSpecifier(resolveHarnessTrackingPlugin(env)))}
 `
 }
 

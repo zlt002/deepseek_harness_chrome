@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { claudeSkillsPatch, effectiveSessionTrackingPatch, harnessArgs, prepareProductUiPackages, productUiPatch, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
+import { claudeSkillsPatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
 import { mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -64,7 +64,14 @@ test('resolves the product-owned AccrUI tracking plugin outside the upstream che
 test('mounts AccrUI effective-session tracking on every Harness Web launch', () => {
   const patch = effectiveSessionTrackingPatch({})
   assert.match(patch, /id: deepseek-harness-effective-session-tracking/)
-  assert.match(patch, /packages\/harness-tracking\/src\/index\.mjs/)
+  assert.match(patch, /name: 'file:\/\/.+packages\/harness-tracking\/src\/index\.mjs'/)
+})
+
+test('converts Windows absolute loader paths to valid file URLs', () => {
+  assert.equal(
+    loaderModuleSpecifier('C:\\Harness Runtime\\harness-tracking.mjs', 'win32'),
+    'file:///C:/Harness%20Runtime/harness-tracking.mjs',
+  )
 })
 
 test('passes the Native Host-owned MCP patch to the official Harness client', () => {
