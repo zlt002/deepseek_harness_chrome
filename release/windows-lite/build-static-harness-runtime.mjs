@@ -13,11 +13,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   RUNTIME_SELECTED_PLUGIN_PACKAGES,
   STATIC_REGISTRY_PACKAGE_OVERRIDES,
+  bundleDirectoryPickerWorker,
   bundleWithHarnessEsbuild,
   copyWebClientPackages,
   copyWithoutSourceMaps,
   patchBundledWorkerPaths,
   shippedPresetConfigs,
+  staticBundleAliases,
   staticPluginRegistry,
   staticTypertPackages,
   staticWebRunner,
@@ -100,6 +102,14 @@ function assertWindowsBuildHost({ platform = process.platform, arch = process.ar
   if (platform !== 'win32' || arch !== 'x64') throw new Error(`Static Windows runtime must build on Windows x64; current host is ${platform}/${arch}.`)
 }
 
+/** Ensure the packaged child process cannot fall back to a Harness node_modules tree. */
+export async function assertDirectoryPickerWorkerContract({ serverPath, workerPath }) {
+  if (!existsSync(workerPath)) throw new Error(`Static runtime is missing directory-picker worker: ${workerPath}`)
+  const [server, worker] = await Promise.all([readFile(serverPath, 'utf8'), readFile(workerPath, 'utf8')])
+  if (!server.includes('directory-picker-worker.cjs')) throw new Error('Static server does not point directory-picker-native at directory-picker-worker.cjs.')
+  if (worker.includes('node_modules')) throw new Error('Static directory-picker worker must not depend on runtime/harness/node_modules.')
+}
+
 /**
  * Creates a static Harness closure rooted at outputDir. The profile directory
  * is deliberately external: dsh plugin add writes user-installed plugins
@@ -147,12 +157,12 @@ export async function buildWindowsStaticHarnessRuntime({
       resolveDir: path.join(harnessRoot, 'apps', 'cli'),
       outfile: bundlePath,
       nativeTarget: 'win32-x64',
-      aliases: Object.fromEntries([...new Set([...STATIC_REGISTRY_PACKAGE_OVERRIDES, ...RUNTIME_SELECTED_PLUGIN_PACKAGES])].map((name) => [
-        name,
-        path.join(harnessRoot, 'node_modules', '.pnpm', 'node_modules', ...name.split('/')),
-      ]).concat(typertPackages.map((entry) => [`${entry.name}/typert`, entry.artifactPath]))),
+      aliases: {
+        ...staticBundleAliases([...STATIC_REGISTRY_PACKAGE_OVERRIDES, ...RUNTIME_SELECTED_PLUGIN_PACKAGES], harnessRoot),
+        ...Object.fromEntries(typertPackages.map((entry) => [`${entry.name}/typert`, entry.artifactPath])),
+      },
     })
-    await patchBundledWorkerPaths(bundlePath)
+    await patchBundledWorkerPaths(bundlePath, { includeDirectoryPicker: true })
 
     const nativeServerPath = path.join(temporary, 'native-server.mjs')
     const pluginManagerPath = path.join(temporary, 'plugin-manager.mjs')
@@ -161,6 +171,14 @@ export async function buildWindowsStaticHarnessRuntime({
 
     await mkdir(path.join(cliDir, 'lib'), { recursive: true })
     await cp(bundlePath, path.join(cliDir, 'lib', 'server.mjs'))
+    await bundleDirectoryPickerWorker({
+      harnessRoot,
+      outfile: path.join(cliDir, 'lib', 'directory-picker-worker.cjs'),
+    })
+    await assertDirectoryPickerWorkerContract({
+      serverPath: path.join(cliDir, 'lib', 'server.mjs'),
+      workerPath: path.join(cliDir, 'lib', 'directory-picker-worker.cjs'),
+    })
     await cp(pluginManagerPath, path.join(cliDir, 'lib', 'plugin-manager.mjs'))
     for (const worker of [
       ['code-runtime/code-runtime-worker-thread', 'code-runtime-worker.cjs'],
@@ -173,7 +191,7 @@ export async function buildWindowsStaticHarnessRuntime({
       // Use the common aliases, not a one-file local registry.
       await writeFile(path.join(configDir, preset.relativePath), preset.contents.replace(/^([ \t]*name:\s+)['"]([^'"]+)['"]\s*$/gm, (line, prefix, name) => aliases.has(name) ? `${prefix}'cordis:${aliases.get(name)}'` : line))
     }
-    await copyWebClientPackages(allAliases, configDir)
+    await copyWebClientPackages(allAliases, configDir, { harnessRoot })
     await writeFile(path.join(cliDir, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.0-rc.5', type: 'module' }, null, 2)}\n`)
     await copyWithoutSourceMaps(path.join(harnessRoot, 'apps', 'web', 'dist'), path.join(harnessDir, 'apps', 'web', 'dist'))
     await mkdir(path.join(harnessDir, 'vendor', 'schemastery', 'lib'), { recursive: true })

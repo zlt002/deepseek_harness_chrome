@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -20,8 +20,9 @@ import {
   validateWindowsRelease,
 } from '../release/windows-lite/windows-release.mjs'
 import { encodeNativeMessage, smokeNativeMessageChild } from '../release/windows-lite/native-message-smoke.mjs'
-import { buildWindowsStaticHarnessRuntime, parseStaticRuntimeArgs } from '../release/windows-lite/build-static-harness-runtime.mjs'
-import { nativeResolverBanner } from '../release/mac-lite/build-mac-production.mjs'
+import { EXPECTED_PRODUCT_CLIENT_IDS, verifyProductUiBoot } from '../release/windows-lite/product-ui-smoke.mjs'
+import { assertDirectoryPickerWorkerContract, buildWindowsStaticHarnessRuntime, parseStaticRuntimeArgs } from '../release/windows-lite/build-static-harness-runtime.mjs'
+import { bundleDirectoryPickerWorker, nativeResolverBanner, patchBundledWorkerPaths } from '../release/mac-lite/build-mac-production.mjs'
 
 async function writeFixture(root, relativePath, content = '') {
   const target = path.join(root, relativePath)
@@ -268,6 +269,64 @@ test('static Windows runtime uses a bundle, keeps native sidecars, and rejects n
   assert.match(builderSource, /'pnpm\.cmd'/)
   assert.doesNotMatch(builderSource, /run\('pnpm'/)
   assert.match(builderSource, /path\.join\(koffi, 'win32_x64', 'koffi\.node'\)/)
+})
+
+test('static runtime rewrites and carries the Win32 directory-picker worker without node_modules', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'directory-picker-worker-contract-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const server = await writeFixture(root, 'server.mjs', `// packages/workflow/workflow-worker-thread/src/host.ts
+new URL("./worker.cjs", import.meta.url)
+// packages/code-runtime/code-runtime-worker-thread/src/index.ts
+import.meta.url.endsWith('.ts') ? "./worker.ts" : "./worker.cjs"
+// packages/host/directory-picker-native/src/win32-dialog-host.ts
+new URL("./worker.cjs", import.meta.url)
+`)
+  await patchBundledWorkerPaths(server, { includeDirectoryPicker: true })
+  const rewritten = await readFile(server, 'utf8')
+  assert.match(rewritten, /directory-picker-worker\.cjs/)
+  assert.doesNotMatch(rewritten, /node_modules/)
+})
+
+test('Windows product UI smoke requires every activated product client bundle', async () => {
+  const entries = EXPECTED_PRODUCT_CLIENT_IDS.map((id, index) => ({ id, url: `/plugins/product-${index}.js` }))
+  const fetched = []
+  const fetchImpl = async input => {
+    const url = String(input)
+    fetched.push(url)
+    if (url === 'http://127.0.0.1:43123/') {
+      return { ok: true, status: 200, text: async () => `<script>window.__DSH_BOOT__ = ${JSON.stringify({ entries })}</script>` }
+    }
+    return { ok: true, status: 200, text: async () => '' }
+  }
+  const result = await verifyProductUiBoot('http://127.0.0.1:43123/', fetchImpl)
+  assert.equal(result.productClientCount, 10)
+  assert.equal(fetched.length, 11)
+
+  await assert.rejects(
+    verifyProductUiBoot('http://127.0.0.1:43123/', async input => {
+      if (String(input) === 'http://127.0.0.1:43123/') {
+        return { ok: true, status: 200, text: async () => '<script>window.__DSH_BOOT__ = {"entries":[]}</script>' }
+      }
+      throw new Error('unexpected client fetch')
+    }),
+    /missing activated product client plugin/,
+  )
+})
+
+test('directory-picker worker is a standalone CJS bundle with a relative Koffi sidecar loader', { timeout: 60_000 }, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'directory-picker-worker-bundle-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const worker = path.join(root, 'harness', 'apps', 'cli', 'lib', 'directory-picker-worker.cjs')
+  await bundleDirectoryPickerWorker({
+    harnessRoot: path.join(process.cwd(), '.generated', 'harness-product'),
+    outfile: worker,
+  })
+  const source = await readFile(worker, 'utf8')
+  assert.doesNotMatch(source, /node_modules/)
+  assert.match(source, /native\/koffi\/koffi\.node/)
+  const server = await writeFixture(root, 'harness/apps/cli/lib/server.mjs', 'new URL("./directory-picker-worker.cjs", import.meta.url)')
+  await assertDirectoryPickerWorkerContract({ serverPath: server, workerPath: worker })
+  await assert.rejects(assertDirectoryPickerWorkerContract({ serverPath: server, workerPath: path.join(root, 'missing.cjs') }), /missing directory-picker worker/)
 })
 
 test('Windows Native Messaging smoke accepts a fragmented pong, writes stop, and exits cleanly', async () => {

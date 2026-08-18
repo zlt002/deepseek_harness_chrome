@@ -26,20 +26,7 @@ export const STATIC_REGISTRY_PACKAGE_OVERRIDES = [
   '@deepseek-ai/dsh-client-ui-browser-target',
   '@deepseek-ai/dsh-client-ui-knowledge-scope',
 ]
-export const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
-  '@deepseek-ai/dsh-host-directory-picker-native',
-  '@deepseek-ai/dsh-client-ui-directory-picker-native',
-  '@deepseek-ai/dsh-host-directory-picker-browse',
-  '@deepseek-ai/dsh-client-ui-directory-picker-browse',
-  '@deepseek-ai/dsh-mcp-client',
-]
-
-function assertHarnessProductAvailable() {
-  if (!EXPLICIT_HARNESS_ROOT && !existsSync(path.join(GENERATED_HARNESS_ROOT, '.harness-product.json'))) {
-    throw new Error(`Generated product Harness is missing: ${GENERATED_HARNESS_ROOT}. Run pnpm build:harness-product first, or set DSH_ROOT explicitly for a different Harness checkout.`)
-  }
-}
-const PRODUCT_UI_PACKAGE_NAMES = [
+export const PRODUCT_UI_PACKAGE_NAMES = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
   'harness-ui-conversation-shell',
@@ -51,6 +38,21 @@ const PRODUCT_UI_PACKAGE_NAMES = [
   'harness-ui-settings-shell',
   'harness-skill-settings',
 ]
+export const PRODUCT_UI_PLUGIN_PACKAGES = PRODUCT_UI_PACKAGE_NAMES.map(name => `@accrui/${name}`)
+export const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
+  '@deepseek-ai/dsh-host-directory-picker-native',
+  '@deepseek-ai/dsh-client-ui-directory-picker-native',
+  '@deepseek-ai/dsh-host-directory-picker-browse',
+  '@deepseek-ai/dsh-client-ui-directory-picker-browse',
+  '@deepseek-ai/dsh-mcp-client',
+  ...PRODUCT_UI_PLUGIN_PACKAGES,
+]
+
+function assertHarnessProductAvailable() {
+  if (!EXPLICIT_HARNESS_ROOT && !existsSync(path.join(GENERATED_HARNESS_ROOT, '.harness-product.json'))) {
+    throw new Error(`Generated product Harness is missing: ${GENERATED_HARNESS_ROOT}. Run pnpm build:harness-product first, or set DSH_ROOT explicitly for a different Harness checkout.`)
+  }
+}
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options })
   if (result.error) throw result.error
@@ -91,10 +93,9 @@ export async function shippedPresetConfigs(configDir) {
 }
 
 export async function staticTypertPackages(aliases) {
-  const packageRoot = path.join(HARNESS_ROOT, 'node_modules', '.pnpm', 'node_modules')
   const packages = []
   for (const name of aliases.keys()) {
-    const manifestPath = path.join(packageRoot, ...name.split('/'), 'package.json')
+    const manifestPath = path.join(staticPackageSource(name), 'package.json')
     if (!existsSync(manifestPath)) continue
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
     const target = manifest.exports?.['./typert']
@@ -289,10 +290,18 @@ main().catch((error) => {
 `
 }
 
-export async function copyWebClientPackages(aliases, configDir) {
-  const packageRoot = path.join(HARNESS_ROOT, 'node_modules', '.pnpm', 'node_modules')
+export function staticPackageSource(name, harnessRoot = HARNESS_ROOT) {
+  if (name.startsWith('@accrui/')) return path.join(PROJECT_ROOT, 'packages', name.split('/').at(-1))
+  return path.join(harnessRoot, 'node_modules', '.pnpm', 'node_modules', ...name.split('/'))
+}
+
+export function staticBundleAliases(names, harnessRoot = HARNESS_ROOT) {
+  return Object.fromEntries([...new Set(names)].map(name => [name, staticPackageSource(name, harnessRoot)]))
+}
+
+export async function copyWebClientPackages(aliases, configDir, { harnessRoot = HARNESS_ROOT } = {}) {
   for (const name of aliases.keys()) {
-    const sourceDir = path.join(packageRoot, ...name.split('/'))
+    const sourceDir = staticPackageSource(name, harnessRoot)
     const manifestPath = path.join(sourceDir, 'package.json')
     if (!existsSync(manifestPath)) continue
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
@@ -381,7 +390,50 @@ await build({
   })
 }
 
-export async function patchBundledWorkerPaths(bundlePath) {
+/**
+ * The Win32 directory picker launches this as a child process rather than a
+ * worker thread. Keep its Koffi loader inside the CJS artifact and resolve
+ * the shipped native sidecar relative to apps/cli/lib at runtime.
+ */
+export async function bundleDirectoryPickerWorker({
+  harnessRoot = HARNESS_ROOT,
+  outfile,
+} = {}) {
+  if (!outfile) throw new Error('bundleDirectoryPickerWorker requires outfile')
+  const worker = path.join(harnessRoot, 'packages', 'host', 'directory-picker-native', 'lib', 'worker.cjs')
+  if (!existsSync(worker)) throw new Error(`Built directory-picker worker is missing: ${worker}`)
+  const shim = path.join(path.dirname(outfile), '.directory-picker-koffi-shim.cjs')
+  await mkdir(path.dirname(outfile), { recursive: true })
+  await writeFile(shim, `const path = require('node:path');\nmodule.exports = require(path.resolve(__dirname, '../../../../native/koffi/koffi.node'));\n`)
+  const program = `
+import { build } from 'esbuild';
+await build({
+  entryPoints: [process.env.DSH_DIRECTORY_PICKER_WORKER],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node22',
+  packages: 'bundle',
+  alias: { koffi: process.env.DSH_DIRECTORY_PICKER_KOFFI_SHIM },
+  outfile: process.env.DSH_DIRECTORY_PICKER_OUTFILE,
+});
+`
+  try {
+    run(process.execPath, ['--input-type=module', '-e', program], {
+      cwd: harnessRoot,
+      env: {
+        ...process.env,
+        DSH_DIRECTORY_PICKER_WORKER: worker,
+        DSH_DIRECTORY_PICKER_KOFFI_SHIM: shim,
+        DSH_DIRECTORY_PICKER_OUTFILE: outfile,
+      },
+    })
+  } finally {
+    await rm(shim, { force: true })
+  }
+}
+
+export async function patchBundledWorkerPaths(bundlePath, { includeDirectoryPicker = false } = {}) {
   let source = await readFile(bundlePath, 'utf8')
   const replacements = [
     {
@@ -394,6 +446,11 @@ export async function patchBundledWorkerPaths(bundlePath) {
       from: '? "./worker.ts" : "./worker.cjs"',
       to: '? "./worker.ts" : "./code-runtime-worker.cjs"',
     },
+    ...(includeDirectoryPicker ? [{
+      marker: '// packages/host/directory-picker-native/src/win32-dialog-host.ts',
+      from: 'new URL("./worker.cjs", import.meta.url)',
+      to: 'new URL("./directory-picker-worker.cjs", import.meta.url)',
+    }] : []),
   ]
   for (const replacement of replacements) {
     const markerIndex = source.indexOf(replacement.marker)
@@ -648,10 +705,10 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
     sourcefile: 'static-web-runner.mjs',
     resolveDir: path.join(HARNESS_ROOT, 'apps', 'cli'),
     outfile: bundlePath,
-    aliases: Object.fromEntries([...new Set([...STATIC_REGISTRY_PACKAGE_OVERRIDES, ...RUNTIME_SELECTED_PLUGIN_PACKAGES])].map((name) => [
-      name,
-      path.join(HARNESS_ROOT, 'node_modules', '.pnpm', 'node_modules', ...name.split('/')),
-    ]).concat(typertPackages.map((entry) => [`${entry.name}/typert`, entry.artifactPath]))),
+    aliases: {
+      ...staticBundleAliases([...STATIC_REGISTRY_PACKAGE_OVERRIDES, ...RUNTIME_SELECTED_PLUGIN_PACKAGES]),
+      ...Object.fromEntries(typertPackages.map((entry) => [`${entry.name}/typert`, entry.artifactPath])),
+    },
   })
   await patchBundledWorkerPaths(bundlePath)
   const nativeBundlePath = path.join(tempDir, 'native-server.mjs')

@@ -157,6 +157,39 @@
 .options { flex: 1; min-height: 0; padding: 0 24px 24px; overflow-y: auto; }
 .hiddenLabel { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
+/* The owning Harness sidebar knows whether this surface is a side panel.
+   Prefer that semantic signal over viewport width so Windows display scaling
+   and browser zoom cannot turn the side-panel settings page into a desktop
+   modal. The media query below remains a safe fallback for other narrow hosts. */
+.panel[data-surface='sidepanel'] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+}
+.panel[data-surface='sidepanel'] .nav { grid-column: 1; grid-row: 1; width: auto; min-width: 0; padding: 8px 0 8px 8px; overflow: hidden; }
+.panel[data-surface='sidepanel'] .navTitle { display: none; }
+.panel[data-surface='sidepanel'] .navList { flex-direction: row; gap: 2px; min-width: 0; overflow-x: auto; }
+.panel[data-surface='sidepanel'] .navCell { flex: none; width: 36px; padding: 8px; justify-content: center; }
+.panel[data-surface='sidepanel'] .navCell.active { width: auto; justify-content: flex-start; }
+.panel[data-surface='sidepanel'] .navLabel { display: none; }
+.panel[data-surface='sidepanel'] .navCell.active .navLabel { display: inline; }
+.panel[data-surface='sidepanel'] .content { display: contents; }
+.panel[data-surface='sidepanel'] .header {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+  z-index: 1;
+  height: 56px;
+  padding: 14px 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.panel[data-surface='sidepanel'] .options { grid-column: 1 / -1; grid-row: 2; padding-right: 16px; padding-bottom: 16px; padding-left: 16px; }
+
 @media (max-width: 999px) {
   .panel {
     display: grid;

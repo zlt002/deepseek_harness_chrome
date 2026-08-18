@@ -21,12 +21,13 @@ function navIcon(id: string) {
 type PanelProps = {
   rows: readonly SettingsSectionRow[]
   renderSlot: SettingsPresentationOwnerProps['renderSlot']
+  sidePanel: boolean
   activeId: string | undefined
   onSelect: (id: string) => void
   onClose: () => void
 }
 
-function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelProps) {
+function SettingsPanel({ rows, renderSlot, sidePanel, activeId, onSelect, onClose }: PanelProps) {
   const active = rows.find(row => row.id === activeId)?.id ?? rows[0]?.id
   const titleId = useId()
   const closeButton = useRef<HTMLButtonElement | null>(null)
@@ -44,7 +45,14 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
   return (
     <div className={css.overlay} role="presentation" data-testid="settings-overlay">
       <div className={css.mask} aria-hidden="true" onClick={onClose} />
-      <div className={css.panel} role="dialog" aria-modal="true" aria-labelledby={titleId} data-testid="settings-panel">
+      <div
+        className={css.panel}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        data-testid="settings-panel"
+        data-surface={sidePanel ? 'sidepanel' : 'desktop'}
+      >
         <nav className={css.nav} data-testid="settings-nav">
           <div className={css.navTitle} id={titleId}>{renderSlot('settings.header', {})}</div>
           <div className={css.navList}>
@@ -180,7 +188,14 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
           </div>
         )}
       </div>
-      {open && <SettingsPanel rows={rows} renderSlot={renderSlot} activeId={activeId} onSelect={setActiveId} onClose={close} />}
+      {open && <SettingsPanel
+        rows={rows}
+        renderSlot={renderSlot}
+        sidePanel={compact || !wide}
+        activeId={activeId}
+        onSelect={setActiveId}
+        onClose={close}
+      />}
       {onboardingStep !== undefined && renderSlot('settings.onboarding', {
         stepId: onboardingStep.id,
         complete: () => { completeOnboardingStep(onboardingStep.id) },

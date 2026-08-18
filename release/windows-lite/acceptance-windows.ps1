@@ -37,6 +37,18 @@ function Invoke-NativeMessageSmoke {
   if ($LASTEXITCODE -ne 0) { throw "Native Messaging smoke failed with exit code $LASTEXITCODE." }
 }
 
+function Invoke-ProductUiSmoke {
+  & node (Join-Path $PSScriptRoot 'product-ui-smoke.mjs') --launcher (Join-Path $installRoot 'runtime\run_native_host.bat')
+  if ($LASTEXITCODE -ne 0) { throw "Product UI activation smoke failed with exit code $LASTEXITCODE." }
+}
+
+function Invoke-DirectoryPickerSmoke {
+  $nodeExecutable = (Get-Content -LiteralPath (Join-Path $installRoot 'runtime\node-path.txt') -Raw).Trim()
+  $worker = Join-Path $installRoot 'runtime\harness\apps\cli\lib\directory-picker-worker.cjs'
+  & node (Join-Path $PSScriptRoot 'directory-picker-worker-smoke.mjs') --node $nodeExecutable --worker $worker
+  if ($LASTEXITCODE -ne 0) { throw "Directory-picker worker smoke failed with exit code $LASTEXITCODE." }
+}
+
 try {
   if (Test-Path -LiteralPath $acceptanceRoot) { Remove-Item -LiteralPath $acceptanceRoot -Recurse -Force }
   New-Item -ItemType Directory -Path $seedRoot -Force | Out-Null
@@ -90,6 +102,8 @@ try {
     }
   }
   Invoke-NativeMessageSmoke
+  Invoke-ProductUiSmoke
+  Invoke-DirectoryPickerSmoke
 
   $manager = Join-Path $installRoot 'manage-install.ps1'
   & $manager -Rollback
@@ -101,6 +115,7 @@ try {
   & $manager -Rollback
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Second rollback did not restore the candidate.'
   Assert-Equal (Get-ItemPropertyValue -Path $productKey -Name Version) $ExpectedVersion 'Product registry version is stale after restoring the candidate.'
+  Invoke-ProductUiSmoke
   Write-Host 'Windows install, Native Messaging, upgrade, rollback, and restore acceptance passed.'
 } finally {
   foreach ($registryRoot in $registryRoots) {

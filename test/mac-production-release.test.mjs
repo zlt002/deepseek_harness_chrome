@@ -8,7 +8,20 @@ import test from 'node:test'
 import { buildMacProductionPackage } from '../release/mac-lite/build-mac-production.mjs'
 import { decodeNativeFrames, encodeNativeFrame } from '../apps/native-server/src/protocol.mjs'
 
-test('Mac production package boots the real Web surface without node_modules', { timeout: 60_000 }, async (t) => {
+const PRODUCT_CLIENT_IDS = [
+  '@accrui/harness-ui-agent-preset',
+  '@accrui/harness-ui-browser-target',
+  '@accrui/harness-ui-conversation-shell',
+  '@accrui/harness-ui-responsive-sidebar',
+  '@accrui/harness-ui-workspace-picker',
+  '@accrui/harness-ui-knowledge-scope',
+  '@accrui/harness-ui-subagent-compact',
+  '@accrui/harness-ui-session-log-copy',
+  '@accrui/harness-ui-settings-shell',
+  '@accrui/harness-skill-settings',
+]
+
+test('Mac production package boots the real Web surface without node_modules', { timeout: 180_000 }, async (t) => {
   if (process.platform !== 'darwin' || process.arch !== 'arm64') return t.skip('Mac ARM64 native package test')
 
   const root = await mkdtemp(path.join(tmpdir(), 'accr-ui-mac-release-'))
@@ -73,7 +86,7 @@ test('Mac production package boots the real Web surface without node_modules', {
   let stderr = ''
   child.stderr.on('data', (chunk) => { stderr += chunk })
   const url = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Web startup timed out: ${stderr}`)), 20_000)
+    const timer = setTimeout(() => reject(new Error(`Web startup timed out: ${stderr}`)), 60_000)
     child.stdout.on('data', (chunk) => {
       const match = chunk.toString().match(/dsh web: (http:\/\/127\.0\.0\.1:\d+)/)
       if (!match) return
@@ -212,7 +225,7 @@ test('Mac production package boots the real Web surface without node_modules', {
   let nativeRemainder = Buffer.alloc(0)
   native.stderr.on('data', (chunk) => { nativeStderr += chunk })
   const started = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Installed Native Host did not start under Chrome PATH: ${nativeStderr}`)), 20_000)
+    const timer = setTimeout(() => reject(new Error(`Installed Native Host did not start under Chrome PATH: ${nativeStderr}`)), 60_000)
     native.stdout.on('data', (chunk) => {
       const decoded = decodeNativeFrames(Buffer.concat([nativeRemainder, chunk]))
       nativeRemainder = decoded.remainder
@@ -235,5 +248,16 @@ test('Mac production package boots the real Web surface without node_modules', {
   native.stdin.write(encodeNativeFrame({ type: 'start' }))
   const startedMessage = await started
   assert.match(startedMessage.payload.url, /^http:\/\/127\.0\.0\.1:\d+$/)
+  const installedHtml = await (await fetch(startedMessage.payload.url)).text()
+  const installedBootMatch = installedHtml.match(/window\.__DSH_BOOT__ = (\{.*?\})<\/script>/)
+  assert.notEqual(installedBootMatch, null)
+  const installedBoot = JSON.parse(installedBootMatch[1])
+  const installedBootIds = new Set(installedBoot.entries.map(entry => entry.id))
+  for (const id of PRODUCT_CLIENT_IDS) {
+    assert.equal(installedBootIds.has(id), true, `Missing activated product client plugin: ${id}`)
+    const entry = installedBoot.entries.find(candidate => candidate.id === id)
+    const clientResponse = await fetch(new URL(entry.url, startedMessage.payload.url))
+    assert.equal(clientResponse.status, 200, `Missing activated product client bundle: ${id}`)
+  }
   native.stdin.write(encodeNativeFrame({ type: 'stop' }))
 })

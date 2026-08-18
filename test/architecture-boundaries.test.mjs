@@ -73,6 +73,8 @@ test('Harness product checkout pins LF before applying portable patches', async 
 
 test('Harness client plugins execute the portable tsdown JavaScript entrypoint', async () => {
   const script = await readFile(resolve(root, 'scripts/build-harness-client-plugins.mjs'), 'utf8')
+  const rootManifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
+  const typecheckPlugins = rootManifest.scripts['typecheck:plugins']
 
   assert.match(script, /node_modules', 'tsdown', 'dist', 'run\.mjs'/)
   assert.match(script, /spawnSync\(process\.execPath, \[tsdown/)
@@ -82,7 +84,9 @@ test('Harness client plugins execute the portable tsdown JavaScript entrypoint',
   for (const name of [
     'harness-ui-agent-preset',
     'harness-ui-browser-target',
+    'harness-ui-conversation-shell',
     'harness-ui-knowledge-scope',
+    'harness-ui-responsive-sidebar',
     'harness-ui-subagent-compact',
     'harness-ui-session-log-copy',
     'harness-ui-settings-shell',
@@ -92,6 +96,7 @@ test('Harness client plugins execute the portable tsdown JavaScript entrypoint',
     const config = await readFile(resolve(root, 'packages', name, 'tsdown.config.ts'), 'utf8')
     assert.match(config, /loadHarnessClientBundle/)
     assert.doesNotMatch(config, /upstream\/deepseek-harness/)
+    assert.match(typecheckPlugins, new RegExp(`@accrui/${name}`), `${name} is missing from typecheck:plugins`)
   }
 })
 
