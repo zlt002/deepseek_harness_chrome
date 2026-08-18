@@ -293,6 +293,8 @@ test('Windows Native Messaging acceptance preserves cmd launcher quoting and fai
   assert.match(acceptanceSource, /function Invoke-NativeMessageSmoke/)
   assert.match(acceptanceSource, /cscript\.exe \/\/NoLogo \$installLauncher/)
   assert.match(acceptanceSource, /DSH_INSTALL_NONINTERACTIVE = '1'/)
+  assert.match(acceptanceSource, /VBS installer error log:/)
+  assert.match(acceptanceSource, /accr-ui-harness-install\.log/)
   assert.match(acceptanceSource, /VBS installer failed with exit code \$LASTEXITCODE/)
   assert.match(acceptanceSource, /if \(\$LASTEXITCODE -ne 0\) \{ throw "Native Messaging smoke failed with exit code \$LASTEXITCODE\." \}/)
   assert.equal((acceptanceSource.match(/Invoke-NativeMessageSmoke/g) ?? []).length, 3)

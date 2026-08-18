@@ -59,7 +59,14 @@ try {
 
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
   & cscript.exe //NoLogo $installLauncher
-  if ($LASTEXITCODE -ne 0) { throw "VBS installer failed with exit code $LASTEXITCODE." }
+  if ($LASTEXITCODE -ne 0) {
+    $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+    if (Test-Path -LiteralPath $installLog -PathType Leaf) {
+      Write-Host 'VBS installer error log:'
+      Get-Content -LiteralPath $installLog | Write-Host
+    }
+    throw "VBS installer failed with exit code $LASTEXITCODE."
+  }
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Upgrade did not install the candidate.'
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) '1.1.62' 'Previous version was not retained for rollback.'
   foreach ($relativePath in @('workspace\user.txt', 'logs\user.txt', '.webmcp\user.txt')) {
