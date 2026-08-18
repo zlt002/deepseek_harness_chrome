@@ -1,0 +1,28 @@
+{
+  "requirementId": "REQ-20260818-driver-order",
+  "project": "H5_前端",
+  "workflow": "pmd-prd",
+  "state": "active",
+  "runs": [
+    {
+      "runId": "run-20260818-155609",
+      "sessionId": "session-20260818",
+      "startedAt": "2026-08-18T15:56:09+08:00",
+      "phase": "phase-2-source-confirm",
+      "notes": "全新 Run：优化司机接单功能"
+    }
+  ],
+  "artifacts": {
+    "analysis_doc": null,
+    "prd_doc": null,
+    "parent_catalog_id": null,
+    "delivery_run_id": null
+  },
+  "status": {
+    "scope_confirmed": false,
+    "analysis_confirmed": false,
+    "docs_confirmed": false,
+    "parent_confirmed": false,
+    "delivery": null
+  }
+}

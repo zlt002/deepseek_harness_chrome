@@ -69,7 +69,9 @@
     if (sheet && typeof sheet.createRANGE === 'function' && typeof sheet.createRange === 'function') {
       const parsed = parseAddress(bare)
       if (parsed) {
-        const core = await call(sheet, 'createRANGE', [parsed.rowFrom, parsed.rowTo, parsed.colFrom, parsed.colTo])
+        // AccrUI / live Midea APP createRANGE is 0-based. Sending 1-based A1
+        // coordinates shifts every exact range by one cell.
+        const core = await call(sheet, 'createRANGE', [parsed.rowFrom - 1, parsed.rowTo - 1, parsed.colFrom - 1, parsed.colTo - 1])
         const exact = core ? await call(sheet, 'createRange', [core]) : null
         if (exact) return exact
       }
@@ -83,6 +85,89 @@
     const partial = cellReadable ? { activeCell: `${columnName(column)}${row}` } : null
     if (!activeWindow || !cellReadable || typeof sheetName !== 'string' || sheetName.length === 0 || sheetName !== resolved.resource.sheetName || typeof freezePanes !== 'boolean' || !Number.isInteger(splitRow) || splitRow < 0 || splitRow > 1048575 || !Number.isInteger(splitColumn) || splitColumn < 0 || splitColumn > 16383 || !Number.isInteger(zoom) || zoom < 10 || zoom > 400 || !Number.isInteger(scrollRow) || scrollRow < 1 || scrollRow > 1048576 || !Number.isInteger(scrollColumn) || scrollColumn < 1 || scrollColumn > 16384) return { supported: false, activeWindow: null, view: partial }
     return { supported: true, activeWindow, view: { sheetName, activeCell: `${columnName(column)}${row}`, freezePanes, splitRow, splitColumn, zoom, scrollRow, scrollColumn } }
+  }
+  const MAX_SELECTION_CELLS = 2000
+  async function selectionObject(app) {
+    return await call(app, 'getSelectionRange') ?? await property(app, 'Selection') ?? await call(app, 'getSelection') ?? null
+  }
+  async function activeCellObject(resolved) {
+    return await property(resolved.app, 'ActiveCell') ?? await call(resolved.app, 'getActiveCell') ?? await property(resolved.sheet, 'ActiveCell') ?? null
+  }
+  function addressFromBounds(bounds) {
+    const start = `${columnName(bounds.colFrom)}${bounds.rowFrom}`
+    return bounds.rowsCount === 1 && bounds.columnsCount === 1 ? start : `${start}:${columnName(bounds.colTo)}${bounds.rowTo}`
+  }
+  function boundsFromCore(core) {
+    if (!core || typeof core !== 'object') return null
+    const rowFrom = Number(core.rowFrom) + 1
+    const rowTo = Number(core.rowTo) + 1
+    const colFrom = Number(core.colFrom) + 1
+    const colTo = Number(core.colTo) + 1
+    if (![rowFrom, rowTo, colFrom, colTo].every((value) => Number.isInteger(value)) || rowFrom < 1 || colFrom < 1 || rowTo < rowFrom || colTo < colFrom || rowTo > 1048576 || colTo > 16384) return null
+    return { rowFrom, rowTo, colFrom, colTo, rowsCount: rowTo - rowFrom + 1, columnsCount: colTo - colFrom + 1 }
+  }
+  async function boundsFromExcelRange(range) {
+    const row = Number(await call(range, 'getRow') ?? await property(range, 'Row'))
+    const column = Number(await call(range, 'getColumn') ?? await property(range, 'Column'))
+    const rows = await call(range, 'getRows') ?? await property(range, 'Rows')
+    const columns = await call(range, 'getColumns') ?? await property(range, 'Columns')
+    const rowsCount = Number(await call(rows, 'getCount') ?? await property(rows, 'Count'))
+    const columnsCount = Number(await call(columns, 'getCount') ?? await property(columns, 'Count'))
+    if (!Number.isInteger(row) || !Number.isInteger(column) || row < 1 || column < 1 || row > 1048576 || column > 16384) return null
+    if (!Number.isInteger(rowsCount) || !Number.isInteger(columnsCount) || rowsCount < 1 || columnsCount < 1 || row + rowsCount - 1 > 1048576 || column + columnsCount - 1 > 16384) return { rowFrom: row, rowTo: row, colFrom: column, colTo: column, rowsCount: 1, columnsCount: 1 }
+    return { rowFrom: row, rowTo: row + rowsCount - 1, colFrom: column, colTo: column + columnsCount - 1, rowsCount, columnsCount }
+  }
+  function addressFromExplicit(value) {
+    if (typeof value !== 'string' || value.includes('function')) return null
+    const bare = splitSheetPrefix(value.replace(/\$/g, '')).range
+    return parseAddress(bare) ? bare.toUpperCase() : null
+  }
+  async function rangeBounds(range) {
+    if (!range) return null
+    const fromCore = boundsFromCore(await call(range, 'getRANGE'))
+    if (fromCore) return { ...fromCore, address: addressFromBounds(fromCore) }
+    const explicit = addressFromExplicit(await call(range, 'getAddress') ?? await call(range, 'getAddressLocal') ?? await property(range, 'Address'))
+    if (explicit) {
+      const parsed = parseAddress(explicit)
+      const bounds = { rowFrom: parsed.rowFrom, rowTo: parsed.rowTo, colFrom: parsed.colFrom, colTo: parsed.colTo, rowsCount: parsed.rowTo - parsed.rowFrom + 1, columnsCount: parsed.colTo - parsed.colFrom + 1 }
+      return { ...bounds, address: addressFromBounds(bounds) }
+    }
+    const fromExcel = await boundsFromExcelRange(range)
+    return fromExcel ? { ...fromExcel, address: addressFromBounds(fromExcel) } : null
+  }
+  async function summarizeLocatedRange(resolved, range, source) {
+    const bounds = await rangeBounds(range)
+    if (!bounds) return { supported: false }
+    const cellCount = bounds.rowsCount * bounds.columnsCount
+    const summary = { supported: true, source, sheetName: resolved.resource.sheetName, address: bounds.address, row: bounds.rowFrom, column: bounds.colFrom, rowsCount: bounds.rowsCount, columnsCount: bounds.columnsCount, cellCount, singleCell: cellCount === 1, truncated: cellCount > MAX_SELECTION_CELLS, values: null, value2: null, text: null, formulas: null }
+    if (cellCount > MAX_SELECTION_CELLS) return summary
+    const read = await rangeSnapshot(resolved.sheet, bounds.address, { tolerateMissingFormulas: true })
+    if (!read.error) {
+      summary.values = read.snapshot.values
+      summary.value2 = read.snapshot.values
+      summary.text = read.snapshot.text
+      summary.formulas = read.snapshot.formulas
+      return summary
+    }
+    const value2 = await call(range, 'getActiveCellValue') ?? await call(range, 'getValue2') ?? await property(range, 'Value2')
+    if (value2 === undefined) return summary
+    summary.values = matrix(value2)
+    summary.value2 = summary.values
+    summary.text = matrix(await call(range, 'getText') ?? await property(range, 'Text') ?? value2)
+    return summary
+  }
+  function activeCellSummary(summary) {
+    if (!summary?.supported) return null
+    return { address: summary.address, row: summary.row, column: summary.column, value: summary.singleCell ? summary.values?.[0]?.[0] ?? null : null, text: summary.singleCell ? summary.text?.[0]?.[0] ?? '' : '' }
+  }
+  async function selectionSnapshot(resolved) {
+    const selection = await selectionObject(resolved.app)
+    const active = await activeCellObject(resolved)
+    const selected = await summarizeLocatedRange(resolved, selection, 'getSelectionRange')
+    const activeSummary = await summarizeLocatedRange(resolved, active, 'ActiveCell')
+    if (selected.supported) return { ...selected, activeCell: activeCellSummary(activeSummary) ?? (selected.singleCell ? activeCellSummary(selected) : { address: selected.address, row: selected.row, column: selected.column, value: null, text: '' }) }
+    if (activeSummary.supported) return { ...activeSummary, source: 'ActiveCell', activeCell: activeCellSummary(activeSummary) }
+    return { supported: false, reason: 'selection_api_not_detected', address: null, activeCell: null }
   }
   function requestedViewOperation(operation, payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
@@ -584,7 +669,11 @@
     if (resolved.error) return resolved.error
     const { workbook, sheet, resource } = resolved
     const sheetCount = Number(await property(workbook?.Worksheets, 'Count') ?? await property(workbook?.Sheets, 'Count'))
-    return { ok: true, result: { status: 'ok', resource, context: { workbookName: resource.workbookName, activeSheet: resource.sheetName, sheetCount: Number.isInteger(sheetCount) ? sheetCount : null, readOnly: await property(resolved.app, 'ReadOnly') === true || await property(resolved.app, 'readonly') === true } } }
+    const selection = await selectionSnapshot(resolved)
+    const compact = selection.supported
+      ? { supported: true, address: selection.address, rowsCount: selection.rowsCount, columnsCount: selection.columnsCount, singleCell: selection.singleCell, activeCell: selection.activeCell }
+      : { supported: false, address: null, activeCell: null }
+    return { ok: true, result: { status: 'ok', resource, context: { workbookName: resource.workbookName, activeSheet: resource.sheetName, sheetCount: Number.isInteger(sheetCount) ? sheetCount : null, readOnly: await property(resolved.app, 'ReadOnly') === true || await property(resolved.app, 'readonly') === true, selection: compact } } }
   }
   async function listSheets() {
     const resolved = await appAndSheet(); if (resolved.error) return resolved.error
@@ -608,6 +697,14 @@
     if (request.action === 'view') {
       const snapshot = await viewSnapshot(resolved)
       return { ok: true, result: { status: 'ok', resource: resolved.resource, view: snapshot.supported ? { supported: true, ...snapshot.view } : { supported: false, ...(snapshot.view ? { activeCell: snapshot.view.activeCell } : {}) } } }
+    }
+    if (request.action === 'selection') {
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, selection: await selectionSnapshot(resolved) } }
+    }
+    if (request.action === 'used_range') {
+      const used = await call(resolved.sheet, 'getUsedRange') ?? await property(resolved.sheet, 'UsedRange') ?? await call(resolved.sheet, 'UsedRange')
+      const summary = await summarizeLocatedRange(resolved, used, 'UsedRange')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, usedRange: summary.supported ? summary : { supported: false, reason: 'used_range_api_not_detected', address: null } } }
     }
     if (request.action === 'print_settings') {
       const snapshot = await printSettingsSnapshot(resolved)
@@ -1308,19 +1405,39 @@
   // blind "first ready frame wins" reads the wrong one. hasContent is a
   // best-effort scalar signal (null = unknown, never guessed): any content
   // signal beyond the first row/column marks the frame as the real document.
+  // Probe must never block the background sweep. A Team Knowledge page hosts
+  // a blank preload iframe beside the real sheet; APP getters on the wrong
+  // frame can hang until the content-script 8s timeout, which used to eat the
+  // entire sendToWebEditFrame budget so the ready spreadsheet was never asked.
+  const PROBE_IDENTITY_BUDGET_MS = 250
+  const unknownIdentity = () => ({ path: location.pathname, workbookName: null, sheetName: null, hasContent: null })
+  function withBudget(work, ms) {
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (value) => { if (settled) return; settled = true; clearTimeout(timer); resolve(value) }
+      const timer = setTimeout(() => finish(null), ms)
+      Promise.resolve().then(work).then(finish, () => finish(null))
+    })
+  }
   async function probeIdentity() {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application
     try {
       const resolved = await appAndSheet()
-      if (resolved.error) return { path: location.pathname, workbookName: null, sheetName: null, hasContent: null }
+      if (resolved.error) return unknownIdentity()
       const lastRow = Number(await call(resolved.sheet, 'getLastRow') ?? await property(resolved.sheet, 'LastRow') ?? await call(app, 'getLastRow'))
       const lastColumn = Number(await call(resolved.sheet, 'getLastColumn') ?? await property(resolved.sheet, 'LastColumn') ?? await call(app, 'getLastCol'))
       const hasContent = (Number.isInteger(lastRow) && lastRow > 1) || (Number.isInteger(lastColumn) && lastColumn > 1)
       return { path: location.pathname, workbookName: resolved.resource.workbookName, sheetName: resolved.resource.sheetName, hasContent: hasContent === false ? null : true }
-    } catch { return { path: location.pathname, workbookName: null, sheetName: null, hasContent: null } }
+    } catch { return unknownIdentity() }
   }
   async function run(request) {
-    if (request?.action === 'probe') return { ok: true, result: { status: 'probe', ready: readyNow(), identity: await probeIdentity() } }
+    if (request?.action === 'probe') {
+      const ready = readyNow()
+      // A light-document APP still exposes ActiveWorkbook-like getters that
+      // never settle. Do not call them when this frame is not a spreadsheet.
+      if (!ready) return { ok: true, result: { status: 'probe', ready: false, identity: unknownIdentity() } }
+      return { ok: true, result: { status: 'probe', ready: true, identity: await withBudget(probeIdentity, PROBE_IDENTITY_BUDGET_MS) ?? unknownIdentity() } }
+    }
     return request?.action === 'write' ? write(request) : request?.action === 'inspect_write' ? inspectWrite(request) : read(request ?? {})
   }
   globalThis.__deepseekHarnessOfficeSpreadsheet = { run }

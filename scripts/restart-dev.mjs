@@ -49,6 +49,10 @@ export function processTree(processes, commandFragment) {
   })
 }
 
+export function isGracefulProcessTermination(code, signal, { allowSignalExitCode = false } = {}) {
+  return code === 0 || signal === 'SIGINT' || signal === 'SIGTERM' || (allowSignalExitCode && code === 143)
+}
+
 // Harness CLI children spawned by the native host carry a temporary connector
 // patch argument. When the host dies without a graceful stop, those children
 // are orphaned (ppid becomes 1) and escape a pure process-tree walk, so match
@@ -109,7 +113,7 @@ function startDevServer() {
   const closed = new Promise((resolvePromise, reject) => {
     child.once('error', reject)
     child.once('close', (code, signal) => {
-      if (code === 0 || signal === 'SIGINT' || signal === 'SIGTERM') resolvePromise()
+      if (isGracefulProcessTermination(code, signal, { allowSignalExitCode: true })) resolvePromise()
       else reject(new Error(`pnpm dev failed (${signal ?? `exit ${String(code)}`})`))
     })
   })

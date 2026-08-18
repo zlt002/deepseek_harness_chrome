@@ -25,22 +25,27 @@ function verified(request, catalogId) {
   }
 }
 
-async function open(responder) {
+async function open(responder, responseTarget = (request) => request.browserTarget) {
   const directory = await mkdtemp(join(tmpdir(), 'pmd-prd-delivery-'))
   const pmdDeliveryStore = new PmdDeliveryRecordStore({ recordPath: join(directory, 'pmd.json') })
   const teamDocStore = new TeamDocRecordStore({ recordPath: join(directory, 'items.json') })
   let connector
-  connector = new BrowserConnector({ pmdDeliveryStore, teamDocStore, requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
-    type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
-    browserTarget: request.browserTarget, result: responder(request),
-  })) })
+  const requests = []
+  connector = new BrowserConnector({ pmdDeliveryStore, teamDocStore, requestExtension: (request) => {
+    requests.push(request)
+    queueMicrotask(() => {
+      const resolvedTarget = typeof responseTarget === 'function' ? responseTarget(request) : responseTarget
+      if (request.action === 'inspect_parent') connector.bindBrowserTarget(request.runId, resolvedTarget)
+      connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: resolvedTarget, result: responder(request) })
+    })
+  } })
   assert.equal(connector.bindBrowserTarget('run-pmd', target), true)
   const endpoint = await connector.start()
   const call = async (id, arguments_) => (await fetch(`${endpoint.url}/mcp`, {
     method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'pmd_prd_delivery', arguments: arguments_ } }),
   })).json()
-  return { connector, endpoint, pmdDeliveryStore, teamDocStore, call }
+  return { connector, endpoint, pmdDeliveryStore, teamDocStore, requests, call }
 }
 
 test('publishes a fixed two-document PMD delivery tool', async () => {
@@ -130,5 +135,22 @@ test('serializes two confirmed creates for one delivery run without duplicate do
     ])
     assert.equal(creates, 2)
     assert.deepEqual(results.map((result) => result.result.structuredContent.status), ['verified_write', 'verified_write'])
+  } finally { await harness.connector.stop() }
+})
+
+test('keeps PMD preview and both creates on the Browser Target resolved by inspection', async () => {
+  const migrated = { browser: 'chrome', windowId: 7, tabId: 18, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9?id=9' }
+  let creates = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : verified(request, String(501 + creates++)), migrated)
+  try {
+    const preview = await harness.call(1, { action: 'preview', requirementId, deliveryRunId: 'delivery-migrated', parentFingerprint: parent.fingerprint, documents })
+    assert.deepEqual(preview.result.structuredContent.browserTarget, migrated)
+    const created = await harness.call(2, { action: 'create', requirementId, deliveryRunId: 'delivery-migrated', challenge: preview.result.structuredContent.challenge, documents })
+    assert.equal(created.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(created.result.structuredContent.browserTarget, migrated)
+    assert.equal(creates, 2)
+    assert.ok(harness.requests.every((request) => request.action === 'inspect_parent' || request.browserTarget.url === migrated.url))
   } finally { await harness.connector.stop() }
 })

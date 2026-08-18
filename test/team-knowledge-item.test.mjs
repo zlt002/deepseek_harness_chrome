@@ -8,44 +8,66 @@ const parent = {
   canRead: true, canCreate: true, fingerprint: 'parent-v2',
 }
 
-async function open(responder) {
+async function open(responder, responseTarget = (request) => request.browserTarget) {
+  const requests = []
   let connector
-  connector = new BrowserConnector({ requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
-    type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
-    browserTarget: request.browserTarget, result: responder(request),
-  })) })
+  connector = new BrowserConnector({ requestExtension: (request) => {
+    requests.push(request)
+    queueMicrotask(() => {
+      const resolvedTarget = typeof responseTarget === 'function' ? responseTarget(request) : responseTarget
+      if (request.action === 'inspect_parent') connector.bindBrowserTarget(request.runId, resolvedTarget)
+      connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: resolvedTarget, result: responder(request) })
+    })
+  } })
   assert.equal(connector.bindBrowserTarget('run-item', target), true)
   const endpoint = await connector.start()
-  const call = async (id, arguments_) => (await fetch(`${endpoint.url}/mcp`, {
+  const callTool = async (name, id, arguments_) => (await fetch(`${endpoint.url}/mcp`, {
     method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'team_knowledge_item', arguments: arguments_ } }),
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_ } }),
   })).json()
-  return { connector, endpoint, call }
+  const call = (id, arguments_) => callTool('team_knowledge_item', id, arguments_)
+  return { connector, endpoint, requests, call, callTool }
 }
 
-test('publishes one narrow Team Knowledge item tool for child light documents and spreadsheets', async () => {
+test('publishes flat spreadsheet tools while retaining the legacy item dispatcher', async () => {
   const connector = new BrowserConnector({ requestExtension: () => {} })
   const endpoint = await connector.start()
   try {
     const response = await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) })
-    const tool = (await response.json()).result.tools.find((item) => item.name === 'team_knowledge_item')
-    assert.deepEqual(tool.inputSchema.properties.action.enum, ['inspect_parent', 'preview', 'create', 'readback'])
-    assert.deepEqual(tool.inputSchema.properties.kind.enum, ['light_document', 'spreadsheet'])
-    assert.equal(tool.annotations.destructiveHint, true)
+    const tools = (await response.json()).result.tools
+    assert.equal(tools.some((item) => item.name === 'team_knowledge_item'), false)
+    const preview = tools.find((item) => item.name === 'team_knowledge_spreadsheet_preview')
+    const create = tools.find((item) => item.name === 'team_knowledge_spreadsheet_create')
+    assert.deepEqual(preview.inputSchema.required, ['name', 'body'])
+    assert.deepEqual(create.inputSchema.required, ['challenge', 'idempotencyIdentity', 'name', 'body'])
+    assert.equal(create.annotations.destructiveHint, true)
   } finally { await connector.stop() }
+})
+
+test('forces the flat spreadsheet preview action and kind over raw caller overrides', async () => {
+  const requests = []
+  const harness = await open((request) => {
+    requests.push(request)
+    return { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
+  })
+  try {
+    const result = await harness.callTool('team_knowledge_spreadsheet_preview', 1, { action: 'create', kind: 'light_document', name: 'Sheet', body: '' })
+    assert.equal(result.result.structuredContent.action, 'preview')
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].action, 'inspect_parent')
+  } finally { await harness.connector.stop() }
 })
 
 test('binds the create grant to parent, kind, name and body and rejects challenge replay and changed payload', async () => {
   let creates = 0
   const harness = await open((request) => request.action === 'inspect_parent'
     ? { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
-    : (++creates, { status: 'verified_write', item: { catalogId: '11', kind: request.kind, name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/11?id=11', fingerprint: 'item-11' }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readback: { body: request.body } }))
+    : (++creates, { status: 'verified_write', item: { catalogId: '11', kind: request.kind, name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/11?id=11', fingerprint: 'item-11' }, stages: request.kind === 'spreadsheet' ? ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified'] : ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readback: { body: request.body } }))
   try {
     const identity = `child-${crypto.randomUUID()}`
-    const inspected = await harness.call(1, { action: 'inspect_parent' })
-    const preview = await harness.call(2, { action: 'preview', parentFingerprint: inspected.result.structuredContent.parent.fingerprint, kind: 'light_document', name: 'Child', body: '# child' })
+    const preview = await harness.callTool('team_knowledge_spreadsheet_preview', 2, { name: 'Child', body: '# child' })
     const challenge = preview.result.structuredContent.challenge
-    const created = await harness.call(3, { action: 'create', challenge, idempotencyIdentity: identity, kind: 'light_document', name: 'Child', body: '# child' })
+    const created = await harness.callTool('team_knowledge_spreadsheet_create', 3, { challenge, idempotencyIdentity: identity, name: 'Child', body: '# child' })
     assert.equal(created.result.structuredContent.status, 'verified_write')
     assert.equal(creates, 1)
     const replay = await harness.call(4, { action: 'create', challenge, idempotencyIdentity: identity, kind: 'light_document', name: 'Child', body: '# child' })
@@ -80,5 +102,23 @@ test('does not turn an HTTP-success business failure into a successful spreadshe
     assert.equal(result.result.structuredContent.status, 'partial_delivery')
     assert.equal(result.result.structuredContent.item, null)
     assert.equal(result.result.structuredContent.diagnostic.errorCode, '20001')
+  } finally { await harness.connector.stop() }
+})
+
+test('adopts an inspect-migrated Browser Target for grants and never writes against the old target', async () => {
+  const migrated = { browser: 'chrome', windowId: 1, tabId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9?id=9' }
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : { status: 'verified_write', item: { catalogId: '11', kind: request.kind, name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/11?id=11', fingerprint: 'item-11' }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readback: { body: request.body } }, migrated)
+  try {
+    const inspected = await harness.call(1, { action: 'inspect_parent' })
+    assert.deepEqual(inspected.result.structuredContent.browserTarget, migrated)
+    const preview = await harness.call(2, { action: 'preview', parentFingerprint: parent.fingerprint, kind: 'light_document', name: 'Child', body: '# child' })
+    assert.deepEqual(preview.result.structuredContent.browserTarget, migrated)
+    const created = await harness.call(3, { action: 'create', challenge: preview.result.structuredContent.challenge, idempotencyIdentity: `migrated-child-${crypto.randomUUID()}`, kind: 'light_document', name: 'Child', body: '# child' })
+    assert.equal(created.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(created.result.structuredContent.browserTarget, migrated)
+    assert.ok(harness.requests.every((request) => request.action === 'inspect_parent' || request.browserTarget.url === migrated.url))
+    assert.deepEqual(harness.requests.at(-1).browserTarget, migrated)
   } finally { await harness.connector.stop() }
 })

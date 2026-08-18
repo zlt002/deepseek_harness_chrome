@@ -659,6 +659,34 @@ test('probe reports a blank preloaded editor as unnamed with unknown content', a
   assert.equal(probed.result.identity.hasContent, null)
 })
 
+test('probe returns immediately when identity getters never settle', async () => {
+  const hang = () => new Promise(() => {})
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getLastRow: hang, getLastColumn: hang }
+  const workbook = { Name: 'Status.xlsx', getName: () => 'Status.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
+  const started = Date.now()
+  const probed = await run({ action: 'probe' })
+  assert.equal(probed.ok, true)
+  assert.equal(probed.result.ready, true)
+  assert.equal(probed.result.identity.path, '/sheet/1')
+  assert.equal(probed.result.identity.hasContent, null)
+  assert.ok(Date.now() - started < 800, 'probe must not wait for hung APP getters')
+})
+
+test('probe skips identity getters when the frame is not a spreadsheet', async () => {
+  const hang = () => new Promise(() => {})
+  const run = await runtimeWith({
+    openApi: { editor: { canvas: { getDocXml: async () => '<apcanvas></apcanvas>' } } },
+    getActiveWorkbook: hang,
+    getActiveSheet: hang,
+  })
+  const started = Date.now()
+  const probed = await run({ action: 'probe' })
+  assert.equal(probed.ok, true)
+  assert.equal(probed.result.ready, false)
+  assert.ok(Date.now() - started < 200, 'a light-document APP must not block the spreadsheet probe')
+})
+
 test('probe does not claim spreadsheet ready on a light-document APP', async () => {
   const run = await runtimeWith({
     openApi: { editor: { canvas: { getDocXml: async () => '<apcanvas></apcanvas>' } } },
@@ -682,7 +710,7 @@ test('reads an exact Midea range through createRANGE when getRange ignores its a
   const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
   const result = await run.raw({ action: 'range', range: 'Sheet1!A1:B3' })
   assert.equal(result.ok, true)
-  assert.deepEqual(bounds.map((entry) => [...entry]), [[1, 3, 1, 2]])
+  assert.deepEqual(bounds.map((entry) => [...entry]), [[0, 2, 0, 1]])
   // Field-wise because the matrices are created inside the VM realm.
   assert.equal(result.result.range.values.length, 3)
   assert.equal(result.result.range.values[0][0], 'Name')
@@ -719,6 +747,81 @@ test('reports expected and observed shapes when the values matrix does not match
   assert.equal(result.ok, false)
   assert.equal(result.error.code, 'readback_mismatch')
   assert.match(result.error.message, /expected 2x2, observed 1x1/)
+})
+
+test('selection reads a multi-cell getSelectionRange via 0-based getRANGE and value2', async () => {
+  const grid = [['状态', '负责人'], ['已完成', '张三'], ['进行中', '李四']]
+  const selected = {
+    getRANGE: () => ({ rowFrom: 1, rowTo: 2, colFrom: 0, colTo: 0 }),
+    getValue2: () => [['已完成'], ['进行中']],
+    getText: () => [['已完成'], ['进行中']],
+    getFormula: () => [[''], ['']],
+  }
+  const active = {
+    getRANGE: () => ({ rowFrom: 1, rowTo: 1, colFrom: 0, colTo: 0 }),
+    getValue2: () => [['已完成']],
+    getText: () => [['已完成']],
+    getFormula: () => [['']],
+  }
+  const sheet = {
+    Name: 'Sheet1', getName: () => 'Sheet1',
+    getRange: (address) => {
+      const match = String(address).match(/^A(\d+)(?::A(\d+))?$/i)
+      if (!match) return { getValue2: () => null }
+      const from = Number(match[1]) - 1
+      const to = Number(match[2] ?? match[1]) - 1
+      return { getValue2: () => grid.slice(from, to + 1).map((row) => [row[0]]), getText: () => grid.slice(from, to + 1).map((row) => [String(row[0])]), getFormula: () => grid.slice(from, to + 1).map(() => ['']) }
+    },
+  }
+  const workbook = { Name: 'Status.xlsx', getName: () => 'Status.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, getSelectionRange: () => selected, ActiveCell: active })
+  const result = await run.raw({ action: 'selection' })
+  assert.equal(result.ok, true)
+  assert.equal(result.result.selection.supported, true)
+  assert.equal(result.result.selection.address, 'A2:A3')
+  assert.equal(result.result.selection.rowsCount, 2)
+  assert.equal(result.result.selection.columnsCount, 1)
+  assert.equal(result.result.selection.singleCell, false)
+  assert.equal(result.result.selection.value2[0][0], '已完成')
+  assert.equal(result.result.selection.value2[1][0], '进行中')
+  assert.equal(result.result.selection.activeCell.address, 'A2')
+  assert.equal(result.result.selection.activeCell.value, '已完成')
+  const context = await run.raw({ action: 'context' })
+  assert.equal(context.result.context.selection.address, 'A2:A3')
+})
+
+test('used_range reports the used rectangle without requiring a complete view snapshot', async () => {
+  const used = {
+    getRANGE: () => ({ rowFrom: 0, rowTo: 2, colFrom: 0, colTo: 1 }),
+    getValue2: () => [['状态', '负责人'], ['已完成', '张三'], ['进行中', '李四']],
+    getText: () => [['状态', '负责人'], ['已完成', '张三'], ['进行中', '李四']],
+    getFormula: () => [['', ''], ['', ''], ['', '']],
+  }
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getUsedRange: () => used, getRange: () => used }
+  const workbook = { Name: 'Status.xlsx', getName: () => 'Status.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet })
+  const result = await run.raw({ action: 'used_range' })
+  assert.equal(result.ok, true)
+  assert.equal(result.result.usedRange.supported, true)
+  assert.equal(result.result.usedRange.address, 'A1:B3')
+  assert.equal(result.result.usedRange.rowsCount, 3)
+  assert.equal(result.result.usedRange.columnsCount, 2)
+  assert.equal(result.result.usedRange.value2[2][1], '李四')
+})
+
+test('selection still reports the active cell when freeze/zoom window fields are missing', async () => {
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getRange: () => ({ getValue2: () => [['选中值']], getText: () => [['选中值']], getFormula: () => [['']] }) }
+  const workbook = { Name: 'W.xlsx', getName: () => 'W.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  const run = await runtimeWith({ ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, ActiveCell: { Row: 3, Column: 2 } })
+  const view = await run.raw({ action: 'view' })
+  assert.equal(view.result.view.supported, false)
+  const result = await run.raw({ action: 'selection' })
+  assert.equal(result.ok, true)
+  assert.equal(result.result.selection.supported, true)
+  assert.equal(result.result.selection.address, 'B3')
+  assert.equal(result.result.selection.singleCell, true)
+  assert.equal(result.result.selection.activeCell.address, 'B3')
+  assert.equal(result.result.selection.value2[0][0], '选中值')
 })
 
 test('view reports the readable active cell when window fields are missing', async () => {

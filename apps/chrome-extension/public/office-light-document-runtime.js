@@ -109,6 +109,16 @@
     for (let index = 0; index < value.length; index += 1) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619) }
     return `selection-v3-${(hash >>> 0).toString(16).padStart(8, '0')}`
   }
+  const normalizeSelectionBlockId = (value) => {
+    if (typeof value !== 'string' || value.length < 1 || value.length > 256) return null
+    // WebEdit currently returns either the public ID itself or the narrow
+    // XPath-shaped selector p[@id='ID']. Treat neither form as executable
+    // XPath: parse only this exact grammar and return the literal safe ID.
+    if (/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(value)) return value
+    const xpath = /^(?:p|h[1-6]|blockquote|table|codeBlock)\[@id=(?:'([^']+)'|"([^"]+)")\]$/.exec(value)
+    const id = xpath?.[1] ?? xpath?.[2]
+    return typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(id) ? id : null
+  }
   const runtimeSelection = (current) => {
     const raw = current?.OTL?.state?.selection
     const canvas = current?.openApi?.editor?.canvas?.canvas
@@ -117,13 +127,18 @@
     const range = raw && Number.isFinite(raw.from) && Number.isFinite(raw.to) && Number.isFinite(raw.anchor) && Number.isFinite(raw.head)
       ? { from: Number(raw.from), to: Number(raw.to), anchor: Number(raw.anchor), head: Number(raw.head) }
       : null
-    const ids = Array.isArray(info?.selected_tag_ids) ? info.selected_tag_ids.filter((id) => typeof id === 'string' && id.length > 0).slice(0, 50) : []
-    return { range, selectedTagIds: ids, isCollapsed: raw?.empty === true || (range !== null && range.from === range.to) }
+    const rawIds = info?.selected_tag_ids
+    const normalizedIds = Array.isArray(rawIds) && rawIds.length <= 50 ? rawIds.map(normalizeSelectionBlockId) : []
+    const selectionIdsValid = Array.isArray(rawIds)
+      ? rawIds.length <= 50 && normalizedIds.length === rawIds.length && normalizedIds.every(Boolean) && new Set(normalizedIds).size === normalizedIds.length
+      : true
+    const ids = selectionIdsValid ? normalizedIds : []
+    return { range, selectedTagIds: ids, selectionIdsValid, isCollapsed: raw?.empty === true || (range !== null && range.from === range.to) }
   }
   const stableSelectionAnchor = (value) => {
     if (!value || typeof value !== 'object') return null
-    const blockId = typeof value.blockId === 'string' && value.blockId ? value.blockId : null
-    const anchorId = typeof value.anchorId === 'string' && value.anchorId ? value.anchorId : null
+    const blockId = normalizeSelectionBlockId(value.blockId)
+    const anchorId = normalizeSelectionBlockId(value.anchorId)
     const start = Number.isInteger(value.start) ? value.start : null
     const end = Number.isInteger(value.end) ? value.end : null
     if ((!blockId && !anchorId) || start === null || end === null) return null
@@ -145,8 +160,8 @@
     const hasContent = Object.values(content).some((item) => String(item).length > 0)
     const isCollapsed = runtime.isCollapsed === true || (anchor !== null && anchor.start !== null && anchor.end !== null && anchor.start === anchor.end)
     const stable = !!anchor
-    const serialized = JSON.stringify({ anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, isCollapsed, content })
-    return { supported: true, content, anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, hasSelection: hasContent || stableRange !== null, isCollapsed, stable, selectionFingerprint: selectionHash(serialized), truncated: Object.values(truncated).some(Boolean), truncatedFields: Object.keys(truncated).filter((key) => truncated[key]) }
+    const serialized = JSON.stringify({ anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, selectionIdsValid: runtime.selectionIdsValid, isCollapsed, content })
+    return { supported: true, content, anchor, range: stableRange, selectedTagIds: runtime.selectedTagIds, selectionIdsValid: runtime.selectionIdsValid, hasSelection: hasContent || stableRange !== null, isCollapsed, stable, selectionFingerprint: selectionHash(serialized), truncated: Object.values(truncated).some(Boolean), truncatedFields: Object.keys(truncated).filter((key) => truncated[key]) }
   }
   const selectionPayload = (payload) => {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
@@ -156,6 +171,15 @@
     if (!value.trim() || value.length > 20_000 || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint)) return null
     if (!Object.keys(payload).every((key) => ['markdown', 'html', 'text', 'insertBelow', 'expectedSelectionFingerprint'].includes(key)) || (payload.insertBelow !== undefined && typeof payload.insertBelow !== 'boolean')) return null
     return { kind, value, expectedSelectionFingerprint: payload.expectedSelectionFingerprint, insertBelow: payload.insertBelow === true }
+  }
+  const selectionBlocksPayload = (payload) => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Array.isArray(payload.blocks)
+      || payload.blocks.length < 1 || payload.blocks.length > 50
+      || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint)
+      || !Object.keys(payload).every((key) => ['blocks', 'expectedSelectionFingerprint'].includes(key))) return null
+    if (!payload.blocks.every((item) => structuredBlockXml(item) !== null)) return null
+    const fragments = distinctiveFragments(payload.blocks.map((item) => Array.isArray(item.items) ? item.items.join('\n') : Array.isArray(item.rows) ? item.rows.flat().join('\n') : item.text ?? item.markdown ?? item.html ?? '').join('\n'))
+    return fragments.length ? { blocks: payload.blocks, expectedSelectionFingerprint: payload.expectedSelectionFingerprint, fragments } : null
   }
   const distinctiveFragments = (value) => {
     const plain = String(value ?? '').replace(/```[\w-]*\n?/g, ' ').replace(/\[[ xX]\]/g, ' ').replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/<[^>]*>/g, ' ').replace(/[`*_#>~\-|:]/g, ' ')
@@ -207,6 +231,38 @@
     if (items.length < 1 || items.length > 50) return null
     const source = items.map((item, index) => structuredBlockXml(item, index === 0 ? preserveId : null))
     return source.every(Boolean) ? source.join('') : null
+  }
+  const selectionMatchesWholeBlocks = (snapshot, ordered) => {
+    // selected_tag_ids says which blocks intersect the selection, not that its
+    // endpoints cover every character.  Replacing based on IDs alone can erase
+    // unselected first/last text.  The public selection snapshot is our second
+    // independent proof that the selected text is exactly these whole blocks.
+    const selected = snapshot?.content?.text ?? snapshot?.content?.markdown ?? snapshot?.content?.html
+    const selectedText = normalizedSelectionText(selected)
+    const blockText = normalizedSelectionText(ordered.map((block) => block.text).join('\n'))
+    return !!selectedText && selectedText === blockText
+  }
+  const selectionReplacementExpectations = (blocks) => {
+    const expected = []
+    for (const item of blocks) {
+      const type = String(item.type ?? item.blockType ?? '').toLowerCase()
+      if (type === 'ul' || type === 'ol') {
+        const items = Array.isArray(item.items) ? item.items : String(item.text ?? '').split('\n')
+        expected.push(...items.map((text) => ({ type: 'p', text: normalizedSelectionText(text) })))
+      } else if (type === 'table') expected.push({ type: 'table', text: normalizedSelectionText((item.rows ?? []).flat().join('\n')) })
+      else expected.push({ type, text: normalizedSelectionText(item.text ?? item.markdown ?? item.html ?? '') })
+    }
+    return expected
+  }
+  const verifySelectionBlocksReplace = (afterXml, firstId, removedIds, expected, fragments) => {
+    const after = editableBlocks(afterXml)
+    if (!after || !after.list.some((block) => block.id === firstId) || removedIds.some((id) => after.list.some((block) => block.id === id))) return null
+    const firstIndex = after.list.findIndex((block) => block.id === firstId)
+    const observed = after.list.slice(firstIndex, firstIndex + expected.length)
+    if (observed.length !== expected.length || !expected.every((item, index) => observed[index].tag.toLowerCase() === item.type && (!item.text || normalizedSelectionText(observed[index].text).includes(item.text)))) return null
+    const fragmentEvidence = fragments.map((fragment) => ({ fragment, blockIds: after.list.filter((block) => normalizedSelectionText(block.text).includes(fragment)).map((block, index) => block.id || `index:${index}`) }))
+    if (fragmentEvidence.some((item) => item.blockIds.length === 0)) return null
+    return { verifiedFragments: fragments, fragmentEvidence, observedBlocks: observed.map((block, index) => ({ id: block.id || `index:${firstIndex + index}`, type: block.tag.toLowerCase(), language: block.language, text: block.text.slice(0, 500) })), replacedTagIds: [firstId, ...removedIds], verified: true }
   }
   const insertPosition = (parsed, payload) => {
     const position = payload?.position ?? 'end'
@@ -369,15 +425,55 @@
       }
       return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload, count: items.length }, observed: { verifiedBlocks, verified: true } } }
     }
-    if (input.operation === 'selection_insert' || input.operation === 'selection_replace') {
-      const requested = selectionPayload(input.payload)
+    if (input.operation === 'selection_insert' || input.operation === 'selection_replace' || input.operation === 'selection_blocks_replace') {
+      const requested = input.operation === 'selection_blocks_replace' ? selectionBlocksPayload(input.payload) : selectionPayload(input.payload)
       const selection = selectionApi(current)
       const mutate = input.operation === 'selection_replace' ? 'replaceContent' : 'insertContent'
-      if (!requested || !selection || typeof selection[mutate] !== 'function') return fail('unsupported', `Light-document ${input.operation} requires one bounded content format, a stable selection fingerprint, and the public ${mutate} API`)
+      if (!requested || !selection) return fail('unsupported', `Light-document ${input.operation} requires one bounded content format and a stable selection fingerprint`)
       const snapshot = await readSelection(current, 20_000)
       if (!snapshot.supported || snapshot.truncated || !snapshot.stable || !snapshot.anchor) return fail('invalid_range', `Light-document ${input.operation} requires a complete, stable selection or cursor snapshot`)
-      if (input.operation === 'selection_replace' && snapshot.isCollapsed) return fail('invalid_range', 'selection_replace requires a non-collapsed selection; use selection_insert at a caret')
+      if ((input.operation === 'selection_replace' || input.operation === 'selection_blocks_replace') && snapshot.isCollapsed) return fail('invalid_range', `${input.operation} requires a non-collapsed selection; use selection_insert at a caret`)
       if (snapshot.selectionFingerprint !== requested.expectedSelectionFingerprint) return fail('fingerprint_mismatch', 'The light-document selection changed since inspect_write')
+      if (input.operation === 'selection_blocks_replace') {
+        const parsed = editableBlocks(beforeXml)
+        const selectedIds = Array.isArray(snapshot.selectedTagIds) ? snapshot.selectedTagIds : []
+        const selected = selectedIds.map((id) => parsed?.list.find((block) => block.id === id)).filter(Boolean)
+        if (!snapshot.selectionIdsValid || !parsed || selected.length !== selectedIds.length || selected.length === 0) return fail('unsupported', 'selection_blocks_replace requires valid unique selectedTagIds for whole public blocks')
+        const ordered = selected.slice().sort((left, right) => parsed.list.indexOf(left) - parsed.list.indexOf(right))
+        const indexes = ordered.map((block) => parsed.list.indexOf(block))
+        if (indexes.some((index, position) => position > 0 && index !== indexes[position - 1] + 1) || !selectionMatchesWholeBlocks(snapshot, ordered)) return fail('unsupported', 'selection_blocks_replace requires one contiguous complete whole-block selection')
+        const first = ordered[0]; const last = ordered[ordered.length - 1]
+        const replacement = blockXml({ blocks: requested.blocks }, first.id)
+        if (!replacement) return fail('invalid_range', 'selection_blocks_replace requires bounded structured blocks')
+        const patched = await patchXml(current, beforeXml, `${parsed.inner.slice(0, first.start)}${replacement}${parsed.inner.slice(last.end)}`)
+        if (!patched.ok) return patched
+        const observed = verifySelectionBlocksReplace(patched.xml, first.id, selectedIds.slice(1), selectionReplacementExpectations(requested.blocks), requested.fragments)
+        if (!observed) return fail('readback_mismatch', 'WebEdit selection_blocks_replace did not return matching block structure and fragments')
+        return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed } }
+      }
+      if (typeof selection[mutate] !== 'function') {
+        // Some WebEdit builds expose a stable whole-block selection but omit
+        // selection.replaceContent. Patch all selected blocks in one Canvas
+        // transaction; never emulate this with delete followed by insert.
+        if (input.operation !== 'selection_replace' || requested.kind !== 'text') return fail('unsupported', `Light-document ${input.operation} requires the public ${mutate} API for this content format`)
+        const parsed = editableBlocks(beforeXml)
+        const selectedIds = Array.isArray(snapshot.selectedTagIds) ? snapshot.selectedTagIds : []
+        const selected = selectedIds.map((id) => parsed?.list.find((block) => block.id === id)).filter(Boolean)
+        if (!snapshot.selectionIdsValid || !parsed || selected.length !== selectedIds.length || selected.length === 0) return fail('unsupported', 'selection_replace fallback requires valid unique selectedTagIds for whole public blocks')
+        const ordered = selected.slice().sort((left, right) => parsed.list.indexOf(left) - parsed.list.indexOf(right))
+        const indexes = ordered.map((block) => parsed.list.indexOf(block))
+        if (indexes.some((index, position) => position > 0 && index !== indexes[position - 1] + 1) || !selectionMatchesWholeBlocks(snapshot, ordered)) return fail('unsupported', 'selection_replace fallback requires one contiguous complete whole-block selection')
+        const first = ordered[0]
+        const last = ordered[ordered.length - 1]
+        const replacement = structuredBlockXml({ type: 'p', text: requested.value }, first.id)
+        if (!replacement) return fail('invalid_range', 'selection_replace fallback requires bounded non-empty text')
+        const patched = await patchXml(current, beforeXml, `${parsed.inner.slice(0, first.start)}${replacement}${parsed.inner.slice(last.end)}`)
+        if (!patched.ok) return patched
+        const after = editableBlocks(patched.xml)
+        const observed = verifySelectionInsert(beforeXml, patched.xml, requested)
+        if (!after || !observed || selectedIds.slice(1).some((id) => after.list.some((block) => block.id === id)) || !after.list.some((block) => block.id === first.id)) return fail('readback_mismatch', 'WebEdit selection_replace fallback did not atomically replace the selected blocks')
+        return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, replacedTagIds: selectedIds, verified: true } } }
+      }
       const content = { [requested.kind]: requested.value, ...(requested.insertBelow ? { insertBlow: true } : {}) }
       try { await selection[mutate](content) } catch { return fail('runtime_error', `WebEdit rejected the light-document ${input.operation}`) }
       let afterXml = await current.openApi.editor.canvas.getDocXml(); const deadline = Date.now() + 3_000

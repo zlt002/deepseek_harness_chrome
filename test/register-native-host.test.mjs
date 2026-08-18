@@ -117,6 +117,7 @@ test('installs the native host into a stable macOS location', async () => {
     await stat(join(nativeServer, 'bin.mjs'))
     await stat(join(nativeServer, 'src/native-host.mjs'))
     await stat(join(nativeServer, 'harness-runtime.mjs'))
+    await stat(join(nativeServer, 'harness-tracking.mjs'))
     const installedSkill = join(installRoot, 'skills/pmd-prd/SKILL.md')
     await stat(installedSkill)
     const installedSkillSource = await readFile(installedSkill, 'utf8')

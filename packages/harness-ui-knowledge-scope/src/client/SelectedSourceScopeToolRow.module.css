@@ -1,0 +1,8 @@
+.root { display: flex; flex-direction: column; }
+.row { position: relative; overflow: hidden; }
+.title { font-weight: 400; }
+.summary { min-width: 0; overflow: hidden; flex: 1 1 auto; color: var(--dsw-alias-label-tertiary); font-size: 14px; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+.body { max-height: 320px; margin: 4px 0 4px 22px; overflow: auto; padding: 8px 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-size: 14px; line-height: 22px; word-break: break-word; }
+.body > :first-child { margin-top: 0; }
+.body > :last-child { margin-bottom: 0; }
+.inspect { align-self: flex-end; margin: 0 8px 4px 0; border: 0; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font: inherit; font-size: 11px; }

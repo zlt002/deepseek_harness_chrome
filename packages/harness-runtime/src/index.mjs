@@ -12,6 +12,51 @@ const MAX_PUBLIC_NAME_LENGTH = 64
 const INVALID_NAME_CHARS = /[^A-Za-z0-9_-]/g
 const HASH_LENGTH = 12
 const DEFAULT_TIMEOUT_MS = 60_000
+const SELECTED_SOURCE_SCOPE = 'mcp__chrome__selected_source_scope'
+const SELECTED_SOURCE_WRAPPERS = new Set(['search_selected_remote_code', 'search_selected_knowledge'])
+const GENERIC_SUBAGENT_TOOLS = new Set(['subagent', 'subagent_fork'])
+
+function activeParentTurn(agent) {
+  if (agent === undefined || !Array.isArray(agent.session?.events)) return undefined
+  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+    const event = agent.session.events[index]
+    if (event?.type === 'turn/end') return undefined
+    if (event?.type === 'turn/start' && Number.isSafeInteger(event.data?.turn)) return event.data.turn
+  }
+  return undefined
+}
+
+/**
+ * Make the selected-source route a single-child operation per parent turn.
+ * A guard is a product-owned, monotonic enforcement seam: unlike prompt text,
+ * it also rejects a second model tool call that reaches dispatch.
+ */
+export function createSelectedSourceDispatchGuard() {
+  const states = new Map()
+  return (exec) => {
+    const parentId = exec.agent === undefined ? undefined : String(exec.agent.id)
+    const turn = activeParentTurn(exec.agent)
+    if (parentId === undefined || turn === undefined) return undefined
+
+    const previous = states.get(parentId)
+    const state = previous?.turn === turn
+      ? previous
+      : { turn, selectedSourceScopeRead: false, childStarted: false }
+    states.set(parentId, state)
+
+    if (exec.name === SELECTED_SOURCE_SCOPE) {
+      state.selectedSourceScopeRead = true
+      return undefined
+    }
+    if (GENERIC_SUBAGENT_TOOLS.has(exec.name) && (state.selectedSourceScopeRead || state.childStarted)) {
+      return '本次请求已读取所选远程范围；请直接调用对应的 selected-source 检索工具，不要再启动通用子代理。'
+    }
+    if (!SELECTED_SOURCE_WRAPPERS.has(exec.name)) return undefined
+    if (state.childStarted) return '本次所选远程范围请求已启动一个检索子代理；请直接使用其结果，不要重复检索或再启动子代理。'
+    state.childStarted = true
+    return undefined
+  }
+}
 
 /** The model-visible name is stable even if an MCP server uses punctuation. */
 export function publicToolName(serverName, rawName) {
@@ -191,6 +236,7 @@ function normalizeConfig(input = {}) {
 export async function apply(ctx, input = {}) {
   const config = normalizeConfig(input)
   const rpc = createConnectorRpc(config)
+  const stopSelectedSourceDispatchGuard = ctx.tools.guard(createSelectedSourceDispatchGuard())
   const childDisposers = new Map()
   let globalDisposers = new Map()
   let definitions = new Map()
@@ -221,12 +267,14 @@ export async function apply(ctx, input = {}) {
     await sync()
   } catch (error) {
     stopContinuableSetup()
+    stopSelectedSourceDispatchGuard()
     if (config.failOnStartupError) throw error
     ctx.logger.error(`MCP startup failed: ${String(error)}`)
   }
   ctx.effect(() => () => {
     stopped = true
     stopContinuableSetup()
+    stopSelectedSourceDispatchGuard()
     for (const disposers of childDisposers.values()) for (const dispose of disposers.values()) dispose()
     childDisposers.clear()
     for (const dispose of globalDisposers.values()) dispose()

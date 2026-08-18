@@ -111,6 +111,38 @@ test('does not re-inject for unrelated sendMessage failures', async () => {
   assert.match(response.error.message, /message port closed/)
 })
 
+test('uses the ready spreadsheet frame when a sibling WebEdit iframe never answers probe', async () => {
+  const frames = [
+    { frameId: 0, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/2079459209604050946' },
+    { frameId: 5, url: 'https://webedit.midea.com/weboffice/office/o/preload' },
+    { frameId: 6, url: 'https://webedit.midea.com/weboffice/office/s/392034640740352' },
+  ]
+  const probedFrames = []
+  const { sentToFrames, nativeMessages } = await driveOfficeReadRange({
+    frames,
+    probeWaitMs: 400,
+    request: { tool: 'office_spreadsheet', action: 'selection', range: undefined },
+    sendMessageBehavior: (message, options) => {
+      if (message.action === 'probe') {
+        probedFrames.push({ type: message.type, frameId: options.frameId })
+        if (options.frameId === 5) return new Promise(() => {})
+        if (message.type === 'office-spreadsheet/v1' && options.frameId === 6) {
+          return Promise.resolve({ ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/s/392034640740352', workbookName: null, sheetName: 'Sheet1', hasContent: true } } })
+        }
+        return Promise.resolve({ ok: true, result: { status: 'probe', ready: false } })
+      }
+      assert.equal(options.frameId, 6, 'the hung preload must not block the ready spreadsheet')
+      assert.equal(message.action, 'selection')
+      return Promise.resolve({ ok: true, result: { status: 'ok', resource: READ_RESULT.resource, selection: { supported: true, address: 'D11:G20', rowsCount: 10, columnsCount: 4, singleCell: false, value2: [['人事部']] } } })
+    },
+  })
+  assert.ok(probedFrames.some((entry) => entry.frameId === 6 && entry.type === 'office-spreadsheet/v1'))
+  const response = nativeMessages.find((message) => message.type === 'connector_response')
+  assert.equal(response.error, undefined, `expected success, got ${JSON.stringify(response.error)}`)
+  assert.equal(response.result.selection.address, 'D11:G20')
+  assert.equal(sentToFrames.filter((entry) => entry.message.action === 'selection').length, 1)
+})
+
 test('skips WebEdit frames whose editor runtime is not ready and uses the ready one', async () => {
   const frames = [
     { frameId: 0, url: 'https://doc.midea.com/sheets/budget' },
@@ -129,7 +161,7 @@ test('skips WebEdit frames whose editor runtime is not ready and uses the ready 
       return Promise.resolve({ ok: true, result: READ_RESULT })
     },
   })
-  assert.deepEqual(probedFrames, [5, 6], 'every webedit candidate must be probed in order')
+  assert.deepEqual([...new Set(probedFrames)].sort((left, right) => left - right), [5, 6], 'every webedit candidate must be probed')
   assert.equal(injections.length, 0, 'no healing needed: receivers answered')
   assert.equal(sentToFrames.filter((entry) => entry.message.range !== undefined).length, 1, 'exactly one real read must be sent')
   const response = nativeMessages.find((message) => message.type === 'connector_response')

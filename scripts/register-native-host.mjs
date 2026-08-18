@@ -4,7 +4,7 @@ import { chmod, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promi
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { bundleHarnessRuntimePlugin } from './bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from './bundle-harness-runtime-plugin.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const extensionIds = [...new Set(
@@ -110,6 +110,7 @@ for (const [name, value] of [
   ['DSH_CWD', process.env.DSH_CWD?.trim()],
   ['DSH_NATIVE_LOG', process.env.DSH_NATIVE_LOG?.trim()],
   ['DSH_HARNESS_RUNTIME_PLUGIN', process.env.DSH_HARNESS_RUNTIME_PLUGIN?.trim()],
+  ['DSH_HARNESS_TRACKING_PLUGIN', process.env.DSH_HARNESS_TRACKING_PLUGIN?.trim()],
 ]) {
   if (value !== undefined && value !== '') launcherLines.splice(1, 0, `export ${name}=${shellQuote(value)}`)
 }
@@ -190,6 +191,7 @@ async function installProductPlugins(destination) {
 await mkdir(installRoot, { recursive: true })
 await replaceDirectory(nativeServerSource, nativeServer, async (staging) => {
   await bundleHarnessRuntimePlugin({ outfile: join(staging, 'harness-runtime.mjs'), projectRoot })
+  await bundleHarnessTrackingPlugin({ outfile: join(staging, 'harness-tracking.mjs'), projectRoot })
   await installProductPlugins(join(staging, 'product-plugins'))
 })
 await replaceDirectory(skillsSource, skills)

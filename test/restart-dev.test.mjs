@@ -1,6 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { extensionIdsFromManifest, extensionIdsFromManifests, processTree } from '../scripts/restart-dev.mjs'
+import { extensionIdsFromManifest, extensionIdsFromManifests, isGracefulProcessTermination, processTree } from '../scripts/restart-dev.mjs'
+
+test('treats an intentional dev-server signal stop as a successful lifecycle', () => {
+  assert.equal(isGracefulProcessTermination(null, 'SIGTERM'), true)
+  assert.equal(isGracefulProcessTermination(null, 'SIGINT'), true)
+  assert.equal(isGracefulProcessTermination(143, null, { allowSignalExitCode: true }), true)
+  assert.equal(isGracefulProcessTermination(143, null), false)
+  assert.equal(isGracefulProcessTermination(1, null), false)
+})
 
 test('reuses all valid Chrome extension ids from the installed manifest', () => {
   assert.deepEqual(extensionIdsFromManifest({ allowed_origins: [

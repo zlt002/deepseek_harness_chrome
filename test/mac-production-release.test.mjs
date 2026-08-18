@@ -37,6 +37,7 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.match(entries, /runtime\/harness\/apps\/cli\/lib\/workflow-worker\.cjs/m)
   assert.match(entries, /runtime\/native-server\/selected-source-routing-prompt\.mjs/m)
   assert.match(entries, /runtime\/native-server\/harness-runtime\.mjs/m)
+  assert.match(entries, /runtime\/native-server\/harness-tracking\.mjs/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-conversation-shell\/package\.json/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-responsive-sidebar\/package\.json/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-subagent-compact\/lib\/client\.js/m)

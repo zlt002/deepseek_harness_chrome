@@ -6,16 +6,14 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-test('publishes destructive two-phase team_doc_create', async () => {
+test('keeps legacy Team Knowledge creation tools out of the model-facing tool list', async () => {
   const connector = new BrowserConnector({ requestExtension: () => {} })
   const endpoint = await connector.start()
   try {
     const response = await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) })
-    const tool = (await response.json()).result.tools.find((item) => item.name === 'team_doc_create')
-    assert.deepEqual(tool.annotations, { destructiveHint: true, idempotentHint: false, openWorldHint: false })
-    assert.match(tool.description, /browser-authenticated/i)
-    assert.match(tool.description, /self-contained/i)
-    assert.match(tool.description, /do not call local midea-knowledge auth/i)
+    const tools = (await response.json()).result.tools
+    for (const legacy of ['team_doc_create', 'team_knowledge_batch', 'team_knowledge_item']) assert.equal(tools.some((item) => item.name === legacy), false)
+    for (const modelTool of ['team_knowledge_batch_preview', 'team_knowledge_batch_create', 'team_knowledge_batch_status', 'team_knowledge_spreadsheet_preview', 'team_knowledge_spreadsheet_create']) assert.ok(tools.some((item) => item.name === modelTool))
   } finally { await connector.stop() }
 })
 
@@ -98,6 +96,7 @@ test('surfaces redacted inspect stage diagnostics for source lookup failures', a
     assert.match(result.content[0].text, /stage=source_internal/)
     assert.match(result.content[0].text, /httpStatus=503/)
     assert.match(result.content[0].text, /errorCode=INTERNAL_DOWN/)
+    assert.match(result.content[0].text, /attempts=source_openapi:200\/20001,source_internal:503\/INTERNAL_DOWN/)
     assert.doesNotMatch(result.content[0].text, /SECRET/)
   } finally { await connector.stop() }
 })
@@ -115,6 +114,50 @@ test('requires a one-time inspect challenge then reuses a verified record withou
     const inspectAgain = await call(3, { phase: 'inspect' })
     const retried = await call(4, { phase: 'create', challenge: inspectAgain.result.structuredContent.challenge, idempotencyIdentity: 'one', name: 'One', body: '# one' })
     assert.equal(retried.result.structuredContent.documentId, '9007199254740993'); assert.equal(creates, 1)
+  } finally { await connector.stop() }
+})
+
+test('uses the Team Knowledge write timeout only for a Team Doc create', async () => {
+  const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://doc.midea.com/teamKnowledge/catalog/9' }
+  const cancelled = []
+  let answerInspects = true
+  let connector
+  connector = new BrowserConnector({
+    requestTimeoutMs: 5,
+    teamKnowledgeWriteRequestTimeoutMs: 60,
+    requestExtension: (request) => {
+      if (request.type === 'connector_cancel') { cancelled.push(request); return }
+      if (request.phase === 'inspect') {
+        if (!answerInspects) return
+        queueMicrotask(() => connector.acceptExtensionResponse({
+          type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget,
+          result: { parent: { parentId: '9', bookId: '10', parentName: 'Root', canRead: true, canCreate: true, fingerprint: 'parent-1' } },
+        }))
+        return
+      }
+      setTimeout(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget,
+        result: { status: 'verified_write', documentId: '9007199254740993', stages: ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readbackMatches: true, observedBody: '# One' },
+      }), 20)
+    },
+  })
+  connector.bindBrowserTarget('run-doc-timeout', target)
+  const endpoint = await connector.start()
+  const call = async (id, arguments_) => (await fetch(`${endpoint.url}/mcp`, {
+    method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'team_doc_create', arguments: arguments_ } }),
+  })).json()
+  try {
+    const inspect = await call(1, { phase: 'inspect' })
+    const created = await call(2, { phase: 'create', challenge: inspect.result.structuredContent.challenge, idempotencyIdentity: 'timeout-one', name: 'One', body: '# One' })
+    assert.equal(created.result.structuredContent.status, 'verified_write')
+    assert.equal(cancelled.length, 0, 'the short generic timeout must not cancel a write still within its dedicated budget')
+
+    answerInspects = false
+    const timedOutInspect = await call(3, { phase: 'inspect' })
+    assert.equal(timedOutInspect.result.isError, true)
+    assert.match(timedOutInspect.result.content[0].text, /timed out waiting for the Extension peer/)
+    assert.equal(cancelled.length, 1)
   } finally { await connector.stop() }
 })
 

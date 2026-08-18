@@ -1,18 +1,46 @@
-param([switch]$Rollback, [switch]$Interactive)
+param(
+  [switch]$Rollback,
+  [switch]$Interactive,
+  [string]$InstallRoot = '',
+  [string]$ProgressPath = ''
+)
 
 # AccrUI-compatible Harness Windows Lite installer and rollback manager.
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $payloadZip = Join-Path $scriptDir 'payload.zip'
-$installRoot = Join-Path $env:LOCALAPPDATA 'accr-ui-harness'
+$defaultInstallRoot = Join-Path $env:LOCALAPPDATA 'accr-ui-harness'
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+  $installedScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+  if ((Split-Path -Leaf $MyInvocation.MyCommand.Path) -eq 'manage-install.ps1' -and
+      (Test-Path -LiteralPath (Join-Path $installedScriptRoot 'runtime') -PathType Container)) {
+    $InstallRoot = $installedScriptRoot
+  } else {
+    $InstallRoot = $defaultInstallRoot
+  }
+}
+$installRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+$installRootDrive = [System.IO.Path]::GetPathRoot($installRoot)
+if ($installRoot.TrimEnd('\') -eq $installRootDrive.TrimEnd('\')) { throw '安装位置不能是磁盘根目录。' }
 $rollbackRoot = Join-Path $installRoot 'rollback'
 $managedNames = @('extension', 'runtime', 'release.json')
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+
+function Write-InstallProgress([int]$Percent, [string]$State, [string]$Detail = '') {
+  if ([string]::IsNullOrWhiteSpace($ProgressPath)) { return }
+  $safeDetail = $Detail.Replace("`r", ' ').Replace("`n", ' ')
+  [System.IO.File]::WriteAllText(
+    $ProgressPath,
+    ($Percent.ToString() + '|' + $State + '|' + $safeDetail),
+    [System.Text.UTF8Encoding]::new($false)
+  )
+}
 
 trap {
   $errorText = ($_ | Out-String).Trim()
   $message = "Harness UI 安装失败：$errorText"
   [System.IO.File]::WriteAllText($installLog, $message + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+  Write-InstallProgress 0 'error' $errorText
   Write-Host ''
   Write-Host $message -ForegroundColor Red
   Write-Host "错误日志：$installLog" -ForegroundColor Yellow
@@ -79,7 +107,9 @@ function Restore-Rollback {
 }
 
 if ($Rollback) {
+  Write-InstallProgress 10 'rollback' '正在回滚到上一版本...'
   Restore-Rollback
+  Write-InstallProgress 100 'complete' '回滚完成。'
   exit 0
 }
 
@@ -90,14 +120,17 @@ $nodePath = [System.IO.Path]::GetFullPath($node.Source)
 if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw "Node.js 路径无效：$nodePath" }
 $nodeVersion = (& $nodePath --version).Trim()
 if ($nodeVersion -notmatch '^v?(?<major>\d+)' -or [int]$Matches.major -lt 22) { throw "Node.js $nodeVersion 版本过低；Harness UI 需要 Node.js 22 或更高版本。" }
+Write-InstallProgress 8 'preparing' "已检测到 Node.js $nodeVersion。"
 
 $stagingRoot = Join-Path $env:TEMP ('accr-ui-harness-stage-' + [guid]::NewGuid().ToString('N'))
 $previousRoot = Join-Path $env:TEMP ('accr-ui-harness-previous-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $previousRoot -Force | Out-Null
 try {
+  Write-InstallProgress 15 'extracting' '正在解压安装包...'
   Expand-Archive -LiteralPath $payloadZip -DestinationPath $stagingRoot -Force
   Assert-ReleaseTree $stagingRoot | Out-Null
+  Write-InstallProgress 65 'configuring' '正在保存现有版本并安装新版本...'
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
   Move-ManagedTree $installRoot $previousRoot
@@ -110,6 +143,7 @@ try {
         Move-Item -LiteralPath $sourcePath -Destination $destinationPath
       }
     }
+    Write-InstallProgress 90 'registering' '正在注册 Chrome 和 Edge Native Messaging...'
     Register-ReleaseTree $installRoot
     Write-ProductState $installRoot
   } catch {
@@ -129,6 +163,7 @@ try {
     Move-Item -LiteralPath $previousRoot -Destination $rollbackRoot
   }
   Copy-Item -LiteralPath $MyInvocation.MyCommand.Path -Destination (Join-Path $installRoot 'manage-install.ps1') -Force
+  Write-InstallProgress 100 'complete' "安装完成：$installRoot"
   Write-Host 'Harness UI 已安装。请在 chrome://extensions 或 edge://extensions 重新加载 AccrUI 扩展。'
 } finally {
   if (Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force }

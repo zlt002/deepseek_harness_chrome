@@ -10,6 +10,7 @@ product source files.
 | Product area | Migration destination | Current seam status |
 |---|---|---|
 | MCP scope and session lineage | `packages/harness-runtime` | Public runtime seams are sufficient |
+| AccrUI effective-session tracking | `packages/harness-tracking` | Host plugin posts to the same company `/api/tracking/effective-sessions` service; first root `step/start` is the execution-start signal |
 | Browser Target controls | `packages/harness-ui-browser-target` | Public composer slots are sufficient; reconnect uses the existing `sidebar.footer.action` seat instead of a compact-shell fork |
 | Knowledge/code scope | `packages/harness-ui-knowledge-scope` | Product plugin and bundle are complete. Clean upstream already provides the card-wide overlay; only the generic composer-above slot remains in `upstream-contributions/0001-*` |
 | Skill three-state settings | `packages/harness-skill-settings` and client plugin | Product plugin mounts by default. Generic Registry, settings/RPC, and catalog-cache seams live in ordered `upstream-contributions` patches; Claude roots use existing `customSkillDirs` |

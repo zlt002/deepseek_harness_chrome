@@ -24,7 +24,7 @@ import {
   staticTypertPackages,
   staticWebRunner,
 } from '../mac-lite/build-mac-production.mjs'
-import { bundleHarnessRuntimePlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -208,7 +208,8 @@ export async function buildWindowsStaticHarnessRuntime({
     await mkdir(path.join(staging, 'native-server'), { recursive: true })
     await cp(nativeServerPath, path.join(staging, 'native-server', 'runtime.mjs'))
     await cp(path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'), path.join(staging, 'native-server', 'selected-source-routing-prompt.mjs'))
-    await bundleHarnessRuntimePlugin({ outfile: path.join(staging, 'native-server', 'harness-runtime.mjs'), projectRoot: PROJECT_ROOT, harnessRoot })
+    await bundleHarnessRuntimePlugin({ outfile: path.join(staging, 'native-server', 'harness-runtime.mjs'), projectRoot: PROJECT_ROOT })
+    await bundleHarnessTrackingPlugin({ outfile: path.join(staging, 'native-server', 'harness-tracking.mjs'), projectRoot: PROJECT_ROOT })
     await copyWindowsNativeAssets(harnessRoot, path.join(staging, 'native'))
     const marker = {
       format: 'deepseek-harness-windows-static-web-v1', platform: 'win32', arch: 'x64', revision,

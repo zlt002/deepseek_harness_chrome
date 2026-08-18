@@ -31,6 +31,7 @@ const REQUIRED_HARNESS_PATHS = [
   'harness/apps/web/dist/index.html',
   'native-server/runtime.mjs',
   'native-server/harness-runtime.mjs',
+  'native-server/harness-tracking.mjs',
   'native/node-pty/prebuilds/win32-x64/pty.node',
   'native/sharp/sharp.node',
   'native/koffi/koffi.node',
@@ -129,7 +130,7 @@ export async function validateHarnessRuntime(harnessRuntimeDir) {
 }
 
 function nativeHostBat() {
-  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server.mjs"\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace"\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"\r\n`
+  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server.mjs"\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace"\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"\r\n`
 }
 
 function pluginManagerBat() {
@@ -189,8 +190,12 @@ async function installPs1() {
   return readFile(path.join(MODULE_DIR, 'templates', 'install.ps1'), 'utf8')
 }
 
+async function installUiPs1() {
+  return readFile(path.join(MODULE_DIR, 'templates', 'install-ui.ps1'), 'utf8')
+}
+
 function installVbs() {
-  return `Option Explicit\r\nDim shell, fso, scriptPath, command, exitCode, nonInteractive\r\nSet shell = CreateObject("WScript.Shell")\r\nSet fso = CreateObject("Scripting.FileSystemObject")\r\nscriptPath = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "install.ps1")\r\nnonInteractive = (shell.ExpandEnvironmentStrings("%DSH_INSTALL_NONINTERACTIVE%") = "1")\r\ncommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & scriptPath & """"\r\nIf Not nonInteractive Then command = command & " -Interactive"\r\nexitCode = shell.Run(command, 1, True)\r\nIf Not nonInteractive Then\r\n  If exitCode <> 0 Then\r\n    MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看安装窗口中的具体错误和日志位置。", vbCritical, "Harness UI 安装失败"\r\n  Else\r\n    MsgBox "Harness UI 安装完成。请重新加载 AccrUI 扩展。", vbInformation, "Harness UI 安装完成"\r\n  End If\r\nEnd If\r\nWScript.Quit exitCode\r\n`
+  return `Option Explicit\r\nDim shell, fso, scriptDir, scriptPath, command, exitCode, nonInteractive, logPath, stream, windowStyle\r\nSet shell = CreateObject("WScript.Shell")\r\nSet fso = CreateObject("Scripting.FileSystemObject")\r\nscriptDir = fso.GetParentFolderName(WScript.ScriptFullName)\r\nnonInteractive = (shell.ExpandEnvironmentStrings("%DSH_INSTALL_NONINTERACTIVE%") = "1")\r\nIf nonInteractive Then\r\n  scriptPath = fso.BuildPath(scriptDir, "install.ps1")\r\n  windowStyle = 1\r\nElse\r\n  scriptPath = fso.BuildPath(scriptDir, "install-ui.ps1")\r\n  windowStyle = 0\r\nEnd If\r\nlogPath = fso.BuildPath(scriptDir, "install-launch.log")\r\nIf Not fso.FileExists(scriptPath) Then\r\n  MsgBox "Harness UI 安装器文件缺失：" & vbCrLf & scriptPath, vbCritical, "Harness UI 安装失败"\r\n  WScript.Quit 1\r\nEnd If\r\nSet stream = fso.OpenTextFile(logPath, 8, True)\r\nstream.WriteLine Now & " launch " & scriptPath\r\nstream.Close\r\ncommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File """ & scriptPath & """"\r\nexitCode = shell.Run(command, windowStyle, True)\r\nIf nonInteractive And exitCode <> 0 Then\r\n  MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看错误日志。", vbCritical, "Harness UI 安装失败"\r\nEnd If\r\nWScript.Quit exitCode\r\n`
 }
 
 function startVbs() {
@@ -283,7 +288,7 @@ function readZipUtf16Le(zipPath, entry) {
 
 export async function validateWindowsRelease({ packageDir, zipPath = path.join(path.dirname(packageDir), `${path.basename(packageDir)}.zip`) }) {
   const errors = []
-  const requiredTopLevel = ['install.ps1', 'install.vbs', 'payload.zip', 'README.zh-CN.md']
+  const requiredTopLevel = ['install.ps1', 'install-ui.ps1', 'install.vbs', 'payload.zip', 'README.zh-CN.md']
   for (const relativePath of requiredTopLevel) {
     if (!existsSync(path.join(packageDir, relativePath))) errors.push(`missing ${relativePath}`)
   }
@@ -297,7 +302,8 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     `runtime/${NATIVE_HOST_NAME}.json`,
     `runtime/${LEGACY_NATIVE_HOST_NAME}.json`,
   ]
-  const requiredPayloadEntries = [manifestEntry, runtimeCliEntry, nativeLauncherEntry, registerNativeHostEntry, startEntry, ...nativeManifestEntries]
+  const productSkillEntry = 'runtime/skills/pmd-prd/SKILL.md'
+  const requiredPayloadEntries = [manifestEntry, runtimeCliEntry, nativeLauncherEntry, registerNativeHostEntry, startEntry, productSkillEntry, ...nativeManifestEntries]
   let payloadEntries = []
   if (existsSync(payloadZipPath)) {
     payloadEntries = normalizedArchiveEntries(payloadZipPath, requiredPayloadEntries)
@@ -336,7 +342,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   }
   if (payloadEntries.includes(nativeLauncherEntry)) {
     const launcher = readZipText(payloadZipPath, nativeLauncherEntry)
-    for (const requiredText of ['NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt', 'set /p "NODE_EXEC=" < "%NODE_PATH_FILE%"', 'DSH_HOME=%APPDATA%\\accr-ui-harness\\profile', '"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"']) {
+    for (const requiredText of ['NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt', 'set /p "NODE_EXEC=" < "%NODE_PATH_FILE%"', 'DSH_HOME=%APPDATA%\\accr-ui-harness\\profile', 'DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills', '"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"']) {
       if (!launcher.includes(requiredText)) errors.push(`run_native_host.bat is missing ${requiredText}`)
     }
     if (launcher.includes('node "%PACKAGE_DIR%native-server')) errors.push('run_native_host.bat must not fall back to Chrome PATH node')
@@ -373,7 +379,9 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       if (!installer.includes(retainedPath)) errors.push(`install.ps1 does not document preservation of ${retainedPath}`)
     }
     for (const transactionalText of [
-      'param([switch]$Rollback, [switch]$Interactive)',
+      '[string]$InstallRoot',
+      '[string]$ProgressPath',
+      'Write-InstallProgress',
       'Move-ManagedTree $installRoot $previousRoot',
       'Move-ManagedTree $previousRoot $installRoot',
       'Move-ManagedTree $rollbackRoot $installRoot',
@@ -382,9 +390,26 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       if (!installer.includes(transactionalText)) errors.push(`install.ps1 is missing transactional behavior: ${transactionalText}`)
     }
   }
+  const installerUiPath = path.join(packageDir, 'install-ui.ps1')
+  if (existsSync(installerUiPath)) {
+    const installerUi = await readFile(installerUiPath, 'utf8')
+    for (const requiredText of [
+      'System.Windows.Forms.FolderBrowserDialog',
+      'Node.js 22+',
+      'Chrome / Edge',
+      '-InstallRoot',
+      '-ProgressPath',
+      '工作区、日志和用户配置',
+    ]) {
+      if (!installerUi.includes(requiredText)) errors.push(`install-ui.ps1 is missing ${requiredText}`)
+    }
+    if (installerUi.includes('请不要选择 C 盘') || installerUi.includes('包含中文的安装路径')) {
+      errors.push('install-ui.ps1 must not carry the obsolete AccrUI path restrictions')
+    }
+  }
   if (existsSync(zipPath)) {
     const root = `${path.basename(packageDir)}/`
-    const requiredOuterPaths = ['install.ps1', 'install.vbs', 'payload.zip']
+    const requiredOuterPaths = ['install.ps1', 'install-ui.ps1', 'install.vbs', 'payload.zip']
     const entries = normalizedArchiveEntries(zipPath, requiredOuterPaths.map((requiredPath) => `${root}${requiredPath}`))
     const missingOuterPaths = []
     for (const requiredPath of requiredOuterPaths) {
@@ -441,6 +466,7 @@ export async function buildWindowsRelease({
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-session-log-copy'), path.join(runtimeDir, 'product-plugins', 'harness-ui-session-log-copy'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-settings-shell'), path.join(runtimeDir, 'product-plugins', 'harness-ui-settings-shell'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-skill-settings'), path.join(runtimeDir, 'product-plugins', 'harness-skill-settings'))
+  await copyDereferenced(path.join(projectRoot, 'skills'), path.join(runtimeDir, 'skills'))
   await rm(path.join(runtimeDir, 'native-server'), { recursive: true, force: true })
   await copyDereferenced(path.join(runtimeSource, 'native-server'), path.join(runtimeDir, 'native-server'))
   await copyDereferenced(path.join(runtimeSource, 'harness'), path.join(runtimeDir, 'harness'))
@@ -466,6 +492,7 @@ export async function buildWindowsRelease({
   await mkdir(releaseDir, { recursive: true })
   runZip(payloadDir, path.join(packageDir, 'payload.zip'), '.')
   await writeFile(path.join(packageDir, 'install.ps1'), utf8Bom(await installPs1()))
+  await writeFile(path.join(packageDir, 'install-ui.ps1'), utf8Bom(await installUiPs1()))
   await writeFile(path.join(packageDir, 'install.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(installVbs(), 'utf16le')]))
   await writeFile(path.join(packageDir, 'README.zh-CN.md'), releaseReadme(version), 'utf8')
   runZip(releaseDir, zipPath, ACCR_UI_WINDOWS_PACKAGE_NAME)

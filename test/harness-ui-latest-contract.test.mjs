@@ -30,9 +30,11 @@ async function settingsShellPluginSource(relativePath) {
 }
 
 test('materialized Harness preserves the latest compact product UI contracts', async () => {
-  const [conversation, knowledgeScope, settings, settingsCss, officialSettings, subagent, sessionLogCopy] = await Promise.all([
+  const [conversation, knowledgeScope, selectedSourceToolview, selectedSourceToolviewIndex, settings, settingsCss, officialSettings, subagent, sessionLogCopy] = await Promise.all([
     source('packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx'),
     knowledgeScopePluginSource('src/client/KnowledgeScope.tsx'),
+    knowledgeScopePluginSource('src/client/SelectedSourceScopeToolRow.tsx'),
+    knowledgeScopePluginSource('src/client/index.ts'),
     settingsShellPluginSource('src/client/SettingsRoot.tsx'),
     settingsShellPluginSource('src/client/SettingsRoot.module.css'),
     source('packages/client/ui-settings-general/src/client/SettingsRoot.tsx'),
@@ -44,6 +46,10 @@ test('materialized Harness preserves the latest compact product UI contracts', a
   const inputSeat = conversation.indexOf('{inputBar}')
   assert.ok(scopeSeat >= 0 && inputSeat > scopeSeat, 'knowledge/code scope must stay above the input card')
   assert.match(knowledgeScope, /PropsRuntime<'conversation\.composer\.above'>/)
+  assert.match(selectedSourceToolviewIndex, /mcp__chrome__selected_source_scope/)
+  assert.match(selectedSourceToolview, /已选远程范围/)
+  assert.match(selectedSourceToolview, /if \(failed\) setExpanded\(true\)/)
+  assert.match(selectedSourceToolview, /<MarkdownText text=\{text\} streaming=\{running\} \/>/)
   await assert.rejects(
     source('packages/client/ui-knowledge-scope/package.json'),
     error => error?.code === 'ENOENT',

@@ -363,3 +363,46 @@ test('selection_insert requires a stable fingerprint and attests payload-bound X
     assert.equal(replay.result.isError, true); assert.match(replay.result.content[0].text, /uncertain/i); assert.equal(writes, 2)
   } finally { await connector.stop() }
 })
+
+test('flat selected-content replacement keeps blocks only in preview and fails closed for replay, selection drift, and target drift', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 31, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/115?id=115' }
+  const movedTarget = { ...target, tabId: 32 }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
+  const blocks = [{ type: 'h2', text: '优化结论' }, { type: 'p', text: '稳定替换正文' }]
+  let selectionFingerprint = 'selection-v3-1234abcd'; let writes = 0
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    if (request.action === 'write') {
+      writes += 1
+      if (request.payload.expectedSelectionFingerprint !== selectionFingerprint) return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, error: { code: 'fingerprint_mismatch', message: 'The light-document selection changed since inspect_write' } })
+      return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: {
+        status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload },
+        observed: { verified: true, verifiedFragments: ['优化结论', '稳定替换正文'], fragmentEvidence: [{ fragment: '优化结论', blockIds: ['one'] }, { fragment: '稳定替换正文', blockIds: ['two'] }], observedBlocks: [{ id: 'one', type: 'h2', text: '优化结论' }, { id: 'two', type: 'p', text: '稳定替换正文' }], replacedTagIds: ['old-one', 'old-two'] },
+      } })
+    }
+    const selection = { supported: true, stable: true, truncated: false, isCollapsed: false, selectionFingerprint, selectedTagIds: ['old-one', 'old-two'], content: { text: '原内容一 原内容二' } }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], ...(request.action === 'selection' ? { selection } : {}) } } })
+  }) })
+  connector.bindBrowserTarget('flat-selection-run', target); const endpoint = await connector.start()
+  try {
+    const preview = await call(endpoint, 'light_document_selection_replace_preview', { blocks })
+    assert.equal(preview.result.structuredContent.action, 'selection_blocks_replace_preview')
+    assert.deepEqual(preview.result.structuredContent.blocks, blocks)
+    const challenge = preview.result.structuredContent.challenge
+    const commit = await call(endpoint, 'light_document_selection_replace_commit', { challenge, idempotencyIdentity: 'flat-selection-1' }, 2)
+    assert.equal(commit.result.structuredContent.status, 'verified_write')
+    assert.equal(writes, 1)
+    const replay = await call(endpoint, 'light_document_selection_replace_commit', { challenge, idempotencyIdentity: 'flat-selection-1' }, 3)
+    assert.equal(replay.result.isError, true); assert.equal(writes, 1)
+
+    const driftPreview = await call(endpoint, 'light_document_selection_replace_preview', { blocks }, 4)
+    selectionFingerprint = 'selection-v3-deadbeef'
+    const drifted = await call(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge, idempotencyIdentity: 'flat-selection-drift' }, 5)
+    assert.equal(drifted.result.isError, true); assert.equal(writes, 2)
+
+    selectionFingerprint = 'selection-v3-1234abcd'
+    const movedPreview = await call(endpoint, 'light_document_selection_replace_preview', { blocks }, 6)
+    connector.bindBrowserTarget('flat-selection-run', movedTarget)
+    const moved = await call(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge, idempotencyIdentity: 'flat-selection-target' }, 7)
+    assert.equal(moved.result.isError, true); assert.equal(writes, 2)
+  } finally { await connector.stop() }
+})

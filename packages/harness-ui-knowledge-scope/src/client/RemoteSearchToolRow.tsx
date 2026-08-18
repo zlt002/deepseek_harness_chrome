@@ -82,7 +82,7 @@ export function RemoteSearchToolRow({ toolName, block, sessionId, useSearchProgr
           <MarkdownText text={text} streaming={active} />
         </div>
       </DisclosureRow>
-      {open && inspect !== undefined && <button className={css.inspect} type="button" onClick={inspect}>Inspect</button>}
+      {open && inspect !== undefined && <button className={css.inspect} type="button" onClick={inspect}>查看详情</button>}
     </div>
   )
 }

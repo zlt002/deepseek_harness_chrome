@@ -54,7 +54,7 @@ export default defineContentScript({
       return documentRuntimeReady
     }
 
-    function invokeDocumentRuntime(request: Record<string, unknown>): Promise<unknown> {
+    function invokeDocumentRuntime(request: Record<string, unknown>, timeoutMs = 8_000): Promise<unknown> {
       return new Promise((resolve, reject) => {
         const id = crypto.randomUUID()
         const requestEvent = 'deepseek-harness-office-document-request/v1'
@@ -62,7 +62,7 @@ export default defineContentScript({
         const timeout = setTimeout(() => {
           window.removeEventListener(responseEvent, receive)
           reject({ code: 'timeout', message: 'Timed out waiting for the WebEdit light-document runtime.' })
-        }, 8_000)
+        }, timeoutMs)
         const receive = (event: Event): void => {
           const detail = (event as CustomEvent<unknown>).detail
           if (!detail || typeof detail !== 'object' || (detail as { id?: unknown }).id !== id) return
@@ -89,12 +89,12 @@ export default defineContentScript({
       return spreadsheetRuntimeReady
     }
 
-    function invokeSpreadsheetRuntime(request: Record<string, unknown>): Promise<unknown> {
+    function invokeSpreadsheetRuntime(request: Record<string, unknown>, timeoutMs = 8_000): Promise<unknown> {
       return new Promise((resolve, reject) => {
         const id = crypto.randomUUID()
         const requestEvent = 'deepseek-harness-office-spreadsheet-request/v1'
         const responseEvent = 'deepseek-harness-office-spreadsheet-response/v1'
-        const timeout = setTimeout(() => { window.removeEventListener(responseEvent, receive); reject({ code: 'timeout', message: 'Timed out waiting for the WebEdit spreadsheet runtime.' }) }, 8_000)
+        const timeout = setTimeout(() => { window.removeEventListener(responseEvent, receive); reject({ code: 'timeout', message: 'Timed out waiting for the WebEdit spreadsheet runtime.' }) }, timeoutMs)
         const receive = (event: Event): void => {
           const detail = (event as CustomEvent<unknown>).detail
           if (!detail || typeof detail !== 'object' || (detail as { id?: unknown }).id !== id) return
@@ -120,7 +120,7 @@ export default defineContentScript({
           action: input.action, ...(input.offset === undefined ? {} : { offset: input.offset }), ...(input.limit === undefined ? {} : { limit: input.limit }),
           ...(input.query === undefined ? {} : { query: input.query }), ...(input.operation === undefined ? {} : { operation: input.operation }),
           ...(input.payload === undefined ? {} : { payload: input.payload }), ...(input.resource === undefined ? {} : { resource: input.resource }),
-        })).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
+        }, input.action === 'probe' ? 400 : 8_000)).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
           const typed = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
             ? error : { code: 'runtime_error', message: error instanceof Error ? error.message : 'WebEdit light-document operation failed' }
           sendResponse({ ok: false, error: typed })
@@ -129,14 +129,14 @@ export default defineContentScript({
       }
       if ((message as { type?: unknown }).type === 'office-spreadsheet/v1') {
         const input = message as { action?: unknown; range?: unknown; sheetName?: unknown; query?: unknown; matchCase?: unknown; matchEntireCell?: unknown; searchBy?: unknown; offset?: unknown; limit?: unknown; resource?: unknown; operation?: unknown; payload?: unknown }
-        if (!['context', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write', 'probe'].includes(String(input.action))) {
+        if (!['context', 'selection', 'used_range', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write', 'probe'].includes(String(input.action))) {
           sendResponse({ ok: false, error: { code: 'invalid_range', message: 'a valid spreadsheet action is required' } }); return false
         }
         void loadSpreadsheetRuntime().then(() => invokeSpreadsheetRuntime({
           action: input.action, ...(input.range === undefined ? {} : { range: input.range }), ...(input.sheetName === undefined ? {} : { sheetName: input.sheetName }),
           ...(input.query === undefined ? {} : { query: input.query }), ...(input.matchCase === undefined ? {} : { matchCase: input.matchCase }), ...(input.matchEntireCell === undefined ? {} : { matchEntireCell: input.matchEntireCell }), ...(input.searchBy === undefined ? {} : { searchBy: input.searchBy }), ...(input.offset === undefined ? {} : { offset: input.offset }), ...(input.limit === undefined ? {} : { limit: input.limit }),
           ...(input.resource === undefined ? {} : { resource: input.resource }), ...(input.operation === undefined ? {} : { operation: input.operation }), ...(input.payload === undefined ? {} : { payload: input.payload }),
-        })).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
+        }, input.action === 'probe' ? 400 : 8_000)).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
           const typed = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? error : { code: 'runtime_error', message: error instanceof Error ? error.message : 'WebEdit spreadsheet operation failed' }
           sendResponse({ ok: false, error: typed })
         })

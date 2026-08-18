@@ -6,9 +6,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $packageRoot = [System.IO.Path]::GetFullPath($PackageDir)
 $installer = Join-Path $packageRoot 'install.ps1'
+$installerUi = Join-Path $packageRoot 'install-ui.ps1'
 $installLauncher = Join-Path $packageRoot 'install.vbs'
 $payloadZip = Join-Path $packageRoot 'payload.zip'
 if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Missing installer: $installer" }
+if (-not (Test-Path -LiteralPath $installerUi -PathType Leaf)) { throw "Missing installer UI: $installerUi" }
 if (-not (Test-Path -LiteralPath $installLauncher -PathType Leaf)) { throw "Missing VBS installer: $installLauncher" }
 if (-not (Test-Path -LiteralPath $payloadZip -PathType Leaf)) { throw "Missing payload: $payloadZip" }
 

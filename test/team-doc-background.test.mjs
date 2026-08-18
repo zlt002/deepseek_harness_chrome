@@ -28,7 +28,7 @@ function assertBusinessSystemHeader(options) {
   assert.equal(headers.businesssystem, 'TEAM_KNOWLEDGE_BOOK')
 }
 
-async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, sendMessage = async () => ({ ok: false }), initialTab = target } = {}) {
+async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, sendMessage, initialTab = target, webeditLightDocument = false, webeditFrames, webeditProbeReadyAfter = 0, teamDocProbeWaitMs = 0 } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   let runtimeListener; const nativeMessages = []; const nativeListeners = new Set(); const executions = []
@@ -39,6 +39,7 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
     postMessage: (message) => { nativeMessages.push(message); if (message.type === 'start') queueMicrotask(() => nativeListeners.forEach((listener) => listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-team-doc' } }))) },
   }
   const localStorage = {}
+  let webeditProbeCalls = 0
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } },
     runtime: { connectNative: () => port, lastError: undefined, onMessage: { addListener: (listener) => { runtimeListener = listener } }, sendMessage: async () => {} },
@@ -50,14 +51,26 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
     tabs: {
       query: async () => [tab], get: async (tabId) => { if (tabId !== tab.id) throw new Error('tab not found'); return { ...tab } },
       update: async (tabId, update) => { if (tabId !== tab.id) throw new Error('tab not found'); if (typeof update.url === 'string') tab.url = update.url; tab.status = 'complete'; return { ...tab } },
-      sendMessage,
+      sendMessage: async (tabId, message, options) => {
+        if (webeditLightDocument && message?.action === 'probe') {
+          webeditProbeCalls += 1
+          return webeditProbeCalls > webeditProbeReadyAfter ? { ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/o/1' } } } : { ok: false }
+        }
+        if (sendMessage === undefined && message?.type === 'office-document/v1' && message?.action === 'probe' && options?.frameId === 17) {
+          return { ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/o/1', hasContent: true } } }
+        }
+        return sendMessage?.(tabId, message, options) ?? { ok: false }
+      },
       onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} },
     },
     scripting: { executeScript: async (request) => { executions.push(request); return [{ result: await execute(request, tab) }] } },
-    webNavigation: { getAllFrames: async () => tab.url === target.url ? [{ frameId: 0, url: tab.url }] : [{ frameId: 0, url: tab.url }, { frameId: 17, url: 'https://webedit.midea.com/weboffice/office/w/1' }] },
+    webNavigation: { getAllFrames: async () => webeditFrames === undefined
+      ? webeditLightDocument ? [{ frameId: 0, url: tab.url }, { frameId: 17, url: 'https://webedit.midea.com/weboffice/office/o/1' }] : tab.url === target.url ? [{ frameId: 0, url: tab.url }] : [{ frameId: 0, url: tab.url }, { frameId: 17, url: 'https://webedit.midea.com/weboffice/office/w/1' }]
+      : typeof webeditFrames === 'function' ? webeditFrames() : webeditFrames },
     sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()
+  globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS = teamDocProbeWaitMs
   await import(`data:text/javascript,${encodeURIComponent(compiled)}#team-doc-background-${Date.now()}-${Math.random()}`)
   await new Promise((resolve, reject) => { const open = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error))); if (open !== true) reject(new Error('ensure-harness did not retain the response channel')) })
   const sendNative = async (request) => {
@@ -69,7 +82,7 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
     }
     return undefined
   }
-  return { executions, localStorage, sendNative, cleanup: () => { delete globalThis.chrome; delete globalThis.defineBackground } }
+  return { executions, localStorage, sendNative, cleanup: () => { delete globalThis.chrome; delete globalThis.defineBackground; delete globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS } }
 }
 
 const inspectRequest = (overrides = {}) => ({ type: 'connector_request', requestId: 'inspect-1', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_doc_create', phase: 'inspect', ...overrides })
@@ -103,6 +116,42 @@ test('creates a child light document only after the verified parent, rediscovery
   } finally { harness.cleanup() }
 })
 
+test('writes through the ready light-document frame after a preload frame and iframe rebuild', async () => {
+  let frameReads = 0
+  const writes = []
+  const harness = await loadBackground({
+    webeditFrames: () => {
+      frameReads += 1
+      return frameReads === 1
+        ? [{ frameId: 0, url: target.url }, { frameId: 16, url: 'https://webedit.midea.com/preload' }, { frameId: 17, url: 'https://webedit.midea.com/weboffice/office/o/1' }]
+        : [{ frameId: 0, url: target.url }, { frameId: 18, url: 'https://webedit.midea.com/weboffice/office/o/2' }]
+    },
+    sendMessage: async (_tabId, message, options) => {
+      if (message.type !== 'office-document/v1' || message.action !== 'probe') return { ok: false }
+      if (options.frameId === 16) return { ok: true, result: { status: 'probe', ready: false } }
+      if ([17, 18].includes(options.frameId)) return { ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/o/1', hasContent: true } } }
+      return { ok: false }
+    },
+    execute: async ({ func, target: scriptTarget }) => {
+      if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent }
+      if (func.name === 'createTeamDocInPage') return { ok: true, documentId: '9007199254740995', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995' }
+      if (func.name === 'writeTeamDocInWebEdit') {
+        writes.push(scriptTarget.frameIds[0])
+        return scriptTarget.frameIds[0] === 18
+          ? { ok: true, readbackMatches: true, observedBody: 'Migrated document' }
+          : { ok: false, failedAt: 'write', error: 'team_doc_webedit_runtime_unavailable' }
+      }
+      throw new Error(`unexpected function ${func.name}`)
+    },
+  })
+  try {
+    const response = await harness.sendNative(createRequest({ requestId: 'ready-frame-after-rebuild' }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.deepEqual(writes, [18])
+    assert.ok(frameReads >= 3, 'the selected ready frame must be rechecked after iframe reconstruction')
+  } finally { harness.cleanup() }
+})
+
 test('persists the remote-create checkpoint before readback so a typed retry rediscoveries instead of creating again', async () => {
   let creates = 0; let rediscoveries = 0; let writes = 0
   const createdUrl = 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995'
@@ -133,7 +182,7 @@ test('creates a child spreadsheet only when its default sheet identity can be re
   globalThis.document = { referrer: '' }
   globalThis.fetch = async (url, options = {}) => {
     const parsed = new URL(String(url), 'https://doc.midea.com')
-    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId')) {
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId') || parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
       listCalls += 1
       return new Response(JSON.stringify({ errorCode: '00000', data: listCalls === 1 ? [] : [{ catalogId: '9007199254740996', name: 'Child sheet', fileType: 8, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740996?id=9007199254740996' }] }), { status: 200 })
     }
@@ -179,7 +228,7 @@ test('rejects a child spreadsheet when same-parent rediscovery reports the wrong
   globalThis.document = { referrer: '' }
   globalThis.fetch = async (url) => {
     const parsed = new URL(String(url), 'https://doc.midea.com')
-    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId')) {
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId') || parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
       listCalls += 1
       return new Response(JSON.stringify({ errorCode: '00000', data: listCalls === 1 ? [] : [{ catalogId: '9007199254740997', name: 'Wrong type', fileType: 4 }] }), { status: 200 })
     }
@@ -324,6 +373,33 @@ test('does not verify a WebEdit write when document body readback mismatches', a
   } finally { harness.cleanup() }
 })
 
+test('accepts semantic WebEdit readback for numbered headings, formatted lists, and tables', async () => {
+  const originalLocation = globalThis.location
+  const originalDocument = globalThis.document
+  const originalApp = globalThis.APP
+  let xml = '<p>before</p>'
+  globalThis.location = new URL('https://webedit.midea.com/weboffice/office/o/1')
+  globalThis.document = { createElement: () => ({ innerHTML: '', get value() { return this.innerHTML } }) }
+  globalThis.APP = { openApi: { editor: { document: { selection: { insertContent: async () => { xml = '<outlineTitle>发布计划</outlineTitle><h2>项目背景</h2><li>准备发布</li><li>接入层：验证回读</li><table><tr><th>阶段</th><th>负责人</th></tr><tr><td>发布</td><td>张三</td></tr></table>' } } }, canvas: { getDocXml: async () => xml } } } }
+  const body = '# 发布计划\n## 1. 项目背景\n- 准备发布\n- **接入层**：验证回读\n\n| 阶段 | 负责人 |\n| --- | --- |\n| 发布 | 张三 |'
+  const harness = await loadBackground({ execute: async ({ func, args }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent }
+    if (func.name === 'createTeamDocInPage') return { ok: true, documentId: '9007199254740995', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995' }
+    if (func.name === 'writeTeamDocInWebEdit') return func(...args)
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(createRequest({ requestId: 'semantic-markdown-readback', body }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.equal(response.result.observedBody, '发布计划\n项目背景\n准备发布\n接入层：验证回读\n阶段\t负责人\n发布\t张三')
+  } finally {
+    harness.cleanup()
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
+    if (originalApp === undefined) delete globalThis.APP; else globalThis.APP = originalApp
+  }
+})
+
 test('recovers only the recorded document id and preserves confirmed stages', async () => {
   const harness = await loadBackground({ execute: async ({ func, args }) => {
     if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent }
@@ -387,6 +463,91 @@ test('uses OpenAPI children before create and again for post-create rediscovery'
   }
 })
 
+test('rediscoveries a created child returned as a bare document-children record', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const originalDocument = globalThis.document
+  const documentParent = { ...parent, parentType: 'document' }
+  globalThis.location = new URL(target.url)
+  globalThis.document = { referrer: '' }
+  let childReads = 0
+  let renamed = false
+  globalThis.fetch = async (url, options = {}) => {
+    const call = String(url)
+    if (call.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      childReads += 1
+      assert.equal(options.method, 'POST')
+      assert.deepEqual(JSON.parse(options.body), { bookId: documentParent.bookId, parentId: documentParent.parentId })
+      const data = childReads === 1 ? [] : { catalogId: '2089549421029306370', name: renamed ? 'Migrated document' : '未命名文档', parentId: documentParent.parentId }
+      return new Response(JSON.stringify({ errorCode: '00000', data }), { status: 200 })
+    }
+    if (call.endsWith('/teamKnowledgeCatalog/rename')) {
+      assert.deepEqual(JSON.parse(options.body), { id: '2089549421029306370', name: 'Migrated document' })
+      renamed = true
+      return new Response(JSON.stringify({ errorCode: '00000', data: null }), { status: 200 })
+    }
+    if (call.includes('/teamKnowledge/getAllFileType')) return new Response(JSON.stringify({ errorCode: '00000', data: [{ type: 4, value: 'newword' }] }), { status: 200 })
+    if (call.includes('/teamKnowledge/add')) return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: '2089549421029306370' } }), { status: 200 })
+    throw new Error(`unexpected fetch: ${call}`)
+  }
+  const harness = await loadBackground({ execute: async ({ func, args }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: documentParent }
+    if (func.name === 'createTeamDocInPage') return func(...args)
+    return { ok: true, readbackMatches: true, observedBody: 'Migrated document' }
+  } })
+  try {
+    const response = await harness.sendNative(createRequest({ requestId: 'document-children-bare-record', parent: documentParent }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.equal(childReads, 3)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
+  }
+})
+
+test('stops before document-body write when renaming an unnamed created child fails', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const originalDocument = globalThis.document
+  const documentParent = { ...parent, parentType: 'document' }
+  globalThis.location = new URL(target.url)
+  globalThis.document = { referrer: '' }
+  let children = 0
+  globalThis.fetch = async (url, options = {}) => {
+    const call = String(url)
+    if (call.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      children += 1
+      return new Response(JSON.stringify({ errorCode: '00000', data: children === 1 ? [] : [{ catalogId: '2089549924576473090', name: '未命名文档' }] }), { status: 200 })
+    }
+    if (call.includes('/teamKnowledge/getAllFileType')) return new Response(JSON.stringify({ errorCode: '00000', data: [{ type: 4, value: 'newword' }] }), { status: 200 })
+    if (call.includes('/teamKnowledge/add')) return new Response('{"errorCode":"00000","data":{"id":2089549924576473090}}', { status: 200 })
+    if (call.endsWith('/teamKnowledgeCatalog/rename')) {
+      assert.deepEqual(JSON.parse(options.body), { id: '2089549924576473090', name: 'Migrated document' })
+      return new Response(JSON.stringify({ errorCode: '20001' }), { status: 200 })
+    }
+    throw new Error(`unexpected fetch: ${call}`)
+  }
+  const harness = await loadBackground({ execute: async ({ func, args }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: documentParent }
+    if (func.name === 'createTeamDocInPage') return func(...args)
+    throw new Error(`body write must not run: ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(createRequest({ requestId: 'rename-business-failure', parent: documentParent }))
+    assert.equal(response.result.status, 'partial_delivery')
+    assert.equal(response.result.failedAt, 'rediscover')
+    assert.equal(response.result.error, 'team_doc_rename_failed')
+    assert.deepEqual(response.result.stages, ['parent_inspected'])
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
+  }
+})
+
 test('checks for an exact-name conflict before calling the create endpoint', async () => {
   const originalFetch = globalThis.fetch
   const originalLocation = globalThis.location
@@ -425,11 +586,20 @@ test('recovery page execution only rediscoveries the exact id and never posts cr
   const originalLocation = globalThis.location
   const calls = []
   let responseData = { list: [{ catalogId: '9007199254740995', name: 'Anything else' }] }
+  let renamed = false
   globalThis.location = new URL(target.url)
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), method: options.method ?? 'GET', options })
     if (String(url) === legacyListPath) return new Response('not found', { status: 404 })
-    if (String(url) === openApiListPath) return new Response(JSON.stringify({ errorCode: '00000', data: responseData }), { status: 200 })
+    if (String(url).endsWith('/teamKnowledgeCatalog/rename')) {
+      assert.deepEqual(JSON.parse(options.body), { id: '9007199254740995', name: 'Migrated document' })
+      renamed = true
+      return new Response(JSON.stringify({ errorCode: '00000', data: null }), { status: 200 })
+    }
+    if (String(url) === openApiListPath) {
+      const data = renamed ? JSON.parse(JSON.stringify(responseData).replaceAll('Anything else', 'Migrated document')) : responseData
+      return new Response(JSON.stringify({ errorCode: '00000', data }), { status: 200 })
+    }
     throw new Error(`unexpected fetch: ${String(url)}`)
   }
   const harness = await loadBackground({ execute: async ({ func, args }) => {
@@ -451,16 +621,51 @@ test('recovery page execution only rediscoveries the exact id and never posts cr
     ].flat()
     for (const [index, variant] of payloadVariants.entries()) {
       responseData = variant.data
+      renamed = false
       const response = await harness.sendNative(createRequest({ requestId: `rediscover-only-${index}`, recovery: {
         documentId: '9007199254740995', stages: ['parent_inspected', 'created'],
       } }))
       assert.equal(response.result.status, 'verified_write', variant.label)
     }
-    const listCalls = calls.filter((call) => call.method === 'POST')
-    assert.equal(listCalls.length, payloadVariants.length)
+    const listCalls = calls.filter((call) => call.url === openApiListPath)
+    assert.equal(listCalls.length, payloadVariants.length * 2)
     listCalls.forEach((call) => assertOpenApiListRequest(call))
     assert.equal(calls.some((call) => call.url === legacyListPath), false)
     assert.equal(calls.some((call) => call.url.includes('/teamKnowledge/add')), false)
+    assert.equal(calls.filter((call) => call.url.endsWith('/teamKnowledgeCatalog/rename')).length, payloadVariants.length)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
+test('recovery reads the approved parent before rename and never renames a missing or already-correct child', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  globalThis.location = new URL(target.url)
+  let records = [{ catalogId: '9007199254740995', name: 'Migrated document' }]
+  let renames = 0
+  globalThis.fetch = async (url) => {
+    const call = String(url)
+    if (call === openApiListPath) return new Response(JSON.stringify({ errorCode: '00000', data: { records } }), { status: 200 })
+    if (call.endsWith('/teamKnowledgeCatalog/rename')) { renames += 1; return new Response(JSON.stringify({ errorCode: '00000' }), { status: 200 }) }
+    throw new Error(`unexpected fetch: ${call}`)
+  }
+  const harness = await loadBackground({ execute: async ({ func, args }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent }
+    if (func.name === 'rediscoverTeamDocInPage') return func(...args)
+    return { ok: true, readbackMatches: true, observedBody: 'Migrated document' }
+  } })
+  try {
+    const correct = await harness.sendNative(createRequest({ requestId: 'recovery-correct-name', recovery: { documentId: '9007199254740995', stages: ['parent_inspected', 'created'] } }))
+    assert.equal(correct.result.status, 'verified_write')
+    assert.equal(renames, 0)
+    records = []
+    const missing = await harness.sendNative(createRequest({ requestId: 'recovery-missing-id', recovery: { documentId: '9007199254740995', stages: ['parent_inspected', 'created'] } }))
+    assert.equal(missing.result.status, 'partial_delivery')
+    assert.equal(missing.result.error, 'team_doc_rediscover_mismatch')
+    assert.equal(renames, 0)
   } finally {
     harness.cleanup()
     globalThis.fetch = originalFetch
@@ -567,6 +772,187 @@ test('resolves a detail-document URL to its real directory parent before create'
   }
 })
 
+test('uses a verified current light document as the Team Knowledge parent without ascending its directory', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const calls = []
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    calls.push({ path: parsed.pathname, search: parsed.search, options })
+    const catalogId = parsed.searchParams.get('catalogId')
+    if (parsed.pathname === sourceDocumentPath && catalogId === detailDocumentId) {
+      assertBusinessSystemHeader(options)
+      return new Response(`{"errorCode":"00000","data":{"catalogId":${detailDocumentId},"parentId":${detailParentId},"bookId":${detailBookId},"fileType":"newword","name":"Current light document"}}`, { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission') && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId') || parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      assert.equal(options.method, 'POST')
+      if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId')) assertBusinessSystemHeader(options)
+      assert.deepEqual(JSON.parse(options.body), { bookId: detailBookId, parentId: detailDocumentId })
+      return new Response(JSON.stringify({ errorCode: '00000', data: [] }), { status: 200 })
+    }
+    throw new Error(`must not ascend to the directory: ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  try {
+    const inspected = await harness.sendNative(inspectRequest({ requestId: 'detail-current-document', browserTarget: detailTarget }))
+    assert.equal(inspected.result.error, undefined)
+    assert.equal(inspected.result.parent.parentId, detailDocumentId)
+    assert.equal(inspected.result.parent.bookId, detailBookId)
+    assert.equal(inspected.result.parent.parentName, 'Current light document')
+    assert.equal(inspected.result.parent.parentType, 'document')
+    assert.equal(calls.some((call) => call.search === `?catalogId=${detailParentId}`), false)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
+test('derives a current light document bookId before accepting it as the Team Knowledge parent', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const calls = []
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    calls.push({ path: parsed.pathname, search: parsed.search, options })
+    const catalogId = parsed.searchParams.get('catalogId')
+    if (parsed.pathname === sourceDocumentPath && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: detailDocumentId, parentId: detailParentId, fileType: 4, name: 'Current light document' } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getBookId') && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { bookId: detailBookId } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission') && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId') || parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      assert.deepEqual(JSON.parse(options.body), { bookId: detailBookId, parentId: detailDocumentId })
+      return new Response(JSON.stringify({ errorCode: '00000', data: [] }), { status: 200 })
+    }
+    throw new Error(`must not ascend to the directory: ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  try {
+    const inspected = await harness.sendNative(inspectRequest({ requestId: 'detail-current-document-derived-book', browserTarget: detailTarget }))
+    assert.equal(inspected.result.parent.parentId, detailDocumentId)
+    assert.equal(inspected.result.parent.bookId, detailBookId)
+    assert.equal(calls.some((call) => call.path.endsWith('/teamKnowledgeCatalog/getBookId') && call.search === `?catalogId=${detailDocumentId}`), true)
+    assert.equal(calls.some((call) => call.search === `?catalogId=${detailParentId}`), false)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
+test('includes redacted current-document probe attempts when directory fallback also fails', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    const catalogId = parsed.searchParams.get('catalogId')
+    if (parsed.pathname === sourceDocumentPath && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: detailDocumentId, parentId: detailParentId, bookId: detailBookId, fileType: 4, name: 'Current light document' } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission') && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId') || parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      return new Response(JSON.stringify({ errorCode: '20001', errorMsg: 'SECRET-CHILDREN-BODY' }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledge/get') && catalogId === detailParentId) {
+      return new Response(JSON.stringify({ errorCode: '20001', errorMsg: 'SECRET-INTERNAL-BODY' }), { status: 200 })
+    }
+    if (parsed.pathname === sourceDocumentPath && catalogId === detailParentId) {
+      return new Response(JSON.stringify({ errorCode: '20001', errorMsg: 'SECRET-OPENAPI-BODY' }), { status: 200 })
+    }
+    throw new Error(`unexpected fetch: ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  try {
+    const inspected = await harness.sendNative(inspectRequest({ requestId: 'detail-source-diagnostic', browserTarget: detailTarget }))
+    assert.equal(inspected.result.error, 'team_doc_parent_inspection_failed')
+    assert.deepEqual(inspected.result.diagnostic.attempts, [
+      { stage: 'source_openapi', httpStatus: 200, errorCode: '00000' },
+      { stage: 'source_permission', httpStatus: 200, errorCode: '00000' },
+      { stage: 'source_children', httpStatus: 200, errorCode: '20001' },
+      { stage: 'node_internal', httpStatus: 200, errorCode: '20001' },
+      { stage: 'node_openapi', httpStatus: 200, errorCode: '20001' },
+    ])
+    assert.doesNotMatch(JSON.stringify(inspected.result), /SECRET|900719925474099/)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
+test('uses source_catalog light-document metadata after docOnline OpenAPI rejects the source lookup', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    const catalogId = parsed.searchParams.get('catalogId')
+    if (parsed.pathname === sourceDocumentPath && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '20001' }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/get') && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: detailDocumentId, parentId: detailParentId, bookId: detailBookId, fileType: 4, name: 'Current light document' } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission') && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId') || parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: [] }), { status: 200 })
+    }
+    throw new Error(`must not ascend to the directory: ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  try {
+    const inspected = await harness.sendNative(inspectRequest({ requestId: 'detail-source-catalog', browserTarget: detailTarget }))
+    assert.equal(inspected.result.parent.parentId, detailDocumentId)
+    assert.equal(inspected.result.parent.parentType, 'document')
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
+test('uses a trusted WebEdit light-document identity only when source metadata lacks its file type', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    const catalogId = parsed.searchParams.get('catalogId')
+    if (parsed.pathname === sourceDocumentPath && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '20001' }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/get') && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: 'NOT_FOUND' }), { status: 404 })
+    if (parsed.pathname.endsWith('/teamKnowledge/get') && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: detailDocumentId, parentId: detailParentId, name: 'Current light document' } }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getBookId') && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '00000', data: { bookId: detailBookId } }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission') && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }), { status: 200 })
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId') || parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) return new Response(JSON.stringify({ errorCode: '00000', data: [] }), { status: 200 })
+    throw new Error(`must not ascend to the directory: ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget, webeditLightDocument: true, webeditProbeReadyAfter: 3, teamDocProbeWaitMs: 500, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  try {
+    const inspected = await harness.sendNative(inspectRequest({ requestId: 'detail-trusted-light-document', browserTarget: detailTarget }))
+    assert.equal(inspected.result.parent.parentId, detailDocumentId)
+    assert.equal(inspected.result.parent.parentType, 'document')
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
 test('requires a directory parent for a detail-document URL and never enters create', async () => {
   const originalFetch = globalThis.fetch
   const originalLocation = globalThis.location
@@ -647,6 +1033,43 @@ test('falls back to the internal source lookup when docOnline OpenAPI lookup fai
   }
 })
 
+test('accepts an internally verified docOnline light document before unavailable parent-node lookups', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const calls = []
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    const catalogId = parsed.searchParams.get('catalogId')
+    calls.push(`${parsed.pathname}${parsed.search}`)
+    if (parsed.pathname === sourceDocumentPath && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '20001' }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/get') && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '404_NOT_FOUND' }), { status: 404 })
+    if (parsed.pathname.endsWith('/teamKnowledge/get') && catalogId === detailDocumentId) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: detailDocumentId, parentId: detailParentId, name: 'Internal light document' } }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getBookId') && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '00000', data: { bookId: detailBookId } }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission') && catalogId === detailDocumentId) return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      assert.equal(options.method, 'POST')
+      assert.deepEqual(JSON.parse(options.body), { bookId: detailBookId, parentId: detailDocumentId })
+      return new Response(JSON.stringify({ errorCode: '00000', data: [] }), { status: 200 })
+    }
+    throw new Error(`must not inspect an unavailable directory node: ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  try {
+    const inspected = await harness.sendNative(inspectRequest({ requestId: 'detail-internal-source-document', browserTarget: detailTarget }))
+    assert.equal(inspected.result.error, undefined)
+    assert.equal(inspected.result.parent.parentId, detailDocumentId)
+    assert.equal(inspected.result.parent.parentType, 'document')
+    assert.equal(calls.some((call) => call === `/g-kmp/team-knowledge-main/teamKnowledge/get?catalogId=${detailParentId}`), false)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
 test('returns redacted staged diagnostics when both docOnline source lookups fail', async () => {
   const originalFetch = globalThis.fetch
   const originalLocation = globalThis.location
@@ -665,6 +1088,7 @@ test('returns redacted staged diagnostics when both docOnline source lookups fai
       stage: 'source_internal', httpStatus: 503, errorCode: 'INTERNAL_DOWN',
       attempts: [
         { stage: 'source_openapi', httpStatus: 200, errorCode: '20001' },
+        { stage: 'source_catalog', httpStatus: 0, errorCode: null },
         { stage: 'source_internal', httpStatus: 503, errorCode: 'INTERNAL_DOWN' },
       ],
     })
@@ -795,6 +1219,8 @@ test('returns redacted staged diagnostics when a docOnline parent node fails int
     assert.deepEqual(inspected.result.diagnostic, {
       stage: 'node_openapi', httpStatus: 502, errorCode: 'NODE_OPENAPI_DOWN',
       attempts: [
+        { stage: 'source_openapi', httpStatus: 200, errorCode: '00000' },
+        { stage: 'source_book', httpStatus: 0, errorCode: null },
         { stage: 'node_internal', httpStatus: 503, errorCode: 'NODE_INTERNAL_DOWN' },
         { stage: 'node_openapi', httpStatus: 502, errorCode: 'NODE_OPENAPI_DOWN' },
       ],

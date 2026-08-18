@@ -68,6 +68,8 @@ importers:
 
   packages/harness-skill-settings: {}
 
+  packages/harness-tracking: {}
+
   packages/harness-ui-agent-preset: {}
 
   packages/harness-ui-browser-target: {}

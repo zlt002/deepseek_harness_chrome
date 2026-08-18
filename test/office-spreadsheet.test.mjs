@@ -411,3 +411,36 @@ test('batch_write requires a complete rectangle and rejects a forged non-value s
     forge = true; const second = await call(endpoint, { action: 'inspect_write', operation: 'batch_write', payload }); const rejected = await call(endpoint, { action: 'write', challenge: second.result.structuredContent.challenge, idempotencyIdentity: 'batch-forged', resource, operation: 'batch_write', payload }); assert.equal(rejected.result.isError, true)
   } finally { await connector.stop() }
 })
+
+test('forwards a bounded selection read without treating view.supported=false as missing cells', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 42, url: 'https://doc.midea.com/sheets/status' }
+  const resource = { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Status.xlsx', sheetName: 'Sheet1', fingerprint: 'status-sheet' }
+  let forwarded = null
+  const connector = new BrowserConnector({
+    officeSpreadsheetWriteStore: writeStore(),
+    requestExtension: (request) => {
+      forwarded = request
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+        result: request.action === 'used_range'
+          ? { status: 'ok', resource, usedRange: { supported: true, source: 'UsedRange', sheetName: 'Sheet1', address: 'A1:B3', row: 1, column: 1, rowsCount: 3, columnsCount: 2, cellCount: 6, singleCell: false, truncated: false, values: [['状态', '负责人'], ['已完成', '张三'], ['进行中', '李四']], value2: [['状态', '负责人'], ['已完成', '张三'], ['进行中', '李四']], text: [['状态', '负责人'], ['已完成', '张三'], ['进行中', '李四']], formulas: [['', ''], ['', ''], ['', '']] } }
+          : { status: 'ok', resource, selection: { supported: true, source: 'getSelectionRange', sheetName: 'Sheet1', address: 'A2:A3', row: 2, column: 1, rowsCount: 2, columnsCount: 1, cellCount: 2, singleCell: false, truncated: false, values: [['已完成'], ['进行中']], value2: [['已完成'], ['进行中']], text: [['已完成'], ['进行中']], formulas: [[''], ['']], activeCell: { address: 'A2', row: 2, column: 1, value: '已完成', text: '已完成' } } },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('spreadsheet-selection-run', target)
+  const endpoint = await connector.start()
+  try {
+    const invalid = await call(endpoint, { action: 'selection', range: 'A1' })
+    assert.equal(invalid.error.code, -32602)
+    const selected = await call(endpoint, { action: 'selection' })
+    assert.equal(forwarded.action, 'selection')
+    assert.equal(selected.result.structuredContent.selection.address, 'A2:A3')
+    assert.equal(selected.result.structuredContent.selection.singleCell, false)
+    assert.equal(selected.result.structuredContent.selection.value2[1][0], '进行中')
+    const used = await call(endpoint, { action: 'used_range' }, 3)
+    assert.equal(forwarded.action, 'used_range')
+    assert.equal(used.result.structuredContent.usedRange.address, 'A1:B3')
+    assert.equal(used.result.structuredContent.usedRange.value2[2][1], '李四')
+  } finally { await connector.stop() }
+})

@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { bundleHarnessRuntimePlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -745,12 +745,14 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await patchBundledWorkerPaths(bundlePath)
   const nativeBundlePath = path.join(tempDir, 'native-server.mjs')
   const harnessRuntimePluginPath = path.join(tempDir, 'harness-runtime.mjs')
+  const harnessTrackingPluginPath = path.join(tempDir, 'harness-tracking.mjs')
   const pluginManagerPath = path.join(tempDir, 'plugin-manager.mjs')
   const schemasteryPath = path.join(harnessDir, 'vendor', 'schemastery', 'lib', 'index.mjs')
   // The sibling Harness checkout owns the host-native esbuild binary. The
   // extension checkout may have been installed for a different CPU target.
   run('pnpm', ['exec', 'esbuild', nativeServerEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${nativeBundlePath}`], { cwd: PROJECT_ROOT })
-  await bundleHarnessRuntimePlugin({ outfile: harnessRuntimePluginPath, projectRoot: PROJECT_ROOT, harnessRoot: HARNESS_ROOT })
+  await bundleHarnessRuntimePlugin({ outfile: harnessRuntimePluginPath, projectRoot: PROJECT_ROOT })
+  await bundleHarnessTrackingPlugin({ outfile: harnessTrackingPluginPath, projectRoot: PROJECT_ROOT })
   run('pnpm', ['exec', 'esbuild', cliEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${pluginManagerPath}`], { cwd: PROJECT_ROOT })
   await mkdir(path.join(cliDir, 'lib'), { recursive: true })
   // `harness-skill-settings` loads this through DSH_PRODUCT_SCHEMATERY_URL.
@@ -787,6 +789,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await mkdir(path.join(runtimeDir, 'native-server'), { recursive: true })
   await cp(nativeBundlePath, path.join(runtimeDir, 'native-server', 'runtime.mjs'))
   await cp(harnessRuntimePluginPath, path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'))
+  await cp(harnessTrackingPluginPath, path.join(runtimeDir, 'native-server', 'harness-tracking.mjs'))
   await cp(
     path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'),
     path.join(runtimeDir, 'native-server', 'selected-source-routing-prompt.mjs'),

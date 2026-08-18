@@ -27,6 +27,13 @@
 
 .root[data-phase='hero'] .scrollBody { justify-content: flex-end; }
 
+/* Provider reasoning is not a user-facing answer and can arrive in the
+   provider's default language before the product routing prompt takes effect.
+   Keep it in the durable session/trajectory record, but never expose its raw
+   prose in the compact product conversation. Tool rows and their exact error
+   bodies remain visible. */
+.root :global([data-variant='think']) { display: none; }
+
 /* The slot runtime gives its public anchor an inline `display: contents`, so a
    product-owned seat is the reliable presentation boundary.  Compact chrome
    already identifies the Session and owns view actions; hide the repeated
@@ -60,6 +67,14 @@
   --dsh-composer-text-max-height: 336px;
 }
 
+/* The official hero stack centers its title and glow with a 32px foot. Its
+   public slot and chain wrappers are `display: contents`, so reach the actual
+   composer root through those stable attributes and directly give the whole
+   scope-strip-plus-card chain active's 8px dock inset. */
+.root[data-phase='hero'] > :global([data-composer-seat]) > :global([data-slot='conversation.composer']) > :global([data-chain-overlay-fallback='conversation.composer']) > * {
+  padding-bottom: var(--dsh-composer-dock-inset);
+}
+
 .root[data-phase='settling'] > :global([data-composer-seat]) { visibility: hidden; }
 
 /* ComposerOverlay is a generic upstream service. Its stable attributes expose
@@ -68,6 +83,10 @@
 :global([data-composer-overlay-surface]) {
   position: relative;
   z-index: 8;
+  /* The upstream anchor is intentionally layout-neutral, so align-self alone
+     cannot center this block.  Auto inline margins keep its center and side
+     clearance identical to the composer card in every parent display mode. */
+  margin-inline: auto;
   align-self: center;
   width: min(
     var(--dsh-composer-card-max-width),
@@ -82,9 +101,12 @@
   position: absolute;
   right: auto;
   left: 0;
-  width: 100%;
   max-width: none;
   transform: none;
+}
+
+:global([data-composer-overlay-surface]) > [role='dialog'] {
+  width: 100%;
 }
 
 :global([data-composer-overlay-surface]) > [role='menu'] {
@@ -93,18 +115,22 @@
   max-height: min(500px, calc(100vh - 144px));
 }
 
-/* PermissionSelect's compact host panel is deliberately structural: the
-   upstream component exports menu/menuitem semantics but no product CSS.  Keep
-   the exact e327 6px sheet and 34px option geometry, while leaving the Agent
-   mode radio-grid (menuitemradio) untouched. */
-:global([data-composer-overlay-surface]) > [role='menu']:has(> [role='menuitem']) {
+/* Compact composer menus are semantically identifiable by direct action rows.
+   ModelSelect has its own stable host marker because it renders beside the
+   shared surface. Dialogs deliberately stay outside this class so context,
+   code, and knowledge panels remain card-wide. */
+:global([data-composer-overlay-surface]) > [role='menu']:has(> [role='menuitem']),
+:global([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu']) {
   display: flex;
+  flex-direction: column;
   box-sizing: border-box;
+  width: min(240px, calc(100vw - 32px));
   padding: 6px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 14px;
   background: var(--dsw-specific-menu);
   box-shadow: var(--dsw-shadow-lv3);
+  overflow: hidden;
 }
 
 :global([data-composer-overlay-surface]) > [role='menu'] > [role='menuitem'] {
@@ -144,15 +170,13 @@
 
 :global([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu']) {
   position: absolute;
-  right: auto;
+  right: 0;
   bottom: calc(100% + 8px);
-  left: 0;
+  left: auto;
   z-index: 100;
-  width: 100%;
   max-width: none;
   max-height: min(500px, calc(100vh - 144px));
   height: auto;
-  overflow: hidden;
 }
 
 /* e327 keeps the new-session permission picker color-first: a 28px shield

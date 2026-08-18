@@ -11,22 +11,35 @@ const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://doc.mid
 const parent = { parentId: '9', bookId: '10', parentName: 'Root', parentType: 'directory', canRead: true, canCreate: true, fingerprint: 'parent-batch-v1' }
 const documents = [{ name: 'One', body: '# One\nsecret one' }, { name: 'Two', body: '# Two\nsecret two' }]
 
+// Matches Harness's current model-facing projection: it reads only top-level
+// properties and required fields, ignoring JSON Schema composition such as oneOf.
+function harnessProjectedArguments(schema) {
+  return { required: schema.required ?? [], properties: Object.keys(schema.properties ?? {}).sort() }
+}
+
 function verified(request, id) {
   return { status: 'verified_write', item: { catalogId: id, kind: 'light_document', name: request.name, url: `https://doc.midea.com/teamKnowledge/detail/docOnline/${id}?id=${id}`, fingerprint: `item-${id}` }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readback: { body: request.body } }
 }
 
-async function open(responder) {
+async function open(responder, responseTarget = (request) => request.browserTarget) {
   const directory = await mkdtemp(join(tmpdir(), 'team-knowledge-batch-'))
   const batchStore = new TeamKnowledgeBatchRecordStore({ recordPath: join(directory, 'batch.json') })
   const teamDocStore = new TeamDocRecordStore({ recordPath: join(directory, 'items.json') })
   let connector
-  connector = new BrowserConnector({ teamKnowledgeBatchStore: batchStore, teamDocStore, requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
-    type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result: responder(request),
-  })) })
+  const requests = []
+  connector = new BrowserConnector({ teamKnowledgeBatchStore: batchStore, teamDocStore, requestExtension: (request) => {
+    requests.push(request)
+    queueMicrotask(() => {
+      const resolvedTarget = typeof responseTarget === 'function' ? responseTarget(request) : responseTarget
+      if (request.action === 'inspect_parent') connector.bindBrowserTarget(request.runId, resolvedTarget)
+      connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: resolvedTarget, result: responder(request) })
+    })
+  } })
   connector.bindBrowserTarget('batch-run', target)
   const endpoint = await connector.start()
-  const call = async (id, arguments_) => (await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'team_knowledge_batch', arguments: arguments_ } }) })).json()
-  return { connector, batchStore, teamDocStore, directory, call }
+  const callTool = async (name, id, arguments_) => (await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_ } }) })).json()
+  const call = (id, arguments_) => callTool('team_knowledge_batch', id, arguments_)
+  return { connector, batchStore, teamDocStore, directory, requests, call, callTool }
 }
 
 async function preview(harness, batchId, items = documents, id = 1) { return harness.call(id, { action: 'preview', batchId, parentFingerprint: parent.fingerprint, items }) }
@@ -37,13 +50,18 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, String(++creates)))
   try {
     const list = await fetch(`${harness.connector.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${harness.connector.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'tools/list', params: {} }) })
-    const tool = (await list.json()).result.tools.find((candidate) => candidate.name === 'team_knowledge_batch')
-    assert.deepEqual(tool.inputSchema.properties.action.enum, ['inspect_parent', 'preview', 'create', 'status'])
-    assert.equal(tool.inputSchema.properties.items.maxItems, 10)
-    const plan = await preview(harness, 'batch-success'); const result = await create(harness, 'batch-success', plan.result.structuredContent.challenge)
+    const tools = (await list.json()).result.tools
+    const previewTool = tools.find((candidate) => candidate.name === 'team_knowledge_batch_preview')
+    const createTool = tools.find((candidate) => candidate.name === 'team_knowledge_batch_create')
+    assert.equal(tools.some((candidate) => candidate.name === 'team_knowledge_batch'), false)
+    assert.deepEqual(harnessProjectedArguments(previewTool.inputSchema), { required: ['batchId', 'items'], properties: ['batchId', 'items'] })
+    assert.equal(previewTool.inputSchema.properties.items.maxItems, 10)
+    assert.deepEqual(harnessProjectedArguments(createTool.inputSchema), { required: ['batchId', 'challenge', 'items'], properties: ['batchId', 'challenge', 'items'] })
+    const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'batch-success', items: documents })
+    const result = await harness.callTool('team_knowledge_batch_create', 2, { batchId: 'batch-success', challenge: plan.result.structuredContent.challenge, items: documents })
     assert.equal(result.result.structuredContent.status, 'verified_write')
     assert.deepEqual(result.result.structuredContent.batch.items.map((item) => item.status), ['created', 'created'])
-    const status = await harness.call(3, { action: 'status', batchId: 'batch-success' })
+    const status = await harness.callTool('team_knowledge_batch_status', 3, { batchId: 'batch-success' })
     assert.equal(status.result.structuredContent.batch.status, 'completed'); assert.equal(creates, 2)
     const raw = await readFile(harness.batchStore.recordPath, 'utf8'); const itemRaw = await readFile(harness.teamDocStore.recordPath, 'utf8')
     assert.doesNotMatch(raw, /secret one|secret two|"body"/); assert.doesNotMatch(itemRaw, /secret one|secret two|"body"|observedBody/)
@@ -121,5 +139,26 @@ test('binds batch status to the current Run Browser Target and parent', async ()
     const response = await harness.call(9, { action: 'status', batchId: 'batch-status-target' })
     assert.equal(response.result.isError, true)
     assert.match(response.result.content[0].text, /target_mismatch/i)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('uses the inspect-migrated Browser Target for batch grants, fingerprints, and every create', async () => {
+  const migrated = { browser: 'chrome', windowId: 1, tabId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9?id=9' }
+  let creates = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : verified(request, String(++creates)), migrated)
+  try {
+    const inspected = await harness.call(1, { action: 'inspect_parent' })
+    assert.deepEqual(inspected.result.structuredContent.browserTarget, migrated)
+    const plan = await preview(harness, 'migrated-batch', documents, 2)
+    assert.deepEqual(plan.result.structuredContent.browserTarget, migrated)
+    const created = await create(harness, 'migrated-batch', plan.result.structuredContent.challenge, documents, 3)
+    assert.equal(created.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(created.result.structuredContent.browserTarget, migrated)
+    const record = await harness.batchStore.load('migrated-batch')
+    assert.match(record.targetFingerprint, /^[a-f0-9]{64}$/)
+    assert.equal(creates, 2)
+    assert.ok(harness.requests.every((request) => request.action === 'inspect_parent' || request.browserTarget.url === migrated.url))
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })

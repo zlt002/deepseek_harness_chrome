@@ -38,7 +38,7 @@
     // argument and returns the entire worksheet; build an exact internal range from
     // numeric bounds when the Midea-specific constructors are available.
     if (sheet && typeof sheet.createRANGE === 'function' && typeof sheet.createRange === 'function') {
-      const core = await call(sheet, 'createRANGE', [parsed.firstRow, parsed.firstRow + parsed.rowCount - 1, parsed.firstColumn, parsed.firstColumn + parsed.columnCount - 1])
+      const core = await call(sheet, 'createRANGE', [parsed.firstRow - 1, parsed.firstRow + parsed.rowCount - 2, parsed.firstColumn - 1, parsed.firstColumn + parsed.columnCount - 2])
       range = core ? await call(sheet, 'createRange', [core]) : undefined
     }
     range = range ?? await call(sheet, 'getRange', [rangeAddress]) ?? await call(sheet, 'Range', [rangeAddress])

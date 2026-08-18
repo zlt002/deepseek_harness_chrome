@@ -28,6 +28,28 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(presentation, /owner\.renderComposer\(\)/)
   assert.match(css, /:global\(\[data-composer-seat\]\)/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)/)
+  // The upstream hero stack carries a 32px centering foot while the active
+  // InputBar owns the 8px dock inset. The product presentation keeps the hero
+  // title/glow centered, but the complete composer chain must directly use the
+  // same dock inset through the public slot and chain wrappers. Both wrappers
+  // are `display: contents`, so a shallow seat child selector cannot style the
+  // actual composer root.
+  assert.match(css, /--dsh-composer-dock-inset:\s*8px/)
+  assert.doesNotMatch(
+    css,
+    /\.root\[data-phase='hero'\]\s*>\s*:global\(\[data-composer-seat\]\)\s*>\s*\*\s*\{/,
+    'hero must not stop at the display:contents composer slot wrapper',
+  )
+  assert.match(
+    css,
+    /\.root\[data-phase='hero'\]\s*>\s*:global\(\[data-composer-seat\]\)\s*>\s*:global\(\[data-slot='conversation\.composer'\]\)\s*>\s*:global\(\[data-chain-overlay-fallback='conversation\.composer'\]\)\s*>\s*\*\s*\{[\s\S]*?padding-bottom:\s*var\(--dsh-composer-dock-inset\)/,
+    'hero must directly override the generated 32px centering foot on the composer root after its display:contents slot and chain wrappers',
+  )
+  assert.match(
+    css,
+    /\.root\s+:global\(\[data-variant='think'\]\)\s*\{[\s\S]*?display:\s*none/,
+    'product conversation chrome must hide provider reasoning instead of exposing English reasoning text',
+  )
   // The slot anchor carries an inline display value, so the product hides its
   // own seat in compact mode instead of trying to override upstream markup.
   assert.match(css, /\.headerSeat\s*\{\s*display: contents;\s*\}/)
@@ -44,17 +66,31 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     /calc\(100% - var\(--dsh-composer-side-clearance\) - var\(--dsh-composer-side-clearance\)\)/,
     'Chrome must receive valid subtraction so the shared overlay stays card-wide instead of shrink-to-fit',
   )
+  assert.match(
+    css,
+    /:global\(\[data-composer-overlay-surface\]\)\s*\{[\s\S]*?margin-inline:\s*auto/,
+    'the shared overlay surface must center itself independently of its unstyled upstream anchor',
+  )
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\) > \[role='dialog'\],[\s\S]*:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\][\s\S]*position: absolute/)
   assert.match(
     css,
     /\[role='dialog'\],[\s\S]*\[role='menu'\][\s\S]*transform:\s*none/,
     'the full-card host must clear trigger-centered transforms or only half the chooser remains visible',
   )
-  // e327's permission and agent-mode sheets always rise above the card.  The
-  // product owns this presentation rule because the upstream provider merely
-  // supplies one active overlay at a time.
+  // `dialog` is the intentionally card-wide class (context/code/knowledge).
+  // Compact menus are classified by their menu semantics and direct action
+  // rows, not by a fuzzy dialog descendant selector.
+  assert.match(css, /:global\(\[data-composer-overlay-surface\]\) > \[role='dialog'\][\s\S]*width:\s*100%/)
+  assert.match(
+    css,
+    /:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\]:has\(> \[role='menuitem'\]\)[\s\S]*width:\s*min\(240px, calc\(100vw - 32px\)\)/,
+    'permission menus must remain compact instead of inheriting card-wide width',
+  )
+  // e327's permission sheets always rise above the card. The product owns
+  // this presentation rule because the upstream provider merely supplies one
+  // active overlay at a time.
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\][\s\S]*bottom: calc\(100% \+ 8px\)[\s\S]*z-index: 100/)
-  assert.match(css, /\[role='menu'\]:has\(> \[role='menuitem'\]\)[\s\S]*padding: 6px[\s\S]*border-radius: 14px/)
+  assert.match(css, /\[role='menu'\]:has\(> \[role='menuitem'\]\)[\s\S]*padding: 6px[\s\S]*border-radius: 14px[\s\S]*box-shadow: var\(--dsw-shadow-lv3\)/)
   assert.match(css, /\[role='menuitem'\][\s\S]*min-height: 34px[\s\S]*font-size: 13px/)
   assert.match(css, /\[role='menuitem'\]\[aria-checked='true'\][\s\S]*interactive-bg-hover/)
   // The hero permission chip remains icon-first and preserves the old
@@ -70,10 +106,24 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     /\.root\s+:global\(\[data-composer-overlay-host\]\)[\s\S]*position: static/,
     'the product root must raise host specificity above ModelSelect .root regardless of bundle order',
   )
-  assert.match(css, /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*width: 100%/)
   assert.match(
     css,
-    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*height: auto[\s\S]*overflow: hidden/,
+    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*width:\s*min\(240px, calc\(100vw - 32px\)\)/,
+    'the model menu must use the same compact width contract as permission menus',
+  )
+  assert.match(
+    css,
+    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*right:\s*0[\s\S]*left:\s*auto/,
+    'the model menu must attach to the card right edge after its host stops positioning around the tiny trigger',
+  )
+  assert.match(
+    css,
+    /:global\(\[data-composer-overlay-surface\]\) > \[role='menu'\]\s*\{[\s\S]*?right:\s*auto[\s\S]*?left:\s*0/,
+    'permission menus must keep their card-left attachment',
+  )
+  assert.match(
+    css,
+    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*height: auto/,
     'the model menu itself carries the generic surface marker, so it must undo the shared zero-height anchor geometry',
   )
   assert.match(overlayHostSeam, /data-composer-overlay-host=\{overlay\.available \|\| undefined\}/)

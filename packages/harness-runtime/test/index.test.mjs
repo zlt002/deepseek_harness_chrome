@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { apply, partitionTools, publicToolName, sessionMeta } from '../src/index.mjs'
+import { apply, createSelectedSourceDispatchGuard, partitionTools, publicToolName, sessionMeta } from '../src/index.mjs'
 
 test('separates only configured raw MCP names into the continuable-child scope', () => {
   const tools = new Map([
@@ -27,15 +27,39 @@ test('keeps public names deterministic and within Harness function-name limits',
   assert.equal(name, publicToolName('chrome', 'search/with spaces and a deliberately very long name that exceeds the limit'))
 })
 
+test('admits only one selected-source child and rejects generic delegation after scope discovery in the same parent turn', () => {
+  const guard = createSelectedSourceDispatchGuard()
+  const exec = (name, turn) => ({
+    name,
+    agent: { id: 'parent-1', session: { events: [{ type: 'turn/start', data: { turn } }] } },
+  })
+
+  assert.equal(guard(exec('mcp__chrome__selected_source_scope', 1)), undefined)
+  assert.match(guard(exec('subagent', 1)), /所选远程范围/)
+  assert.equal(guard(exec('search_selected_remote_code', 1)), undefined)
+  assert.match(guard(exec('search_selected_remote_code', 1)), /已启动一个检索子代理/)
+  assert.equal(guard(exec('search_selected_remote_code', 2)), undefined)
+
+  const directSearchGuard = createSelectedSourceDispatchGuard()
+  assert.equal(directSearchGuard(exec('search_selected_remote_code', 3)), undefined)
+  assert.match(directSearchGuard(exec('subagent', 3)), /所选远程范围/)
+})
+
 function toolRegistry() {
   const registered = new Map()
+  const guards = new Set()
   return {
     registered,
+    guards,
     register(definition) {
       registered.set(definition.name, definition)
       return () => {
         if (registered.get(definition.name) === definition) registered.delete(definition.name)
       }
+    },
+    guard(guard) {
+      guards.add(guard)
+      return () => { guards.delete(guard) }
     },
   }
 }

@@ -7,6 +7,11 @@ import { OfficeDocumentWriteRecordStore } from './office-document-write-record-s
 import { OfficeSpreadsheetWriteRecordStore } from './office-spreadsheet-write-record-store.mjs'
 
 const REQUEST_TIMEOUT_MS = 15_000
+// A Team Knowledge write includes navigation, editor-frame readiness, write
+// readback, and restoration of the parent page. Those are legitimate browser
+// operations, not a long-running knowledge retrieval. Batch and PMD delivery
+// issue one Extension request per item, so this cap applies per item.
+const TEAM_KNOWLEDGE_WRITE_REQUEST_TIMEOUT_MS = 120_000
 const KNOWLEDGE_REQUEST_TIMEOUT_MS = 30 * 60_000
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
 const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 60_000
@@ -16,7 +21,7 @@ const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
 const MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES = 128 * 1024
 // Operations without a stable public API and operation-specific readback are
 // deliberately absent. Accepting them and failing after a mutation is unsafe.
-const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace']
+const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_blocks_replace']
 
 function spreadsheetArtifactSummary(result) {
   const artifact = result?.observed?.artifact
@@ -193,7 +198,7 @@ const officeContextSchema = {
 const officeGetContextTool = {
   name: 'office_get_context',
   title: 'Get Office context',
-  description: 'Read the trusted browser context bound to this Harness Run. In fixed-tab mode it returns every selected available page, marks the primary page, and reports selected pages that closed or changed. When multiple pages are returned, treat all of them as the current context and enumerate or use all of them unless the user explicitly asks only for the primary page. The model cannot select tabs. documentIdentity reports the probed WebEdit editor of each page: kind webedit_spreadsheet means call office_spreadsheet (view reports the selected cell), kind webedit_light_document means call office_document. A Team Knowledge light-document page can also preload a blank spreadsheet iframe; a blank spreadsheet next to a ready light document is reported as webedit_light_document, not a spreadsheet. null only means no webedit frame answered ready yet, so a null on a freshly loaded page should be retried with the specific office tool rather than read as "no document".',
+  description: 'Read the trusted browser context bound to this Harness Run. In fixed-tab mode it returns every selected available page, marks the primary page, and reports selected pages that closed or changed. When multiple pages are returned, treat all of them as the current context and enumerate or use all of them unless the user explicitly asks only for the primary page. The model cannot select tabs. documentIdentity reports the probed WebEdit editor of each page: kind webedit_spreadsheet means call office_spreadsheet (action=selection reports the selected cells; view is only freeze/zoom), kind webedit_light_document means call office_document. A Team Knowledge light-document page can also preload a blank spreadsheet iframe; a blank spreadsheet next to a ready light document is reported as webedit_light_document, not a spreadsheet. null only means no webedit frame answered the quick probe yet, so retry office_spreadsheet context or selection rather than read as "no document" or "no selected cells".',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -276,7 +281,7 @@ const lightDocumentResourceSchema = {
 
 const officeDocumentTool = {
   name: 'office_document', title: 'Read or edit light document',
-  description: 'Use this dispatch only for a bound WebEdit light document, never for spreadsheets. Reads are bounded. inspect_write is never a bare action: it always takes the final operation plus the exact payload that write will reuse, then returns a one-time challenge. write supplies that challenge, a new idempotencyIdentity, and the same operation/payload; the extension rechecks the document fingerprint and reads back the result. Empty documents report blockCount 0 and have no replaceable public block — do not call replace, blocks_replace, or blocks_batch_edit. To write body content into an empty document: first call action=selection, copy document.selection.selectionFingerprint, inspect_write with operation=selection_insert and payload {text|markdown|html, expectedSelectionFingerprint}, then write the same payload once; or inspect_write with operation=blocks_insert and payload {position:"end", blocks:[...]} / operation=insert_drawing and payload {mermaid}. Flowcharts, sequence diagrams, and pie charts are native text drawings: insert_drawing with Mermaid source (flowchart TD, sequenceDiagram, pie), not images. blocks_insert accepts h1-h6, p, blockquote, ul/ol items, table rows, and codeblock/mermaid. selection_replace edits the current non-collapsed selection and requires the same expectedSelectionFingerprint contract as selection_insert. replace/delete/format/blocks_* require an existing public block id or index from a prior read. set_title/title change only the document title.',
+  description: 'Legacy dispatch for a bound WebEdit light document, never a spreadsheet. For selected-content optimization and replacement, prefer light_document_selection_read plus light_document_selection_replace_preview/commit: those flat tools prevent parameter guessing and preserve the approved structured payload. This dispatch remains for insert/delete/format and existing callers. Every write is bound to the Browser Target, resource fingerprint, one-time approval, and same-target readback.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['action'],
@@ -297,12 +302,42 @@ const officeDocumentTool = {
   },
 }
 
+const lightDocumentBlockSchema = { type: 'object', additionalProperties: false, properties: {
+  type: { enum: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'blockquote', 'ul', 'ol', 'table', 'codeblock'] },
+  text: { type: 'string', maxLength: 20000 }, markdown: { type: 'string', maxLength: 20000 }, html: { type: 'string', maxLength: 20000 },
+  items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1, maxLength: 20000 } },
+  rows: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'string', maxLength: 2000 } } },
+  language: { type: 'string', minLength: 1, maxLength: 32 },
+} }
+const lightDocumentReadTool = {
+  name: 'light_document_read', title: 'Read light document',
+  description: 'Read a bounded page of the light document on this Browser Target. No target, tab, frame, or resource is model-controlled.',
+  inputSchema: { type: 'object', additionalProperties: false, properties: { offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } } },
+}
+const lightDocumentSelectionReadTool = {
+  name: 'light_document_selection_read', title: 'Read selected light-document content',
+  description: 'Read the current light-document selection and its stable fingerprint. Use immediately before preparing a replacement.',
+  inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+}
+const lightDocumentSelectionReplacePreviewTool = {
+  name: 'light_document_selection_replace_preview', title: 'Preview selected-content replacement',
+  description: 'Preview a rich replacement for the current complete multi-block selection. Supply only the desired blocks. This reads the selection, binds its fingerprint, checks the Browser Target, and returns a one-time approval challenge. It does not write.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['blocks'], properties: { blocks: { type: 'array', minItems: 1, maxItems: 50, items: lightDocumentBlockSchema } } },
+}
+const lightDocumentSelectionReplaceCommitTool = {
+  name: 'light_document_selection_replace_commit', title: 'Commit approved selected-content replacement',
+  description: 'After user approval, commit exactly the structured replacement captured by preview. This tool intentionally accepts only the one-time challenge: the approved body and internal write identity are not model-controlled. On any failure, stop and report the exact error; do not retry through office_document or blocks_batch_edit. Success requires an atomic write and same-target structural readback.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['challenge'], properties: { challenge: { type: 'string', minLength: 1, maxLength: 256 } } },
+}
+
 const officeSpreadsheetTool = {
   name: 'office_spreadsheet', title: 'Read or edit spreadsheet',
-  description: 'Use only for a bound WebEdit spreadsheet. Reads return bounded context, ranges, searches, or sheet lists. Any mutation first obtains a one-time inspect_write challenge; its operation, payload, Browser Target, and workbook fingerprint are revalidated and the same frame is read back.',
+  description: 'Use only for a bound WebEdit spreadsheet. Reads return bounded context, the current selection, the used range, ranges, searches, or sheet lists. action=selection is AccrUI webedit_get_selection: it returns address, rowsCount, columnsCount, value2, and the active cell even when view.supported is false. action=used_range is AccrUI webedit_get_used_range. Do not treat view.supported=false as "no selection". office_get_context documentIdentity=null only means no webedit frame answered the quick probe; retry office_spreadsheet context or selection instead of telling the user the editor is missing. Any mutation first obtains a one-time inspect_write challenge; its operation, payload, Browser Target, and workbook fingerprint are revalidated and the same frame is read back.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
-    action: { enum: ['context', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, axis: { enum: ['row', 'column'] }, kind: { enum: ['blanks', 'constants', 'formulas', 'lastCell', 'visible'] }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
+    action: { enum: ['context', 'selection', 'used_range', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, axis: { enum: ['row', 'column'] }, kind: { enum: ['blanks', 'constants', 'formulas', 'lastCell', 'visible'] }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
     challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
     operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'fill_range', 'batch_write', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'set_zoom', 'set_freeze_panes', 'set_print_settings', 'set_outline_group', 'set_rows_hidden', 'set_columns_hidden', 'auto_fit', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility'] }, payload: { type: 'object', additionalProperties: true },
   } },
@@ -316,28 +351,72 @@ const teamDocCreateTool = {
 }
 
 const teamKnowledgeItemTool = {
-  name: 'team_knowledge_item', title: 'Create or verify a Team Knowledge child item',
-  description: 'Use the bound Chrome Team Knowledge catalog only. Inspect the real parent first, preview one named light document or spreadsheet to obtain a one-time approval grant, then create exactly that item. Creation succeeds only after business success, parent rediscovery, and item readback.',
+  name: 'team_knowledge_item', title: 'Create or verify one Team Knowledge spreadsheet',
+  description: 'Legacy compatibility endpoint retained for existing callers. It is not model-facing; models use the flat team_knowledge_spreadsheet_* tools for a spreadsheet or team_knowledge_batch_* tools for light documents.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: {
-    type: 'object', additionalProperties: false, required: ['action'],
-    properties: {
-      action: { enum: ['inspect_parent', 'preview', 'create', 'readback'] },
-      parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 },
-      kind: { enum: ['light_document', 'spreadsheet'] }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 },
-      challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, catalogId: { type: 'string', pattern: '^\\d+$' },
-    },
-  },
+  inputSchema: { type: 'object', oneOf: [
+    { type: 'object', additionalProperties: false, required: ['action'], properties: { action: { const: 'inspect_parent' } } },
+    { type: 'object', additionalProperties: false, required: ['action', 'parentFingerprint', 'kind', 'name', 'body'], properties: { action: { const: 'preview' }, parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 }, kind: { const: 'spreadsheet' }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
+    { type: 'object', additionalProperties: false, required: ['action', 'challenge', 'idempotencyIdentity', 'kind', 'name', 'body'], properties: { action: { const: 'create' }, challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, kind: { const: 'spreadsheet' }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
+    { type: 'object', additionalProperties: false, required: ['action', 'kind', 'catalogId'], properties: { action: { const: 'readback' }, kind: { const: 'spreadsheet' }, catalogId: { type: 'string', pattern: '^\\d+$' } } },
+  ] },
 }
 
+const teamKnowledgeSpreadsheetPreviewTool = {
+  name: 'team_knowledge_spreadsheet_preview', title: 'Preview one Team Knowledge spreadsheet',
+  description: 'Preview one named Team Knowledge spreadsheet in the current bound parent. This checks the parent and returns a one-time approval challenge. Do not create it in this step.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['name', 'body'], properties: { name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
+}
+
+const teamKnowledgeSpreadsheetCreateTool = {
+  name: 'team_knowledge_spreadsheet_create', title: 'Create the approved Team Knowledge spreadsheet',
+  description: 'After explicit approval, create exactly the previewed Team Knowledge spreadsheet using its challenge, idempotency identity, name, and unchanged body. Success requires business success, same-parent catalog rediscovery, and spreadsheet identity readback.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['challenge', 'idempotencyIdentity', 'name', 'body'], properties: { challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
+}
+
+const teamKnowledgeSpreadsheetReadbackTool = {
+  name: 'team_knowledge_spreadsheet_readback', title: 'Read a created Team Knowledge spreadsheet identity',
+  description: 'Read back the verified identity of one Team Knowledge spreadsheet by catalog ID.',
+  inputSchema: { type: 'object', additionalProperties: false, required: ['catalogId'], properties: { catalogId: { type: 'string', pattern: '^\\d+$' } } },
+}
+
+const teamKnowledgeBatchItemSchema = { type: 'object', additionalProperties: false, required: ['name', 'body'], properties: { name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', minLength: 1, maxLength: 100000 } } }
+
+// Kept callable for existing integrations. It is deliberately not returned by
+// tools/list because Harness currently ignores oneOf branches when forming the
+// model-visible argument surface.
 const teamKnowledgeBatchTool = {
   name: 'team_knowledge_batch', title: 'Create a batch of Team Knowledge light documents',
-  description: 'Create one to ten ordered light documents in the bound Team Knowledge directory. Inspect the parent, preview the exact ordered names and body hashes, then create or resume only unfinished items. Each item requires catalog rediscovery and WebEdit body readback before it is verified.',
+  description: 'Legacy compatibility endpoint retained for existing callers. It is not model-facing; models use team_knowledge_batch_preview, team_knowledge_batch_create, and team_knowledge_batch_status.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
-    action: { enum: ['inspect_parent', 'preview', 'create', 'status'] }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 }, challenge: { type: 'string', minLength: 1, maxLength: 256 },
-    items: { type: 'array', minItems: 1, maxItems: 10, items: { type: 'object', additionalProperties: false, required: ['name', 'body'], properties: { name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', minLength: 1, maxLength: 100000 } } } },
-  } },
+  inputSchema: { type: 'object', oneOf: [
+    { type: 'object', additionalProperties: false, required: ['action'], properties: { action: { const: 'inspect_parent' } } },
+    { type: 'object', additionalProperties: false, required: ['action', 'batchId', 'parentFingerprint', 'items'], properties: { action: { const: 'preview' }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
+    { type: 'object', additionalProperties: false, required: ['action', 'batchId', 'challenge', 'items'], properties: { action: { const: 'create' }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
+    { type: 'object', additionalProperties: false, required: ['action', 'batchId'], properties: { action: { const: 'status' }, batchId: { type: 'string', minLength: 1, maxLength: 128 } } },
+  ] },
+}
+
+const teamKnowledgeBatchPreviewTool = {
+  name: 'team_knowledge_batch_preview', title: 'Preview one to ten Team Knowledge light documents',
+  description: 'The first step for one to ten light documents. Provide a stable batchId and the exact ordered names and bodies. This inspects the currently bound parent itself and returns its fingerprint plus a one-time approval challenge. Do not create documents in this step.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'items'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
+}
+
+const teamKnowledgeBatchCreateTool = {
+  name: 'team_knowledge_batch_create', title: 'Create the approved Team Knowledge light-document batch',
+  description: 'After explicit approval, provide the batchId, preview challenge, and the unchanged ordered items. The parent is rechecked and every item is created only after business success, same-parent catalog rediscovery, and WebEdit readback. Reuse the same batchId to resume unfinished items.',
+  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'challenge', 'items'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
+}
+
+const teamKnowledgeBatchStatusTool = {
+  name: 'team_knowledge_batch_status', title: 'Read Team Knowledge batch delivery status',
+  description: 'Read the current status of a previously previewed or created light-document batch. Provide only its batchId.',
+  inputSchema: { type: 'object', additionalProperties: false, required: ['batchId'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 } } },
 }
 
 const pmdPrdDeliveryTool = {
@@ -612,6 +691,18 @@ function validOfficeDocumentArguments(value) {
     && JSON.stringify(value.payload).length <= 100000 && validLightDocumentOperationPayload(value.operation, value.payload)
 }
 
+function validFlatLightDocumentArguments(name, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  if (name === 'light_document_read') return keys.every((key) => ['offset', 'limit'].includes(key))
+    && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000)
+    && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
+  if (name === 'light_document_selection_read') return keys.length === 0
+  if (name === 'light_document_selection_replace_preview') return keys.length === 1 && selectionBlocksReplaceFragments({ blocks: value.blocks, expectedSelectionFingerprint: 'selection-v3-00000000' }) !== null
+  return name === 'light_document_selection_replace_commit' && keys.length === 1
+    && typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256
+}
+
 function validOfficeDocumentReadResult(value) {
   return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'ok'
     && validLightDocumentResource(value.resource) && value.document && typeof value.document === 'object' && !Array.isArray(value.document)
@@ -714,8 +805,18 @@ function selectionInsertFragments(payload) {
   const fragments = distinctiveLightDocumentFragments(kind === 'html' ? value.replace(/<[^>]*>/g, ' ') : value)
   return fragments.length ? { kind, fragments } : null
 }
+function selectionBlocksReplaceFragments(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || !Object.keys(payload).every((key) => ['blocks', 'expectedSelectionFingerprint'].includes(key))
+    || !Array.isArray(payload.blocks) || payload.blocks.length < 1 || payload.blocks.length > 50
+    || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint)
+    || !payload.blocks.every(lightDocumentStructuredBlockValid)) return null
+  const fragments = distinctiveLightDocumentFragments(payload.blocks.map(lightDocumentStructuredBlockText).join('\n'))
+  return fragments.length ? { fragments } : null
+}
 function validLightDocumentOperationPayload(operation, payload) {
   if (operation === 'selection_insert' || operation === 'selection_replace') return selectionInsertFragments(payload) !== null
+  if (operation === 'selection_blocks_replace') return selectionBlocksReplaceFragments(payload) !== null
   if (operation === 'insert_drawing' || operation === 'blocks_insert') return lightDocumentInsertFragments(operation, payload) !== null
   return !['blocks_delete', 'blocks_format'].includes(operation) || lightDocumentBatchItems(operation, payload) !== null
 }
@@ -731,6 +832,12 @@ function verifiedLightDocumentWriteMatches(result, request) {
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
   if (!matchesRequest) return false
   if (request.operation === 'selection_insert' || request.operation === 'selection_replace') return verifiedFragmentEvidence(request, result, selectionInsertFragments(request.payload))
+  if (request.operation === 'selection_blocks_replace') {
+    const requested = selectionBlocksReplaceFragments(request.payload)
+    return verifiedFragmentEvidence(request, result, requested)
+      && Array.isArray(result.observed?.replacedTagIds) && result.observed.replacedTagIds.length >= 1
+      && Array.isArray(result.observed?.observedBlocks) && result.observed.observedBlocks.length >= 1
+  }
   if (request.operation === 'insert_drawing' || request.operation === 'blocks_insert') return verifiedFragmentEvidence(request, result, lightDocumentInsertFragments(request.operation, request.payload))
   if (!['blocks_delete', 'blocks_format'].includes(request.operation)) return true
   const expected = lightDocumentBatchItems(request.operation, request.payload); const observed = result.observed?.verifiedBlocks
@@ -882,12 +989,16 @@ function spreadsheetArgumentsHint(args) {
   if (action === 'dimensions' || action === 'outline') return `office_spreadsheet ${action} requires a bounded whole-row or whole-column range and a matching axis`
   if (action === 'range') return 'office_spreadsheet range requires a bounded bare range (for example A1:C10); qualify the sheet through sheetName'
   if (action === 'search') return 'office_spreadsheet search requires a bounded bare range and a non-empty query'
+  if (action === 'selection') return 'office_spreadsheet selection takes no range; it reads the current selected cells and active cell'
+  if (action === 'used_range') return 'office_spreadsheet used_range takes no range; it reads the active sheet used rectangle'
   return 'office_spreadsheet requires a bounded read action, inspect_write, or challenged verified write'
 }
 function validOfficeSpreadsheetArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
   const keys = Object.keys(value)
   if (['context', 'sheets', 'defined_names'].includes(value.action)) return keys.length === 1
+  if (value.action === 'selection') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
+  if (value.action === 'used_range') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
   if (value.action === 'view') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
   if (value.action === 'print_settings') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
   if (value.action === 'outline') return keys.every((key) => ['action', 'range', 'axis', 'sheetName'].includes(key)) && !!parseSpreadsheetOutlineRange(value.range, value.axis) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
@@ -1155,7 +1266,7 @@ function validTeamKnowledgeItemArguments(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
   const keys = Object.keys(args)
   if (args.action === 'inspect_parent') return keys.length === 1
-  if (args.action === 'preview') return keys.length === 5 && typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0
+  if (args.action === 'preview') return (keys.length === 4 || keys.length === 5) && (args.parentFingerprint === undefined || typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0)
     && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.name === 'string' && args.name.trim().length > 0 && args.name.length <= 120
     && typeof args.body === 'string' && args.body.length <= 100000 && (args.kind === 'spreadsheet' || args.body.trim().length > 0)
   if (args.action === 'create') return keys.length === 6 && typeof args.challenge === 'string' && args.challenge.length > 0
@@ -1176,8 +1287,8 @@ function validTeamKnowledgeBatchArguments(args) {
   const keys = Object.keys(args)
   if (args.action === 'inspect_parent') return keys.length === 1
   if (args.action === 'status') return keys.length === 2 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
-  if (args.action === 'preview') return keys.length === 4 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
-    && typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256 && validTeamKnowledgeBatchItems(args.items)
+  if (args.action === 'preview') return (keys.length === 3 || keys.length === 4) && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
+    && (args.parentFingerprint === undefined || typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256) && validTeamKnowledgeBatchItems(args.items)
   return args.action === 'create' && keys.length === 4 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
     && typeof args.challenge === 'string' && args.challenge.length > 0 && args.challenge.length <= 256 && validTeamKnowledgeBatchItems(args.items)
 }
@@ -1254,6 +1365,12 @@ function validTeamDocResult(value) {
   return value.observedBody === undefined || typeof value.observedBody === 'string'
 }
 function hash(value) { return createHash('sha256').update(value).digest('hex') }
+function flatSelectionReplaceIdentity(challenge) {
+  // Challenge values are server-generated one-time random values. Hashing keeps
+  // them out of storage/logs while this namespace cannot collide with a model
+  // supplied office_document identity.
+  return `flat-selection:${hash(challenge).slice(0, 48)}`
+}
 function teamDocTargetFingerprint(target, parent) {
   return hash(JSON.stringify({ browser: target.browser, windowId: target.windowId, tabId: target.tabId, url: target.url, parentFingerprint: parent.fingerprint }))
 }
@@ -1268,7 +1385,15 @@ function teamDocInspectFailureText(result) {
   if (!diagnostic || typeof diagnostic !== 'object' || typeof diagnostic.stage !== 'string'
     || !Number.isInteger(diagnostic.httpStatus)
     || !(typeof diagnostic.errorCode === 'string' || diagnostic.errorCode === null)) return result.error
-  return `${result.error}; stage=${diagnostic.stage}; httpStatus=${diagnostic.httpStatus}; errorCode=${diagnostic.errorCode ?? 'null'}`
+  const attempts = Array.isArray(diagnostic.attempts)
+    ? diagnostic.attempts.filter((attempt) => attempt && typeof attempt === 'object'
+      && typeof attempt.stage === 'string' && Number.isInteger(attempt.httpStatus)
+      && (typeof attempt.errorCode === 'string' || attempt.errorCode === null))
+    : []
+  const attemptsText = attempts.length === 0
+    ? ''
+    : `; attempts=${attempts.map((attempt) => `${attempt.stage}:${attempt.httpStatus}/${attempt.errorCode ?? 'null'}`).join(',')}`
+  return `${result.error}; stage=${diagnostic.stage}; httpStatus=${diagnostic.httpStatus}; errorCode=${diagnostic.errorCode ?? 'null'}${attemptsText}`
 }
 
 function validOfficeReadFailure(value) {
@@ -1348,10 +1473,11 @@ function knowledgeProxyHeaders(entries, cookie) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore, officeSpreadsheetWriteStore?: OfficeSpreadsheetWriteRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore, officeSpreadsheetWriteStore?: OfficeSpreadsheetWriteRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
+    this.teamKnowledgeWriteRequestTimeoutMs = options.teamKnowledgeWriteRequestTimeoutMs ?? TEAM_KNOWLEDGE_WRITE_REQUEST_TIMEOUT_MS
     this.knowledgeRequestTimeoutMs = options.knowledgeRequestTimeoutMs ?? KNOWLEDGE_REQUEST_TIMEOUT_MS
     this.knowledgeCatalogTimeoutMs = options.knowledgeCatalogTimeoutMs ?? KNOWLEDGE_CATALOG_TIMEOUT_MS
     this.onToolsListed = options.onToolsListed
@@ -1623,7 +1749,7 @@ export class BrowserConnector {
     }
     if (message.method === 'tools/list') {
       this.onToolsListed?.()
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, officeSpreadsheetTool, teamDocCreateTool, teamKnowledgeItemTool, teamKnowledgeBatchTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool] } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, lightDocumentReadTool, lightDocumentSelectionReadTool, lightDocumentSelectionReplacePreviewTool, lightDocumentSelectionReplaceCommitTool, officeSpreadsheetTool, teamKnowledgeSpreadsheetPreviewTool, teamKnowledgeSpreadsheetCreateTool, teamKnowledgeSpreadsheetReadbackTool, teamKnowledgeBatchPreviewTool, teamKnowledgeBatchCreateTool, teamKnowledgeBatchStatusTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool] } })
       return
     }
     if (message.method !== 'tools/call') {
@@ -1646,6 +1772,10 @@ export class BrowserConnector {
       await this.#officeDocument(message, response)
       return
     }
+    if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit'].includes(message.params?.name)) {
+      await this.#flatLightDocument(message, response)
+      return
+    }
     if (message.params?.name === 'office_spreadsheet') {
       await this.#officeSpreadsheet(message, response)
       return
@@ -1658,8 +1788,18 @@ export class BrowserConnector {
       await this.#teamKnowledgeItem(message, response)
       return
     }
+    const spreadsheetAction = ({ team_knowledge_spreadsheet_preview: 'preview', team_knowledge_spreadsheet_create: 'create', team_knowledge_spreadsheet_readback: 'readback' })[message.params?.name]
+    if (spreadsheetAction !== undefined) {
+      await this.#teamKnowledgeItem({ ...message, params: { ...message.params, arguments: { ...(message.params?.arguments ?? {}), action: spreadsheetAction, kind: 'spreadsheet' } } }, response)
+      return
+    }
     if (message.params?.name === 'team_knowledge_batch') {
       await this.#teamKnowledgeBatch(message, response)
+      return
+    }
+    const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create', team_knowledge_batch_status: 'status' })[message.params?.name]
+    if (batchAction !== undefined) {
+      await this.#teamKnowledgeBatch({ ...message, params: { ...message.params, arguments: { ...(message.params?.arguments ?? {}), action: batchAction } } }, response)
       return
     }
     if (message.params?.name === 'pmd_prd_delivery') {
@@ -1891,6 +2031,57 @@ export class BrowserConnector {
     }
   }
 
+  async #flatLightDocument(message, response) {
+    const name = message.params?.name
+    const args = message.params?.arguments ?? {}
+    if (!validFlatLightDocumentArguments(name, args)) {
+      this.#reply(response, errorResponse(message.id, -32602, `${name} received invalid arguments; use its flat schema exactly.`))
+      return
+    }
+    // Read-only flat tools deliberately reuse the proven office_document
+    // routing path.  The extension still owns frame discovery and the model
+    // cannot supply a Browser Target or resource identity.
+    if (name === 'light_document_read' || name === 'light_document_selection_read') {
+      await this.#officeDocument({ ...message, params: { ...message.params, arguments: name === 'light_document_read' ? { action: 'read', ...args } : { action: 'selection' } } }, response)
+      return
+    }
+    const runId = this.currentRunId
+    const browserTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
+    if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    if (name === 'light_document_selection_replace_commit') {
+      const grant = this.officeDocumentChallenges.get(args.challenge)
+      if (!grant || grant.flatSelectionReplace !== true || !grant.payload) { this.#toolError(response, message.id, 'Selected-content approval challenge is missing, stale, or not issued by preview.'); return }
+      // Do not permit any raw action, operation, target, or body to enter this
+      // endpoint.  Commit reconstitutes exactly what preview approved.
+      await this.#officeDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: args.idempotencyIdentity, operation: 'selection_blocks_replace', payload: grant.payload } } }, response)
+      return
+    }
+    const selectionCorrelation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'selection' }
+    try {
+      const selected = await this.#requestExtension(selectionCorrelation)
+      if (!validOfficeDocumentReadResult(selected.result)) throw new Error('Browser Connector produced an invalid light-document selection')
+      const selection = selected.result.document?.selection
+      const selectionFingerprint = selection?.selectionFingerprint
+      if (!selection?.supported || selection?.truncated || selection?.isCollapsed || selection?.stable !== true || typeof selectionFingerprint !== 'string') throw new Error('The current light-document selection is not a complete stable non-collapsed selection.')
+      const payload = { blocks: args.blocks, expectedSelectionFingerprint: selectionFingerprint }
+      if (!validLightDocumentOperationPayload('selection_blocks_replace', payload)) throw new Error('The requested replacement blocks are invalid.')
+      // Re-inspect after selection.  The resulting resource identity is the
+      // write approval fence, so a navigation/content change cannot be hidden
+      // between preview and commit.
+      const inspectCorrelation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'inspect_write', operation: 'selection_blocks_replace', payload }
+      const inspected = await this.#requestExtension(inspectCorrelation)
+      if (!validOfficeDocumentReadResult(inspected.result) || inspected.result.resource.fingerprint !== selected.result.resource.fingerprint) throw new Error('The light document changed while preparing selected-content replacement.')
+      const challenge = randomBytes(32).toString('base64url')
+      for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
+      if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
+      this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: inspected.result.resource, operation: 'selection_blocks_replace', payload, payloadHash: lightDocumentWriteHash('selection_blocks_replace', payload), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+      const result = { runId, requestId: inspectCorrelation.requestId, generation: this.generation, browserTarget: inspected.browserTarget, action: 'selection_blocks_replace_preview', resource: inspected.result.resource, selection, blocks: args.blocks, challenge }
+      this.#reply(response, lightDocumentToolResponse(message.id, result))
+    } catch (error) {
+      this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document selection preview failed')
+    }
+  }
+
   async #officeDocument(message, response) {
     const args = message.params?.arguments ?? {}
     if (!validOfficeDocumentArguments(args)) {
@@ -2060,8 +2251,8 @@ export class BrowserConnector {
         const parent = resolved.teamDoc.parent
         if (!validTeamParent(parent)) throw new Error('Extension peer returned an invalid Team Doc parent')
         const challenge = randomBytes(32).toString('base64url')
-        this.teamDocChallenges.set(challenge, { runId, generation: this.generation, target, parent })
-        const result = { phase: 'inspect', browserTarget: target, parent, challenge }
+        this.teamDocChallenges.set(challenge, { runId, generation: this.generation, target: resolved.browserTarget, parent })
+        const result = { phase: 'inspect', browserTarget: resolved.browserTarget, parent, challenge }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
       } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Doc inspect failed') }
       return
@@ -2078,12 +2269,14 @@ export class BrowserConnector {
     }
     const recovery = existing ? { documentId: existing.documentId ?? null, stages: existing.stages ?? [] } : undefined
     await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, stages: recovery?.stages ?? [], documentId: recovery?.documentId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
-    const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_doc_create', phase: 'create', parent: grant.parent, idempotencyIdentity: args.idempotencyIdentity, name: args.name, body: args.body, ...(recovery ? { recovery } : {}) }
+    const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_doc_create', phase: 'create', parent: grant.parent, idempotencyIdentity: args.idempotencyIdentity, name: args.name, body: args.body, ...(recovery ? { recovery } : {}) }
     try {
-      const resolved = await this.#requestExtension(request); const result = resolved.teamDoc
+      const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const result = resolved.teamDoc
+      if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Doc Browser Target changed after confirmation.')
       if (!validTeamDocResult(result)) throw new Error('Extension peer returned an invalid canonical Team Doc result')
       await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, stages: result.stages, documentId: result.documentId, verified: result.status === 'verified_write', result })
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      const content = { ...result, browserTarget: grant.target }
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent: content } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Doc create failed') }
   }
 
@@ -2101,25 +2294,25 @@ export class BrowserConnector {
       const result = resolved.teamKnowledgeItem
       if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge parent')
-      return { request, result }
+      return { request, target: resolved.browserTarget, result }
     }
     try {
       if (args.action === 'inspect_parent') {
         const resolved = await inspect()
-        const result = { action: 'inspect_parent', browserTarget: target, parent: resolved.result.parent, capabilities: resolved.result.capabilities ?? {} }
+        const result = { action: 'inspect_parent', browserTarget: resolved.target, parent: resolved.result.parent, capabilities: resolved.result.capabilities ?? {} }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
       if (args.action === 'preview') {
         const resolved = await inspect(); const parent = resolved.result.parent
-        if (parent.fingerprint !== args.parentFingerprint) { this.#toolError(response, message.id, 'Team Knowledge parent changed; inspect and confirm the directory again.'); return }
+        if (args.parentFingerprint !== undefined && parent.fingerprint !== args.parentFingerprint) { this.#toolError(response, message.id, 'Team Knowledge parent changed; inspect and confirm the directory again.'); return }
         const supported = resolved.result.capabilities?.[args.kind]
         if (supported === false) { this.#toolError(response, message.id, `team_knowledge_${args.kind}_unsupported`); return }
         for (const [key, grant] of this.teamKnowledgeItemChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeItemChallenges.delete(key)
         const challenge = randomBytes(32).toString('base64url')
         const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
-        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target, parent, kind: args.kind, name: args.name, contentHash, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', browserTarget: target, parent, kind: args.kind, name: args.name, contentHash, challenge }
+        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target: resolved.target, parent, kind: args.kind, name: args.name, contentHash, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { action: 'preview', browserTarget: resolved.target, parent, kind: args.kind, name: args.name, contentHash, challenge }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
@@ -2150,11 +2343,13 @@ export class BrowserConnector {
       }
       const recovery = existing ? { catalogId: existing.catalogId ?? null, stages: existing.stages ?? [] } : undefined
       await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, kind: args.kind, name: args.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
-      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: args.kind, name: args.name, body: args.body, idempotencyIdentity: args.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
-      const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
+      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: args.kind, name: args.name, body: args.body, idempotencyIdentity: args.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
+      const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const result = resolved.teamKnowledgeItem
+      if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Knowledge Browser Target changed after confirmation.')
       if (!validTeamKnowledgeItemResult(result) || !['verified_write', 'partial_delivery'].includes(result.status)) throw new Error('Extension peer returned an invalid Team Knowledge item create result')
       await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, kind: args.kind, name: args.name, stages: result.stages, catalogId: result.item?.catalogId ?? null, verified: result.status === 'verified_write', result })
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      const content = { ...result, browserTarget: grant.target }
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent: content } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge item operation failed') }
   }
 
@@ -2185,43 +2380,43 @@ export class BrowserConnector {
       if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge batch parent')
       if (result.capabilities?.light_document === false) throw new Error('team_knowledge_light_document_unsupported')
-      return result
+      return { target: resolved.browserTarget, result }
     }
     try {
       if (args.action === 'status') {
         const inspected = await inspectParent()
         const batch = await this.teamKnowledgeBatchStore.load(args.batchId)
         if (!batch) throw new Error('team_knowledge_batch_not_found')
-        if (batch.targetFingerprint !== teamKnowledgeTargetFingerprint(target, inspected.parent, 'light_document')) throw new Error('team_knowledge_batch_target_mismatch')
-        const result = { action: 'status', browserTarget: target, parent: inspected.parent, batch }
+        if (batch.targetFingerprint !== teamKnowledgeTargetFingerprint(inspected.target, inspected.result.parent, 'light_document')) throw new Error('team_knowledge_batch_target_mismatch')
+        const result = { action: 'status', browserTarget: inspected.target, parent: inspected.result.parent, batch }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
       if (args.action === 'inspect_parent') {
         const inspected = await inspectParent()
-        const result = { action: 'inspect_parent', browserTarget: target, parent: inspected.parent, capabilities: inspected.capabilities ?? {} }
+        const result = { action: 'inspect_parent', browserTarget: inspected.target, parent: inspected.result.parent, capabilities: inspected.result.capabilities ?? {} }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
       const contentFingerprint = teamKnowledgeBatchFingerprint(args.items)
       if (args.action === 'preview') {
-        const inspected = await inspectParent(); const parent = inspected.parent
-        if (parent.fingerprint !== args.parentFingerprint) throw new Error('Team Knowledge parent changed; inspect and confirm the directory again.')
-        const targetFingerprint = teamKnowledgeTargetFingerprint(target, parent, 'light_document')
+        const inspected = await inspectParent(); const parent = inspected.result.parent
+        if (args.parentFingerprint !== undefined && parent.fingerprint !== args.parentFingerprint) throw new Error('Team Knowledge parent changed; inspect and confirm the directory again.')
+        const targetFingerprint = teamKnowledgeTargetFingerprint(inspected.target, parent, 'light_document')
         const batch = await this.teamKnowledgeBatchStore.create({
           batchId: args.batchId, targetFingerprint, contentFingerprint,
           items: args.items.map((item, index) => ({ index, name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body), idempotencyIdentity: `team-batch:${hash(args.batchId).slice(0, 48)}:${String(index)}` })),
         })
         if (batch.status === 'completed') {
-          const result = { action: 'preview', status: 'already_completed', browserTarget: target, parent, batch }
+          const result = { action: 'preview', status: 'already_completed', browserTarget: inspected.target, parent, batch }
           this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
           return
         }
         for (const [key, grant] of this.teamKnowledgeBatchChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeBatchChallenges.delete(key)
         if (this.teamKnowledgeBatchChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.teamKnowledgeBatchChallenges.delete(this.teamKnowledgeBatchChallenges.keys().next().value)
         const challenge = randomBytes(32).toString('base64url')
-        this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target, parent, batchId: args.batchId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', status: batch.status, browserTarget: target, parent, batch, challenge }
+        this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, batchId: args.batchId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { action: 'preview', status: batch.status, browserTarget: inspected.target, parent, batch, challenge }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
@@ -2230,8 +2425,9 @@ export class BrowserConnector {
       if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)
         || grant.batchId !== args.batchId || grant.contentFingerprint !== contentFingerprint) throw new Error('Team Knowledge batch approval challenge is missing, stale, changed, or already used.')
       const inspected = await inspectParent()
-      if (inspected.parent.fingerprint !== grant.parent.fingerprint) throw new Error('Team Knowledge parent changed after confirmation.')
-      const targetFingerprint = teamKnowledgeTargetFingerprint(target, grant.parent, 'light_document')
+      if (!sameBrowserTarget(inspected.target, grant.target)) throw new Error('Team Knowledge Browser Target changed after confirmation.')
+      if (inspected.result.parent.fingerprint !== grant.parent.fingerprint) throw new Error('Team Knowledge parent changed after confirmation.')
+      const targetFingerprint = teamKnowledgeTargetFingerprint(grant.target, grant.parent, 'light_document')
       const result = await this.#withTeamKnowledgeBatchLock(JSON.stringify([args.batchId, targetFingerprint]), async () => {
         let batch = await this.teamKnowledgeBatchStore.load(args.batchId)
         if (!batch || batch.targetFingerprint !== targetFingerprint || batch.contentFingerprint !== contentFingerprint) throw new Error('team_knowledge_batch_conflict')
@@ -2250,8 +2446,9 @@ export class BrowserConnector {
           await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'creating', error: null })
           await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
           try {
-            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
-            const resolved = await this.#requestExtension(request); const itemResult = resolved.teamKnowledgeItem
+            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
+            const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const itemResult = resolved.teamKnowledgeItem
+            if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Knowledge Browser Target changed during batch creation.')
             if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid Team Knowledge batch item result')
             if (itemResult.status === 'verified_write' && !validVerifiedTeamKnowledgeBatchItem(itemResult, document)) throw new Error('Extension peer verified the wrong Team Knowledge batch item')
             await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
@@ -2261,7 +2458,7 @@ export class BrowserConnector {
           }
         }
         batch = await this.teamKnowledgeBatchStore.load(args.batchId)
-        return { action: 'create', status: batch.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: target, parent: grant.parent, batch }
+        return { action: 'create', status: batch.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: grant.target, parent: grant.parent, batch }
       })
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch operation failed') }
@@ -2303,34 +2500,34 @@ export class BrowserConnector {
       if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid PMD delivery parent')
       if (result.capabilities?.light_document === false) throw new Error('team_knowledge_light_document_unsupported')
-      return result
+      return { target: resolved.browserTarget, result }
     }
     try {
       if (args.action === 'inspect_parent') {
         const inspected = await inspectParent()
-        const result = { action: 'inspect_parent', browserTarget: target, parent: inspected.parent, capabilities: inspected.capabilities ?? {} }
+        const result = { action: 'inspect_parent', browserTarget: inspected.target, parent: inspected.result.parent, capabilities: inspected.result.capabilities ?? {} }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
       const documents = normalizedPmdDocuments(args.documents)
       const contentFingerprint = pmdContentFingerprint(documents)
       if (args.action === 'preview') {
-        const inspected = await inspectParent(); const parent = inspected.parent
+        const inspected = await inspectParent(); const parent = inspected.result.parent
         if (parent.fingerprint !== args.parentFingerprint) throw new Error('PMD delivery parent changed; inspect and confirm the directory again.')
-        const targetFingerprint = teamKnowledgeTargetFingerprint(target, parent, 'light_document')
+        const targetFingerprint = teamKnowledgeTargetFingerprint(inspected.target, parent, 'light_document')
         const record = await this.pmdDeliveryStore.create({
           requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, targetFingerprint, contentFingerprint,
           documents: documents.map((item) => ({ kind: item.kind, name: item.name, idempotencyIdentity: `pmd:${hash(`${args.requirementId}:${args.deliveryRunId}`).slice(0, 48)}:${item.kind}`, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) })),
         })
         if (record.status === 'completed') {
-          const result = { action: 'preview', status: 'already_completed', browserTarget: target, parent, delivery: record }
+          const result = { action: 'preview', status: 'already_completed', browserTarget: inspected.target, parent, delivery: record }
           this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
           return
         }
         for (const [key, grant] of this.pmdDeliveryChallenges) if (grant.expiresAt < Date.now()) this.pmdDeliveryChallenges.delete(key)
         const challenge = randomBytes(32).toString('base64url')
-        this.pmdDeliveryChallenges.set(challenge, { runId, generation: this.generation, target, parent, requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', status: record.status, browserTarget: target, parent, delivery: record, challenge }
+        this.pmdDeliveryChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { action: 'preview', status: record.status, browserTarget: inspected.target, parent, delivery: record, challenge }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
@@ -2342,8 +2539,9 @@ export class BrowserConnector {
         throw new Error('PMD delivery approval challenge is missing, stale, changed, or already used.')
       }
       const inspected = await inspectParent()
-      if (inspected.parent.fingerprint !== grant.parent.fingerprint) throw new Error('PMD delivery parent changed after confirmation.')
-      const targetFingerprint = teamKnowledgeTargetFingerprint(target, grant.parent, 'light_document')
+      if (!sameBrowserTarget(inspected.target, grant.target)) throw new Error('PMD delivery Browser Target changed after confirmation.')
+      if (inspected.result.parent.fingerprint !== grant.parent.fingerprint) throw new Error('PMD delivery parent changed after confirmation.')
+      const targetFingerprint = teamKnowledgeTargetFingerprint(grant.target, grant.parent, 'light_document')
       const result = await this.#withPmdDeliveryLock(JSON.stringify([args.requirementId, args.deliveryRunId]), async () => {
         let record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
         if (!record || record.targetFingerprint !== targetFingerprint || record.contentFingerprint !== contentFingerprint) throw new Error('pmd_delivery_run_conflict')
@@ -2364,8 +2562,9 @@ export class BrowserConnector {
           await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'creating', error: null })
           await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
           try {
-            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: item.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
-            const resolved = await this.#requestExtension(request); const itemResult = resolved.teamKnowledgeItem
+            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: item.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
+            const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const itemResult = resolved.teamKnowledgeItem
+            if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('PMD delivery Browser Target changed during creation.')
             if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid PMD document result')
             await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
             if (itemResult.status !== 'verified_write') {
@@ -2381,7 +2580,7 @@ export class BrowserConnector {
           }
         }
         record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
-        return { action: 'create', status: record.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: target, parent: grant.parent, delivery: record, ...(failedAt ? { failedAt, error: failure } : {}) }
+        return { action: 'create', status: record.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: grant.target, parent: grant.parent, delivery: record, ...(failedAt ? { failedAt, error: failure } : {}) }
       })
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'PMD delivery failed') }

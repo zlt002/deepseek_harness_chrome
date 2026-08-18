@@ -7,16 +7,40 @@ import { build } from 'esbuild'
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = resolve(SCRIPT_DIR, '..')
 
-export async function bundleHarnessRuntimePlugin({
+async function bundleProductHostPlugin({
   outfile,
   projectRoot = PROJECT_ROOT,
-  harnessRoot = resolve(projectRoot, 'upstream/deepseek-harness'),
+  entry,
+  label,
 } = {}) {
-  if (!outfile) throw new Error('bundleHarnessRuntimePlugin requires outfile')
-  const entry = resolve(projectRoot, 'packages/harness-runtime/src/index.mjs')
+  if (!outfile) throw new Error(`${label} requires outfile`)
   await mkdir(dirname(outfile), { recursive: true })
   await build({ entryPoints: [entry], bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile, logLevel: 'silent' })
   return outfile
+}
+
+export async function bundleHarnessRuntimePlugin({
+  outfile,
+  projectRoot = PROJECT_ROOT,
+} = {}) {
+  return bundleProductHostPlugin({
+    outfile,
+    projectRoot,
+    entry: resolve(projectRoot, 'packages/harness-runtime/src/index.mjs'),
+    label: 'bundleHarnessRuntimePlugin',
+  })
+}
+
+export async function bundleHarnessTrackingPlugin({
+  outfile,
+  projectRoot = PROJECT_ROOT,
+} = {}) {
+  return bundleProductHostPlugin({
+    outfile,
+    projectRoot,
+    entry: resolve(projectRoot, 'packages/harness-tracking/src/index.mjs'),
+    label: 'bundleHarnessTrackingPlugin',
+  })
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

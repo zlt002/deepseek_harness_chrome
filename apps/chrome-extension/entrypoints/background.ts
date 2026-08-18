@@ -340,8 +340,8 @@ interface OfficeWriteRangeRequest {
 }
 
 type OfficeDocumentAction = 'read' | 'search' | 'selection' | 'inspect_write' | 'write'
-type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format' | 'blocks_insert' | 'insert_drawing' | 'selection_insert' | 'selection_replace'
-const OFFICE_DOCUMENT_OPERATIONS: readonly OfficeDocumentOperation[] = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace']
+type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format' | 'blocks_insert' | 'insert_drawing' | 'selection_insert' | 'selection_replace' | 'selection_blocks_replace'
+const OFFICE_DOCUMENT_OPERATIONS: readonly OfficeDocumentOperation[] = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_blocks_replace']
 
 interface LightDocumentResourceIdentity {
   kind: 'webedit_light_document'
@@ -366,7 +366,7 @@ interface OfficeDocumentRequest {
   resource?: LightDocumentResourceIdentity
 }
 
-type OfficeSpreadsheetAction = 'context' | 'range' | 'range_features' | 'search' | 'sheets' | 'defined_names' | 'capabilities' | 'view' | 'print_settings' | 'outline' | 'dimensions' | 'special_cells' | 'inspect_write' | 'write'
+type OfficeSpreadsheetAction = 'context' | 'selection' | 'used_range' | 'range' | 'range_features' | 'search' | 'sheets' | 'defined_names' | 'capabilities' | 'view' | 'print_settings' | 'outline' | 'dimensions' | 'special_cells' | 'inspect_write' | 'write'
 type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'fill_range' | 'batch_write' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'set_data_validation' | 'clear_data_validation' | 'add_hyperlink' | 'delete_hyperlinks' | 'add_conditional_format' | 'clear_conditional_formats' | 'set_zoom' | 'set_freeze_panes' | 'set_print_settings' | 'set_outline_group' | 'set_rows_hidden' | 'set_columns_hidden' | 'auto_fit' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range' | 'create_defined_name' | 'delete_defined_name' | 'activate_worksheet' | 'move_worksheet' | 'set_worksheet_visibility'
 interface OfficeSpreadsheetPreconditionTarget {
   range: string
@@ -429,6 +429,7 @@ interface TeamDocParent {
   canRead: true
   canCreate: true
   fingerprint: string
+  parentType?: string
 }
 
 type TeamKnowledgeItemKind = 'light_document' | 'spreadsheet'
@@ -741,8 +742,9 @@ function isOfficeSpreadsheetRequest(message: NativeMessage): message is OfficeSp
   const candidate = message as NativeMessage & Partial<OfficeSpreadsheetRequest>
   if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
     && message.tool === 'office_spreadsheet' && isBrowserTarget(message.browserTarget)
-    && ['context', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
+    && ['context', 'selection', 'used_range', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
   if (candidate.action === 'context' || candidate.action === 'sheets' || candidate.action === 'defined_names') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined
+  if (candidate.action === 'selection' || candidate.action === 'used_range') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
   if (candidate.action === 'view') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
   if (candidate.action === 'print_settings') return candidate.range === undefined && candidate.axis === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
   if (candidate.action === 'outline') return candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && isOfficeSpreadsheetOutlineRange(candidate.range, candidate.axis) && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
@@ -1216,6 +1218,9 @@ async function readOfficeContext(request: ConnectorRequest): Promise<Record<stri
 }
 
 async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<BrowserTargetBinding> {
+  // Tab-update candidate persistence and Connector dispatch can arrive in the
+  // same event turn. Read settings only after that serialized update settles.
+  await settingsMutation
   const settings = await readBrowserTargetSettings()
   if (settings.mode === 'none') throw new Error('Browser use is disabled for the next Office turn.')
   const binding = settings.mode === 'pinned-tabs'
@@ -1404,26 +1409,24 @@ async function probeDocumentIdentity(tabId: number): Promise<Record<string, unkn
     if (frames.length === 0) return null
     const spreadsheetCandidates: ProbeIdentity[] = []
     const lightDocumentCandidates: ProbeIdentity[] = []
-    for (const frame of frames) {
-      for (const channel of ['office-spreadsheet/v1', 'office-document/v1'] as const) {
-        try {
-          const reply = await chrome.tabs.sendMessage(tabId, { type: channel, action: 'probe' }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown } | undefined
-          if (!probeSucceeded(reply)) continue
-          const identity = probeIdentityOf(reply) ?? {}
-          const path = identityPath(identity)
-          // accr-ui: /weboffice/office/o/ is a light document, /office/s/ is a
-          // spreadsheet. A Team Knowledge light-document page also preloads a
-          // blank spreadsheet iframe; never let that blank frame steal identity.
-          if (channel === 'office-spreadsheet/v1') {
-            if (pathLooksLikeLightDocument(path)) continue
-            spreadsheetCandidates.push(identity)
-          } else {
-            if (pathLooksLikeSpreadsheet(path)) continue
-            lightDocumentCandidates.push(identity)
-          }
-        } catch { /* diagnostic-only probe: an unreachable frame simply does not count */ }
-      }
-    }
+    await Promise.all(frames.flatMap((frame) => (['office-spreadsheet/v1', 'office-document/v1'] as const).map(async (channel) => {
+      try {
+        const reply = await sendMessageWithBudget(tabId, { type: channel, action: 'probe' }, frame.frameId, 250)
+        if (!probeSucceeded(reply)) return
+        const identity = probeIdentityOf(reply) ?? {}
+        const path = identityPath(identity)
+        // accr-ui: /weboffice/office/o/ is a light document, /office/s/ is a
+        // spreadsheet. A Team Knowledge light-document page also preloads a
+        // blank spreadsheet iframe; never let that blank frame steal identity.
+        if (channel === 'office-spreadsheet/v1') {
+          if (pathLooksLikeLightDocument(path)) return
+          spreadsheetCandidates.push(identity)
+        } else {
+          if (pathLooksLikeSpreadsheet(path)) return
+          lightDocumentCandidates.push(identity)
+        }
+      } catch { /* diagnostic-only probe: an unreachable frame simply does not count */ }
+    })))
     const lightDocumentReady = lightDocumentCandidates.length > 0
     const substantial = spreadsheetCandidates.filter(substantialSpreadsheet)
     const spreadsheetKind = (best: ProbeIdentity) => ({
@@ -1451,33 +1454,83 @@ function framePreference(identity: ProbeIdentity | undefined): number {  if (ide
   return 2
 }
 
+function isProbeTimeout(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === 'probe_timeout')
+}
+
+async function sendMessageWithBudget(tabId: number, message: Record<string, unknown>, frameId: number, budgetMs: number): Promise<{ ok?: unknown; result?: unknown; error?: unknown } | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, message, { frameId }) as Promise<{ ok?: unknown; result?: unknown; error?: unknown } | undefined>,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('office probe timed out'), { code: 'probe_timeout' })), Math.max(0, budgetMs))
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.GetAllFrameResultDetails[], message: Record<string, unknown>): Promise<{ reply: { ok?: unknown; result?: unknown; error?: unknown } | undefined; frame: chrome.webNavigation.GetAllFrameResultDetails }> {
   const configuredWaitMs = Number((globalThis as typeof globalThis & { __DSH_OFFICE_PROBE_WAIT_MS?: unknown }).__DSH_OFFICE_PROBE_WAIT_MS)
   const waitBudgetMs = Number.isFinite(configuredWaitMs) && configuredWaitMs >= 0 ? configuredWaitMs : OFFICE_PROBE_WAIT_MS_DEFAULT
   const deadline = Date.now() + waitBudgetMs
   let lastMissingReceiver: unknown
   const healedFrameIds = new Set<number>()
+  // A Team Knowledge spreadsheet page hosts two webedit iframes. Probing them
+  // one-by-one lets a hung preload/light-document APP eat the whole 8s budget
+  // before the ready sheet is asked. Probe every candidate in parallel. A
+  // content-bearing ready frame wins immediately; otherwise wait out this
+  // sweep so a slower real document can still beat a blank preload.
   for (;;) {
-    const readyCandidates: Array<{ frame: chrome.webNavigation.GetAllFrameResultDetails; identity: ProbeIdentity | undefined }> = []
-    for (const frame of frames) {
-      let probeReply: { ok?: unknown; result?: unknown; error?: unknown } | undefined
-      try {
-        probeReply = await chrome.tabs.sendMessage(tabId, probeMessageFor(message), { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
-      } catch (error) {
-        if (!isMissingReceivingEnd(error)) throw error
-        if (healedFrameIds.has(frame.frameId)) { lastMissingReceiver = error; continue }
-        healedFrameIds.add(frame.frameId)
-        try {
-          await chrome.scripting.executeScript({ target: { tabId, frameIds: [frame.frameId] }, files: OFFICE_CONTENT_SCRIPT_FILES })
-          probeReply = await chrome.tabs.sendMessage(tabId, probeMessageFor(message), { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
-        } catch (retryError) {
-          if (!isMissingReceivingEnd(retryError)) throw retryError
-          lastMissingReceiver = retryError
-          continue
-        }
-      }
-      if (probeSucceeded(probeReply)) readyCandidates.push({ frame, identity: probeIdentityOf(probeReply) })
+    const remainingMs = Math.max(0, deadline - Date.now())
+    const perFrameMs = Math.min(1_000, remainingMs)
+    const readyByFrameId = new Map<number, { frame: chrome.webNavigation.GetAllFrameResultDetails; identity: ProbeIdentity | undefined }>()
+    let pending = frames.length
+    let settleSweep!: () => void
+    const sweepDone = new Promise<void>((resolve) => { settleSweep = resolve })
+    const finishSweep = (): void => { pending = 0; settleSweep() }
+    const considerReady = (): void => {
+      if ([...readyByFrameId.values()].some((candidate) => framePreference(candidate.identity) === 0) || pending <= 0) finishSweep()
     }
+    const timer = setTimeout(finishSweep, perFrameMs)
+    let sweepError: unknown
+    try {
+      void Promise.all(frames.map(async (frame) => {
+        let probeReply: { ok?: unknown; result?: unknown; error?: unknown } | undefined
+        try {
+          probeReply = await sendMessageWithBudget(tabId, probeMessageFor(message), frame.frameId, perFrameMs)
+        } catch (error) {
+          if (isProbeTimeout(error)) { pending -= 1; considerReady(); return }
+          if (!isMissingReceivingEnd(error)) { sweepError = error; finishSweep(); return }
+          if (healedFrameIds.has(frame.frameId)) { lastMissingReceiver = error; pending -= 1; considerReady(); return }
+          healedFrameIds.add(frame.frameId)
+          try {
+            await chrome.scripting.executeScript({ target: { tabId, frameIds: [frame.frameId] }, files: OFFICE_CONTENT_SCRIPT_FILES })
+            probeReply = await sendMessageWithBudget(tabId, probeMessageFor(message), frame.frameId, Math.max(0, deadline - Date.now()))
+          } catch (retryError) {
+            if (isProbeTimeout(retryError)) { pending -= 1; considerReady(); return }
+            if (!isMissingReceivingEnd(retryError)) { sweepError = retryError; finishSweep(); return }
+            lastMissingReceiver = retryError
+            pending -= 1
+            considerReady()
+            return
+          }
+        }
+        if (probeSucceeded(probeReply)) readyByFrameId.set(frame.frameId, { frame, identity: probeIdentityOf(probeReply) })
+        pending -= 1
+        considerReady()
+      }))
+      await sweepDone
+      if (sweepError !== undefined) throw sweepError
+    } finally {
+      clearTimeout(timer)
+    }
+    const readyCandidates = frames.flatMap((frame) => {
+      const candidate = readyByFrameId.get(frame.frameId)
+      return candidate ? [candidate] : []
+    })
     if (readyCandidates.length > 0) {
       const chosen = readyCandidates.reduce((best, candidate) => framePreference(candidate.identity) < framePreference(best.identity) ? candidate : best)
       const reply = await chrome.tabs.sendMessage(tabId, message, { frameId: chosen.frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
@@ -1491,12 +1544,13 @@ async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.Ge
   const siblingType = siblingProbeType(channel)
   let siblingReadyCount = 0
   if (siblingType !== null) {
-    for (const frame of frames) {
+    const siblingBudgetMs = 250
+    await Promise.all(frames.map(async (frame) => {
       try {
-        const siblingReply = await chrome.tabs.sendMessage(tabId, { type: siblingType, action: 'probe' }, { frameId: frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown } | undefined
+        const siblingReply = await sendMessageWithBudget(tabId, { type: siblingType, action: 'probe' }, frame.frameId, siblingBudgetMs)
         if (probeSucceeded(siblingReply)) siblingReadyCount += 1
       } catch { /* diagnostic-only probe: an unreachable frame simply does not count */ }
-    }
+    }))
   }
   const hint = siblingType === null || siblingReadyCount === 0
     ? ''
@@ -1504,6 +1558,23 @@ async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.Ge
       ? ` ${siblingReadyCount} of them expose a ready WebEdit spreadsheet runtime instead — this Browser Target hosts a spreadsheet, so call office_spreadsheet (its view action reports the selected cell).`
       : ` ${siblingReadyCount} of them expose a ready WebEdit light-document editor instead — this Browser Target hosts a document, so call office_document.`
   throw { code: 'unsupported', message: `The bound Browser Target has ${frames.length} WebEdit iframe(s), but none exposed a ready ${channelReadyLabel(channel)} within ${Math.round(waitBudgetMs / 100) / 10}s.${hint}` } satisfies OfficeReadFailure
+}
+
+async function waitForTeamDocWritableFrame(tabId: number, timeoutMs = 30_000): Promise<chrome.webNavigation.GetAllFrameResultDetails | undefined> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const frames = (await chrome.webNavigation.getAllFrames({ tabId }) ?? [])
+      .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+    if (frames.length > 0) {
+      try {
+        const { reply, frame } = await sendToWebEditFrame(tabId, frames, { type: 'office-document/v1', action: 'probe' })
+        const latest = await chrome.webNavigation.getAllFrames({ tabId }) ?? []
+        if (reply?.ok === true && latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) return frame
+      } catch { /* the editor is still mounting or its iframe was rebuilt; retry within the write budget */ }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return undefined
 }
 
 async function readOfficeRange(request: OfficeReadRangeRequest): Promise<Record<string, unknown>> {
@@ -1684,7 +1755,7 @@ function extractTeamDocParentId(url: string): string | null {
   }
 }
 
-async function inspectTeamDocParentInPage(catalogId: string, documentDetail = false): Promise<unknown> {
+async function inspectTeamDocParentInPage(catalogId: string, documentDetail = false, trustedLightDocument = false): Promise<unknown> {
   if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com') {
     return { ok: false, error: 'team_doc_wrong_origin' }
   }
@@ -1694,7 +1765,7 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
   const parse = async (response: Response): Promise<TeamDocReply> => {
     const text = await response.text()
     try {
-      const lossless = text.replace(/"(bookId|catalogId|parentId)"\s*:\s*(\d+)/g, '"$1":"$2"')
+      const lossless = text.replace(/"(bookId|catalogId|parentId|id|pid)"\s*:\s*(\d+)/g, '"$1":"$2"')
         .replace(/"data"\s*:\s*(\d{16,})(?=\s*[,}])/g, '"data":"$1"')
       const payload = JSON.parse(lossless) as unknown
       return { response, payload: payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : null }
@@ -1703,6 +1774,16 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
   const stageRequest = async (path: string, stage: string, headers?: Record<string, string>): Promise<TeamDocStageResult> => {
     try {
       const reply = await parse(await fetch(`/g-kmp${path}`, { credentials: 'include', ...(headers ? { headers } : {}) }))
+      return { reply, diagnostic: { stage, httpStatus: reply.response.status, errorCode: typeof reply.payload?.errorCode === 'string' ? reply.payload.errorCode : null } }
+    } catch {
+      return { reply: null, diagnostic: { stage, httpStatus: 0, errorCode: null } }
+    }
+  }
+  const stagePost = async (path: string, stage: string, body: Record<string, string>, headers?: Record<string, string>): Promise<TeamDocStageResult> => {
+    try {
+      const reply = await parse(await fetch(`/g-kmp${path}`, {
+        method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body),
+      }))
       return { reply, diagnostic: { stage, httpStatus: reply.response.status, errorCode: typeof reply.payload?.errorCode === 'string' ? reply.payload.errorCode : null } }
     } catch {
       return { reply: null, diagnostic: { stage, httpStatus: 0, errorCode: null } }
@@ -1727,23 +1808,35 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
   try {
     let resolvedCatalogId = catalogId
     let detailSourceBookId: string | null = null
+    const sourceAttempts: TeamDocAttempt[] = []
     if (documentDetail) {
       const openApiAttempt = await stageRequest(
         `/team-knowledge-main/openApi/teamKnowledgeCatalog/get?catalogId=${encodeURIComponent(catalogId)}`,
         'source_openapi', { businessSystem: 'TEAM_KNOWLEDGE_BOOK' },
       )
+      sourceAttempts.push(openApiAttempt.diagnostic)
       let selectedAttempt = openApiAttempt
       let requireFileType = true
       if (!successful(openApiAttempt)) {
-        const internalAttempt = await stageRequest(
-          `/team-knowledge-main/teamKnowledge/get?catalogId=${encodeURIComponent(catalogId)}`,
-          'source_internal',
+        const catalogAttempt = await stageRequest(
+          `/team-knowledge-main/teamKnowledgeCatalog/get?catalogId=${encodeURIComponent(catalogId)}`,
+          'source_catalog',
         )
-        if (!successful(internalAttempt)) {
-          return failedInspection(internalAttempt.diagnostic, [openApiAttempt.diagnostic, internalAttempt.diagnostic])
+        sourceAttempts.push(catalogAttempt.diagnostic)
+        if (successful(catalogAttempt)) {
+          selectedAttempt = catalogAttempt
+        } else {
+          const internalAttempt = await stageRequest(
+            `/team-knowledge-main/teamKnowledge/get?catalogId=${encodeURIComponent(catalogId)}`,
+            'source_internal',
+          )
+          sourceAttempts.push(internalAttempt.diagnostic)
+          if (!successful(internalAttempt)) {
+            return failedInspection(internalAttempt.diagnostic, sourceAttempts)
+          }
+          selectedAttempt = internalAttempt
+          requireFileType = false
         }
-        selectedAttempt = internalAttempt
-        requireFileType = false
       }
       const sourceRecord = dataRecord(selectedAttempt) ?? {}
       const sourceId = typeof sourceRecord.catalogId === 'string' ? sourceRecord.catalogId : null
@@ -1751,8 +1844,48 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
       detailSourceBookId = typeof sourceRecord.bookId === 'string' && /^\d+$/.test(sourceRecord.bookId) ? sourceRecord.bookId : null
       const fileType = sourceRecord.fileType
       if (sourceId !== catalogId || !sourceParentId || !/^\d+$/.test(sourceParentId) || sourceParentId === catalogId
-        || (requireFileType && !((typeof fileType === 'string' && fileType.length > 0) || typeof fileType === 'number'))) {
+        || (requireFileType && !trustedLightDocument && !((typeof fileType === 'string' && fileType.length > 0) || typeof fileType === 'number'))) {
         return { ok: false, error: 'team_doc_directory_required' }
+      }
+      const sourceName = [sourceRecord.name, sourceRecord.catalogName, sourceRecord.title]
+        .find((value) => typeof value === 'string' && value.trim())
+      // `teamKnowledge/get` is the authenticated document-identity fallback
+      // for a docOnline URL. Its successful exact catalogId/parentId response
+      // does not always expose fileType, so do not discard that verified
+      // document merely because the directory-node APIs reject its parent.
+      // Permission, bookId and document-children readback still gate use.
+      const isLightDocument = trustedLightDocument || !requireFileType || fileType === 4 || (typeof fileType === 'string' && /^(4|newword)$/i.test(fileType.trim()))
+      let currentDocumentBookId = detailSourceBookId
+      if (currentDocumentBookId === null) {
+        const sourceBookAttempt = await stageRequest(`/team-knowledge-main/teamKnowledgeCatalog/getBookId?catalogId=${encodeURIComponent(catalogId)}`, 'source_book')
+        sourceAttempts.push(sourceBookAttempt.diagnostic)
+        if (successful(sourceBookAttempt)) currentDocumentBookId = bookIdFromData(sourceBookAttempt)
+      }
+      if (isLightDocument && currentDocumentBookId !== null && typeof sourceName === 'string') {
+        const permissionAttempt = await stageRequest(`/team-knowledge-main/teamKnowledgeCatalog/getPermission?catalogId=${encodeURIComponent(catalogId)}`, 'source_permission')
+        sourceAttempts.push(permissionAttempt.diagnostic)
+        const sourcePermission = permissionAttempt.reply?.payload?.data
+        const sourcePermissionRecord = sourcePermission && typeof sourcePermission === 'object' && !Array.isArray(sourcePermission) ? sourcePermission as Record<string, unknown> : {}
+        const sourceCanRead = sourcePermissionRecord.canRead === true
+        const sourceCanCreate = sourcePermissionRecord.canAddOrUpload === true
+        if (successful(permissionAttempt) && sourceCanRead && sourceCanCreate) {
+          const childrenAttempt = await stagePost(
+            '/team-knowledge-main/teamKnowledgeCatalog/getDataByParentId', 'source_children',
+            { bookId: currentDocumentBookId, parentId: catalogId },
+          )
+          sourceAttempts.push(childrenAttempt.diagnostic)
+          if (successful(childrenAttempt)) {
+            const fingerprintSource = `${location.href}|${currentDocumentBookId}|${catalogId}|${sourceName}|${sourceCanRead}|${sourceCanCreate}`
+            let hash = 2166136261
+            for (let index = 0; index < fingerprintSource.length; index += 1) {
+              hash ^= fingerprintSource.charCodeAt(index); hash = Math.imul(hash, 16777619)
+            }
+            return { ok: true, parent: {
+              parentId: catalogId, bookId: currentDocumentBookId, parentName: sourceName, canRead: true, canCreate: true, parentType: 'document',
+              fingerprint: `team-doc-parent-v2-${(hash >>> 0).toString(16).padStart(8, '0')}`,
+            } }
+          }
+        }
       }
       resolvedCatalogId = sourceParentId
     }
@@ -1763,11 +1896,15 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
         'node_openapi', { businessSystem: 'TEAM_KNOWLEDGE_BOOK' },
       )
       if (!successful(openApiNodeAttempt)) {
-        return failedInspection(openApiNodeAttempt.diagnostic, [nodeAttempt.diagnostic, openApiNodeAttempt.diagnostic])
+        const attempts = [...sourceAttempts, nodeAttempt.diagnostic, openApiNodeAttempt.diagnostic]
+        return failedInspection(openApiNodeAttempt.diagnostic, documentDetail ? attempts : undefined)
       }
       nodeAttempt = openApiNodeAttempt
     }
-    if (!successful(nodeAttempt)) return failedInspection(nodeAttempt.diagnostic)
+    if (!successful(nodeAttempt)) {
+      const attempts = [...sourceAttempts, nodeAttempt.diagnostic]
+      return failedInspection(nodeAttempt.diagnostic, documentDetail ? attempts : undefined)
+    }
     const nodeRecord = dataRecord(nodeAttempt) ?? {}
     const nodeId = typeof nodeRecord.catalogId === 'string' ? nodeRecord.catalogId : resolvedCatalogId
     const parentName = [nodeRecord.name, nodeRecord.catalogName, nodeRecord.title].find((value) => typeof value === 'string' && value.trim())
@@ -1819,14 +1956,14 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
   }
 }
 
-async function createTeamDocInPage(input: { bookId: string; parentId: string; name: string; kind?: TeamKnowledgeItemKind }): Promise<unknown> {
+async function createTeamDocInPage(input: { bookId: string; parentId: string; name: string; kind?: TeamKnowledgeItemKind; parentType?: string }): Promise<unknown> {
   if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com') {
     return { ok: false, failedAt: 'create', error: 'team_doc_wrong_origin' }
   }
   const parse = async (response: Response): Promise<{ response: Response; payload: Record<string, unknown> | null }> => {
     const text = await response.text()
     try {
-      const lossless = text.replace(/"(bookId|catalogId|parentId)"\s*:\s*(\d+)/g, '"$1":"$2"')
+      const lossless = text.replace(/"(bookId|catalogId|parentId|id|pid)"\s*:\s*(\d+)/g, '"$1":"$2"')
         .replace(/"data"\s*:\s*(\d{16,})(?=\s*[,}])/g, '"data":"$1"')
       const payload = JSON.parse(lossless) as unknown
       return { response, payload: payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : null }
@@ -1849,6 +1986,7 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
         if (Array.isArray(value)) return value
         if (value && typeof value === 'object') pending.push(value as Record<string, unknown>)
       }
+      if (typeof record.catalogId === 'string') return [record]
       for (const value of Object.values(record)) {
         if (value && typeof value === 'object' && !Array.isArray(value)) pending.push(value as Record<string, unknown>)
       }
@@ -1856,14 +1994,20 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     return []
   }
   const listChildren = async () => {
-    const reply = await parse(await fetch('/g-kmp/team-knowledge-main/openApi/teamKnowledgeCatalog/getListByParentId', {
-      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', businessSystem: 'TEAM_KNOWLEDGE_BOOK' },
+    const documentParent = input.parentType === 'document'
+    const reply = await parse(await fetch(documentParent ? '/g-kmp/team-knowledge-main/teamKnowledgeCatalog/getDataByParentId' : '/g-kmp/team-knowledge-main/openApi/teamKnowledgeCatalog/getListByParentId', {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(documentParent ? {} : { businessSystem: 'TEAM_KNOWLEDGE_BOOK' }) },
       body: JSON.stringify({ bookId: input.bookId, parentId: input.parentId }),
     }))
     return { reply, records: recordsFrom(reply.payload?.data) }
   }
-  const recordId = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
-    && typeof (value as Record<string, unknown>).catalogId === 'string' ? (value as Record<string, unknown>).catalogId as string : null
+  const exactId = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+    ? [
+        (value as Record<string, unknown>).catalogId,
+        (value as Record<string, unknown>).id,
+        (value as Record<string, unknown>).pid,
+      ].find((candidate): candidate is string => typeof candidate === 'string' && /^\d+$/.test(candidate)) ?? null
+    : null
   const recordName = (value: unknown) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null
     const record = value as Record<string, unknown>
@@ -1906,12 +2050,22 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     }))
     const data = createReply.payload?.data
     const created = data && typeof data === 'object' && !Array.isArray(data) ? data as Record<string, unknown> : {}
-    const documentId = typeof created.catalogId === 'string' ? created.catalogId : null
+    const documentId = exactId(created)
     if (!createReply.response.ok || createReply.payload?.errorCode !== '00000' || !documentId || !/^\d+$/.test(documentId)) {
       return { ok: false, failedAt: 'create', error: 'team_doc_create_failed', diagnostic: diagnostic(createReply) }
     }
-    const children = await listChildren()
-    const match = children.records.find((value) => recordId(value) === documentId && recordName(value) === input.name) as Record<string, unknown> | undefined
+    let children = await listChildren()
+    let match = children.records.find((value) => exactId(value) === documentId && recordName(value) === input.name) as Record<string, unknown> | undefined
+    if (!match && children.reply.response.ok && children.reply.payload?.errorCode === '00000') {
+      const renamed = await parse(await fetch('/g-kmp/team-knowledge-main/teamKnowledgeCatalog/rename', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: documentId, name: input.name }),
+      }))
+      if (!renamed.response.ok || renamed.payload?.errorCode !== '00000') {
+        return { ok: false, failedAt: 'rediscover', error: 'team_doc_rename_failed', documentId, diagnostic: diagnostic(renamed) }
+      }
+      children = await listChildren()
+      match = children.records.find((value) => exactId(value) === documentId && recordName(value) === input.name) as Record<string, unknown> | undefined
+    }
     if (!children.reply.response.ok || children.reply.payload?.errorCode !== '00000' || !match) {
       return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId, diagnostic: diagnostic(children.reply) }
     }
@@ -1929,20 +2083,12 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
   }
 }
 
-async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string; documentId: string; kind?: TeamKnowledgeItemKind }): Promise<unknown> {
+async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string; documentId: string; name: string; kind?: TeamKnowledgeItemKind; parentType?: string }): Promise<unknown> {
   if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com') {
     return { ok: false, failedAt: 'rediscover', error: 'team_doc_wrong_origin', documentId: input.documentId }
   }
   try {
-    const response = await fetch('/g-kmp/team-knowledge-main/openApi/teamKnowledgeCatalog/getListByParentId', {
-      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', businessSystem: 'TEAM_KNOWLEDGE_BOOK' },
-      body: JSON.stringify({ bookId: input.bookId, parentId: input.parentId }),
-    })
-    const text = await response.text()
-    const lossless = text.replace(/"(bookId|catalogId|parentId)"\s*:\s*(\d+)/g, '"$1":"$2"')
-      .replace(/"data"\s*:\s*(\d{16,})(?=\s*[,}])/g, '"data":"$1"')
-    const parsed = JSON.parse(lossless) as unknown
-    const payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
+    const documentParent = input.parentType === 'document'
     const recordsFrom = (data: unknown): unknown[] => {
       if (Array.isArray(data)) return data
       const pending = data && typeof data === 'object' ? [data as Record<string, unknown>] : []
@@ -1951,23 +2097,68 @@ async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string
         const record = pending.shift()!
         if (seen.has(record)) continue
         seen.add(record)
-        for (const key of ['records', 'list', 'items', 'content', 'rows', 'page']) {
-          const value = record[key]
-          if (Array.isArray(value)) return value
-          if (value && typeof value === 'object') pending.push(value as Record<string, unknown>)
-        }
-        for (const value of Object.values(record)) {
+      for (const key of ['records', 'list', 'items', 'content', 'rows', 'page']) {
+        const value = record[key]
+        if (Array.isArray(value)) return value
+        if (value && typeof value === 'object') pending.push(value as Record<string, unknown>)
+      }
+      if (typeof record.catalogId === 'string') return [record]
+      for (const value of Object.values(record)) {
           if (value && typeof value === 'object' && !Array.isArray(value)) pending.push(value as Record<string, unknown>)
         }
       }
       return []
     }
-    const records = recordsFrom(payload?.data)
-    const match = records.find((value) => value && typeof value === 'object' && !Array.isArray(value)
-      && (value as Record<string, unknown>).catalogId === input.documentId) as Record<string, unknown> | undefined
-    const diagnostic = { httpStatus: response.status, errorCode: typeof payload?.errorCode === 'string' ? payload.errorCode : null }
-    if (!response.ok || payload?.errorCode !== '00000' || !match) {
-      return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId: input.documentId, diagnostic }
+    const readChildren = async () => {
+      const response = await fetch(documentParent ? '/g-kmp/team-knowledge-main/teamKnowledgeCatalog/getDataByParentId' : '/g-kmp/team-knowledge-main/openApi/teamKnowledgeCatalog/getListByParentId', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(documentParent ? {} : { businessSystem: 'TEAM_KNOWLEDGE_BOOK' }) },
+        body: JSON.stringify({ bookId: input.bookId, parentId: input.parentId }),
+      })
+      const text = await response.text()
+      const lossless = text.replace(/"(bookId|catalogId|parentId|id|pid)"\s*:\s*(\d+)/g, '"$1":"$2"')
+        .replace(/"data"\s*:\s*(\d{16,})(?=\s*[,}])/g, '"data":"$1"')
+      const parsed = JSON.parse(lossless) as unknown
+      const payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
+      return { response, payload, records: recordsFrom(payload?.data), diagnostic: { httpStatus: response.status, errorCode: typeof payload?.errorCode === 'string' ? payload.errorCode : null } }
+    }
+    const matchingRecord = (records: unknown[]) => records.find((value) => value && typeof value === 'object' && !Array.isArray(value)
+      && [
+        (value as Record<string, unknown>).catalogId,
+        (value as Record<string, unknown>).id,
+        (value as Record<string, unknown>).pid,
+      ].some((candidate) => candidate === input.documentId)
+      && [
+        (value as Record<string, unknown>).name,
+        (value as Record<string, unknown>).fileName,
+        (value as Record<string, unknown>).catalogName,
+        (value as Record<string, unknown>).title,
+      ].some((candidate) => candidate === input.name)) as Record<string, unknown> | undefined
+    let children = await readChildren()
+    if (!children.response.ok || children.payload?.errorCode !== '00000') {
+      return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
+    }
+    const located = children.records.find((value) => value && typeof value === 'object' && !Array.isArray(value)
+      && [(value as Record<string, unknown>).catalogId, (value as Record<string, unknown>).id, (value as Record<string, unknown>).pid]
+        .some((candidate) => candidate === input.documentId)) as Record<string, unknown> | undefined
+    if (!located) {
+      return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
+    }
+    let match = matchingRecord(children.records)
+    if (!match) {
+      const renameResponse = await fetch('/g-kmp/team-knowledge-main/teamKnowledgeCatalog/rename', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: input.documentId, name: input.name }),
+      })
+      const renameText = await renameResponse.text()
+      const renamePayload = JSON.parse(renameText) as { errorCode?: unknown }
+      const renameDiagnostic = { httpStatus: renameResponse.status, errorCode: typeof renamePayload?.errorCode === 'string' ? renamePayload.errorCode : null }
+      if (!renameResponse.ok || renamePayload?.errorCode !== '00000') {
+        return { ok: false, failedAt: 'rediscover', error: 'team_doc_rename_failed', documentId: input.documentId, diagnostic: renameDiagnostic }
+      }
+      children = await readChildren()
+      match = matchingRecord(children.records)
+      if (!children.response.ok || children.payload?.errorCode !== '00000' || !match) {
+        return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
+      }
     }
     if (input.kind !== undefined) {
       const fileTypesResponse = await fetch('/g-kmp/team-knowledge-main/teamKnowledge/getAllFileType?createFlag=true', { credentials: 'include' })
@@ -1987,7 +2178,7 @@ async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string
         return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId: input.documentId }
       }
       if (String(match.fileType ?? '') !== String(expectedFileType)) {
-        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId: input.documentId, diagnostic }
+        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
       }
     }
     const rawUrl = typeof match.url === 'string' ? match.url : `/teamKnowledge/detail/docOnline/${input.documentId}?id=${input.documentId}`
@@ -2033,8 +2224,32 @@ async function writeTeamDocInWebEdit(body: string): Promise<unknown> {
     }
     if (typeof afterXml !== 'string' || afterXml === beforeXml) return { ok: false, failedAt: 'write', error: 'team_doc_write_not_observed' }
     const observedBody = decodeXml(afterXml)
-    const visibleFragments = body.replace(/<!--[\s\S]*?-->/g, '').split(/\n+/)
-      .map((line) => line.replace(/^\s{0,3}#{1,6}\s+/, '').trim()).filter(Boolean)
+    const visibleText = (value: string) => value
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/~~([^~]+)~~/g, '$1')
+      .trim()
+    const visibleFragments = body.replace(/<!--[\s\S]*?-->/g, '').split(/\n+/).flatMap((sourceLine) => {
+      const line = sourceLine.trim()
+      if (!line) return []
+      if (/^(?:`{3,}|~{3,}|-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return []
+      if (/^\|.*\|$/.test(line)) {
+        const cells = line.slice(1, -1).split('|').map((cell) => visibleText(cell))
+        if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) return []
+        return [cells.join('\t')]
+      }
+      const heading = /^#{1,6}\s+/.test(line)
+      const withoutBlockPrefix = line.replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
+        .replace(/^(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, '')
+      const withoutHeadingNumber = heading
+        ? withoutBlockPrefix.replace(/^\d+(?:\.\d+)*[.)、．]?\s+/, '')
+        : withoutBlockPrefix
+      const fragment = visibleText(withoutHeadingNumber)
+      return fragment ? [fragment] : []
+    }).filter(Boolean)
     const readbackMatches = observedBody.length > 0 && visibleFragments.every((fragment) => observedBody.includes(fragment))
     return readbackMatches
       ? { ok: true, readbackMatches: true, observedBody }
@@ -2054,6 +2269,22 @@ async function assertTeamDocTarget(request: { runId: string; browserTarget: Brow
   if (actual === undefined || !sameBrowserTarget(actual, request.browserTarget)) {
     throw new Error('The trusted Browser Target navigated before Team Doc execution.')
   }
+}
+
+async function waitForTrustedLightDocumentIdentity(browserTarget: BrowserTarget): Promise<boolean> {
+  const configuredWaitMs = Number((globalThis as typeof globalThis & { __DSH_TEAM_DOC_PROBE_WAIT_MS?: unknown }).__DSH_TEAM_DOC_PROBE_WAIT_MS)
+  const deadline = Date.now() + (Number.isFinite(configuredWaitMs) && configuredWaitMs >= 0 ? configuredWaitMs : 2_500)
+  do {
+    const tab = await chrome.tabs.get(browserTarget.tabId)
+    const actual = targetFromActionTab(tab)
+    if (actual === undefined || !sameBrowserTarget(actual, browserTarget)) {
+      throw new Error('The trusted Browser Target navigated before Team Doc inspection.')
+    }
+    if ((await probeDocumentIdentity(browserTarget.tabId))?.kind === 'webedit_light_document') return true
+    if (Date.now() >= deadline) break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  } while (Date.now() < deadline)
+  return false
 }
 
 async function waitForTeamDocTab(tabId: number, expectedUrl: string, timeoutMs = 20_000): Promise<void> {
@@ -2080,8 +2311,9 @@ async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
   const parentId = extractTeamDocParentId(request.browserTarget.url)
   if (!parentId) return teamDocPartial({ failedAt: 'inspect', error: 'team_doc_parent_id_missing' })
   const documentDetail = /\/teamKnowledge\/detail\/docOnline\//i.test(request.browserTarget.url)
+  const trustedLightDocument = documentDetail ? await waitForTrustedLightDocumentIdentity(request.browserTarget) : false
   const inspected = (await chrome.scripting.executeScript({
-    target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail],
+    target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail, trustedLightDocument],
   }))[0]?.result as { ok?: unknown; parent?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   if (inspected?.ok !== true || !isTeamDocParent(inspected.parent)) {
     return teamDocPartial({ failedAt: 'inspect', error: typeof inspected?.error === 'string' ? inspected.error : 'team_doc_parent_inspection_failed', diagnostic: inspected?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
@@ -2096,11 +2328,11 @@ async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
   const resolution = recoveryDocumentId
     ? await chrome.scripting.executeScript({
       target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage,
-      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, documentId: recoveryDocumentId }],
+      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, documentId: recoveryDocumentId, name: request.name!, parentType: request.parent.parentType }],
     })
     : await chrome.scripting.executeScript({
       target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage,
-      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, name: request.name! }],
+      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, name: request.name!, parentType: request.parent.parentType }],
     })
   const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   if (created?.ok !== true || typeof created.documentId !== 'string' || typeof created.url !== 'string') {
@@ -2116,14 +2348,7 @@ async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
   try {
     await chrome.tabs.update(request.browserTarget.tabId, { url: created.url })
     await waitForTeamDocTab(request.browserTarget.tabId, created.url)
-    const frameDeadline = Date.now() + 30_000
-    let frame: chrome.webNavigation.GetAllFrameResultDetails | undefined
-    while (Date.now() < frameDeadline) {
-      const frames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-      frame = frames.find((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
-      if (frame) break
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
+    const frame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
     if (!frame) return teamDocPartial({ documentId: created.documentId, stages, failedAt: 'write', error: 'team_doc_webedit_frame_unavailable' })
     writeResult = (await chrome.scripting.executeScript({
       target: { tabId: request.browserTarget.tabId, frameIds: [frame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!],
@@ -2226,8 +2451,9 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const parentId = extractTeamDocParentId(request.browserTarget.url)
   if (!parentId) return teamKnowledgeItemPartial({ failedAt: 'inspect', error: 'team_knowledge_parent_id_missing' })
   const documentDetail = /\/teamKnowledge\/detail\/docOnline\//i.test(request.browserTarget.url)
+  const trustedLightDocument = documentDetail ? await waitForTrustedLightDocumentIdentity(request.browserTarget) : false
   const inspected = (await chrome.scripting.executeScript({
-    target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail],
+    target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail, trustedLightDocument],
   }))[0]?.result as { ok?: unknown; parent?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   if (inspected?.ok !== true || !isTeamKnowledgeParent(inspected.parent)) {
     return teamKnowledgeItemPartial({ failedAt: 'inspect', error: typeof inspected?.error === 'string' ? inspected.error : 'team_knowledge_parent_inspection_failed', diagnostic: inspected?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
@@ -2235,7 +2461,7 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const parent = inspected.parent
   if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
   if (request.action === 'readback') {
-    const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: request.catalogId!, kind: request.kind }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown } | undefined
+  const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: request.catalogId!, name: request.name!, kind: request.kind, parentType: parent.parentType }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown } | undefined
     if (recovered?.ok !== true || recovered.documentId !== request.catalogId || typeof recovered.url !== 'string') return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_rediscover_mismatch' })
     let readback: Record<string, unknown>
     try {
@@ -2261,8 +2487,8 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const recoveryCatalogId = request.recovery?.catalogId ?? checkpoint?.catalogId
   const creatingNewItem = !recoveryCatalogId
   const resolution = recoveryCatalogId
-    ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId, kind }] })
-    : await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, name: request.name!, kind }] })
+    ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId, name: request.name!, kind, parentType: parent.parentType }] })
+    : await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, name: request.name!, kind, parentType: parent.parentType }] })
   const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; catalogId?: unknown; kind?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   const catalogId = typeof created?.catalogId === 'string' ? created.catalogId : typeof created?.documentId === 'string' ? created.documentId : null
   if (creatingNewItem && catalogId && /^\d+$/.test(catalogId)) {

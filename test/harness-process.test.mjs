@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { claudeSkillsPatch, harnessArgs, prepareProductUiPackages, productUiPatch, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin } from '../apps/native-server/src/harness-process.mjs'
+import { claudeSkillsPatch, effectiveSessionTrackingPatch, harnessArgs, prepareProductUiPackages, productUiPatch, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
 import { mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -54,6 +54,19 @@ test('resolves the product-owned Harness runtime plugin outside the upstream che
   )
 })
 
+test('resolves the product-owned AccrUI tracking plugin outside the upstream checkout', () => {
+  assert.equal(
+    resolveHarnessTrackingPlugin({}),
+    resolve(projectRoot, 'packages/harness-tracking/src/index.mjs'),
+  )
+})
+
+test('mounts AccrUI effective-session tracking on every Harness Web launch', () => {
+  const patch = effectiveSessionTrackingPatch({})
+  assert.match(patch, /id: deepseek-harness-effective-session-tracking/)
+  assert.match(patch, /packages\/harness-tracking\/src\/index\.mjs/)
+})
+
 test('passes the Native Host-owned MCP patch to the official Harness client', () => {
   assert.deepEqual(
     harnessArgs(0, '/private/tmp/connector.cordis.yml'),
@@ -63,6 +76,9 @@ test('passes the Native Host-owned MCP patch to the official Harness client', ()
 
 test('mounts Harness-native skills before Claude skills so duplicate names resolve to this project', () => {
   const harnessSkillsDir = resolve(projectRoot, 'skills')
+  assert.equal(resolveProductSkillsRoot({}), harnessSkillsDir)
+  assert.equal(resolveProductSkillsRoot({ DSH_PRODUCT_SKILLS_ROOT: '/opt/runtime/skills' }), '/opt/runtime/skills')
+  assert.equal(resolveUserHome({ USERPROFILE: 'C:\\Users\\alice' }), 'C:\\Users\\alice')
   assert.equal(
     claudeSkillsPatch({ HOME: '/Users/alice' }),
     `- insert:
@@ -74,6 +90,14 @@ test('mounts Harness-native skills before Claude skills so duplicate names resol
           - '${harnessSkillsDir}'
           - '/Users/alice/.claude/skills'
 `,
+  )
+  assert.match(
+    claudeSkillsPatch({ USERPROFILE: 'C:\\Users\\alice', DSH_PRODUCT_SKILLS_ROOT: 'C:\\AccrUI\\runtime\\skills' }),
+    /C:\\AccrUI\\runtime\\skills/,
+  )
+  assert.match(
+    claudeSkillsPatch({ USERPROFILE: 'C:\\Users\\alice', DSH_PRODUCT_SKILLS_ROOT: 'C:\\AccrUI\\runtime\\skills' }),
+    /C:\\Users\\alice[/\\]\.claude[/\\]skills/,
   )
 })
 
@@ -250,6 +274,8 @@ test('advertises distinct selected-source routes with isolated MCP tools', async
   assert.match(source, /mcp__chrome__knowledge_search call with one focused non-empty "question" string/)
   const code = source.slice(source.indexOf('toolName: search_selected_remote_code'), source.indexOf('toolName: search_selected_knowledge'))
   const knowledge = source.slice(source.indexOf('toolName: search_selected_knowledge'))
+  assert.match(code, /enableRunInBackground: false/)
+  assert.match(knowledge, /enableRunInBackground: false/)
   assert.match(code, /allow: \['mcp__chrome__code_search'\]/)
   assert.match(code, /Preserve the end user's language in the MCP question and in your final answer/)
   assert.match(code, /when the user writes Chinese, all user-visible narration and answers must be Simplified Chinese/)
@@ -283,6 +309,8 @@ test('keeps selected-source routing in the final Code preset system prompt', asy
   assert.match(prompt, /search_selected_knowledge/)
   assert.match(prompt, /searching them is the default path for answering questions/)
   assert.match(prompt, /The selection itself is the instruction/)
+  assert.match(prompt, /When the end user's message is Chinese, write every user-visible message from the parent in Simplified Chinese/)
+  assert.match(prompt, /Call exactly one matching selected-source wrapper at most once for each user request/)
   assert.match(prompt, /current working directory is a session workspace for generated documents and process files, not the product codebase/)
   assert.match(prompt, /empty or docs-only cwd is expected/)
   assert.match(prompt, /never ask where the code is after seeing an empty listing/)

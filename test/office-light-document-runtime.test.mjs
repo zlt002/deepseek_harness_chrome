@@ -13,6 +13,7 @@ async function runtime(options = {}) {
   const canvas = {
     async getDocXml() { return xml },
     async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
+    ...(options.selectionInfo ? { canvas: { getSelectionInfo: () => options.selectionInfo } } : {}),
   }
   const applySelection = (value) => {
     if (options.selectionInsert === 'throws') throw new Error('insert failed')
@@ -180,6 +181,78 @@ test('light-document runtime inserts mermaid drawings, structured blocks, and se
   const rejected = await missing({ action: 'write', operation: 'selection_replace', resource: read.result.resource, payload: { text: '不应写入', expectedSelectionFingerprint: read.result.document.selection.selectionFingerprint } })
   assert.equal(rejected.ok, false)
   assert.equal(rejected.error.code, 'unsupported')
+})
+
+test('light-document runtime atomically replaces a stable whole-block selection when replaceContent is unavailable', async () => {
+  const state = {}
+  const firstId = 'pxbYLFAvkv'; const secondId = 'pxbK7R0v8n'
+  const call = await runtime({ state, initialXml: `<apcanvas><outlineTitle id="title">旧标题</outlineTitle><p id="${firstId}">重复</p><p id="${secondId}">重复</p></apcanvas>`, otlSelection: { from: 1, to: 9, anchor: 1, head: 9, empty: false }, selectionInfo: { selected_tag_ids: [`p[@id='${firstId}']`, `p[@id='${secondId}']`] }, selection: {
+    async getSelectionContent() { return { text: '重复 重复' } },
+    async getSelectionAnchor() { return { blockId: `p[@id='${firstId}']`, start: 1, end: 9 } },
+  } })
+  const selected = await call({ action: 'selection' })
+  assert.deepEqual(Array.from(selected.result.document.selection.selectedTagIds), [firstId, secondId])
+  assert.equal(selected.result.document.selection.anchor.blockId, firstId)
+  const result = await call({ action: 'write', operation: 'selection_replace', resource: selected.result.resource, payload: { text: '原子替换内容', expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint } })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(state.replaceCalls ?? 0, 0)
+  assert.equal(state.patchCalls, 1)
+  assert.ok(result.result.observed.replacedTagIds.includes(secondId))
+})
+
+test('light-document runtime rejects malformed or duplicate public selectedTagIds before CanvasPatch', async () => {
+  for (const selectedTagIds of [["p[@id='one']../p"], ["p[@id='one']", "p[@id='one']"]]) {
+    const state = {}
+    const call = await runtime({ state, otlSelection: { from: 1, to: 9, anchor: 1, head: 9, empty: false }, selectionInfo: { selected_tag_ids: selectedTagIds }, selection: {
+      async getSelectionContent() { return { text: '重复 重复' } },
+      async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 9 } },
+    } })
+    const selected = await call({ action: 'selection' })
+    assert.equal(selected.result.document.selection.selectionIdsValid, false)
+    const result = await call({ action: 'write', operation: 'selection_blocks_replace', resource: selected.result.resource, payload: { expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint, blocks: [{ type: 'p', text: '不应写入' }] } })
+    assert.equal(result.ok, false)
+    assert.equal(result.error.code, 'unsupported')
+    assert.equal(state.patchCalls ?? 0, 0)
+  }
+})
+
+test('light-document runtime atomically replaces complete multi-block rich selections with structural readback', async () => {
+  const state = {}
+  const call = await runtime({ state, otlSelection: { from: 1, to: 9, anchor: 1, head: 9, empty: false }, selectionInfo: { selected_tag_ids: ['one', 'two'] }, selection: {
+    async getSelectionContent() { return { text: '重复 重复' } },
+    async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 9 } },
+  } })
+  const selected = await call({ action: 'selection' })
+  const oldRichPath = await call({ action: 'write', operation: 'selection_replace', resource: selected.result.resource, payload: { markdown: '## 优化结论\n\n结构化正文', expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint } })
+  assert.equal(oldRichPath.ok, false)
+  assert.equal(oldRichPath.error.code, 'unsupported')
+  const result = await call({ action: 'write', operation: 'selection_blocks_replace', resource: selected.result.resource, payload: {
+    expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint,
+    blocks: [{ type: 'h2', text: '优化结论' }, { type: 'p', text: '替换后的结构化正文' }, { type: 'table', rows: [['项', '结果'], ['选区', '已替换']] }],
+  } })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(state.patchCalls, 1)
+  assert.equal(state.replaceCalls ?? 0, 0)
+  assert.deepEqual(Array.from(result.result.observed.observedBlocks, (block) => block.type), ['h2', 'p', 'table'])
+  assert.ok(result.result.observed.replacedTagIds.includes('two'))
+})
+
+test('light-document runtime never CanvasPatches a partial first or last selected block', async () => {
+  for (const content of ['复 重复', '重复 重']) {
+    const state = {}
+    const call = await runtime({ state, otlSelection: { from: 2, to: 8, anchor: 2, head: 8, empty: false }, selectionInfo: { selected_tag_ids: ['one', 'two'] }, selection: {
+      async getSelectionContent() { return { text: content } },
+      async getSelectionAnchor() { return { blockId: 'one', start: 2, end: 8 } },
+    } })
+    const selected = await call({ action: 'selection' })
+    const result = await call({ action: 'write', operation: 'selection_blocks_replace', resource: selected.result.resource, payload: {
+      expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint,
+      blocks: [{ type: 'p', text: '不应删除整块' }],
+    } })
+    assert.equal(result.ok, false, content)
+    assert.equal(result.error.code, 'unsupported')
+    assert.equal(state.patchCalls ?? 0, 0)
+  }
 })
 
 test('light-document selection_insert ignores checkbox markers when attesting XML fragments', async () => {

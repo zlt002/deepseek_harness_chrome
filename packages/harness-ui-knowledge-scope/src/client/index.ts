@@ -3,6 +3,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createKnowledgeScopeBridge, knowledgeScopeBridgeConfig } from './bridge.ts'
 import { KnowledgeScopePanel, KnowledgeScopeStrip, type KnowledgeScopeInjected } from './KnowledgeScope.tsx'
 import { RemoteSearchToolRow } from './RemoteSearchToolRow.tsx'
+import { SelectedSourceScopeToolRow } from './SelectedSourceScopeToolRow.tsx'
 
 export const inject = ['slots']
 
@@ -26,6 +27,10 @@ export function apply(ctx: ClientContext): void {
   for (const key of ['search_selected_remote_code', 'mcp__chrome__code_search', 'search_selected_knowledge', 'mcp__chrome__knowledge_search']) {
     ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key, inject: progressInjected }, RemoteSearchToolRow))
   }
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
+    { name: 'tool.call.toolview', key: 'mcp__chrome__selected_source_scope' },
+    SelectedSourceScopeToolRow,
+  ))
 }
 
 export { KnowledgeScopePanel, KnowledgeScopeStrip }

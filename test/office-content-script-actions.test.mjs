@@ -25,7 +25,7 @@ test('the content script accepts every spreadsheet action the MCP surface advert
 
   const advertised = [
     ...arrayOnFirstMatchingLine(connectorSource, (line) => line.includes('action: { enum:') && line.includes("'special_cells'"), 'the connector office_spreadsheet action enum'),
-    ...arrayOnFirstMatchingLine(backgroundSource, (line) => line.includes("['context', 'range', 'range_features'") && line.includes("'special_cells'"), 'the background office_spreadsheet action list'),
+    ...arrayOnFirstMatchingLine(backgroundSource, (line) => line.includes("['context', 'selection', 'used_range', 'range', 'range_features'") && line.includes("'special_cells'"), 'the background office_spreadsheet action list'),
   ]
   const allowlist = arrayOnFirstMatchingLine(contentSource, (line) => line.includes("'special_cells', 'inspect_write', 'write', 'probe'"), 'the content-script spreadsheet allowlist')
 

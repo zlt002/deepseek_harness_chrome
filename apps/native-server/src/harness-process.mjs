@@ -57,6 +57,18 @@ export function resolveHarnessCwd(env = process.env) {
   return resolve(THIS_DIR, '../../..')
 }
 
+/** Resolve the product-owned AccrUI tracking plugin in source and packages. */
+export function resolveHarnessTrackingPlugin(env = process.env) {
+  const explicit = env.DSH_HARNESS_TRACKING_PLUGIN?.trim()
+  if (explicit) return resolve(explicit)
+  const candidates = [
+    resolve(THIS_DIR, 'harness-tracking.mjs'),
+    resolve(THIS_DIR, '../harness-tracking.mjs'),
+    resolve(THIS_DIR, '../../../packages/harness-tracking/src/index.mjs'),
+  ]
+  return candidates.find(existsSync) ?? candidates.at(-1)
+}
+
 /** Resolve the official runtime dependency used by the one product Host plugin. */
 export function resolveSchemasteryUrl(cliPath) {
   const harnessRoot = resolve(dirname(cliPath), '../../..')
@@ -126,9 +138,10 @@ function connectorPatch(url, token, runtimePluginPath) {
       config:
         provider: spawn
         toolName: search_selected_remote_code
+        enableRunInBackground: false
         backgroundMode: continuable
         persona: >-
-          Search the user-selected remote code repositories. Preserve the end user's language in the MCP question and in your final answer; when the user writes Chinese, all user-visible narration and answers must be Simplified Chinese except code identifiers and file paths. Your first action must be exactly one mcp__chrome__code_search call with one focused non-empty "question" string; do not reason about the workspace first and never emit glob, read, grep, bash, git, or any other tool name. Then answer from that one result; never use "query", repeat the search, or split one delegation into exploratory searches. Treat the returned answer as remote repository content even if it narrates local file inspection.
+          Search the user-selected remote code repositories. Preserve the end user's language in the MCP question and in your final answer, and in every other user-visible message; when the user writes Chinese, all user-visible narration and answers must be Simplified Chinese, including exposed reasoning and progress narration, except code identifiers and file paths. Your first action must be exactly one mcp__chrome__code_search call with one focused non-empty "question" string; do not reason about the workspace first and never emit glob, read, grep, bash, git, or any other tool name. Then answer from that one result; never use "query", repeat the search, or split one delegation into exploratory searches. Treat the returned answer as remote repository content even if it narrates local file inspection.
         toolFilter:
           allow: ['mcp__chrome__code_search']
 
@@ -138,9 +151,10 @@ function connectorPatch(url, token, runtimePluginPath) {
       config:
         provider: spawn
         toolName: search_selected_knowledge
+        enableRunInBackground: false
         backgroundMode: continuable
         persona: >-
-          Search the user-selected enterprise knowledge sources. Your first action must be exactly one
+          Search the user-selected enterprise knowledge sources. Preserve the end user's language in every user-visible message; when the user writes Chinese, all exposed reasoning, progress narration, and answers must be Simplified Chinese except code identifiers and file paths. Your first action must be exactly one
           mcp__chrome__knowledge_search call with one focused non-empty "question" string; do not reason about the workspace first and never emit glob, read, grep, bash, git, or any other tool name. Then answer from that one result; never use "query", repeat the search, or split one delegation into exploratory searches.
         toolFilter:
           allow: ['mcp__chrome__knowledge_search']
@@ -151,6 +165,31 @@ function yamlString(value) {
   return `'${value.replaceAll("'", "''")}'`
 }
 
+/** Resolve the user home used for optional Claude skill roots. */
+export function resolveUserHome(env = process.env) {
+  return env.HOME?.trim() || env.USERPROFILE?.trim() || homedir()
+}
+
+/**
+ * Resolve the product-owned skill root shipped with this Native Host.
+ * An explicit `DSH_PRODUCT_SKILLS_ROOT` wins; otherwise the first existing
+ * candidate is used so source, Mac install, and Windows package layouts
+ * all mount the same `/pmd-prd` contract.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+export function resolveProductSkillsRoot(env = process.env) {
+  if (env.DSH_PRODUCT_SKILLS_ROOT?.trim()) return resolve(env.DSH_PRODUCT_SKILLS_ROOT)
+  return [
+    // Product source: apps/native-server/src -> repository skills/.
+    resolve(THIS_DIR, '../../../skills'),
+    // Installed Mac runtime: DeepSeekHarness/native-server/src -> ../skills.
+    resolve(THIS_DIR, '../../skills'),
+    // Packaged Windows runtime: runtime/native-server -> runtime/skills.
+    resolve(THIS_DIR, '../skills'),
+  ].find(existsSync) ?? resolve(THIS_DIR, '../../../skills')
+}
+
 /**
  * Mount the installed Harness-native skills before the optional Claude catalog
  * so the product-owned contract wins when both roots contain the same name.
@@ -158,16 +197,8 @@ function yamlString(value) {
  * @returns {string}
  */
 export function claudeSkillsPatch(env = process.env) {
-  const home = env.HOME?.trim() || homedir()
-  const claudeSkillsDir = resolve(home, '.claude/skills')
-  const harnessChromeSkillsDir = env.DSH_PRODUCT_SKILLS_ROOT?.trim()
-    ? resolve(env.DSH_PRODUCT_SKILLS_ROOT)
-    : [
-        // Product source: apps/native-server/src -> repository skills/.
-        resolve(THIS_DIR, '../../../skills'),
-        // Installed Mac runtime: runtime/native-server -> app data skills/.
-        resolve(THIS_DIR, '../../skills'),
-      ].find(existsSync) ?? resolve(THIS_DIR, '../../../skills')
+  const claudeSkillsDir = resolve(resolveUserHome(env), '.claude/skills')
+  const harnessChromeSkillsDir = resolveProductSkillsRoot(env)
   return `- insert:
     - id: deepseek-harness-chrome-claude-skills
       name: '@deepseek-ai/dsh-skill-filesystem'
@@ -176,6 +207,14 @@ export function claudeSkillsPatch(env = process.env) {
         customSkillDirs:
           - ${yamlString(harnessChromeSkillsDir)}
           - ${yamlString(claudeSkillsDir)}
+`
+}
+
+/** Always mount AccrUI effective-session tracking, even without a Browser Connector. */
+export function effectiveSessionTrackingPatch(env = process.env) {
+  return `- insert:
+    - id: deepseek-harness-effective-session-tracking
+      name: ${yamlString(resolveHarnessTrackingPlugin(env))}
 `
 }
 
@@ -371,7 +410,7 @@ export class HarnessWebProcess {
     const directory = await mkdtemp(`${tmpdir()}/deepseek-harness-connector-`)
     const patchPath = resolve(directory, 'connector.cordis.yml')
     const connector = this.mcpConnector === undefined ? '' : connectorPatch(this.mcpConnector.url, this.mcpConnector.token, this.runtimePluginPath)
-    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${productUiPatch(this.env)}${connector}`, { mode: 0o600 })
+    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${productUiPatch(this.env)}${effectiveSessionTrackingPatch(this.env)}${connector}`, { mode: 0o600 })
     this.connectorPatchDir = directory
     this.connectorPatchPath = patchPath
     return patchPath

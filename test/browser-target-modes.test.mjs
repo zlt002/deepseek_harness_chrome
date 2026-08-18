@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript }) {
+async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0 }) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
@@ -90,6 +90,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
     sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()
+  globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS = teamDocProbeWaitMs
   await import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
   return {
     nativeMessages,
@@ -119,6 +120,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
     cleanup: () => {
       delete globalThis.chrome
       delete globalThis.defineBackground
+      delete globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS
     },
   }
 }
@@ -243,6 +245,43 @@ test('Team Knowledge inspection transfers to a same-tab selected parent without 
     assert.equal(response.result.parent.parentId, '200')
     const transfer = background.nativeMessages.find((message) => message.type === 'transfer-browser-target' && message.requestId === 'team-knowledge-inspect')
     assert.deepEqual(transfer.browserTarget, { browser: 'chrome', windowId: 7, tabId: 42, url: selected.url })
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('Team Knowledge waits for a same-tab candidate update before resolving its Browser Target', async () => {
+  const original = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/100', title: 'Original' }
+  const selected = { id: 42, windowId: 7, active: true, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/200', title: 'Selected parent' }
+  const originalTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: original.url }
+  let markCandidateSaveStarted
+  const candidateSaveStarted = new Promise((resolve) => { markCandidateSaveStarted = resolve })
+  let releaseCandidateSave
+  const candidateSaveMayFinish = new Promise((resolve) => { releaseCandidateSave = resolve })
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [], candidate: originalTarget }, activeTab: original,
+    onStorageSet: async (value) => {
+      if (value.harnessBrowserTargetSettings?.candidate?.url !== selected.url) return
+      markCandidateSaveStarted()
+      await candidateSaveMayFinish
+    },
+    executeScript: async () => [{ result: { ok: true, parent: { parentId: '200', bookId: '1', parentName: 'Selected parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-200' } } }],
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.updateActiveTab({ url: selected.url, title: selected.title }, selected)
+    background.emitNative({
+      type: 'connector_request', requestId: 'candidate-race', runId: 'run-follow', generation: 'generation-1',
+      browserTarget: originalTarget, tool: 'team_knowledge_item', action: 'inspect_parent',
+    })
+    await candidateSaveStarted
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(background.nativeMessages.some((message) => message.type === 'transfer-browser-target' && message.requestId === 'candidate-race'), false)
+    releaseCandidateSave()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'candidate-race')
+    assert.equal(response.error, undefined)
+    assert.equal(response.browserTarget.url, selected.url)
   } finally {
     background.cleanup()
   }
