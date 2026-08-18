@@ -275,6 +275,11 @@ test('static Windows runtime uses a bundle, keeps native sidecars, and rejects n
   assert.match(builderSource, /process\.env\.npm_execpath/)
   assert.match(builderSource, /'pnpm\.cmd'/)
   assert.doesNotMatch(builderSource, /run\('pnpm'/)
+  assert.match(builderSource, /runPnpm\(\['build:harness-client-plugins'\]/)
+  assert.ok(
+    builderSource.indexOf("runPnpm(['build:harness-client-plugins']") < builderSource.indexOf('bundleWithHarnessEsbuild({'),
+    'product plugins must build before the static server bundle',
+  )
   assert.match(builderSource, /path\.join\(koffi, 'win32_x64', 'koffi\.node'\)/)
 })
 

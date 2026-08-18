@@ -132,6 +132,14 @@ export async function buildWindowsStaticHarnessRuntime({
   ]
   for (const target of required) if (!existsSync(target)) throw new Error(`Built Harness product input is missing: ${target}`)
 
+  // Product plugin artifacts are intentionally not committed. Build them
+  // against this exact materialized Harness so a clean CI checkout has the
+  // concrete lib/index.js and lib/client.js files required below.
+  runPnpm(['build:harness-client-plugins'], {
+    cwd: PROJECT_ROOT,
+    env: { ...process.env, DSH_ROOT: harnessRoot },
+  })
+
   const destination = path.resolve(outputDir)
   const staging = `${destination}.staging`
   const harnessDir = path.join(staging, 'harness')
