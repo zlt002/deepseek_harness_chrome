@@ -70,6 +70,34 @@ function Invoke-InstallerUiSmoke {
   }
 }
 
+function Start-InstalledRuntimeLockHolder {
+  $readyPath = Join-Path $env:RUNNER_TEMP 'accrui-harness-runtime-lock-ready.txt'
+  $scriptPath = Join-Path $installRoot 'runtime\installer-lock-holder.ps1'
+  $targetPath = Join-Path $installRoot 'runtime\harness\apps\cli\lib\server.mjs'
+  Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
+  $source = @'
+param([string]$TargetPath, [string]$ReadyPath)
+$handle = [System.IO.File]::Open($TargetPath, 'Open', 'Read', 'None')
+try {
+  [System.IO.File]::WriteAllText($ReadyPath, 'ready', [System.Text.UTF8Encoding]::new($false))
+  Start-Sleep -Seconds 120
+} finally {
+  $handle.Dispose()
+}
+'@
+  [System.IO.File]::WriteAllText($scriptPath, $source, [System.Text.UTF8Encoding]::new($true))
+  $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $scriptPath + '"'), '-TargetPath', ('"' + $targetPath + '"'), '-ReadyPath', ('"' + $readyPath + '"'))
+  $process = Start-Process -FilePath powershell.exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
+  $deadline = [DateTime]::UtcNow.AddSeconds(10)
+  while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf) -and -not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 100
+    $process.Refresh()
+  }
+  if (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) { throw 'Failed to start the installed runtime lock holder.' }
+  return $process
+}
+
+$lockProcess = $null
 try {
   if (Test-Path -LiteralPath $acceptanceRoot) { Remove-Item -LiteralPath $acceptanceRoot -Recurse -Force }
   New-Item -ItemType Directory -Path $seedRoot -Force | Out-Null
@@ -91,6 +119,7 @@ try {
   }
 
   Invoke-InstallerUiSmoke
+  $lockProcess = Start-InstalledRuntimeLockHolder
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
   $vbsOutput = & cscript.exe //NoLogo $installLauncher 2>&1
   $vbsExitCode = $LASTEXITCODE
@@ -107,6 +136,9 @@ try {
     }
     throw "VBS installer failed with exit code $vbsExitCode."
   }
+  $lockProcess.Refresh()
+  if (-not $lockProcess.HasExited) { throw 'Old installed runtime lock holder was not stopped before upgrade.' }
+  Write-Host 'Old installed runtime lock holder was stopped before upgrade.'
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Upgrade did not install the candidate.'
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) '1.1.62' 'Previous version was not retained for rollback.'
   foreach ($relativePath in @('workspace\user.txt', 'logs\user.txt', '.webmcp\user.txt')) {
@@ -147,6 +179,10 @@ try {
   Invoke-ProductUiSmoke
   Write-Host 'Windows install, Native Messaging, upgrade, rollback, and restore acceptance passed.'
 } finally {
+  if ($null -ne $lockProcess) {
+    $lockProcess.Refresh()
+    if (-not $lockProcess.HasExited) { & taskkill.exe /PID $lockProcess.Id /T /F | Out-Null }
+  }
   foreach ($registryRoot in $registryRoots) {
     foreach ($nativeHostName in $nativeHostNames) {
       $key = Join-Path $registryRoot $nativeHostName

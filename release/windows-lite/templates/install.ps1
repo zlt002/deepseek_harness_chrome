@@ -58,14 +58,64 @@ function Assert-ReleaseTree([string]$Root) {
   return (Get-Content -LiteralPath $extensionManifest -Raw | ConvertFrom-Json)
 }
 
+function Get-InstalledProductProcesses([string]$Root) {
+  $runtimeRoot = (Join-Path ([System.IO.Path]::GetFullPath($Root)) 'runtime').TrimEnd('\') + '\'
+  $allowedNames = @('node.exe', 'cmd.exe', 'powershell.exe', 'wscript.exe', 'cscript.exe')
+  try {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  } catch {
+    $processes = @(Get-WmiObject Win32_Process -ErrorAction SilentlyContinue)
+  }
+  return @($processes | Where-Object {
+    $_.ProcessId -ne $PID -and
+    $allowedNames -contains $_.Name.ToLowerInvariant() -and
+    -not [string]::IsNullOrWhiteSpace($_.CommandLine) -and
+    $_.CommandLine.IndexOf($runtimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+  })
+}
+
+function Stop-InstalledProductProcesses([string]$Root) {
+  $processes = @(Get-InstalledProductProcesses $Root)
+  if ($processes.Count -eq 0) { return }
+  $ids = @($processes | ForEach-Object { [int]$_.ProcessId })
+  $roots = @($processes | Where-Object { $ids -notcontains [int]$_.ParentProcessId })
+  foreach ($process in $roots) {
+    & taskkill.exe /PID $process.ProcessId /T /F 2>$null | Out-Null
+  }
+  $deadline = [DateTime]::UtcNow.AddSeconds(8)
+  do {
+    Start-Sleep -Milliseconds 200
+    $remaining = @(Get-InstalledProductProcesses $Root)
+  } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+  if ($remaining.Count -gt 0) {
+    $details = ($remaining | ForEach-Object { "$($_.Name) PID=$($_.ProcessId)" }) -join ', '
+    throw "无法停止正在使用旧 Harness UI 文件的进程：$details。请关闭 Harness UI 侧边栏后重试。"
+  }
+  Write-Host "已停止 $($processes.Count) 个旧 Harness UI 进程。"
+}
+
+function Move-ManagedPathWithRetry([string]$SourcePath, [string]$DestinationPath) {
+  $lastError = $null
+  foreach ($delayMs in @(0, 200, 400, 800, 1200, 2000)) {
+    if ($delayMs -gt 0) { Start-Sleep -Milliseconds $delayMs }
+    try {
+      if (Test-Path -LiteralPath $DestinationPath) { Remove-Item -LiteralPath $DestinationPath -Recurse -Force -ErrorAction Stop }
+      Move-Item -LiteralPath $SourcePath -Destination $DestinationPath -ErrorAction Stop
+      return
+    } catch {
+      $lastError = $_
+    }
+  }
+  throw $lastError
+}
+
 function Move-ManagedTree([string]$Source, [string]$Destination) {
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
   foreach ($name in $managedNames) {
     $sourcePath = Join-Path $Source $name
     if (-not (Test-Path -LiteralPath $sourcePath)) { continue }
     $destinationPath = Join-Path $Destination $name
-    if (Test-Path -LiteralPath $destinationPath) { Remove-Item -LiteralPath $destinationPath -Recurse -Force }
-    Move-Item -LiteralPath $sourcePath -Destination $destinationPath
+    Move-ManagedPathWithRetry $sourcePath $destinationPath
   }
 }
 
@@ -108,6 +158,7 @@ function Restore-Rollback {
 
 if ($Rollback) {
   Write-InstallProgress 10 'rollback' '正在回滚到上一版本...'
+  Stop-InstalledProductProcesses $installRoot
   Restore-Rollback
   Write-InstallProgress 100 'complete' '回滚完成。'
   exit 0
@@ -132,6 +183,7 @@ try {
   Assert-ReleaseTree $stagingRoot | Out-Null
   Write-InstallProgress 65 'configuring' '正在保存现有版本并安装新版本...'
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+  Stop-InstalledProductProcesses $installRoot
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
   Move-ManagedTree $installRoot $previousRoot
   try {

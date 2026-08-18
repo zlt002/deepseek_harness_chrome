@@ -3,6 +3,16 @@ param()
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class HarnessUiConsoleWindow {
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr GetConsoleWindow();
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+'@
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -241,6 +251,8 @@ $form.Add_Shown({
   Write-LauncherLog 'installer UI visible'
   $form.Activate()
   $form.BringToFront()
+  $consoleWindow = [HarnessUiConsoleWindow]::GetConsoleWindow()
+  if ($consoleWindow -ne [IntPtr]::Zero) { [void][HarnessUiConsoleWindow]::ShowWindow($consoleWindow, 0) }
   if (-not [string]::IsNullOrWhiteSpace($env:DSH_INSTALL_UI_PROBE_PATH)) {
     $visibility = if ($form.Visible -and $form.WindowState -ne [System.Windows.Forms.FormWindowState]::Minimized) { 'visible' } else { 'hidden' }
     [System.IO.File]::WriteAllText($env:DSH_INSTALL_UI_PROBE_PATH, $visibility, [System.Text.UTF8Encoding]::new($false))
