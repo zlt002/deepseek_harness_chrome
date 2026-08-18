@@ -404,6 +404,24 @@ await build({
  * worker thread. Keep its Koffi loader inside the CJS artifact and resolve
  * the shipped native sidecar relative to apps/cli/lib at runtime.
  */
+export function directoryPickerKoffiShimSource(nativeModulePath = '../../../../native/koffi/koffi.node') {
+  return `const path = require('node:path');
+const native = require(path.resolve(__dirname, ${JSON.stringify(nativeModulePath)}));
+const introspect = native.introspect ?? native.type;
+if (typeof introspect !== 'function') throw new Error('Bundled Koffi native module has no introspection API');
+native.sizeof ??= (spec) => introspect(spec).size;
+native.alignof ??= (spec) => introspect(spec).alignment;
+native.offsetof ??= (spec, name) => {
+  const info = introspect(spec);
+  if (info.primitive !== 'Record') throw new TypeError('The offsetof() function can only be used with record types');
+  const member = info.members?.[name];
+  if (member == null) throw new Error('Koffi record member not found: ' + name);
+  return member.offset;
+};
+module.exports = native;
+`
+}
+
 export async function bundleDirectoryPickerWorker({
   harnessRoot = HARNESS_ROOT,
   outfile,
@@ -413,7 +431,7 @@ export async function bundleDirectoryPickerWorker({
   if (!existsSync(worker)) throw new Error(`Built directory-picker worker is missing: ${worker}`)
   const shim = path.join(path.dirname(outfile), '.directory-picker-koffi-shim.cjs')
   await mkdir(path.dirname(outfile), { recursive: true })
-  await writeFile(shim, `const path = require('node:path');\nmodule.exports = require(path.resolve(__dirname, '../../../../native/koffi/koffi.node'));\n`)
+  await writeFile(shim, directoryPickerKoffiShimSource())
   const program = `
 import { build } from 'esbuild';
 await build({

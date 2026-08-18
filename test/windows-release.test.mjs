@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -25,6 +26,7 @@ import { assertDirectoryPickerWorkerContract, buildWindowsStaticHarnessRuntime, 
 import {
   PRODUCT_UI_PLUGIN_PACKAGES,
   bundleDirectoryPickerWorker,
+  directoryPickerKoffiShimSource,
   nativeResolverBanner,
   patchBundledWorkerPaths,
   staticBundleAliases,
@@ -351,6 +353,24 @@ test('directory-picker worker is a standalone CJS bundle with a relative Koffi s
   const server = await writeFixture(root, 'harness/apps/cli/lib/server.mjs', 'new URL("./directory-picker-worker.cjs", import.meta.url)')
   await assertDirectoryPickerWorkerContract({ serverPath: server, workerPath: worker })
   await assert.rejects(assertDirectoryPickerWorkerContract({ serverPath: server, workerPath: path.join(root, 'missing.cjs') }), /missing directory-picker worker/)
+})
+
+test('directory-picker Koffi shim restores the official JS introspection helpers', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'directory-picker-koffi-shim-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(path.join(root, 'fake-native.cjs'), `module.exports = {
+    version: 'test',
+    introspect(spec) {
+      if (spec === 'record') return { primitive: 'Record', size: 16, alignment: 8, members: { value: { offset: 4 } } };
+      return { primitive: 'Scalar', size: 8, alignment: 8 };
+    },
+  }`)
+  const shim = await writeFixture(root, 'shim.cjs', directoryPickerKoffiShimSource('./fake-native.cjs'))
+  const koffi = createRequire(import.meta.url)(shim)
+  assert.equal(koffi.sizeof('void *'), 8)
+  assert.equal(koffi.alignof('void *'), 8)
+  assert.equal(koffi.offsetof('record', 'value'), 4)
+  assert.throws(() => koffi.offsetof('void *', 'value'), /only be used with record types/)
 })
 
 test('Windows Native Messaging smoke accepts a fragmented pong, writes stop, and exits cleanly', async () => {
