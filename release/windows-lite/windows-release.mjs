@@ -190,7 +190,7 @@ async function installPs1() {
 }
 
 function installVbs() {
-  return `Set shell = CreateObject("WScript.Shell")\r\nshell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & Replace(WScript.ScriptFullName, "install.vbs", "install.ps1") & """", 1, False\r\n`
+  return `Option Explicit\r\nDim shell, fso, scriptPath, command, exitCode\r\nSet shell = CreateObject("WScript.Shell")\r\nSet fso = CreateObject("Scripting.FileSystemObject")\r\nscriptPath = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "install.ps1")\r\ncommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & scriptPath & """ -Interactive"\r\nexitCode = shell.Run(command, 1, True)\r\nIf exitCode <> 0 Then\r\n  MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看安装窗口中的具体错误和日志位置。", vbCritical, "Harness UI 安装失败"\r\nElse\r\n  MsgBox "Harness UI 安装完成。请重新加载 AccrUI 扩展。", vbInformation, "Harness UI 安装完成"\r\nEnd If\r\n`
 }
 
 function startVbs() {
@@ -369,7 +369,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       if (!installer.includes(retainedPath)) errors.push(`install.ps1 does not document preservation of ${retainedPath}`)
     }
     for (const transactionalText of [
-      'param([switch]$Rollback)',
+      'param([switch]$Rollback, [switch]$Interactive)',
       'Move-ManagedTree $installRoot $previousRoot',
       'Move-ManagedTree $previousRoot $installRoot',
       'Move-ManagedTree $rollbackRoot $installRoot',

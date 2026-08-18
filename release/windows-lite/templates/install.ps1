@@ -1,4 +1,4 @@
-param([switch]$Rollback)
+param([switch]$Rollback, [switch]$Interactive)
 
 # AccrUI-compatible Harness Windows Lite installer and rollback manager.
 $ErrorActionPreference = 'Stop'
@@ -7,6 +7,18 @@ $payloadZip = Join-Path $scriptDir 'payload.zip'
 $installRoot = Join-Path $env:LOCALAPPDATA 'accr-ui-harness'
 $rollbackRoot = Join-Path $installRoot 'rollback'
 $managedNames = @('extension', 'runtime', 'release.json')
+$installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+
+trap {
+  $errorText = ($_ | Out-String).Trim()
+  $message = "Harness UI 安装失败：$errorText"
+  [System.IO.File]::WriteAllText($installLog, $message + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+  Write-Host ''
+  Write-Host $message -ForegroundColor Red
+  Write-Host "错误日志：$installLog" -ForegroundColor Yellow
+  if ($Interactive) { Read-Host '按 Enter 键关闭安装窗口' | Out-Null }
+  exit 1
+}
 
 function Assert-ReleaseTree([string]$Root) {
   $extensionManifest = Join-Path $Root 'extension\manifest.json'
