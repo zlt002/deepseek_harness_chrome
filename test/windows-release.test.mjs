@@ -22,7 +22,14 @@ import {
 import { encodeNativeMessage, smokeNativeMessageChild } from '../release/windows-lite/native-message-smoke.mjs'
 import { EXPECTED_PRODUCT_CLIENT_IDS, verifyProductUiBoot } from '../release/windows-lite/product-ui-smoke.mjs'
 import { assertDirectoryPickerWorkerContract, buildWindowsStaticHarnessRuntime, parseStaticRuntimeArgs } from '../release/windows-lite/build-static-harness-runtime.mjs'
-import { bundleDirectoryPickerWorker, nativeResolverBanner, patchBundledWorkerPaths } from '../release/mac-lite/build-mac-production.mjs'
+import {
+  PRODUCT_UI_PLUGIN_PACKAGES,
+  bundleDirectoryPickerWorker,
+  nativeResolverBanner,
+  patchBundledWorkerPaths,
+  staticBundleAliases,
+  staticPackageSource,
+} from '../release/mac-lite/build-mac-production.mjs'
 
 async function writeFixture(root, relativePath, content = '') {
   const target = path.join(root, relativePath)
@@ -269,6 +276,18 @@ test('static Windows runtime uses a bundle, keeps native sidecars, and rejects n
   assert.match(builderSource, /'pnpm\.cmd'/)
   assert.doesNotMatch(builderSource, /run\('pnpm'/)
   assert.match(builderSource, /path\.join\(koffi, 'win32_x64', 'koffi\.node'\)/)
+})
+
+test('Windows bundle aliases use concrete product plugin entries and retain package roots for assets', () => {
+  const aliases = staticBundleAliases(PRODUCT_UI_PLUGIN_PACKAGES, 'C:\\harness-product')
+  for (const name of PRODUCT_UI_PLUGIN_PACKAGES) {
+    assert.equal(aliases[name], path.join(staticPackageSource(name, 'C:\\harness-product'), 'lib', 'index.js'))
+    assert.match(aliases[name], /lib[/\\\\]index\.js$/)
+    assert.doesNotMatch(staticPackageSource(name, 'C:\\harness-product'), /lib[/\\\\]index\.js$/)
+  }
+
+  const upstream = '@deepseek-ai/dsh-mcp-client'
+  assert.equal(staticBundleAliases([upstream], 'C:\\harness-product')[upstream], staticPackageSource(upstream, 'C:\\harness-product'))
 })
 
 test('static runtime rewrites and carries the Win32 directory-picker worker without node_modules', async (t) => {

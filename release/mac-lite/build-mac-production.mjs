@@ -295,8 +295,17 @@ export function staticPackageSource(name, harnessRoot = HARNESS_ROOT) {
   return path.join(harnessRoot, 'node_modules', '.pnpm', 'node_modules', ...name.split('/'))
 }
 
+export function staticBundleEntry(name, harnessRoot = HARNESS_ROOT) {
+  const source = staticPackageSource(name, harnessRoot)
+  // esbuild resolves directory aliases differently on Windows. Product
+  // plugins are already built, so use their concrete server entry while
+  // keeping staticPackageSource() as the package root for manifests/clients.
+  if (name.startsWith('@accrui/')) return path.join(source, 'lib', 'index.js')
+  return source
+}
+
 export function staticBundleAliases(names, harnessRoot = HARNESS_ROOT) {
-  return Object.fromEntries([...new Set(names)].map(name => [name, staticPackageSource(name, harnessRoot)]))
+  return Object.fromEntries([...new Set(names)].map(name => [name, staticBundleEntry(name, harnessRoot)]))
 }
 
 export async function copyWebClientPackages(aliases, configDir, { harnessRoot = HARNESS_ROOT } = {}) {
