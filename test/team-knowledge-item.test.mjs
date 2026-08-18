@@ -38,9 +38,14 @@ test('publishes flat spreadsheet tools while retaining the legacy item dispatche
     assert.equal(tools.some((item) => item.name === 'team_knowledge_item'), false)
     const preview = tools.find((item) => item.name === 'team_knowledge_spreadsheet_preview')
     const create = tools.find((item) => item.name === 'team_knowledge_spreadsheet_create')
+    const readback = tools.find((item) => item.name === 'team_knowledge_spreadsheet_readback')
+    assert.deepEqual(preview.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
+    assert.match(preview.description, /idempotency identity/)
     assert.deepEqual(preview.inputSchema.required, ['name', 'body'])
     assert.deepEqual(create.inputSchema.required, ['challenge', 'idempotencyIdentity', 'name', 'body'])
+    assert.match(create.description, /does not populate cells/)
     assert.equal(create.annotations.destructiveHint, true)
+    assert.deepEqual(readback.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
   } finally { await connector.stop() }
 })
 
@@ -64,17 +69,19 @@ test('binds the create grant to parent, kind, name and body and rejects challeng
     ? { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
     : (++creates, { status: 'verified_write', item: { catalogId: '11', kind: request.kind, name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/11?id=11', fingerprint: 'item-11' }, stages: request.kind === 'spreadsheet' ? ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified'] : ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readback: { body: request.body } }))
   try {
-    const identity = `child-${crypto.randomUUID()}`
-    const preview = await harness.callTool('team_knowledge_spreadsheet_preview', 2, { name: 'Child', body: '# child' })
+    const name = `Child ${crypto.randomUUID()}`
+    const body = `# ${name}`
+    const preview = await harness.callTool('team_knowledge_spreadsheet_preview', 2, { name, body })
     const challenge = preview.result.structuredContent.challenge
-    const created = await harness.callTool('team_knowledge_spreadsheet_create', 3, { challenge, idempotencyIdentity: identity, name: 'Child', body: '# child' })
+    const identity = preview.result.structuredContent.idempotencyIdentity
+    const created = await harness.callTool('team_knowledge_spreadsheet_create', 3, { challenge, idempotencyIdentity: identity, name, body })
     assert.equal(created.result.structuredContent.status, 'verified_write')
     assert.equal(creates, 1)
-    const replay = await harness.call(4, { action: 'create', challenge, idempotencyIdentity: identity, kind: 'light_document', name: 'Child', body: '# child' })
+    const replay = await harness.call(4, { action: 'create', challenge, idempotencyIdentity: identity, kind: 'light_document', name, body })
     assert.equal(replay.result.isError, true)
     const inspectAgain = await harness.call(5, { action: 'inspect_parent' })
-    const previewAgain = await harness.call(6, { action: 'preview', parentFingerprint: inspectAgain.result.structuredContent.parent.fingerprint, kind: 'light_document', name: 'Child', body: '# child' })
-    const changed = await harness.call(7, { action: 'create', challenge: previewAgain.result.structuredContent.challenge, idempotencyIdentity: identity, kind: 'spreadsheet', name: 'Child', body: '' })
+    const previewAgain = await harness.call(6, { action: 'preview', parentFingerprint: inspectAgain.result.structuredContent.parent.fingerprint, kind: 'light_document', name, body })
+    const changed = await harness.call(7, { action: 'create', challenge: previewAgain.result.structuredContent.challenge, idempotencyIdentity: identity, kind: 'spreadsheet', name, body: '' })
     assert.equal(changed.result.isError, true)
     assert.match(changed.result.content[0].text, /identity|conflict/i)
   } finally { await harness.connector.stop() }

@@ -28,7 +28,7 @@ function assertBusinessSystemHeader(options) {
   assert.equal(headers.businesssystem, 'TEAM_KNOWLEDGE_BOOK')
 }
 
-async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, sendMessage, initialTab = target, webeditLightDocument = false, webeditFrames, webeditProbeReadyAfter = 0, teamDocProbeWaitMs = 0 } = {}) {
+async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, sendMessage, initialTab = target, webeditLightDocument = false, webeditFrames, webeditProbeReadyAfter = 0, teamDocProbeWaitMs = 0, responseWaitAttempts = 200 } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   let runtimeListener; const nativeMessages = []; const nativeListeners = new Set(); const executions = []
@@ -75,7 +75,7 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
   await new Promise((resolve, reject) => { const open = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error))); if (open !== true) reject(new Error('ensure-harness did not retain the response channel')) })
   const sendNative = async (request) => {
     nativeListeners.forEach((listener) => listener(request))
-    for (let attempt = 0; attempt < 200; attempt += 1) {
+    for (let attempt = 0; attempt < responseWaitAttempts; attempt += 1) {
       const response = nativeMessages.findLast((message) => message.type === 'connector_response' && message.requestId === request.requestId)
       if (response) return response
       await new Promise((resolve) => setTimeout(resolve, 5))
@@ -494,12 +494,36 @@ test('keeps a directory URL bound to that directory without document-parent look
     if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission')) return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }))
     throw new Error(`unexpected directory inspect fetch: ${parsed.pathname}${parsed.search}`)
   }
-  const harness = await loadBackground({ execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  const harness = await loadBackground({ responseWaitAttempts: 600, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
   try {
     const inspected = await harness.sendNative(inspectRequest({ requestId: 'directory-inspect' }))
     assert.equal(inspected.result.parent.parentId, parent.parentId)
     assert.equal(inspected.result.parent.parentName, parent.parentName)
     assert.equal(calls.some((call) => call.includes('/openApi/teamKnowledgeCatalog/get?')), false)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
+})
+
+test('reports truthful Team Knowledge item capabilities during parent inspection', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  globalThis.location = new URL(target.url)
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    if (parsed.pathname.endsWith('/teamKnowledge/get')) return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: parent.parentId, name: parent.parentName, bookId: parent.bookId, fileType: 11 } }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getBookId')) return new Response(JSON.stringify({ errorCode: '00000', data: { bookId: parent.bookId } }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission')) return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledge/getAllFileType')) return new Response(JSON.stringify({ errorCode: '00000', data: [{ type: 4, value: 'newword' }] }), { status: 200 })
+    throw new Error(`unexpected capability inspect fetch: ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ responseWaitAttempts: 600, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  try {
+    const response = await harness.sendNative({ type: 'connector_request', requestId: 'capabilities-inspect', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' })
+    assert.equal(response.result.status, 'ok')
+    assert.deepEqual(response.result.capabilities, { light_document: true, spreadsheet: false })
   } finally {
     harness.cleanup()
     globalThis.fetch = originalFetch
@@ -518,7 +542,7 @@ test('refuses a non-directory catalog node before issuing any child-item create 
     if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getPermission')) return new Response(JSON.stringify({ errorCode: '00000', data: { canRead: true, canAddOrUpload: true } }))
     throw new Error(`unexpected non-directory inspect fetch: ${parsed.pathname}${parsed.search}`)
   }
-  const harness = await loadBackground({ execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
+  const harness = await loadBackground({ responseWaitAttempts: 600, execute: async ({ func, args }) => func.name === 'inspectTeamDocParentInPage' ? func(...args) : null })
   try {
     const response = await harness.sendNative({ type: 'connector_request', requestId: 'item-non-directory', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' })
     assert.deepEqual(response.result, { status: 'partial_delivery', item: null, stages: [], failedAt: 'inspect', error: 'team_doc_directory_required' })

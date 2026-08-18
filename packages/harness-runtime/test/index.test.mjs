@@ -27,7 +27,7 @@ test('keeps public names deterministic and within Harness function-name limits',
   assert.equal(name, publicToolName('chrome', 'search/with spaces and a deliberately very long name that exceeds the limit'))
 })
 
-test('admits only one selected-source child and rejects generic delegation after scope discovery in the same parent turn', () => {
+test('admits sequential same-side selected-source children and rejects generic delegation after scope discovery in the same parent turn', () => {
   const guard = createSelectedSourceDispatchGuard()
   const exec = (name, turn) => ({
     name,
@@ -37,7 +37,12 @@ test('admits only one selected-source child and rejects generic delegation after
   assert.equal(guard(exec('mcp__chrome__selected_source_scope', 1)), undefined)
   assert.match(guard(exec('subagent', 1)), /所选远程范围/)
   assert.equal(guard(exec('search_selected_remote_code', 1)), undefined)
-  assert.match(guard(exec('search_selected_remote_code', 1)), /已启动一个检索子代理/)
+  assert.equal(guard(exec('search_selected_remote_code', 1)), undefined)
+  assert.match(guard(exec('search_selected_knowledge', 1)), /不要再启动另一侧检索/)
+  assert.equal(guard(exec('search_selected_remote_code', 1)), undefined)
+  assert.equal(guard(exec('search_selected_remote_code', 1)), undefined)
+  assert.equal(guard(exec('search_selected_remote_code', 1)), undefined)
+  assert.match(guard(exec('search_selected_remote_code', 1)), /已连续检索多次/)
   assert.equal(guard(exec('search_selected_remote_code', 2)), undefined)
 
   const directSearchGuard = createSelectedSourceDispatchGuard()

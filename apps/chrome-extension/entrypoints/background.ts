@@ -23,6 +23,17 @@ function validScope(value: unknown): value is KnowledgeScope {
 }
 function normalizeScope(scope: KnowledgeScope): KnowledgeScope { return { domainId: scope.domainId, systemIds: [...new Set(scope.systemIds)], repositoryIds: [...new Set(scope.repositoryIds)] } }
 function scopeFingerprint(scope: KnowledgeScope): string { return JSON.stringify([scope.domainId, [...scope.systemIds].sort(), [...scope.repositoryIds].sort()]) }
+function knowledgeConversationOwner(harnessSessionId: string, harnessParentSessionId?: string): string {
+  return harnessParentSessionId ?? harnessSessionId
+}
+function upstreamSessionKey(ownerSessionId: string, kind: KnowledgeKind, fingerprint: string): string {
+  return `${ownerSessionId}\u0000${kind}\u0000${fingerprint}`
+}
+function planKnowledgeContinuation(sessions: Record<string, { sessionId: string; fingerprint: string }>, ownerSessionId: string, kind: KnowledgeKind, fingerprint: string): { key: string; priorSessionId?: string } {
+  const key = upstreamSessionKey(ownerSessionId, kind, fingerprint)
+  const priorSessionId = sessions[key]?.sessionId
+  return priorSessionId === undefined || priorSessionId.trim() === '' ? { key } : { key, priorSessionId }
+}
 function payloadArray(value: unknown): unknown[] { return Array.isArray(value) ? value : Array.isArray((value as { data?: unknown } | undefined)?.data) ? (value as { data: unknown[] }).data : [] }
 function field(value: unknown, key: string): string | undefined { const item = value as Record<string, unknown> | undefined; return typeof item?.[key] === 'string' && item[key].trim().length > 0 ? item[key].trim() : undefined }
 function validKnowledgeProxyConfig(url: unknown, token: unknown): url is string {
@@ -299,14 +310,16 @@ function appendProcess(current: string, incoming: string): string {
   }
   return `${current}\n${line}`.slice(0, PROCESS_TEXT_LIMIT)
 }
-function retrievalQuestion(kind: KnowledgeKind, question: string): string {
-  const instruction = kind === 'code'
-    ? '请直接返回从所选远程代码仓库检索到的事实、文件路径和代码依据。'
-    : '请直接返回从所选知识范围检索到的事实和引用依据。'
+function retrievalQuestion(kind: KnowledgeKind, question: string, resumed = false): string {
+  const instruction = resumed
+    ? '这是同一远程检索会话的追问。请在已有上下文上继续回答，不要无必要地从头扫描仓库或知识库。'
+    : kind === 'code'
+      ? '请直接返回从所选远程代码仓库检索到的事实、文件路径和代码依据。'
+      : '请直接返回从所选知识范围检索到的事实和引用依据。'
   const language = /[\u3400-\u9fff]/u.test(question)
     ? '所有面向用户的流式内容和最终答案都必须使用简体中文；工具名、代码标识符和文件路径可保留原文。即使转述后的问题包含英文，也不要用英文叙述。'
     : 'Use the same language as the user question for all user-visible streaming content and the final answer.'
-  return `${instruction}${language}最终答案只保留事实和引用，不要把思考过程写进最终答案。检索计划、当前正在查的仓库或知识、工具选择和进度可通过独立过程事件流式返回。用户问题：${question}`
+  return `${instruction}${language}若用户要原文摘录，一次只返回一个文件或一个函数的核心片段；不要并行检索多个文件，也不要把多个大文件全文塞进同一次答案。最终答案只保留事实和引用，不要把思考过程写进最终答案。检索计划、当前正在查的仓库或知识、工具选择和进度可通过独立过程事件流式返回。用户问题：${question}`
 }
 async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scope: KnowledgeScope, priorSessionId: string | undefined, signal: AbortSignal, onProgress?: (progress: { chars: number; content: string; eventType?: string; process?: string }) => void): Promise<{ result: { status: 'complete' | 'partial' | 'truncated'; answer: string; sources: Array<{ id: string; title: string }> }; sessionId?: string }> {
   if (kind === 'knowledge' && scope.domainId === '') {
@@ -315,7 +328,7 @@ async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scop
   if (kind === 'code' && scope.repositoryIds.length === 0) {
     throw new Error('当前会话没有选择远程代码库。请在输入框上方点「选择代码库」并勾选仓库，然后重试。不要用本地工作区代替远程代码检索。')
   }
-  const directedQuestion = retrievalQuestion(kind, question)
+  const directedQuestion = retrievalQuestion(kind, question, priorSessionId !== undefined)
   const body = kind === 'knowledge' ? { question: directedQuestion, domain_system_config: { [scope.domainId]: { self: false, systems: scope.systemIds } }, forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question: directedQuestion, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
   const emit = (eventType?: string, content = '', process = '') => onProgress?.({ chars: content.length, content, ...(eventType === undefined ? {} : { eventType }), ...(process === '' ? {} : { process }) })
   const response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(body), signal })
@@ -1172,6 +1185,10 @@ function targetStorage(): chrome.storage.StorageArea | undefined {
   return chrome.storage?.session ?? chrome.storage?.local
 }
 
+function knowledgeSessionStorage(): chrome.storage.StorageArea | undefined {
+  return chrome.storage?.local ?? chrome.storage?.session
+}
+
 async function knowledgeScopes(): Promise<Record<string, KnowledgeScopeRecord>> {
   const values = await targetStorage()?.get(KNOWLEDGE_SCOPE_STORAGE_KEY)
   const candidate = values?.[KNOWLEDGE_SCOPE_STORAGE_KEY]
@@ -1200,17 +1217,13 @@ async function saveKnowledgeScope(sessionId: string, scope: KnowledgeScope, enab
 }
 
 async function knowledgeSessions(): Promise<Record<string, KnowledgeSessionRecord>> {
-  const values = await targetStorage()?.get(KNOWLEDGE_SESSION_STORAGE_KEY)
+  const values = await knowledgeSessionStorage()?.get(KNOWLEDGE_SESSION_STORAGE_KEY)
   const candidate = values?.[KNOWLEDGE_SESSION_STORAGE_KEY]
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return {}
   return Object.fromEntries(Object.entries(candidate as Record<string, unknown>).flatMap(([key, value]) => {
     const record = value as Partial<KnowledgeSessionRecord>
     return typeof record?.sessionId === 'string' && typeof record?.fingerprint === 'string' ? [[key, { sessionId: record.sessionId, fingerprint: record.fingerprint }]] : []
   }))
-}
-
-function upstreamSessionKey(sessionId: string, kind: KnowledgeKind, fingerprint: string): string {
-  return `${sessionId}\u0000${kind}\u0000${fingerprint}`
 }
 
 async function resolveKnowledgeScopeRecord(request: KnowledgeQueryRequest | SelectedSourceScopeRequest): Promise<KnowledgeScopeRecord | undefined> {
@@ -1262,15 +1275,15 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     const kind: KnowledgeKind = request.tool === 'knowledge_search' ? 'knowledge' : 'code'
     const fingerprint = scopeFingerprint(scope)
     const sessions = await knowledgeSessions()
-    const key = upstreamSessionKey(request.harnessSessionId, kind, fingerprint)
-    const prior = sessions[key]?.sessionId
-    const executed = await executeKnowledgeQuery(kind, request.question.trim(), scope, prior, controller.signal, (progress) => {
+    const owner = knowledgeConversationOwner(request.harnessSessionId, request.harnessParentSessionId)
+    const continuation = planKnowledgeContinuation(sessions, owner, kind, fingerprint)
+    const executed = await executeKnowledgeQuery(kind, request.question.trim(), scope, continuation.priorSessionId, controller.signal, (progress) => {
       if (progress.process !== undefined && progress.process !== '') lastProcess = progress.process
       broadcast('streaming', progress.chars, progress.content, progress.eventType, progress.process)
     })
     if (executed.sessionId !== undefined) {
-      sessions[key] = { sessionId: executed.sessionId, fingerprint }
-      await targetStorage()?.set({ [KNOWLEDGE_SESSION_STORAGE_KEY]: sessions })
+      sessions[continuation.key] = { sessionId: executed.sessionId, fingerprint }
+      await knowledgeSessionStorage()?.set({ [KNOWLEDGE_SESSION_STORAGE_KEY]: sessions })
     }
     broadcast('done', executed.result.answer.length, executed.result.answer, 'done', lastProcess)
     port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, result: executed.result })
@@ -2028,6 +2041,21 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
   const failedInspection = (diagnostic: TeamDocAttempt, attempts?: TeamDocAttempt[]) => ({
     ok: false, error: 'team_doc_parent_inspection_failed', diagnostic: { ...diagnostic, ...(attempts ? { attempts } : {}) },
   })
+  const capabilities = async (): Promise<Record<string, unknown>> => {
+    const attempt = await stageRequest('/team-knowledge-main/teamKnowledge/getAllFileType?createFlag=true', 'capabilities')
+    if (!successful(attempt)) return { diagnostic: attempt.diagnostic }
+    const records = Array.isArray(attempt.reply.payload?.data) ? attempt.reply.payload.data : null
+    if (records === null) return { diagnostic: attempt.diagnostic }
+    const supports = (pattern: RegExp) => records.some((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+      const record = value as Record<string, unknown>
+      return [record.value, record.name, record.icon, record.format]
+        .filter((item): item is string => typeof item === 'string')
+        .join(' ')
+        .match(pattern) !== null
+    })
+    return { light_document: supports(/newword|lightdoc|轻文档/i), spreadsheet: supports(/newexcel|excel|spreadsheet|表格|xlsx/i) }
+  }
   try {
     let resolvedCatalogId = catalogId
     let detailSourceBookId: string | null = null
@@ -2106,7 +2134,7 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
             return { ok: true, parent: {
               parentId: catalogId, bookId: currentDocumentBookId, parentName: sourceName, canRead: true, canCreate: true, parentType: 'document',
               fingerprint: `team-doc-parent-v2-${(hash >>> 0).toString(16).padStart(8, '0')}`,
-            } }
+            }, capabilities: await capabilities() }
           }
         }
       }
@@ -2173,7 +2201,7 @@ async function inspectTeamDocParentInPage(catalogId: string, documentDetail = fa
       parentId: resolvedCatalogId, bookId, parentName, canRead: true, canCreate: true,
       parentType: typeof nodeType === 'number' ? String(nodeType) : typeof nodeType === 'string' ? nodeType : 'catalog',
       fingerprint: `team-doc-parent-v2-${(hash >>> 0).toString(16).padStart(8, '0')}`,
-    } }
+    }, capabilities: await capabilities() }
   } catch {
     return { ok: false, error: 'team_doc_parent_inspection_failed' }
   }
@@ -2646,7 +2674,7 @@ async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
   const trustedLightDocument = documentDetail ? await waitForTrustedLightDocumentIdentity(request.browserTarget) : false
   const inspected = (await chrome.scripting.executeScript({
     target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail, trustedLightDocument],
-  }))[0]?.result as { ok?: unknown; parent?: unknown; error?: unknown; diagnostic?: unknown } | undefined
+  }))[0]?.result as { ok?: unknown; parent?: unknown; capabilities?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   if (inspected?.ok !== true || !isTeamDocParent(inspected.parent)) {
     return teamDocPartial({ failedAt: 'inspect', error: typeof inspected?.error === 'string' ? inspected.error : 'team_doc_parent_inspection_failed', diagnostic: inspected?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
   }
@@ -2788,16 +2816,16 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const trustedLightDocument = documentDetail ? await waitForTrustedLightDocumentIdentity(request.browserTarget) : false
   const inspected = (await chrome.scripting.executeScript({
     target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail, trustedLightDocument],
-  }))[0]?.result as { ok?: unknown; parent?: unknown; error?: unknown; diagnostic?: unknown } | undefined
+  }))[0]?.result as { ok?: unknown; parent?: unknown; capabilities?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   if (inspected?.ok !== true || !isTeamKnowledgeParent(inspected.parent)) {
     return teamKnowledgeItemPartial({ failedAt: 'inspect', error: typeof inspected?.error === 'string' ? inspected.error : 'team_knowledge_parent_inspection_failed', diagnostic: inspected?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
   }
   const parent = inspected.parent
-  if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
+  if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: inspected.capabilities && typeof inspected.capabilities === 'object' && !Array.isArray(inspected.capabilities) ? inspected.capabilities : {} }
   if (request.action === 'readback') {
-    if (!/^\d+$/.test(request.catalogId ?? '')) return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_catalog_id_invalid' })
-    if (request.kind !== 'light_document' && request.kind !== 'spreadsheet') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
     const catalogId = request.catalogId
+    if (typeof catalogId !== 'string' || !/^\d+$/.test(catalogId)) return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_catalog_id_invalid' })
+    if (request.kind !== 'light_document' && request.kind !== 'spreadsheet') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
     const kind = request.kind
     const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: catalogId, kind, parentType: parent.parentType, renameOnMismatch: false }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown; name?: unknown; error?: unknown } | undefined
     if (recovered?.ok !== true || recovered.documentId !== catalogId || typeof recovered.url !== 'string') return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: typeof recovered?.error === 'string' ? recovered.error : 'team_knowledge_item_rediscover_mismatch' })

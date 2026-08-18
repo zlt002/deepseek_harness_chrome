@@ -237,6 +237,59 @@ test('light-document selection marks partial and ambiguous block ranges not repl
   assert.equal(ambiguousRead.result.document.selection.wholeBlockReplaceable, false)
 })
 
+test('light-document selection accepts complete contiguous WebEdit list blocks when only selection content carries markers', async () => {
+  const call = await runtime({
+    initialXml: '<apcanvas><outlineTitle id="title">列表</outlineTitle><p id="one"><span>完成核对</span></p><p id="two"><span>校验结果</span></p><p id="three"><span>确认交付</span></p></apcanvas>',
+    otlSelection: { from: 1, to: 12, anchor: 1, head: 12, empty: false },
+    selectionInfo: { selected_tag_ids: ['one', 'two', 'three'] },
+    selection: { async getSelectionContent() { return { text: '• 完成核对\n• 校验结果\n• 确认交付', markdown: '- 完成核对\n- 校验结果\n- 确认交付', html: '<html><head><meta charset="utf-8"></meta></head><body><div data-selection="true"><ul><li data-id="a">完成核对</li><li data-id="b">校验结果</li><li data-id="c">确认交付</li></ul></div></body></html>' } } },
+  })
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.result.document.selection.hasSelection, true)
+  assert.equal(selected.result.document.selection.wholeBlockReplaceable, true)
+})
+
+test('light-document selection still rejects a partial first WebEdit list item after HTML list proof', async () => {
+  const call = await runtime({
+    initialXml: '<apcanvas><outlineTitle id="title">列表</outlineTitle><p id="one"><span>完成核对</span></p><p id="two"><span>校验结果</span></p><p id="three"><span>确认交付</span></p></apcanvas>',
+    otlSelection: { from: 2, to: 12, anchor: 2, head: 12, empty: false },
+    selectionInfo: { selected_tag_ids: ['one', 'two', 'three'] },
+    selection: { async getSelectionContent() { return { text: '• 成核对\n• 校验结果\n• 确认交付', markdown: '- 成核对\n- 校验结果\n- 确认交付', html: '<ul><li>成核对</li><li>校验结果</li><li>确认交付</li></ul>' } } },
+  })
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.result.document.selection.wholeBlockReplaceable, false)
+})
+
+test('light-document selection does not treat ordinary paragraphs as list proof', async () => {
+  const call = await runtime({
+    initialXml: '<apcanvas><outlineTitle id="title">正文</outlineTitle><p id="one"><span>完成核对</span></p><p id="two"><span>校验结果</span></p></apcanvas>',
+    otlSelection: { from: 1, to: 8, anchor: 1, head: 8, empty: false },
+    selectionInfo: { selected_tag_ids: ['one', 'two'] },
+    selection: { async getSelectionContent() { return { text: '• 完成核对\n• 校验结果', html: '<p>完成核对</p><p>校验结果</p>' } } },
+  })
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.result.document.selection.wholeBlockReplaceable, false)
+})
+
+test('light-document selection rejects text, paragraphs, or a second list outside an enveloped WebEdit list', async () => {
+  const base = '<html><head><meta charset="utf-8"></meta></head><body><div><ul><li>完成核对</li><li>校验结果</li></ul></div></body></html>'
+  const invalid = [
+    base.replace('<div>', '<div>说明'),
+    base.replace('</ul>', '</ul><p>额外段落</p>'),
+    base.replace('</div>', '</div><ul><li>第二列表</li></ul>'),
+  ]
+  for (const html of invalid) {
+    const call = await runtime({
+      initialXml: '<apcanvas><outlineTitle id="title">正文</outlineTitle><p id="one"><span>完成核对</span></p><p id="two"><span>校验结果</span></p></apcanvas>',
+      otlSelection: { from: 1, to: 8, anchor: 1, head: 8, empty: false },
+      selectionInfo: { selected_tag_ids: ['one', 'two'] },
+      selection: { async getSelectionContent() { return { text: '• 完成核对\n• 校验结果', html } } },
+    })
+    const selected = await call({ action: 'selection' })
+    assert.equal(selected.result.document.selection.wholeBlockReplaceable, false)
+  }
+})
+
 test('light-document selection_insert rejects drift, ambiguity, runtime failure, and insufficient XML readback without replay', async () => {
   const stable = { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 3 } } }
   const driftState = {}; let content = '选区'

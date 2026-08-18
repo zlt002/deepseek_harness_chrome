@@ -7,7 +7,7 @@ async function adapter() {
   const background = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const end = background.indexOf('\nconst NATIVE_HOST_NAME')
   assert.notEqual(end, -1, 'knowledge adapter source block must remain before background bootstrap')
-  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
+  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream, knowledgeConversationOwner, planKnowledgeContinuation }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
 }
@@ -118,6 +118,7 @@ test('remote retrieval prompt requests facts without agent execution narration',
   assert.match(code, /所有面向用户的流式内容和最终答案都必须使用简体中文/)
   assert.match(code, /即使转述后的问题包含英文，也不要用英文叙述/)
   assert.match(code, /最终答案只保留事实和引用/)
+  assert.match(code, /一次只返回一个文件或一个函数的核心片段/)
   assert.match(code, /检索计划、当前正在查的仓库或知识、工具选择和进度可通过独立过程事件流式返回/)
   assert.match(code, /用户问题：有哪些模块/)
   const english = retrievalQuestion('code', 'Which modules exist?')
@@ -128,6 +129,50 @@ test('remote retrieval prompt requests facts without agent execution narration',
 test('scope fingerprints isolate an upstream continuation when the user changes scope', async () => {
   const { scopeFingerprint } = await adapter()
   assert.notEqual(scopeFingerprint({ domainId: 'one', systemIds: ['s'], repositoryIds: ['r'] }), scopeFingerprint({ domainId: 'two', systemIds: ['s'], repositoryIds: ['r'] }))
+})
+
+test('the same parent conversation reuses one remote session across new local search children', async () => {
+  const { knowledgeConversationOwner, planKnowledgeContinuation, scopeFingerprint } = await adapter()
+  const fingerprint = scopeFingerprint({ domainId: '', systemIds: [], repositoryIds: ['H5_前端'] })
+  const firstOwner = knowledgeConversationOwner('child-1', 'parent-1')
+  const secondOwner = knowledgeConversationOwner('child-2', 'parent-1')
+  assert.equal(firstOwner, 'parent-1')
+  assert.equal(secondOwner, 'parent-1')
+  const first = planKnowledgeContinuation({}, firstOwner, 'code', fingerprint)
+  assert.equal(first.priorSessionId, undefined)
+  const second = planKnowledgeContinuation({ [first.key]: { sessionId: 'remote-session-first', fingerprint } }, secondOwner, 'code', fingerprint)
+  assert.equal(second.key, first.key)
+  assert.equal(second.priorSessionId, 'remote-session-first')
+  const knowledge = planKnowledgeContinuation({ [first.key]: { sessionId: 'remote-session-first', fingerprint } }, secondOwner, 'knowledge', fingerprint)
+  assert.notEqual(knowledge.key, first.key)
+  assert.equal(knowledge.priorSessionId, undefined)
+  const otherScope = planKnowledgeContinuation({ [first.key]: { sessionId: 'remote-session-first', fingerprint } }, secondOwner, 'code', scopeFingerprint({ domainId: '', systemIds: [], repositoryIds: ['其他仓库'] }))
+  assert.notEqual(otherScope.key, first.key)
+  assert.equal(otherScope.priorSessionId, undefined)
+})
+
+test('a resumed remote query sends the prior session_id and asks the agent not to rescan', async () => {
+  const { executeKnowledgeQuery, retrievalQuestion } = await adapter()
+  assert.match(retrievalQuestion('code', '第一种方式详细看看', true), /同一远程检索会话的追问/)
+  assert.doesNotMatch(retrievalQuestion('code', '直通宝有哪些入口'), /同一远程检索会话的追问/)
+  const previousFetch = globalThis.fetch
+  const bodies = []
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(String(init.body)))
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"delta":"继续回答"}\n\ndata: {"type":"done","citations":[{"page_id":"p1","page_title":"入口"}],"session_id":"remote-session-second"}\n\ndata: [DONE]\n\n'))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+  try {
+    const value = await executeKnowledgeQuery('code', '第一种方式详细看看', { domainId: '', systemIds: [], repositoryIds: ['H5_前端'] }, 'remote-session-first', new AbortController().signal)
+    assert.equal(value.sessionId, 'remote-session-second')
+    assert.equal(bodies[0].session_id, 'remote-session-first')
+    assert.deepEqual(bodies[0].repo_keys, ['H5_前端'])
+    assert.match(bodies[0].question, /同一远程检索会话的追问/)
+  } finally { globalThis.fetch = previousFetch }
 })
 
 test('initial catalog preserves repository grouping and type metadata for the composer tree', async () => {

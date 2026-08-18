@@ -28,10 +28,14 @@ function activeParentTurn(agent) {
   return undefined
 }
 
+const MAX_SELECTED_SOURCE_SEARCHES_PER_TURN = 5
+
 /**
- * Make the selected-source route a single-child operation per parent turn.
+ * Allow a few sequential same-side selected-source children in one parent turn.
  * A guard is a product-owned, monotonic enforcement seam: unlike prompt text,
- * it also rejects a second model tool call that reaches dispatch.
+ * it also rejects a second model tool call that reaches dispatch. Generic
+ * subagents stay blocked after scope discovery. Switching knowledge/code in
+ * the same turn is rejected so the model cannot probe the unselected side.
  */
 export function createSelectedSourceDispatchGuard() {
   const states = new Map()
@@ -43,7 +47,7 @@ export function createSelectedSourceDispatchGuard() {
     const previous = states.get(parentId)
     const state = previous?.turn === turn
       ? previous
-      : { turn, selectedSourceScopeRead: false, childStarted: false }
+      : { turn, selectedSourceScopeRead: false, childStarted: false, searchCount: 0, lastWrapper: undefined }
     states.set(parentId, state)
 
     if (exec.name === SELECTED_SOURCE_SCOPE) {
@@ -54,8 +58,15 @@ export function createSelectedSourceDispatchGuard() {
       return '本次请求已读取所选远程范围；请直接调用对应的 selected-source 检索工具，不要再启动通用子代理。'
     }
     if (!SELECTED_SOURCE_WRAPPERS.has(exec.name)) return undefined
-    if (state.childStarted) return '本次所选远程范围请求已启动一个检索子代理；请直接使用其结果，不要重复检索或再启动子代理。'
+    if (state.lastWrapper !== undefined && state.lastWrapper !== exec.name) {
+      return '本次请求已在一侧远程范围检索；不要再启动另一侧检索来试探选择状态。'
+    }
+    if (state.searchCount >= MAX_SELECTED_SOURCE_SEARCHES_PER_TURN) {
+      return '本次请求已连续检索多次；请先用已有结果作答，不要再把多个文件塞进同一次远程检索。'
+    }
+    state.searchCount += 1
     state.childStarted = true
+    state.lastWrapper = exec.name
     return undefined
   }
 }

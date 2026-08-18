@@ -184,12 +184,18 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   assert.match(capabilityMatrix, /父会话先 `mcp__chrome__selected_source_scope` 回显名称并确认/)
   assert.match(capabilityMatrix, /未选侧禁止 `search_selected_remote_code`、`search_selected_knowledge`、`subagent` 和底层检索 MCP/)
   assert.match(template, /PRD: \{编号\} - \{主题\}/)
+  assert.match(template, /analysis\.md 固定模板/)
+  assert.match(template, /# 需求分析与研发交付：\{编号\} - \{主题\}/)
   for (const heading of [
     '# 一、术语与缩写', '# 二、背景与目标', '# 三、整体流程', '# 四、功能性需求',
     '# 五、角色权限', '# 六、非功能性需求', '# 七、配置与开关', '# 八、测试关注点',
     '# 九、参考文档', '## AccrUI 需求交接附录',
   ]) assert.match(template, new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   for (const rule of ['必填项无事实时写', '选填项不适用时写', '每个功能至少包含正常场景', 'PRD 只写结论和索引']) assert.match(template, new RegExp(rule))
+  for (const field of ['Evidence ID', 'Impact ID', '仓库', '模块或文件', '符号或接口', '当前行为', '计划改动', '不确定项', 'Task ID', '测试 seam', 'AC ID', 'Given', 'When', 'Then', '验证层级', '通过标准']) assert.match(template, new RegExp(field))
+  assert.match(template, /每个 Impact 必须映射 Evidence；每个 Task 必须映射 Impact 和至少一个 AC；每个 AC 必须映射需求和 Task/)
+  assert.match(capabilityMatrix, /两个普通信号或一个高风险信号/)
+  assert.match(capabilityMatrix, /任务均可独立演示或验证/)
 })
 
 test('declares pmd-prd run binding, isolated scope, persisted state, and stale-confirmation recovery contracts', async () => {
@@ -211,6 +217,28 @@ test('declares pmd-prd run binding, isolated scope, persisted state, and stale-c
   assert.match(processState, /旧确认在恢复后失效/)
   assert.match(processState, /阶段 4 确认正文快照是唯一交付正文/)
   assert.match(processState, /阶段 5 的父目录确认与线上创建严格分离/)
+  assert.match(processState, /预估超过 10 人天/)
+  assert.match(processState, /多个系统\/仓库/)
+  assert.match(processState, /多个角色\/权限范围/)
+  assert.match(processState, /数据迁移\/外部依赖/)
+  assert.match(processState, /超过 5 个可独立功能切片/)
+  assert.match(processState, /复杂性能\/高可用/)
+  assert.match(processState, /高风险写/)
+  assert.match(processState, /父需求\+子需求/)
+  assert.match(processState, /单需求分阶段/)
+  assert.match(processState, /明确接受风险继续整体分析/)
+  assert.match(processState, /未确认选择不得进入阶段 4/)
+  for (const confirmation of ['evidence_confirmed', 'impact_map_confirmed', 'tasks_confirmed', 'acceptance_confirmed', 'decomposition_decided']) assert.match(processState, new RegExp(confirmation))
+  assert.match(processState, /每行一个独立、合法 JSON 对象/)
+  assert.match(processState, /同一轮更新受影响的过程文件/)
+  assert.match(skill, /抽取并执行设计树\/frontier、领域术语\/边界\/不变量、纵向 tracer-bullet、测试 seam、复杂需求地图和按需原型/)
+  assert.match(skill, /decomposition_decided/)
+  assert.match(skill, /需求\/PRD → Evidence → Impact → Task → AC/)
+  assert.match(skill, /稳定、非空且后续始终复用的 `deliveryRunId`/)
+  assert.match(skill, /`action=preview`、内部 `requirementId`、稳定 `deliveryRunId`、`parentFingerprint`/)
+  assert.match(skill, /user confirmation → fresh preview → immediate create → status/)
+  assert.match(skill, /不得使用确认前 preview 的旧 challenge/)
+  assert.match(skill, /`status` 必须且只能传 `action=status`、相同的 `requirementId` 与 `deliveryRunId`/)
 
   for (const artifact of [
     'manifest\\.json',
@@ -287,6 +315,7 @@ test('advertises distinct selected-source routes with isolated MCP tools', async
   assert.match(code, /Preserve the end user's language in the MCP question and in your final answer/)
   assert.match(code, /when the user writes Chinese, all user-visible narration and answers must be Simplified Chinese/)
   assert.match(code, /first action must be exactly one[\s\S]*mcp__chrome__code_search call/)
+  assert.match(code, /keep that question to one file, one function, or one short topic/)
   assert.match(code, /never use "query", repeat the search, or split one delegation into exploratory searches/)
   assert.doesNotMatch(code, /mcp__chrome__knowledge_search/)
   assert.match(knowledge, /allow: \['mcp__chrome__knowledge_search'\]/)
@@ -317,7 +346,8 @@ test('keeps selected-source routing in the final Code preset system prompt', asy
   assert.match(prompt, /searching them is the default path for answering questions/)
   assert.match(prompt, /The selection itself is the instruction/)
   assert.match(prompt, /When the end user's message is Chinese, write every user-visible message from the parent in Simplified Chinese/)
-  assert.match(prompt, /Call exactly one matching selected-source wrapper at most once for each user request/)
+  assert.match(prompt, /Keep each selected-source wrapper prompt to one file, one function, or one short topic/)
+  assert.match(prompt, /call the same matching wrapper sequentially, once per file or function/)
   assert.match(prompt, /current working directory is a session workspace for generated documents and process files, not the product codebase/)
   assert.match(prompt, /empty or docs-only cwd is expected/)
   assert.match(prompt, /never ask where the code is after seeing an empty listing/)

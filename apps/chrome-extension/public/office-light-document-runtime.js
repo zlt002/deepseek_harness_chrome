@@ -367,6 +367,38 @@
     }
     return { verified: true, observedBlocks: after.list.map((block, index) => ({ index, id: block.id || null, type: block.tag.toLowerCase(), text: block.text.slice(0, 500) })) }
   }
+  const pureListSelectionItems = (html) => {
+    if (typeof html !== 'string') return null
+    let source = html.trim()
+    const htmlRoot = /^<html\b[^>]*>([\s\S]*)<\/html>$/i.exec(source)
+    if (htmlRoot) {
+      const documentParts = /^\s*<head\b[^>]*>([\s\S]*?)<\/head>\s*<body\b[^>]*>([\s\S]*)<\/body>\s*$/i.exec(htmlRoot[1])
+      if (!documentParts) return null
+      // Meta is the only tolerated head child. It is metadata, never selected
+      // content, so text or structural siblings fail closed.
+      if (documentParts[1].replace(/<meta\b[^>]*>(?:\s*<\/meta>)?/gi, '').trim() !== '') return null
+      source = documentParts[2].trim()
+    } else if (/<\/?(?:html|head|body|meta)\b/i.test(source)) return null
+    // WebEdit may wrap a selected list in presentation-only divs. Require
+    // each div to contain exactly its child wrapper/list and no sibling text.
+    for (;;) {
+      const wrapper = /^<div\b[^>]*>([\s\S]*)<\/div>$/i.exec(source)
+      if (!wrapper) break
+      source = wrapper[1].trim()
+    }
+    const root = /^<(ul|ol)\b[^>]*>([\s\S]*)<\/\1>$/i.exec(source)
+    if (!root) return null
+    const items = []; const pattern = /<li\b[^>]*>([\s\S]*?)<\/li>/gi; let match
+    while ((match = pattern.exec(root[2]))) {
+      // Nested lists make a flattened text comparison ambiguous; require the
+      // exact, single-level ul/ol -> li structure observed on the real page.
+      if (/<\/?(?:ul|ol|li)\b/i.test(match[1])) return null
+      const text = normalizedSelectionText(decode(match[1]))
+      if (!text) return null
+      items.push(text)
+    }
+    return items.length > 0 && root[2].replace(pattern, '').trim() === '' ? items : null
+  }
   const selectionMatchesWholeBlocks = (snapshot, ordered) => {
     // selected_tag_ids says which blocks intersect the selection, not that its
     // endpoints cover every character.  Replacing based on IDs alone can erase
@@ -375,7 +407,11 @@
     const selected = snapshot?.content?.text ?? snapshot?.content?.markdown ?? snapshot?.content?.html
     const selectedText = normalizedSelectionText(selected)
     const blockText = normalizedSelectionText(ordered.map((block) => block.text).join('\n'))
-    return !!selectedText && selectedText === blockText
+    if (!selectedText) return false
+    if (selectedText === blockText) return true
+    const listItems = pureListSelectionItems(snapshot?.content?.html)
+    return listItems !== null && listItems.length === ordered.length
+      && listItems.every((text, index) => text === normalizedSelectionText(ordered[index].text))
   }
   const wholeBlockReplaceable = (xml, snapshot) => {
     if (!snapshot?.supported || snapshot.truncated || snapshot.stable !== true || snapshot.hasSelection !== true || snapshot.isCollapsed || snapshot.selectionIdsValid !== true) return false

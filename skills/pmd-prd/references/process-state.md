@@ -23,18 +23,28 @@
 | 入口 | 只记录什么 | 完成/恢复用途 |
 |---|---|---|
 | `manifest.json` | `requirementId`、项目/工作流绑定、run/session 列表、`active/paused/partial/failed/aborted/completed` 状态和 artifacts | 判断当前 Run、状态和可恢复范围 |
-| `process.md` | 需求访谈、用户确认、查询摘要、决策摘要和交付状态 | 让产品/研发回看过程，不承载机器生命周期明细 |
+| `process.md` | 需求访谈、规模信号/拆分选择、父子覆盖/依赖、用户确认、查询摘要、决策摘要和交付状态 | 让产品/研发回看过程，不承载机器生命周期明细 |
 | `domain-model.md` | 已确认或明确标注待确认的标准术语、实现无关定义、关系/边界/不变量及 `_Avoid_` | 保持术语单一，避免后续分析漂移 |
 | `knowledge-sources.md` | 本 Run 实际 scope、查询问题、来源标识/链接、关键证据和失败影响 | 区分授权、实际查询、用户事实、知识依据和 `[待确认]` |
-| `trace-events.jsonl` | 已脱敏的机器事件摘要、runId、序号和时间 | 诊断运行，不替代过程或交付正文 |
+| `trace-events.jsonl` | 已脱敏的机器事件摘要、runId、序号和时间 | 每行一个独立、合法 JSON 对象；诊断运行，不替代过程或交付正文 |
 | `decisions/` | 只有难以逆转、需要解释且存在真实取舍的 ADR | 恢复时重建决策上下文；普通偏好不制造 ADR |
 
-每次实质性用户回答后先更新 `process.md`；术语确认后同步 `domain-model.md`；实际查询完成或失败后同步 `knowledge-sources.md`；运行事件追加 `trace-events.jsonl` 并刷新 manifest 的状态/artifacts。过程文件不保存完整对话或敏感值。
+每次实质性用户回答或状态转换后，同一轮更新受影响的过程文件，追加一个独立合法的 JSONL 事件，并让 manifest 的阶段、确认状态和 artifacts 与该事件一致。未受影响的文件不重复改写；过程文件不保存完整对话或敏感值。
 
-## 4. 恢复与确认生命周期
+## 4. 规模门、分析产物与确认
+
+阶段 3 逐项评估并在 `process.md` 写入信号、证据、计数和结论。普通信号为：预估超过 10 人天、多个系统/仓库、多个角色/权限范围、数据迁移/外部依赖、超过 5 个可独立功能切片、复杂性能/高可用。高风险信号为：高风险写。两个普通信号或一个高风险信号即触发拆分门。
+
+- 未触发时记录“不触发、依据、剩余风险”，再确认继续整体分析。
+- 触发时只接受用户明确选择：`父需求+子需求`、`单需求分阶段`、`明确接受风险继续整体分析`。记录每个父/子或阶段的覆盖范围、排除范围、依赖和阻塞关系；未确认选择不得进入阶段 4。
+- 阶段 3/4 同步记录以下确认状态：`evidence_confirmed`、`impact_map_confirmed`、`tasks_confirmed`、`acceptance_confirmed`、`decomposition_decided`。任一必需状态为否，保持在当前阶段。
+
+代码影响地图只可记录实际远程证据或明确的未知项，字段固定为：Impact ID、仓库、模块或文件、符号或接口、当前行为、计划改动、Evidence ID、不确定项。纵向任务字段固定为：Task ID、PRD 章节、用户可见交付、Impact ID/修改内容、阻塞关系、测试 seam、验证方式、AC ID、完成条件；每项必须独立可演示或验证。验收合同字段固定为：AC ID、需求/PRD 章节、Task ID、Given、When、Then、测试数据、验证层级、命令或手工步骤、通过标准、证据。每个 Impact 必须映射 Evidence；每个 Task 必须映射 Impact 和至少一个 AC；每个 AC 必须映射需求和 Task。
+
+## 5. 恢复与确认生命周期
 
 - 恢复只能从当前 Harness 运行绑定和已校验 manifest 找到原需求。恢复前向用户回显业务需求摘要、当前阶段、两份文档状态和父目录状态；内部标识只供运行状态关联，不要求用户输入。
-- **旧确认在恢复后失效**：旧 Run 的 scope 确认、阶段 3 分析确认、阶段 4 正文确认、阶段 5 父目录确认和旧 challenge 不能直接复用。恢复必须重新取得当前 Run 所需的确认；scope 变更、正文变化、父节点 fingerprint/Browser Target 变化、权限变化或 challenge 过期也会使相关确认失效。
+- **旧确认在恢复后失效**：旧 Run 的 scope 确认、规模/拆分、阶段 3 分析确认、阶段 4 正文确认、阶段 5 父目录确认和旧 challenge 不能直接复用。恢复必须重新取得当前 Run 所需的确认；scope 变更、正文变化、父节点 fingerprint/Browser Target 变化、权限变化或 challenge 过期也会使相关确认失效。
 - 阶段 4 确认正文快照是唯一交付正文。恢复可读取已冻结快照和它的 content hash；不得用 `process.md`、`domain-model.md`、`knowledge-sources.md`、`trace-events.jsonl` 或其他本地文件重建正文。内容无法完整恢复时回到阶段 4，重新生成、预览和确认。
 - 阶段 5 的父目录确认与线上创建严格分离：`inspect_parent` 和 `preview` 只读取/冻结目标与正文，不产生线上写入；只有当前父目录预览成功、用户在看到目标后明确确认，才进入阶段 6 的 `create`。
 - 部分交付恢复时保留成功项的 catalogId、幂等身份和回读证据，只恢复未完成项。恢复前必须重新 `inspect_parent → preview` 并取得新确认/挑战；旧确认不能授权重试，已成功项不能重复创建。

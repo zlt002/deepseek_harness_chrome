@@ -14,7 +14,7 @@ Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel�
 
 ## 状态机与确认门
 
-`input → reference_selection → research → analysis_interview → analysis_confirmed → preview → documents_confirmed → parent_inspect → parent_confirmed → creating → partial/paused/failed → completed`
+`input → reference_selection → research → analysis_interview → decomposition_decided → analysis_confirmed → preview → documents_confirmed → parent_inspect → parent_confirmed → creating → partial/paused/failed → completed`
 
 阶段对照和可检查完成条件见 [`references/capability-matrix.md`](references/capability-matrix.md)。
 仅当本条消息已包含业务需求而启动新 Run、确认资料范围、记录访谈/查询/状态，或用户明确要求恢复暂停/部分交付时，读取 [`references/process-state.md`](references/process-state.md)；它是本 Skill 的运行绑定、持久过程文件和恢复合同。
@@ -39,25 +39,27 @@ Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel�
 
 输入框上方的范围选择是授权来源；模型看不到按钮上的名称，不得根据用户消息里有没有仓库名推断未选，也不得请用户读两个范围按钮并回报名称。本阶段没有单独的 Run 级选库工具，也不要扫描本地工作区来猜测仓库。进入本阶段后，父会话先调用一次无参数的 `mcp__chrome__selected_source_scope`，用回显名称向用户确认当前范围：代码库一侧报 `repositories`，知识一侧报 `knowledge`；某一侧数组为空 = 该侧未选。确认文案必须写出识别到的具体名称。用户确认后，只查询已选侧：代码库已选才调用 `search_selected_remote_code`，知识库已选才调用 `search_selected_knowledge`。未选的那一侧禁止调用对应包装工具，也禁止用 `subagent`、`subagent_fork` 或底层检索 MCP 去试探。两侧回显都未选时，停在本阶段请用户选择或明确不使用远程资料，不得先做 RAG 检索再问。回显失败时报告工具错误，仍不得改让用户读按钮。确认只代表授权，不代表查询已发生。每次父会话检索只传：短 `description`，以及一条具体、聚焦、含业务对象/目标流程/待查证据的 `prompt`；需要立刻写分析时设 `run_in_background: false`。`prompt` 是给子 Agent 的完整任务，由子 Agent 转成一次 MCP `question`；父会话不得自己传 `question`，也不得直调 `mcp__chrome__code_search` / `mcp__chrome__knowledge_search`。取消停留在本阶段；已选侧查询失败不阻断草稿，但必须把失败影响写入过程状态并标 `[待确认]`。后续阶段 3–6 必须使用这次包装工具回执里的远程证据，不得改用本地 cwd 文件重做调研。完成条件：每一侧都已是「已查询 / 明确不使用 / 确认未选」，且未选侧没有子代理调用。
 
-### 阶段 3：需求分析与确认
+### 阶段 3：需求分析、规模门与确认
 
-使用 `grill-with-docs` 的设计树/frontier 逐轮澄清，校准领域术语、边界和不变量。每轮完整询问当前 frontier，不任意截断；问题编号全程连续，严格使用：`❓ **Q<n>** - **<决策标题>**：<具体场景与互斥选项>`，下一行使用 `➡️ <具体推荐、价值、代价或风险>`。问题只问产品真实取舍，不问可由 Agent 查明的事实；“全部按推荐”只确认当前轮推荐并立即重算下一轮。每轮回答后按过程状态合同记录访谈、已确认术语、实际资料来源、必要 ADR 和状态；分析必须包含需求理解、证据、范围、主/异常流程、权限、数据影响、研发计划、验收用例、风险和待确认项。用户明确确认需求理解、范围、计划和验收方向后，才进入阶段 4；确认前禁止写线上文档。完成条件：所有设计树分支已访问，术语/范围/计划/验收确认，无未解释的静默假设，且过程状态已持久化。
+抽取并执行设计树/frontier、领域术语/边界/不变量、纵向 tracer-bullet、测试 seam、复杂需求地图和按需原型的方法；不得在运行时串联或创建外部 Skill。每轮完整询问当前 frontier，不任意截断；问题编号全程连续，严格使用：`❓ **Q<n>** - **<决策标题>**：<具体场景与互斥选项>`，下一行使用 `➡️ <具体推荐、价值、代价或风险>`。问题只问产品真实取舍，不问可由 Agent 查明的事实；“全部按推荐”只确认当前轮推荐并立即重算下一轮。
+
+先按 [`references/process-state.md`](references/process-state.md) 的规模信号评估并持久化。两个普通信号或一个高风险信号触发拆分门；触发时必须让用户明确选择“父需求+子需求”“单需求分阶段”或“明确接受风险继续整体分析”，并记录覆盖关系和依赖。未完成拆分决策不得进入阶段 4。随后产生分析模板规定的证据分类、代码影响地图、纵向任务和验收合同，建立 `需求/PRD → Evidence → Impact → Task → AC` 追踪链，逐项确认映射和待确认项。每轮回答后同步过程状态、术语和实际资料来源。完成条件见能力矩阵：所有设计树分支已访问，拆分决策、术语、范围、影响地图、任务和验收合同已确认，无静默假设。
 
 ### 阶段 4：双文档预览与确认
 
-读取本目录 `templates.md`（再按其指针读取完整正文）。生成分析 Doc 和完整 PRD Doc；PRD 必须保留模板所有章节、顺序、标题及必填/选填标记，并区分用户事实、知识依据、`[AI 推断]` 和 `[待确认]`。展示两个规范文件名、章节摘要和待确认数量，请求用户确认两个文档内容。阶段 4 用户确认的两份正文快照是唯一交付正文；不得从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。内容变化必须重新预览并重新确认。此阶段不绑定父节点、不写远程。完成条件：两份正文快照、规范文件名和模板完整性校验均冻结，用户第二次确认有效。
+读取本目录 `templates.md`（再按其指针读取完整正文）。生成“需求分析与研发交付”和完整 PRD；分析 Doc 使用固定 `analysis.md` 模板并承载完整证据、代码影响、任务和验收追踪链。PRD 必须保留公司模板所有章节、顺序、标题及必填/选填标记，写入已确认的产品结论，并在交接附录按 ID 索引 Impact、Task 和 AC；不得重复整份代码证据或编造代码事实。两份正文均区分用户事实、知识依据、`[AI 推断]` 和 `[待确认]`。展示两个规范文件名、章节摘要和待确认数量，请求用户确认两个文档内容。阶段 4 用户确认的两份正文快照是唯一交付正文；不得从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。内容变化必须重新预览并重新确认。此阶段不绑定父节点、不写远程。完成条件：两份正文快照、规范文件名、追踪链和模板完整性校验均冻结，用户第二次确认有效。
 
 ### 阶段 5：父节点确认
 
-请用户在 Chrome 手动打开目标目录或可创建子项的轻文档父级。调用 `mcp__chrome__pmd_prd_delivery` 的 `inspect_parent`，回显知识库、父节点、URL、类型、权限和 fingerprint。再调用一次 `preview`，传入阶段 4 冻结的 `analysis`/`prd` 两份正文；工具会把两份 content hash、父节点和 Browser Target 冻结到同一 delivery run。此阶段只检查父目录、冻结预览并请求用户确认，不创建或修改线上文档。然后只询问一次是否在该父节点下创建以上两份 Doc。父节点不一致、权限不足或检查失败时停止。完成条件：双文档 preview 成功，且用户明确确认父节点。
+请用户在 Chrome 手动打开目标目录或可创建子项的轻文档父级。先为本次交付生成一个稳定、非空且后续始终复用的 `deliveryRunId`。调用 `mcp__chrome__pmd_prd_delivery` 的 `inspect_parent`，回显知识库、父节点、URL、类型、权限和 fingerprint。再调用一次 `preview`，必须传入 `action=preview`、内部 `requirementId`、稳定 `deliveryRunId`、`parentFingerprint`，以及阶段 4 冻结的 `analysis`/`prd` 两份正文；工具会把两份 content hash、父节点和 Browser Target 冻结到同一 delivery run，并返回 `challenge` 与 `expiresAt`。此阶段只检查父目录、冻结预览并请求用户确认，不创建或修改线上文档。然后只询问一次是否在该父节点下创建以上两份 Doc。父节点不一致、权限不足或检查失败时停止。完成条件：双文档 preview 成功，且用户明确确认父节点。
 
 ### 阶段 6：创建与回读
 
 使用 `mcp__chrome__pmd_prd_delivery` 执行：
 
-`inspect_parent → preview → user confirmation → create → status`
+`inspect_parent → preview → user confirmation → fresh preview → immediate create → status`
 
-`create` 必须使用 preview 返回的一次性 challenge、相同的 `requirementId`、`deliveryRunId` 和两份正文。工具内部为两项生成独立幂等身份，成功项不得重复创建；失败项返回 `partial_delivery`，重新 preview 并确认后只恢复未完成项。两项都在同一父节点下、名称和正文回读通过后才报告完成。完成条件：delivery record 为 `completed`，两项均 `created`，均有 catalogId、完整 stages 和同目标回读证据。
+用户确认后，必须用相同的 `requirementId`、稳定 `deliveryRunId`、`parentFingerprint` 和两份冻结正文再执行一次 fresh `preview`，然后不再插入用户等待或过程文件写入，立即调用 `create`。`create` 必须传入 `action=create`、fresh preview 返回的一次性 `challenge`、相同的 `requirementId`、`deliveryRunId` 和两份正文；不得使用确认前 preview 的旧 challenge。最后 `status` 必须且只能传 `action=status`、相同的 `requirementId` 与 `deliveryRunId`。工具内部为两项生成独立幂等身份，成功项不得重复创建；失败项返回 `partial_delivery`，重新 preview 并确认后只恢复未完成项。两项都在同一父节点下、名称和正文回读通过后才报告完成。完成条件：delivery record 为 `completed`，两项均 `created`，均有 catalogId、完整 stages 和同目标回读证据。
 
 ## 安全约束
 

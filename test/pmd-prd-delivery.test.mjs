@@ -54,6 +54,9 @@ test('publishes a fixed two-document PMD delivery tool', async () => {
     const listed = await fetch(`${harness.endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${harness.endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) })
     const tool = (await listed.json()).result.tools.find((candidate) => candidate.name === 'pmd_prd_delivery')
     assert.deepEqual(tool.inputSchema.properties.action.enum, ['inspect_parent', 'preview', 'create', 'status'])
+    assert.match(tool.inputSchema.properties.action.description, /status requires requirementId and deliveryRunId/)
+    assert.match(tool.inputSchema.properties.deliveryRunId.description, /reused unchanged/)
+    assert.match(tool.inputSchema.properties.challenge.description, /fresh preview performed after user confirmation/)
     assert.equal(tool.inputSchema.properties.documents.minItems, 2)
     assert.equal(tool.inputSchema.properties.documents.maxItems, 2)
   } finally { await harness.connector.stop() }
@@ -66,6 +69,7 @@ test('creates exactly two approved PMD light documents and persists body-free re
     : verified(request, String(101 + creates++)))
   try {
     const preview = await harness.call(1, { action: 'preview', requirementId, deliveryRunId, parentFingerprint: parent.fingerprint, documents })
+    assert.ok(preview.result.structuredContent.expiresAt - Date.now() > 9 * 60_000)
     const result = await harness.call(2, { action: 'create', requirementId, deliveryRunId, challenge: preview.result.structuredContent.challenge, documents })
     assert.equal(result.result.structuredContent.status, 'verified_write')
     assert.equal(creates, 2)
@@ -116,8 +120,41 @@ test('rejects changed document content after preview without creating anything',
     const changed = documents.map((item) => item.kind === 'prd' ? { ...item, body: `${item.body}\nchanged` } : item)
     const result = await harness.call(2, { action: 'create', requirementId, deliveryRunId, challenge: preview.result.structuredContent.challenge, documents: changed })
     assert.equal(result.result.isError, true)
-    assert.match(result.result.content[0].text, /challenge|changed/i)
+    assert.match(result.result.content[0].text, /pmd_delivery_challenge_content_changed/)
     assert.equal(creates, 0)
+  } finally { await harness.connector.stop() }
+})
+
+test('reports an expired PMD approval grant without reaching document creation', async () => {
+  let creates = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : (++creates, verified(request, '351')))
+  try {
+    const preview = await harness.call(1, { action: 'preview', requirementId, deliveryRunId: 'delivery-expired', parentFingerprint: parent.fingerprint, documents })
+    const challenge = preview.result.structuredContent.challenge
+    harness.connector.pmdDeliveryChallenges.get(challenge).expiresAt = Date.now() - 1
+    const result = await harness.call(2, { action: 'create', requirementId, deliveryRunId: 'delivery-expired', challenge, documents })
+    assert.equal(result.result.isError, true)
+    assert.match(result.result.content[0].text, /pmd_delivery_challenge_expired/)
+    assert.equal(creates, 0)
+  } finally { await harness.connector.stop() }
+})
+
+test('reports a consumed PMD approval grant separately from expiry', async () => {
+  let creates = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : verified(request, String(361 + creates++)))
+  try {
+    const preview = await harness.call(1, { action: 'preview', requirementId, deliveryRunId: 'delivery-consumed', parentFingerprint: parent.fingerprint, documents })
+    const challenge = preview.result.structuredContent.challenge
+    const created = await harness.call(2, { action: 'create', requirementId, deliveryRunId: 'delivery-consumed', challenge, documents })
+    assert.equal(created.result.structuredContent.status, 'verified_write')
+    const replay = await harness.call(3, { action: 'create', requirementId, deliveryRunId: 'delivery-consumed', challenge, documents })
+    assert.equal(replay.result.isError, true)
+    assert.match(replay.result.content[0].text, /pmd_delivery_challenge_missing_or_already_used/)
+    assert.equal(creates, 2)
   } finally { await harness.connector.stop() }
 })
 

@@ -1,0 +1,43 @@
+{
+  "requirementId": "req-4k7q2m9d",
+  "workflow": "pmd-prd",
+  "createdAt": "2026-08-18T17:15:19Z",
+  "status": "active",
+  "phase": "research",
+  "business_requirement": "优化司机接单流程",
+  "runs": [
+    {
+      "runId": "run-c4e8f2",
+      "sessionBound": true,
+      "status": "active",
+      "phase": "research"
+    }
+  ],
+  "scope": {
+    "repositories": ["H5_前端"],
+    "knowledge": [],
+    "codeSelected": true,
+    "knowledgeSelected": false,
+    "echoedAt": "2026-08-18T17:15:19Z",
+    "userConfirmed": true,
+    "confirmedSides": {
+      "code": "query_with_search_selected_remote_code",
+      "knowledge": "confirmed_unselected"
+    }
+  },
+  "confirmations": {
+    "root_understanding": "stated_with_pending_items",
+    "scope_confirmed": false,
+    "evidence_confirmed": false,
+    "impact_map_confirmed": false,
+    "tasks_confirmed": false,
+    "acceptance_confirmed": false,
+    "decomposition_decided": false
+  },
+  "artifacts": [
+    "process.md",
+    "domain-model.md",
+    "knowledge-sources.md",
+    "trace-events.jsonl"
+  ]
+}

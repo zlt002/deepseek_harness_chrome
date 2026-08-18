@@ -1,6 +1,6 @@
-# PRD 模板入口
+# 双文档模板入口
 
-需要生成或校验 PRD 正文时，读取同目录 [`references/templates.md`](references/templates.md)。该文件从 AccrUI `pmd-prd/templates.md` 原样迁移，包含公司模板正文、填写规则和 AccrUI 需求交接附录。
+需要生成或校验两份正式正文时，读取同目录 [`references/templates.md`](references/templates.md)。该文件包含固定 `analysis.md` 模板、公司 PRD 模板、填写规则和 AccrUI 需求交接附录。
 
 - 保留 `# PRD: {编号} - {主题}`、九个主章节及其原始顺序。
 - 保留所有 `[必填]`、`【选填】`、`[建议填写]` 标记和模板提示。
@@ -12,3 +12,4 @@
 - 选填章节不适用时写“不适用（原因）”。
 - PRD 正文不得用分析 Doc、过程文件或本地 Markdown 替代。
 - 交付前必须验证章节顺序、规范文件名、目标父节点和同目标正文回读。
+- 分析 Doc 必须使用固定 `analysis.md` 模板并承载完整追踪链；PRD 只写已确认产品结论和 Impact/Task/AC 索引，不复制整份代码证据。

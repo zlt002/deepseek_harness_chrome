@@ -1,0 +1,56 @@
+{
+  "requirementId": "req_k4t7vq2m",
+  "workflow": "pmd-prd",
+  "projectWorkspace": "pmd-workspace/spec/req_k4t7vq2m/",
+  "runs": [
+    {
+      "runId": "run-20260819-001834",
+      "sessionId": "session-0fbec3a9-3733-4f9b-999c-576322ac7cb1",
+      "startedAt": "2026-08-19T00:18:34+08:00",
+      "status": "active"
+    }
+  ],
+  "status": "paused",
+  "phase": "phase6_create_blocked",
+  "delivery": {
+    "deliveryRunId": "dlv-req_k4t7vq2m-20260819-001",
+    "parentFingerprint": "team-doc-parent-v2-6a5d8d99",
+    "parentId": "2089684608120328194",
+    "parentName": "未命名文档",
+    "targetFingerprint": "645b49fd5f434661c111b8abdab902b6018fe7af1c09d13a00edea27490dff49",
+    "contentFingerprint": "335a41d451c1684dcd529ba1d12f2d5c10fbbd88cabdd9cdba3b953d22fd8bfa",
+    "analysisHash": "4b86f749db6ef8e30540aa1ec09ca9025454e20becd3960e3ceaeb569743d441",
+    "prdHash": "aea99045d2d711de978a589bbdb1cf96e9576d9a4b6760f3870df91b08337ede",
+    "status": "pending"
+  },
+  "businessRequirement": "优化司机接单流程",
+  "confirmations": {
+    "root_understanding": "unambiguous_entered_phase2",
+    "scope_echo_done": true,
+    "scope_user_confirmed": true,
+    "scope_confirmed_at": "2026-08-19",
+    "code_side": "queried_once",
+    "knowledge_side": "not_selected",
+    "decomposition_decided": true,
+    "decomposition_choice": "单需求分阶段: P1入口效率(纯前端) / P2实时性(后端配合)",
+    "evidence_confirmed": true,
+    "impact_map_confirmed": true,
+    "tasks_confirmed": true,
+    "acceptance_confirmed": true,
+    "acceptance_confirmed_at": "2026-08-19",
+    "metrics_target": "steps<=2, duration-30pct, ac07<=10s",
+    "documents_confirmed": true,
+    "documents_confirmed_at": "2026-08-19",
+    "document_snapshots": ["analysis.md", "prd.md"],
+    "parent_confirmed": true,
+    "parent_confirmed_at": "2026-08-19",
+    "create_authorized": true,
+    "create_blocked_reason": "create 两次均报 'PMD delivery approval challenge is missing, stale, changed, or already used'（含 preview 后立即使用新 challenge）；本会话审批提示已禁用，疑似 destructive 工具的客户端审批无法建立，challenge 校验无法通过。线上未创建任何文档（status 确认两项 pending）。"
+  },
+  "artifacts": [
+    "process.md",
+    "domain-model.md",
+    "knowledge-sources.md",
+    "trace-events.jsonl"
+  ]
+}

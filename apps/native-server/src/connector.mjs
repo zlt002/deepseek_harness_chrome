@@ -21,7 +21,12 @@ const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
 // knowledge tools/call must emit response headers and periodic body bytes
 // before the Extension finishes, or the child MCP client dies as fetch failed.
 const MCP_JSON_KEEPALIVE_INTERVAL_MS = 15_000
-const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 60_000
+// Approval Grants cross a human-confirmation boundary. One minute is too short
+// for a preview to be read and approved in the Harness Workspace, so keep the
+// grant usable for a bounded ten-minute window. Resource fingerprints, Browser
+// Target binding, payload hashes, and one-time consumption still prevent stale
+// or changed writes.
+const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 10 * 60_000
 const OFFICE_DOCUMENT_MAX_RECORDS = 256
 const MCP_PATH = '/mcp'
 const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
@@ -373,14 +378,14 @@ const teamKnowledgeItemTool = {
 
 const teamKnowledgeSpreadsheetPreviewTool = {
   name: 'team_knowledge_spreadsheet_preview', title: 'Preview one Team Knowledge spreadsheet',
-  description: 'Preview one named Team Knowledge spreadsheet in the current bound parent. This checks the parent and returns a one-time approval challenge. Do not create it in this step.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  description: 'Preview one named Team Knowledge spreadsheet in the current bound parent. This checks the parent and returns a one-time approval challenge plus the matching idempotency identity. Copy both values into team_knowledge_spreadsheet_create after explicit user confirmation. Do not create it in this step.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['name', 'body'], properties: { name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
 }
 
 const teamKnowledgeSpreadsheetCreateTool = {
   name: 'team_knowledge_spreadsheet_create', title: 'Create the approved Team Knowledge spreadsheet',
-  description: 'After explicit approval, create exactly the previewed Team Knowledge spreadsheet using the challenge and idempotency identity returned by preview, plus the unchanged name and body. Success requires business success, same-parent catalog rediscovery, and spreadsheet identity readback.',
+  description: 'After explicit approval, create exactly the previewed Team Knowledge spreadsheet using the challenge and idempotency identity returned by preview, plus the unchanged name and body. The body is used to bind the approval/idempotency contract; this tool creates the spreadsheet and verifies its identity but does not populate cells. Use office_spreadsheet after creation for cell writes. Success requires business success, same-parent catalog rediscovery, and spreadsheet identity readback.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['challenge', 'idempotencyIdentity', 'name', 'body'], properties: { challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
 }
@@ -388,6 +393,7 @@ const teamKnowledgeSpreadsheetCreateTool = {
 const teamKnowledgeSpreadsheetReadbackTool = {
   name: 'team_knowledge_spreadsheet_readback', title: 'Read a created Team Knowledge spreadsheet identity',
   description: 'Read back the verified identity of one Team Knowledge spreadsheet by catalog ID.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['catalogId'], properties: { catalogId: { type: 'string', pattern: '^\\d+$' } } },
 }
 
@@ -410,8 +416,8 @@ const teamKnowledgeBatchTool = {
 
 const teamKnowledgeBatchPreviewTool = {
   name: 'team_knowledge_batch_preview', title: 'Preview one to ten Team Knowledge light documents',
-  description: 'The first step for one to ten light documents. Provide a stable batchId and the exact ordered names and bodies. This inspects the currently bound parent and returns a model-visible one-time creation challenge. Copy that exact challenge into team_knowledge_batch_create after explicit user confirmation. No online document is created in this step.',
-  annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  description: 'The first step for one to ten light documents. Provide a stable batchId and the exact ordered names and bodies. This inspects the currently bound parent and returns a model-visible one-time creation challenge plus expiresAt. Copy that exact challenge into team_knowledge_batch_create after explicit user confirmation. If it expired, preview the unchanged batch again before create. No online document is created in this step.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'items'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
 }
 
@@ -425,21 +431,22 @@ const teamKnowledgeBatchCreateTool = {
 const teamKnowledgeBatchStatusTool = {
   name: 'team_knowledge_batch_status', title: 'Read Team Knowledge batch delivery status',
   description: 'Read the current status of a previously previewed or created light-document batch. Provide only its batchId.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['batchId'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 } } },
 }
 
 const pmdPrdDeliveryTool = {
   name: 'pmd_prd_delivery', title: 'Deliver the two approved PMD documents',
-  description: 'Fixed two-document delivery for /pmd-prd. Inspect the bound Team Knowledge parent, preview exactly the approved analysis and PRD light documents, obtain explicit user confirmation, then create or resume only unfinished items with persistent readback evidence.',
+  description: 'Fixed two-document delivery for /pmd-prd. Inspect the bound Team Knowledge parent, preview exactly the approved analysis and PRD light documents, obtain explicit user confirmation, then refresh the unchanged preview and immediately create or resume only unfinished items with persistent readback evidence. Preview returns expiresAt for the one-time Approval Grant.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['action'],
     properties: {
-      action: { enum: ['inspect_parent', 'preview', 'create', 'status'] },
-      requirementId: { type: 'string', minLength: 1, maxLength: 64 },
-      deliveryRunId: { type: 'string', minLength: 1, maxLength: 80 },
+      action: { enum: ['inspect_parent', 'preview', 'create', 'status'], description: 'inspect_parent requires no other fields; preview requires requirementId, deliveryRunId, parentFingerprint, and documents; create requires requirementId, deliveryRunId, challenge, and documents; status requires requirementId and deliveryRunId.' },
+      requirementId: { type: 'string', minLength: 1, maxLength: 64, description: 'Stable internal PMD requirement identity. Required for preview, create, and status.' },
+      deliveryRunId: { type: 'string', minLength: 1, maxLength: 80, description: 'Stable delivery identity generated before the first preview and reused unchanged by preview, create, retries, and status.' },
       parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 },
-      challenge: { type: 'string', minLength: 1, maxLength: 256 },
+      challenge: { type: 'string', minLength: 1, maxLength: 256, description: 'One-time Approval Grant returned by the fresh preview performed after user confirmation. Required for create.' },
       documents: {
         type: 'array', minItems: 2, maxItems: 2,
         items: { type: 'object', additionalProperties: false, required: ['kind', 'name', 'body'], properties: {
@@ -2536,8 +2543,9 @@ export class BrowserConnector {
         const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
         const targetFingerprint = teamKnowledgeTargetFingerprint(resolved.target, parent, args.kind)
         const idempotencyIdentity = `team-item:${hash(JSON.stringify({ targetFingerprint, contentHash })).slice(0, 48)}`
-        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', browserTarget: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, challenge }
+        const expiresAt = Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS
+        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, expiresAt })
+        const result = { action: 'preview', browserTarget: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, challenge, expiresAt }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
@@ -2555,7 +2563,9 @@ export class BrowserConnector {
         this.#toolError(response, message.id, 'Team Knowledge approval challenge is missing, stale, or already used.'); return
       }
       const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
-      if (grant.kind !== args.kind || grant.name !== args.name || grant.contentHash !== contentHash || grant.idempotencyIdentity !== args.idempotencyIdentity) {
+      const requiresPreviewIdentity = message.params?.name !== 'team_knowledge_item'
+      if (grant.kind !== args.kind || grant.name !== args.name || grant.contentHash !== contentHash
+        || (requiresPreviewIdentity && grant.idempotencyIdentity !== args.idempotencyIdentity)) {
         this.#toolError(response, message.id, 'Team Knowledge approval challenge conflicts with the confirmed kind, name, body, or idempotency identity.'); return
       }
       const targetFingerprint = teamKnowledgeTargetFingerprint(grant.target, grant.parent, args.kind)
@@ -2640,8 +2650,9 @@ export class BrowserConnector {
         for (const [key, grant] of this.teamKnowledgeBatchChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeBatchChallenges.delete(key)
         if (this.teamKnowledgeBatchChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.teamKnowledgeBatchChallenges.delete(this.teamKnowledgeBatchChallenges.keys().next().value)
         const challenge = randomBytes(32).toString('base64url')
-        this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, batchId: args.batchId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', status: batch.status, browserTarget: inspected.target, parent, batch: teamKnowledgeBatchView(batch), challenge }
+        const expiresAt = Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS
+        this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, batchId: args.batchId, contentFingerprint, expiresAt })
+        const result = { action: 'preview', status: batch.status, browserTarget: inspected.target, parent, batch: teamKnowledgeBatchView(batch), challenge, expiresAt }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
         return
       }
@@ -2751,18 +2762,21 @@ export class BrowserConnector {
         }
         for (const [key, grant] of this.pmdDeliveryChallenges) if (grant.expiresAt < Date.now()) this.pmdDeliveryChallenges.delete(key)
         const challenge = randomBytes(32).toString('base64url')
-        this.pmdDeliveryChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', status: record.status, browserTarget: inspected.target, parent, delivery: record, challenge }
+        const expiresAt = Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS
+        this.pmdDeliveryChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, contentFingerprint, expiresAt })
+        const result = { action: 'preview', status: record.status, browserTarget: inspected.target, parent, delivery: record, challenge, expiresAt }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
 
       const grant = this.pmdDeliveryChallenges.get(args.challenge)
       this.pmdDeliveryChallenges.delete(args.challenge)
-      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)
-        || grant.requirementId !== args.requirementId || grant.deliveryRunId !== args.deliveryRunId || grant.contentFingerprint !== contentFingerprint) {
-        throw new Error('PMD delivery approval challenge is missing, stale, changed, or already used.')
-      }
+      if (!grant) throw new Error('pmd_delivery_challenge_missing_or_already_used')
+      if (grant.expiresAt < Date.now()) throw new Error('pmd_delivery_challenge_expired')
+      if (grant.runId !== runId || grant.generation !== this.generation) throw new Error('pmd_delivery_challenge_run_changed')
+      if (!sameBrowserTarget(grant.target, target)) throw new Error('pmd_delivery_challenge_browser_target_changed')
+      if (grant.requirementId !== args.requirementId || grant.deliveryRunId !== args.deliveryRunId) throw new Error('pmd_delivery_challenge_delivery_identity_changed')
+      if (grant.contentFingerprint !== contentFingerprint) throw new Error('pmd_delivery_challenge_content_changed')
       const inspected = await inspectParent()
       if (!sameBrowserTarget(inspected.target, grant.target)) throw new Error('PMD delivery Browser Target changed after confirmation.')
       if (inspected.result.parent.fingerprint !== grant.parent.fingerprint) throw new Error('PMD delivery parent changed after confirmation.')

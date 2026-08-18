@@ -53,14 +53,17 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
     const tools = (await list.json()).result.tools
     const previewTool = tools.find((candidate) => candidate.name === 'team_knowledge_batch_preview')
     const createTool = tools.find((candidate) => candidate.name === 'team_knowledge_batch_create')
+    const statusTool = tools.find((candidate) => candidate.name === 'team_knowledge_batch_status')
     assert.equal(tools.some((candidate) => candidate.name === 'team_knowledge_batch'), false)
     assert.deepEqual(harnessProjectedArguments(previewTool.inputSchema), { required: ['batchId', 'items'], properties: ['batchId', 'items'] })
-    assert.deepEqual(previewTool.annotations, { destructiveHint: false, idempotentHint: true, openWorldHint: false })
+    assert.deepEqual(previewTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
     assert.equal(previewTool.inputSchema.properties.items.maxItems, 10)
     assert.deepEqual(harnessProjectedArguments(createTool.inputSchema), { required: ['batchId', 'challenge', 'items'], properties: ['batchId', 'challenge', 'items'] })
+    assert.deepEqual(statusTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
     const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'batch-success', items: documents })
     const modelVisibleChallenge = plan.result.content[0].text.match(/创建凭证：([A-Za-z0-9_-]+)/)?.[1]
     assert.equal(modelVisibleChallenge, plan.result.structuredContent.challenge)
+    assert.ok(plan.result.structuredContent.expiresAt - Date.now() > 9 * 60_000)
     const result = await harness.callTool('team_knowledge_batch_create', 2, { batchId: 'batch-success', challenge: modelVisibleChallenge, items: documents })
     assert.equal(result.result.structuredContent.status, 'verified_write')
     assert.equal(result.result.content[0].text, '已完成 2 个子文档的创建、内容写入和回读验证。')
