@@ -142,10 +142,10 @@ function App(): React.JSX.Element {
     chrome.runtime.sendMessage({ type: 'search-progress-snapshot/v1' }, (response: { ok?: boolean; progress?: unknown[] } | undefined) => {
       if (chrome.runtime.lastError !== undefined || response?.ok !== true || !Array.isArray(response.progress)) return
       for (const item of response.progress) {
-        const value = item as { requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown }
+        const value = item as { requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown }
         if (typeof value.requestId !== 'string' || typeof value.harnessSessionId !== 'string' || (value.tool !== 'code_search' && value.tool !== 'knowledge_search') || typeof value.question !== 'string' || (value.phase !== 'querying' && value.phase !== 'streaming' && value.phase !== 'done' && value.phase !== 'error') || typeof value.chars !== 'number' || typeof value.content !== 'string') continue
         searchProgressSequenceRef.current += 1
-        frameRef.current?.contentWindow?.postMessage({ type: 'search-progress/v1', nonce: frameNonce, sequence: searchProgressSequenceRef.current, progress: value }, frameOrigin)
+        frameRef.current?.contentWindow?.postMessage({ type: 'search-progress/v1', nonce: frameNonce, sequence: searchProgressSequenceRef.current, progress: { ...value, ...(typeof value.eventType === 'string' ? { eventType: value.eventType } : {}), ...(typeof value.process === 'string' ? { process: value.process } : {}) } }, frameOrigin)
       }
     })
   }, [frameNonce, frameOrigin])
@@ -159,7 +159,7 @@ function App(): React.JSX.Element {
     void requestActiveTab().then((response) => { if (response.ok) accept(response.epoch, response.sequence, response.tab) })
     const onMessage = (message: unknown): void => {
       if (!message || typeof message !== 'object') return
-      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown }
+      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
       if (value.type === 'harness-ready' && typeof value.url === 'string') { setUrl(value.url); setStatus('ready'); setError(undefined) }
       if (value.type === 'harness-disconnected') { void connect() }
@@ -169,7 +169,7 @@ function App(): React.JSX.Element {
         searchProgressSequenceRef.current += 1
         frameRef.current?.contentWindow?.postMessage({
           type: 'search-progress/v1', nonce: frameNonce, sequence: searchProgressSequenceRef.current,
-          progress: { requestId: value.requestId, harnessSessionId: value.harnessSessionId, harnessParentSessionId: value.harnessParentSessionId, tool: value.tool, question: value.question, phase: value.phase, chars: value.chars, content: value.content },
+          progress: { requestId: value.requestId, harnessSessionId: value.harnessSessionId, harnessParentSessionId: value.harnessParentSessionId, tool: value.tool, question: value.question, phase: value.phase, chars: value.chars, content: value.content, ...(typeof value.eventType === 'string' ? { eventType: value.eventType } : {}), ...(typeof value.process === 'string' ? { process: value.process } : {}) },
         }, frameOrigin)
       }
     }

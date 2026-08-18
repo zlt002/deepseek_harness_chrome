@@ -259,6 +259,153 @@ test('rejects a child spreadsheet when same-parent rediscovery reports the wrong
   }
 })
 
+test('accepts a docOnline document parent when its child listing omits fileType but the exact child record says newword', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const originalDocument = globalThis.document
+  const documentParent = { ...parent, parentId: detailDocumentId, bookId: detailBookId, parentName: 'Current light document', parentType: 'document', fingerprint: 'current-document-parent' }
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.document = { referrer: '' }
+  let childLists = 0
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      childLists += 1
+      return new Response(JSON.stringify({ errorCode: '00000', data: childLists === 1 ? [] : [{ catalogId: '9007199254740998', name: 'Second child' }] }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledge/getAllFileType')) return new Response(JSON.stringify({ errorCode: '00000', data: [{ type: 4, value: 'newword' }] }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledge/add')) return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: '9007199254740998' } }), { status: 200 })
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/get') && parsed.searchParams.get('catalogId') === '9007199254740998') {
+      return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: '9007199254740998', fileType: 'newword' } }), { status: 200 })
+    }
+    throw new Error(`unexpected fetch ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget, execute: async ({ func, args }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: documentParent }
+    if (func.name === 'createTeamDocInPage') return func(...args)
+    if (func.name === 'writeTeamDocInWebEdit') return { ok: true, readbackMatches: true, observedBody: 'Second child' }
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(itemRequest({ requestId: 'document-parent-missing-type', browserTarget: detailTarget, parent: documentParent, name: 'Second child', body: 'Second child' }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.equal(response.result.item.catalogId, '9007199254740998')
+    assert.equal(childLists, 2)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
+  }
+})
+
+test('continues a same-parent light-document create with unavailable catalog type only after WebEdit identity confirms it', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const originalDocument = globalThis.document
+  const documentParent = { ...parent, parentId: detailDocumentId, bookId: detailBookId, parentName: 'Current light document', parentType: 'document', fingerprint: 'current-document-parent-provisional' }
+  globalThis.location = new URL(detailTarget.url)
+  globalThis.document = { referrer: '' }
+  let childLists = 0
+  const identityReads = []
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/getDataByParentId')) {
+      childLists += 1
+      return new Response(JSON.stringify({ errorCode: '00000', data: childLists === 1 ? [] : [{ catalogId: '9007199254740996', name: 'Provisional child' }] }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledge/getAllFileType')) return new Response(JSON.stringify({ errorCode: '00000', data: [{ type: 4, value: 'newword' }] }), { status: 200 })
+    if (parsed.pathname.endsWith('/teamKnowledge/add')) return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: '9007199254740996' } }), { status: 200 })
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/get')) return new Response(JSON.stringify({ errorCode: '00000', data: { catalogId: '9007199254740996' } }), { status: 200 })
+    throw new Error(`unexpected fetch ${parsed.pathname}${parsed.search}`)
+  }
+  const harness = await loadBackground({ initialTab: detailTarget,
+    sendMessage: async (_tabId, message) => {
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/o/1', hasContent: true } } }
+      if (message.type === 'office-document/v1' && message.action === 'read') {
+        identityReads.push(message)
+        return { ok: true, result: { status: 'ok', resource: { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: 'Provisional child', fingerprint: 'child-identity' }, document: { blocks: [] } } }
+      }
+      return { ok: false }
+    },
+    execute: async ({ func, args }) => {
+      if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: documentParent }
+      if (func.name === 'createTeamDocInPage') return func(...args)
+      if (func.name === 'writeTeamDocInWebEdit') return { ok: true, readbackMatches: true, observedBody: 'Provisional child' }
+      throw new Error(`unexpected function ${func.name}`)
+    },
+  })
+  try {
+    const response = await harness.sendNative(itemRequest({ requestId: 'document-parent-provisional-type', browserTarget: detailTarget, parent: documentParent, name: 'Provisional child', body: 'Provisional child' }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.equal(response.result.item.catalogId, '9007199254740996')
+    assert.equal(identityReads.length, 1)
+    assert.equal(childLists, 2)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
+  }
+})
+
+test('fails closed before writing when a provisional light-document catalog entry opens a non-light WebEdit identity', async () => {
+  let writes = 0
+  const provisional = { ok: true, catalogId: '9007199254740997', documentId: '9007199254740997', kind: 'light_document', provisionalKind: true, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740997?id=9007199254740997' }
+  const harness = await loadBackground({
+    execute: async ({ func }) => {
+      if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+      if (func.name === 'createTeamDocInPage') return provisional
+      if (func.name === 'writeTeamDocInWebEdit') { writes += 1; return { ok: true, readbackMatches: true, observedBody: 'must not write' } }
+      throw new Error(`unexpected function ${func.name}`)
+    },
+    sendMessage: async (_tabId, message) => {
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/o/1', hasContent: true } } }
+      if (message.type === 'office-document/v1' && message.action === 'read') {
+        return { ok: true, result: { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Wrong', sheetName: 'Sheet1', fingerprint: 'wrong-identity' }, document: { blocks: [] } } }
+      }
+      return { ok: false }
+    },
+  })
+  try {
+    const response = await harness.sendNative(itemRequest({ requestId: 'provisional-wrong-identity' }))
+    assert.equal(response.result.status, 'partial_delivery')
+    assert.equal(response.result.failedAt, 'readback')
+    assert.equal(response.result.error, 'team_knowledge_document_readback_unavailable')
+    assert.equal(writes, 0)
+  } finally { harness.cleanup() }
+})
+
+test('keeps the created catalog ID and checkpoint when post-create type verification is uncertain', async () => {
+  const documentParent = { ...parent, parentId: detailDocumentId, bookId: detailBookId, parentName: 'Current light document', parentType: 'document', fingerprint: 'current-document-parent-uncertain' }
+  const uncertain = {
+    ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable',
+    catalogId: '9007199254740999', documentId: '9007199254740999', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740999?id=9007199254740999',
+  }
+  const uncertainRecovery = { ...uncertain }
+  delete uncertainRecovery.url
+  let creates = 0
+  let rediscoveries = 0
+  const harness = await loadBackground({ initialTab: detailTarget, execute: async ({ func }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: documentParent }
+    if (func.name === 'createTeamDocInPage') { creates += 1; return uncertain }
+    if (func.name === 'rediscoverTeamDocInPage') { rediscoveries += 1; return uncertainRecovery }
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const request = { browserTarget: detailTarget, parent: documentParent, name: 'Uncertain child', body: 'Uncertain child', idempotencyIdentity: 'uncertain-child' }
+    const first = await harness.sendNative(itemRequest({ requestId: 'uncertain-first', ...request }))
+    assert.equal(first.result.status, 'partial_delivery')
+    assert.equal(first.result.failedAt, 'rediscover')
+    assert.equal(first.result.item.catalogId, '9007199254740999')
+    const retry = await harness.sendNative(itemRequest({ requestId: 'uncertain-retry', ...request }))
+    assert.equal(retry.result.status, 'partial_delivery')
+    assert.equal(retry.result.item.catalogId, '9007199254740999')
+    assert.equal(creates, 1)
+    assert.equal(rediscoveries, 1)
+  } finally { harness.cleanup() }
+})
+
 test('does not verify a spreadsheet when the post-create frame reads back a light-document resource', async () => {
   const harness = await loadBackground({
     execute: async ({ func }) => {
@@ -277,6 +424,49 @@ test('does not verify a spreadsheet when the post-create frame reads back a ligh
     assert.equal(response.result.failedAt, 'unsupported')
     assert.equal(response.result.error, 'team_knowledge_spreadsheet_identity_unavailable')
   } finally { harness.cleanup() }
+})
+
+test('keeps spreadsheet readback read-only and returns the catalog name when the caller name is stale', async () => {
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  const catalogId = '9007199254741001'
+  const recoveredUrl = `https://doc.midea.com/teamKnowledge/detail/docOnline/${catalogId}?id=${catalogId}`
+  let renames = 0
+  globalThis.location = new URL(target.url)
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url), 'https://doc.midea.com')
+    if (parsed.pathname.endsWith('/openApi/teamKnowledgeCatalog/getListByParentId')) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: [{ catalogId, name: 'Actual sheet', fileType: 8, url: recoveredUrl }] }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledge/getAllFileType')) {
+      return new Response(JSON.stringify({ errorCode: '00000', data: [{ type: 4, value: 'newword' }, { type: 8, value: 'newexcel' }] }), { status: 200 })
+    }
+    if (parsed.pathname.endsWith('/teamKnowledgeCatalog/rename')) {
+      renames += 1
+      return new Response(JSON.stringify({ errorCode: '00000' }), { status: 200 })
+    }
+    throw new Error(`unexpected fetch ${parsed.pathname}`)
+  }
+  const harness = await loadBackground({ execute: async ({ func, args }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+    if (func.name === 'rediscoverTeamDocInPage') return func(...args)
+    throw new Error(`unexpected function ${func.name}`)
+  }, sendMessage: async (_tabId, message) => {
+    if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
+    assert.deepEqual(message, { type: 'office-read-range/v1', range: 'A1' })
+    return { ok: true, result: { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Actual.xlsx', sheetName: 'Sheet1', fingerprint: 'actual-sheet' }, range: { address: 'Sheet1!A1' } } }
+  } })
+  try {
+    const response = await harness.sendNative(itemRequest({ requestId: 'readback-stale-name', action: 'readback', catalogId, kind: 'spreadsheet', name: 'Stale sheet', body: '' }))
+    assert.equal(response.result.status, 'ok')
+    assert.equal(response.result.item.catalogId, catalogId)
+    assert.equal(response.result.item.name, 'Actual sheet')
+    assert.equal(renames, 0)
+  } finally {
+    harness.cleanup()
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+  }
 })
 
 test('keeps a generic child item partial when the create API returns HTTP 200 with a business error', async () => {

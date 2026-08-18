@@ -4,6 +4,8 @@
  * `ctx.subagents.registerContinuableSetup()`.
  */
 import { createHash } from 'node:crypto'
+import { request as httpRequest } from 'node:http'
+import { Readable } from 'node:stream'
 
 export const name = 'harness-runtime-mcp-scopes'
 export const inject = ['tools', 'subagents']
@@ -171,23 +173,98 @@ async function discover(rpc, config) {
 }
 
 /**
+ * Node fetch (undici) defaults headersTimeout to 300s. A knowledge tools/call
+ * can stay quiet that long before the Connector writes the JSON-RPC body, so
+ * the child MCP client must not use the default dispatcher.
+ */
+export function connectorHttpFetch(input, init = {}) {
+  const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(String(input))
+  const headers = new Headers(init.headers)
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const abort = (error) => {
+      request.destroy(error)
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+    const request = httpRequest({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || 80,
+      path: `${url.pathname}${url.search}`,
+      method: init.method ?? 'GET',
+      headers: Object.fromEntries(headers),
+    }, (incoming) => {
+      settled = true
+      resolve(new Response(Readable.toWeb(incoming), {
+        status: incoming.statusCode ?? 502,
+        statusText: incoming.statusMessage ?? '',
+        headers: incoming.headers,
+      }))
+    })
+    request.once('error', (error) => {
+      if (!settled) {
+        settled = true
+        reject(error)
+      }
+    })
+    if (init.signal !== undefined) {
+      if (init.signal.aborted) {
+        abort(init.signal.reason instanceof Error ? init.signal.reason : new Error('aborted'))
+        return
+      }
+      init.signal.addEventListener('abort', () => abort(init.signal.reason instanceof Error ? init.signal.reason : new Error('aborted')), { once: true })
+    }
+    if (typeof init.body === 'string') request.end(init.body)
+    else request.end()
+  })
+}
+
+function connectorFetchError(error) {
+  const parts = []
+  const seen = new Set()
+  let current = error
+  for (let depth = 0; depth < 6 && current !== undefined && current !== null && !seen.has(current); depth += 1) {
+    seen.add(current)
+    if (current instanceof Error) {
+      const code = typeof current.code === 'string' ? current.code : undefined
+      let text = current.message || current.name
+      if (code && !text.includes(code)) text = `${text}: ${code}`
+      if (text && !parts.includes(text)) parts.push(text)
+      current = current.cause
+      continue
+    }
+    const text = typeof current === 'object' && typeof current.code === 'string' ? current.code : String(current)
+    if (text && !parts.includes(text)) parts.push(text)
+    break
+  }
+  return new Error(`Browser Connector request failed: ${parts.join(': ') || 'unknown transport error'}`, { cause: error instanceof Error ? error : undefined })
+}
+
+/**
  * The trusted Native Connector uses a deliberately narrow MCP transport:
  * authenticated JSON-RPC POST with JSON responses and no server sessions.
  */
-function createConnectorRpc(config) {
+function createConnectorRpc(config, fetchImpl = connectorHttpFetch) {
   let nextId = 1
   const post = async (message, callerSignal, expectsResponse = true) => {
     const timeoutSignal = AbortSignal.timeout(config.toolCallTimeoutMs)
     const signal = callerSignal === undefined ? timeoutSignal : AbortSignal.any([callerSignal, timeoutSignal])
-    const response = await fetch(config.url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json', ...config.headers },
-      body: JSON.stringify(message),
-      signal,
-    })
+    let response
+    try {
+      response = await fetchImpl(config.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json', ...config.headers },
+        body: JSON.stringify(message),
+        signal,
+      })
+    } catch (error) {
+      throw connectorFetchError(error)
+    }
     if (!response.ok) throw new Error(`Browser Connector HTTP ${response.status}`)
     if (!expectsResponse) return undefined
-    const envelope = await response.json()
+    const envelope = JSON.parse(await response.text())
     if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) throw new Error('Browser Connector returned an invalid JSON-RPC envelope')
     if (envelope.error !== undefined) throw new Error(envelope.error?.message ?? 'Browser Connector JSON-RPC error')
     return envelope.result
@@ -235,7 +312,7 @@ function normalizeConfig(input = {}) {
  */
 export async function apply(ctx, input = {}) {
   const config = normalizeConfig(input)
-  const rpc = createConnectorRpc(config)
+  const rpc = createConnectorRpc(config, input.fetch ?? connectorHttpFetch)
   const stopSelectedSourceDispatchGuard = ctx.tools.guard(createSelectedSourceDispatchGuard())
   const childDisposers = new Map()
   let globalDisposers = new Map()

@@ -76,6 +76,21 @@ function isRetryableKnowledgeTransport(error: unknown): boolean {
   return /fetch failed|Failed to fetch|NetworkError|socket hang up|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|other side closed/i.test(errorChain(error))
 }
 function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)) }
+function isKnowledgeStream(input: string): boolean {
+  return /\/api\/rag\/(?:retrieval|repo-search)(?:\?|$)/.test(input)
+}
+function describeKnowledgeTransportError(error: unknown, process = ''): string {
+  const detail = errorChain(error)
+  const timeout = /UND_ERR_BODY_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|body timeout|headers timeout/i.test(detail)
+  const transport = timeout || /fetch failed|Failed to fetch|NetworkError|socket hang up|ECONNRESET|other side closed/i.test(detail)
+  const reason = timeout
+    ? '远程检索流因传输层空闲超时中断（常见于仓库精搜超过约 5 分钟仍未结束）。'
+    : transport
+      ? '远程检索流在返回最终答案前因网络传输中断。'
+      : '远程检索流在返回最终答案前中断。'
+  const hint = process.trim() === '' ? '' : `\n已收到的远程检索过程：\n${process.trim().slice(-3_000)}`
+  return `${reason}${detail}${hint}`
+}
 function proxyFailureText(status: number, text: string): boolean {
   return status === 502 && /Knowledge proxy failed|fetch failed|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|UND_ERR_/i.test(text)
 }
@@ -101,8 +116,17 @@ async function fetchWithRetry(input: string, init: RequestInit = {}): Promise<Re
   throw lastError instanceof Error ? lastError : new Error(errorChain(lastError))
 }
 async function knowledgeFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const stream = isKnowledgeStream(input)
+  const chromeInit: RequestInit = { ...init, credentials: init.credentials ?? 'include' }
+  // Long repo-search SSE stays quiet while upstream Explore agents run.
+  // Chrome fetch has no undici 300s bodyTimeout; AccrUI uses this path.
+  if (stream) {
+    try { return await fetchWithRetry(input, chromeInit) } catch (error) {
+      if (init.signal?.aborted || knowledgeProxyConfig === undefined) throw error
+    }
+  }
   const proxy = knowledgeProxyConfig
-  if (proxy === undefined) return fetchWithRetry(input, init)
+  if (proxy === undefined) return fetchWithRetry(input, chromeInit)
   const target = new URL(input)
   if (target.origin !== new URL(KNOWLEDGE_BASE_URL).origin || !target.pathname.startsWith('/api-sse-kd/api/')) throw new Error('knowledge_proxy_target_rejected')
   const headers = new Headers(init.headers); headers.delete('cookie'); headers.delete('authorization')
@@ -117,12 +141,12 @@ async function knowledgeFetch(input: string, init: RequestInit = {}): Promise<Re
     const response = await fetchWithRetry(proxy.url, proxyInit)
     if (response.ok) return response
     const preview = await response.clone().text()
-    if (proxyFailureText(response.status, preview)) return fetchWithRetry(input, init)
+    if (proxyFailureText(response.status, preview)) return fetchWithRetry(input, chromeInit)
     return response
   } catch (error) {
     if (init.signal?.aborted) throw error
     if (!isRetryableKnowledgeTransport(error) && !/Knowledge proxy failed|fetch failed|Failed to fetch/i.test(errorChain(error))) throw error
-    return fetchWithRetry(input, init)
+    return fetchWithRetry(input, chromeInit)
   }
 }
 async function knowledgeJson(path: string): Promise<unknown> {
@@ -219,6 +243,8 @@ async function loadKnowledgeCatalog(domainId?: string): Promise<{ domains: Array
   return value
 }
 function sseEvents(buffer: string, chunk: string): { events: string[]; remainder: string } { const parts = `${buffer}${chunk}`.replace(/\r\n/g, '\n').split('\n\n'); const remainder = parts.pop() ?? ''; return { events: parts.map((part) => part.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')).filter(Boolean), remainder } }
+const PROCESS_TEXT_LIMIT = 32_000
+const PROCESS_LINE_LIMIT = 400
 function mergeStreamText(current: string, incoming: string): string {
   if (incoming.startsWith(current)) return incoming.slice(0, 16_000)
   if (current.endsWith(incoming)) return current
@@ -227,8 +253,51 @@ function mergeStreamText(current: string, incoming: string): string {
   while (overlap > 0 && current.slice(-overlap) !== incoming.slice(0, overlap)) overlap -= 1
   return `${current}${incoming.slice(overlap)}`.slice(0, 16_000)
 }
+function isProcessEvent(payload: Record<string, unknown>): boolean {
+  return payload.type === 'reasoning' || payload.type === 'thinking' || payload.type === 'thought' || payload.type === 'agent_thought'
+    || payload.type === 'tool' || payload.type === 'tool_call' || payload.type === 'search' || payload.type === 'status' || payload.type === 'progress'
+    || payload.type === 'log' || payload.type === 'step'
+}
 function isAnswerDelta(payload: Record<string, unknown>): boolean {
-  return payload.type !== 'reasoning' && payload.type !== 'thinking' && payload.type !== 'thought' && payload.type !== 'agent_thought'
+  return !isProcessEvent(payload) && payload.type !== 'done' && payload.type !== 'citations' && payload.type !== 'error'
+}
+function compactProcessText(value: string): string {
+  const normalized = value.slice(0, PROCESS_LINE_LIMIT * 4).replace(/\s+/g, ' ').replace(/(?:[A-Za-z]:[\\/]|\/)(?:[^"'()\s,:]+[\\/]){3,}[^"'()\s,:]+/g, (path) => {
+    const parts = path.split(/[\\/]/).filter(Boolean)
+    return `…/${parts.slice(-4).join('/')}`
+  }).trim()
+  return normalized.length <= PROCESS_LINE_LIMIT ? normalized : `${normalized.slice(0, PROCESS_LINE_LIMIT - 1)}…`
+}
+function processEventText(payload: Record<string, unknown>): string | undefined {
+  if (payload.type === 'reasoning' || payload.type === 'thinking' || payload.type === 'thought' || payload.type === 'agent_thought') {
+    return '远程检索正在分析问题…'
+  }
+  if (payload.type === 'step') {
+    const step = typeof payload.step === 'string' ? payload.step : 'retrieval'
+    const status = typeof payload.status === 'string' ? payload.status : 'running'
+    return `步骤：${step}（${status}）`
+  }
+  const source = typeof payload.source === 'string' ? payload.source.trim() : ''
+  for (const candidate of [payload.message, payload.delta, payload.content, payload.text, payload.status, payload.detail]) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      const text = compactProcessText(candidate)
+      return source === '' ? text : `${compactProcessText(source).slice(0, 80)} · ${text}`
+    }
+  }
+  return undefined
+}
+function appendProcess(current: string, incoming: string): string {
+  const line = incoming.trim()
+  if (line === '') return current
+  if (current === '') return line.slice(0, PROCESS_TEXT_LIMIT)
+  const newline = current.lastIndexOf('\n')
+  const last = newline === -1 ? current : current.slice(newline + 1)
+  if (line === last) return current
+  if (line.startsWith(last) || last.startsWith(line)) {
+    const next = line.length >= last.length ? line : last
+    return `${newline === -1 ? '' : current.slice(0, newline + 1)}${next}`.slice(0, PROCESS_TEXT_LIMIT)
+  }
+  return `${current}\n${line}`.slice(0, PROCESS_TEXT_LIMIT)
 }
 function retrievalQuestion(kind: KnowledgeKind, question: string): string {
   const instruction = kind === 'code'
@@ -237,18 +306,66 @@ function retrievalQuestion(kind: KnowledgeKind, question: string): string {
   const language = /[\u3400-\u9fff]/u.test(question)
     ? '所有面向用户的流式内容和最终答案都必须使用简体中文；工具名、代码标识符和文件路径可保留原文。即使转述后的问题包含英文，也不要用英文叙述。'
     : 'Use the same language as the user question for all user-visible streaming content and the final answer.'
-  return `${instruction}${language}不要输出思考过程、检索计划、工具选择、工作目录判断或是否需要检索的讨论。用户问题：${question}`
+  return `${instruction}${language}最终答案只保留事实和引用，不要把思考过程写进最终答案。检索计划、当前正在查的仓库或知识、工具选择和进度可通过独立过程事件流式返回。用户问题：${question}`
 }
-async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scope: KnowledgeScope, priorSessionId: string | undefined, signal: AbortSignal, onProgress?: (progress: { chars: number; content: string; eventType?: string }) => void): Promise<{ result: { status: 'complete' | 'partial' | 'truncated'; answer: string; sources: Array<{ id: string; title: string }> }; sessionId?: string }> {
-  if (kind === 'knowledge' && scope.domainId === '') throw new Error('knowledge_scope_requires_domain')
-  if (kind === 'code' && scope.repositoryIds.length === 0) throw new Error('knowledge_scope_requires_repository')
+async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scope: KnowledgeScope, priorSessionId: string | undefined, signal: AbortSignal, onProgress?: (progress: { chars: number; content: string; eventType?: string; process?: string }) => void): Promise<{ result: { status: 'complete' | 'partial' | 'truncated'; answer: string; sources: Array<{ id: string; title: string }> }; sessionId?: string }> {
+  if (kind === 'knowledge' && scope.domainId === '') {
+    throw new Error('当前会话没有选择知识范围。请在输入框上方点「选择知识范围」，先选一个领域再勾选知识库，然后重试。不要用已选代码库代替知识库检索。')
+  }
+  if (kind === 'code' && scope.repositoryIds.length === 0) {
+    throw new Error('当前会话没有选择远程代码库。请在输入框上方点「选择代码库」并勾选仓库，然后重试。不要用本地工作区代替远程代码检索。')
+  }
   const directedQuestion = retrievalQuestion(kind, question)
   const body = kind === 'knowledge' ? { question: directedQuestion, domain_system_config: { [scope.domainId]: { self: false, systems: scope.systemIds } }, forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question: directedQuestion, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
+  const emit = (eventType?: string, content = '', process = '') => onProgress?.({ chars: content.length, content, ...(eventType === undefined ? {} : { eventType }), ...(process === '' ? {} : { process }) })
   const response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(body), signal })
   if (!response.ok || response.body === null) throw new Error(`knowledge_platform_http_${response.status}`)
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let visualContent = ''; let sources: Array<{ id: string; title: string }> = []; let sessionId: string | undefined; let done = false; let marker = false; let stop = false
-  try { while (!stop) { const read = await reader.read(); if (read.done) break; const parsed = sseEvents(buffer, decoder.decode(read.value, { stream: true })); buffer = parsed.remainder; for (const event of parsed.events) { if (event === '[DONE]') { marker = true; continue }; let payload: Record<string, unknown>; try { payload = JSON.parse(event) as Record<string, unknown> } catch { continue }; if (payload.type === 'error') { if (answer.length > 0) { stop = true; break } throw new Error(typeof payload.error === 'string' ? payload.error : 'knowledge_platform_error') }; if (typeof payload.delta === 'string' && isAnswerDelta(payload)) { answer = mergeStreamText(answer, payload.delta); visualContent = answer; onProgress?.({ chars: visualContent.length, content: visualContent, eventType: typeof payload.type === 'string' ? payload.type : undefined }) } else if (visualContent === '' && typeof payload.type === 'string' && payload.type !== 'done' && payload.type !== 'citations') onProgress?.({ chars: 0, content: '', eventType: payload.type }); if (payload.type === 'citations' || payload.type === 'done') sources = (Array.isArray(payload.citations) ? payload.citations : []).flatMap((item): Array<{ id: string; title: string }> => { const id = field(item, 'page_id') ?? field(item, 'id'); const title = field(item, 'page_title') ?? field(item, 'title') ?? id; return id === undefined ? [] : [{ id, title: title ?? id }] }).slice(0, 20); if (payload.type === 'done') { done = true; sessionId = typeof payload.session_id === 'string' ? payload.session_id : sessionId } } } } catch (error) {
-    if (answer.length === 0) throw new Error(errorChain(error), { cause: error instanceof Error ? error : undefined })
+  emit('connected')
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let visualContent = ''; let process = ''; let sources: Array<{ id: string; title: string }> = []; let sessionId: string | undefined; let done = false; let marker = false; let stop = false
+  const consume = (chunk: string): void => {
+    const parsed = sseEvents(buffer, chunk)
+    buffer = parsed.remainder
+    for (const event of parsed.events) {
+      if (event === '[DONE]') { marker = true; continue }
+      let payload: Record<string, unknown>
+      try { payload = JSON.parse(event) as Record<string, unknown> } catch { continue }
+      if (payload.type === 'error') {
+        if (answer.length > 0) { stop = true; break }
+        throw new Error(typeof payload.error === 'string' ? payload.error : 'knowledge_platform_error')
+      }
+      if (payload.type === 'text_delta') continue
+      if (isProcessEvent(payload)) {
+        const incoming = processEventText(payload)
+        if (incoming !== undefined) process = appendProcess(process, incoming)
+        emit(typeof payload.type === 'string' ? payload.type : 'progress', visualContent, process)
+      } else if (typeof payload.delta === 'string' && isAnswerDelta(payload)) {
+        answer = mergeStreamText(answer, payload.delta)
+        visualContent = answer
+        emit(typeof payload.type === 'string' ? payload.type : undefined, visualContent, process)
+      }
+      if (payload.type === 'citations' || payload.type === 'done') {
+        sources = (Array.isArray(payload.citations) ? payload.citations : []).flatMap((item): Array<{ id: string; title: string }> => {
+          const id = field(item, 'page_id') ?? field(item, 'id')
+          const title = field(item, 'page_title') ?? field(item, 'title') ?? id
+          return id === undefined ? [] : [{ id, title: title ?? id }]
+        }).slice(0, 20)
+      }
+      if (payload.type === 'done') {
+        done = true
+        sessionId = typeof payload.session_id === 'string' ? payload.session_id : sessionId
+      }
+    }
+  }
+  try {
+    while (!stop) {
+      const read = await reader.read()
+      if (read.done) break
+      consume(decoder.decode(read.value, { stream: true }))
+    }
+    consume(decoder.decode())
+  } catch (error) {
+    try { consume(decoder.decode()) } catch { /* keep the original transport error */ }
+    if (answer.length === 0) throw new Error(describeKnowledgeTransportError(error, process), { cause: error instanceof Error ? error : undefined })
   } finally { reader.releaseLock() }
   if (answer.length === 0 && !done && !marker) throw new Error('knowledge_platform_incomplete_sse')
   const complete = (done || marker) && answer.length < 16_000
@@ -615,7 +732,7 @@ interface SelectedSourceScopeRequest {
 interface KnowledgeScopeRecord { scope: KnowledgeScope; enabled: boolean }
 interface KnowledgeEnabledPreference { remember: boolean; enabled: boolean }
 interface KnowledgeSessionRecord { sessionId: string; fingerprint: string }
-interface SearchProgressSnapshot { type: 'search-progress/v1'; requestId: string; harnessSessionId: string; harnessParentSessionId?: string; tool: 'knowledge_search' | 'code_search'; question: string; phase: 'querying' | 'streaming' | 'done' | 'error'; chars: number; content: string }
+interface SearchProgressSnapshot { type: 'search-progress/v1'; requestId: string; harnessSessionId: string; harnessParentSessionId?: string; tool: 'knowledge_search' | 'code_search'; question: string; phase: 'querying' | 'streaming' | 'done' | 'error'; chars: number; content: string; eventType?: string; process?: string }
 const activeKnowledgeQueries = new Map<string, AbortController>()
 const searchProgressSnapshots = new Map<string, SearchProgressSnapshot>()
 
@@ -1122,11 +1239,11 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
   // Live search progress for the sidepanel UI; throttled because SSE deltas
   // arrive at answer speed. The callback form tolerates a missing listener.
   let lastProgressAt = 0
-  const broadcast = (phase: 'querying' | 'streaming' | 'done' | 'error', chars = 0, content = ''): void => {
+  const broadcast = (phase: 'querying' | 'streaming' | 'done' | 'error', chars = 0, content = '', eventType?: string, process?: string): void => {
     const now = Date.now()
-    if (phase === 'streaming' && now - lastProgressAt < 120) return
+    if (phase === 'streaming' && content !== '' && process === undefined && now - lastProgressAt < 120) return
     lastProgressAt = now
-    const snapshot: SearchProgressSnapshot = { type: 'search-progress/v1', requestId: request.requestId, harnessSessionId: request.harnessSessionId, ...(request.harnessParentSessionId === undefined ? {} : { harnessParentSessionId: request.harnessParentSessionId }), tool: request.tool, question: request.question.trim(), phase, chars, content }
+    const snapshot: SearchProgressSnapshot = { type: 'search-progress/v1', requestId: request.requestId, harnessSessionId: request.harnessSessionId, ...(request.harnessParentSessionId === undefined ? {} : { harnessParentSessionId: request.harnessParentSessionId }), tool: request.tool, question: request.question.trim(), phase, chars, content, ...(eventType === undefined ? {} : { eventType }), ...(process === undefined || process === '' ? {} : { process }) }
     searchProgressSnapshots.delete(request.requestId)
     searchProgressSnapshots.set(request.requestId, snapshot)
     while (searchProgressSnapshots.size > 12) searchProgressSnapshots.delete(searchProgressSnapshots.keys().next().value!)
@@ -1136,26 +1253,31 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
   const keepAlive = typeof chrome !== 'undefined' && chrome.runtime?.getPlatformInfo !== undefined
     ? setInterval(() => { void chrome.runtime.getPlatformInfo(() => { void chrome.runtime.lastError }) }, 20_000)
     : undefined
+  let lastProcess = ''
   try {
     const record = await resolveKnowledgeScopeRecord(request)
-    if (record === undefined) throw new Error('knowledge_scope_missing')
-    if (!record.enabled) throw new Error('knowledge_query_disabled')
+    if (record === undefined) throw new Error('当前会话还没有知识/代码范围记录。请先在输入框上方选择知识范围或代码库，再发起检索。')
+    if (!record.enabled) throw new Error('知识查询开关已关闭。请打开输入框上方的知识查询开关后再试。')
     const scope = record.scope
     const kind: KnowledgeKind = request.tool === 'knowledge_search' ? 'knowledge' : 'code'
     const fingerprint = scopeFingerprint(scope)
     const sessions = await knowledgeSessions()
     const key = upstreamSessionKey(request.harnessSessionId, kind, fingerprint)
     const prior = sessions[key]?.sessionId
-    const executed = await executeKnowledgeQuery(kind, request.question.trim(), scope, prior, controller.signal, (progress) => broadcast('streaming', progress.chars, progress.content))
+    const executed = await executeKnowledgeQuery(kind, request.question.trim(), scope, prior, controller.signal, (progress) => {
+      if (progress.process !== undefined && progress.process !== '') lastProcess = progress.process
+      broadcast('streaming', progress.chars, progress.content, progress.eventType, progress.process)
+    })
     if (executed.sessionId !== undefined) {
       sessions[key] = { sessionId: executed.sessionId, fingerprint }
       await targetStorage()?.set({ [KNOWLEDGE_SESSION_STORAGE_KEY]: sessions })
     }
-    broadcast('done', executed.result.answer.length, executed.result.answer)
+    broadcast('done', executed.result.answer.length, executed.result.answer, 'done', lastProcess)
     port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, result: executed.result })
   } catch (error) {
-    broadcast('error')
-    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: asError(error) })
+    const text = asError(error)
+    broadcast('error', text.length, text, 'error', lastProcess)
+    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: text })
   } finally {
     if (keepAlive !== undefined) clearInterval(keepAlive)
     activeKnowledgeQueries.delete(request.requestId)
@@ -1736,13 +1858,22 @@ async function readOfficeDocument(request: OfficeDocumentRequest): Promise<Recor
 }
 
 function respondToOfficeDocument(port: chrome.runtime.Port, request: OfficeDocumentRequest): void {
-  void queueNativeLifecycle(async () => {
+  // ADR-0006: reads may run concurrently, but writes against one Resource
+  // Identity pass through a Write Fence. Mirror office_write_range: a write
+  // leaves the global lifecycle chain and is serialized per resource
+  // fingerprint, so two documents edit in parallel while the same document's
+  // read-patch-readback cycles can never interleave.
+  const execute = async () => {
     if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    const result = await readOfficeDocument(request)
+    const result = request.action === 'write' && request.resource ? await queueResourceWrite(request.resource, () => readOfficeDocument(request)) : await readOfficeDocument(request)
     if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
     return result
-  }).then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
+  }
+  const respond = (settled: Promise<Record<string, unknown>>) => settled
+    .then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
     .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
+  if (request.action === 'write' && request.resource) void respond(execute())
+  else void respond(queueNativeLifecycle(execute))
 }
 
 async function readOfficeSpreadsheet(request: OfficeSpreadsheetRequest): Promise<Record<string, unknown>> {
@@ -1776,7 +1907,7 @@ function respondToOfficeSpreadsheet(port: chrome.runtime.Port, request: OfficeSp
     .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
 }
 
-async function queueResourceWrite<T>(resource: OfficeResourceIdentity, action: () => Promise<T>): Promise<T> {
+async function queueResourceWrite<T>(resource: { origin: string; fingerprint: string }, action: () => Promise<T>): Promise<T> {
   const key = `${resource.origin}|${resource.fingerprint}`
   const prior = resourceWriteQueues.get(key) ?? Promise.resolve()
   let release: () => void = () => {}
@@ -2111,6 +2242,31 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     const url = new URL(rawUrl, 'https://doc.midea.com').href
     return new URL(url).origin === 'https://doc.midea.com' ? url : null
   }
+  const itemKindFromRecord = (value: unknown): TeamKnowledgeItemKind | null => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const record = value as Record<string, unknown>
+    const values = [record.fileType, record.fileTypeName, record.fileTypeValue, record.type, record.format, record.fileFormat, record.kind, record.value]
+    for (const candidate of values) {
+      if (candidate === 4 || candidate === '4') return 'light_document'
+      if (candidate === 8 || candidate === '8') return 'spreadsheet'
+      if (typeof candidate !== 'string') continue
+      const normalized = candidate.trim().toLowerCase()
+      if (/^(newword|lightdoc|light_document|light-document|轻文档)$/.test(normalized)) return 'light_document'
+      if (/^(newexcel|spreadsheet|excel|xlsx|表格)$/.test(normalized)) return 'spreadsheet'
+    }
+    return null
+  }
+  const exactTypeRecord = async (documentId: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const reply = await parse(await fetch(`/g-kmp/team-knowledge-main/openApi/teamKnowledgeCatalog/get?catalogId=${encodeURIComponent(documentId)}`, {
+        credentials: 'include', headers: { businessSystem: 'TEAM_KNOWLEDGE_BOOK' },
+      }))
+      const record = reply.payload?.data
+      return reply.response.ok && reply.payload?.errorCode === '00000' && exactId(record) === documentId && record && typeof record === 'object' && !Array.isArray(record)
+        ? record as Record<string, unknown>
+        : null
+    } catch { return null }
+  }
   try {
     const initialChildren = await listChildren()
     if (!initialChildren.reply.response.ok || initialChildren.reply.payload?.errorCode !== '00000') {
@@ -2161,21 +2317,41 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     if (!children.reply.response.ok || children.reply.payload?.errorCode !== '00000' || !match) {
       return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId, diagnostic: diagnostic(children.reply) }
     }
-    // team_doc_create predates child spreadsheet support. For the narrower
-    // item tool, make the rediscovered catalog entry prove that the server
-    // actually created the dynamically selected document type.
-    if (input.kind !== undefined && String(match.fileType ?? '') !== String(fileType)) {
-      return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId, diagnostic: diagnostic(children.reply) }
-    }
     const url = documentUrl(match, documentId, created.url)
     if (!url) return { ok: false, failedAt: 'rediscover', error: 'team_doc_document_url_invalid', documentId }
+    // A document-parent listing may omit its child's file type or expose a
+    // symbolic alias (for example `newword`). Keep the exact same-parent
+    // lookup, then use the exact child record only when that listing cannot
+    // identify the dynamically created kind.
+    if (input.kind !== undefined) {
+      const actualKind = itemKindFromRecord(match) ?? itemKindFromRecord(await exactTypeRecord(documentId))
+      if (actualKind === null) {
+        // getDataByParentId can prove this exact child belongs to the parent
+        // while omitting its type. A light-document editor identity can make
+        // the final type proof after navigation; never make this exception
+        // for spreadsheets, whose identity/readback contract is different.
+        if (wantedKind === 'light_document') return { ok: true, documentId, catalogId: documentId, kind: wantedKind, provisionalKind: true, url }
+        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId, catalogId: documentId, url, diagnostic: diagnostic(children.reply) }
+      }
+      if (actualKind !== wantedKind) {
+        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId, catalogId: documentId, url, diagnostic: diagnostic(children.reply) }
+      }
+    }
     return { ok: true, documentId, catalogId: documentId, kind: wantedKind, url }
   } catch {
     return { ok: false, failedAt: 'create', error: 'team_doc_create_failed' }
   }
 }
 
-async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string; documentId: string; name: string; kind?: TeamKnowledgeItemKind; parentType?: string }): Promise<unknown> {
+async function rediscoverTeamDocInPage(input: {
+  bookId: string
+  parentId: string
+  documentId: string
+  name?: string
+  kind?: TeamKnowledgeItemKind
+  parentType?: string
+  renameOnMismatch?: boolean
+}): Promise<unknown> {
   if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com') {
     return { ok: false, failedAt: 'rediscover', error: 'team_doc_wrong_origin', documentId: input.documentId }
   }
@@ -2213,18 +2389,53 @@ async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string
       const payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
       return { response, payload, records: recordsFrom(payload?.data), diagnostic: { httpStatus: response.status, errorCode: typeof payload?.errorCode === 'string' ? payload.errorCode : null } }
     }
+    const recordName = (value: unknown) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+      const record = value as Record<string, unknown>
+      return [record.name, record.fileName, record.catalogName, record.title]
+        .find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0) ?? null
+    }
+    const requestedName = typeof input.name === 'string' && input.name.trim().length > 0 ? input.name : null
     const matchingRecord = (records: unknown[]) => records.find((value) => value && typeof value === 'object' && !Array.isArray(value)
       && [
         (value as Record<string, unknown>).catalogId,
         (value as Record<string, unknown>).id,
         (value as Record<string, unknown>).pid,
       ].some((candidate) => candidate === input.documentId)
-      && [
-        (value as Record<string, unknown>).name,
-        (value as Record<string, unknown>).fileName,
-        (value as Record<string, unknown>).catalogName,
-        (value as Record<string, unknown>).title,
-      ].some((candidate) => candidate === input.name)) as Record<string, unknown> | undefined
+      && (requestedName === null || recordName(value) === requestedName)) as Record<string, unknown> | undefined
+    const itemKindFromRecord = (value: unknown): TeamKnowledgeItemKind | null => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+      const record = value as Record<string, unknown>
+      const values = [record.fileType, record.fileTypeName, record.fileTypeValue, record.type, record.format, record.fileFormat, record.kind, record.value]
+      for (const candidate of values) {
+        if (candidate === 4 || candidate === '4') return 'light_document'
+        if (candidate === 8 || candidate === '8') return 'spreadsheet'
+        if (typeof candidate !== 'string') continue
+        const normalized = candidate.trim().toLowerCase()
+        if (/^(newword|lightdoc|light_document|light-document|轻文档)$/.test(normalized)) return 'light_document'
+        if (/^(newexcel|spreadsheet|excel|xlsx|表格)$/.test(normalized)) return 'spreadsheet'
+      }
+      return null
+    }
+    const exactTypeRecord = async (): Promise<Record<string, unknown> | null> => {
+      try {
+        const response = await fetch(`/g-kmp/team-knowledge-main/openApi/teamKnowledgeCatalog/get?catalogId=${encodeURIComponent(input.documentId)}`, {
+          credentials: 'include', headers: { businessSystem: 'TEAM_KNOWLEDGE_BOOK' },
+        })
+        const text = await response.text()
+        const lossless = text.replace(/"(bookId|catalogId|parentId|id|pid)"\s*:\s*(\d+)/g, '"$1":"$2"')
+          .replace(/"data"\s*:\s*(\d{16,})(?=\s*[,}])/g, '"data":"$1"')
+        const payload = JSON.parse(lossless) as { errorCode?: unknown; data?: unknown }
+        const record = payload.data
+        const recordId = record && typeof record === 'object' && !Array.isArray(record)
+          ? [(record as Record<string, unknown>).catalogId, (record as Record<string, unknown>).id, (record as Record<string, unknown>).pid]
+            .find((candidate): candidate is string => candidate === input.documentId)
+          : null
+        return response.ok && payload.errorCode === '00000' && recordId && record && typeof record === 'object' && !Array.isArray(record)
+          ? record as Record<string, unknown>
+          : null
+      } catch { return null }
+    }
     let children = await readChildren()
     if (!children.response.ok || children.payload?.errorCode !== '00000') {
       return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
@@ -2237,6 +2448,19 @@ async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string
     }
     let match = matchingRecord(children.records)
     if (!match) {
+      // A readback is strictly read-only. It may identify the child by
+      // catalogId alone, but it must never rename a remotely stored item just
+      // to satisfy a stale or omitted caller-provided name.
+      if (input.renameOnMismatch !== true || requestedName === null) {
+        return {
+          ok: false,
+          failedAt: 'rediscover',
+          error: requestedName === null ? 'team_doc_rediscover_mismatch' : 'team_doc_name_mismatch',
+          documentId: input.documentId,
+          name: recordName(located),
+          diagnostic: children.diagnostic,
+        }
+      }
       const renameResponse = await fetch('/g-kmp/team-knowledge-main/teamKnowledgeCatalog/rename', {
         method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: input.documentId, name: input.name }),
       })
@@ -2252,6 +2476,9 @@ async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string
         return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
       }
     }
+    const rawUrl = typeof match.url === 'string' ? match.url : `/teamKnowledge/detail/docOnline/${input.documentId}?id=${input.documentId}`
+    const url = new URL(rawUrl, 'https://doc.midea.com').href
+    if (new URL(url).origin !== 'https://doc.midea.com') return { ok: false, failedAt: 'rediscover', error: 'team_doc_document_url_invalid', documentId: input.documentId }
     if (input.kind !== undefined) {
       const fileTypesResponse = await fetch('/g-kmp/team-knowledge-main/teamKnowledge/getAllFileType?createFlag=true', { credentials: 'include' })
       const fileTypesText = await fileTypesResponse.text()
@@ -2265,18 +2492,28 @@ async function rediscoverTeamDocInPage(input: { bookId: string; parentId: string
           ? /newword|lightdoc|轻文档/i.test(descriptor)
           : /newexcel|excel|spreadsheet|表格|xlsx/i.test(descriptor)
       }) as Record<string, unknown> | undefined
-      const expectedFileType = expected?.type
-      if (!fileTypesResponse.ok || fileTypesPayload.errorCode !== '00000' || (typeof expectedFileType !== 'string' && typeof expectedFileType !== 'number')) {
+      if (!fileTypesResponse.ok || fileTypesPayload.errorCode !== '00000' || !expected) {
+        if (input.kind === 'light_document') return { ok: true, recovered: true, documentId: input.documentId, catalogId: input.documentId, kind: input.kind, name: recordName(match) ?? recordName(located), provisionalKind: true, url }
         return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId: input.documentId }
       }
-      if (String(match.fileType ?? '') !== String(expectedFileType)) {
+      const actualKind = itemKindFromRecord(match) ?? itemKindFromRecord(await exactTypeRecord())
+      if (actualKind === null) {
+        if (input.kind === 'light_document') return { ok: true, recovered: true, documentId: input.documentId, catalogId: input.documentId, kind: input.kind, name: recordName(match) ?? recordName(located), provisionalKind: true, url }
+        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId: input.documentId, diagnostic: children.diagnostic }
+      }
+      if (actualKind !== input.kind) {
         return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
       }
     }
-    const rawUrl = typeof match.url === 'string' ? match.url : `/teamKnowledge/detail/docOnline/${input.documentId}?id=${input.documentId}`
-    const url = new URL(rawUrl, 'https://doc.midea.com').href
-    if (new URL(url).origin !== 'https://doc.midea.com') return { ok: false, failedAt: 'rediscover', error: 'team_doc_document_url_invalid', documentId: input.documentId }
-    return { ok: true, recovered: true, documentId: input.documentId, url }
+    return {
+      ok: true,
+      recovered: true,
+      documentId: input.documentId,
+      catalogId: input.documentId,
+      ...(input.kind === undefined ? {} : { kind: input.kind }),
+      name: recordName(match) ?? recordName(located),
+      url,
+    }
   } catch {
     return { ok: false, failedAt: 'rediscover', error: 'team_doc_rediscover_failed', documentId: input.documentId }
   }
@@ -2308,7 +2545,10 @@ async function writeTeamDocInWebEdit(body: string): Promise<unknown> {
     const canvas = app?.openApi?.editor?.canvas
     if (!selection?.insertContent || !canvas?.getDocXml) return { ok: false, failedAt: 'write', error: 'team_doc_webedit_runtime_unavailable' }
     const beforeXml = await canvas.getDocXml()
-    await selection.insertContent({ markdown: body, insertBlow: false })
+    // WebEdit builds have only ever been observed accepting `insertBlow`
+    // (sic). Send both spellings until the public API contract is confirmed
+    // against a live editor target.
+    await selection.insertContent({ markdown: body, insertBlow: false, insertBelow: false })
     let afterXml = await canvas.getDocXml()
     const changeDeadline = Date.now() + 3_000
     while (Date.now() < changeDeadline && (typeof afterXml !== 'string' || afterXml === beforeXml)) {
@@ -2420,7 +2660,7 @@ async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
   const resolution = recoveryDocumentId
     ? await chrome.scripting.executeScript({
       target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage,
-      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, documentId: recoveryDocumentId, name: request.name!, parentType: request.parent.parentType }],
+      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, documentId: recoveryDocumentId, name: request.name!, parentType: request.parent.parentType, renameOnMismatch: true }],
     })
     : await chrome.scripting.executeScript({
       target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage,
@@ -2524,7 +2764,9 @@ async function teamKnowledgeItemFrame(tabId: number): Promise<chrome.webNavigati
 }
 
 async function readCreatedTeamKnowledgeItem(request: TeamKnowledgeItemRequest, item: { catalogId: string; kind: TeamKnowledgeItemKind; name: string; url: string }): Promise<Record<string, unknown>> {
-  const frame = await teamKnowledgeItemFrame(request.browserTarget.tabId)
+  const frame = item.kind === 'light_document'
+    ? await waitForTeamDocWritableFrame(request.browserTarget.tabId)
+    : await teamKnowledgeItemFrame(request.browserTarget.tabId)
   if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
   if (item.kind === 'spreadsheet') {
     const { reply } = await sendToWebEditFrame(request.browserTarget.tabId, [frame], { type: 'office-read-range/v1', range: 'A1' })
@@ -2553,15 +2795,20 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const parent = inspected.parent
   if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true, spreadsheet: true } }
   if (request.action === 'readback') {
-  const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: request.catalogId!, name: request.name!, kind: request.kind, parentType: parent.parentType }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown } | undefined
-    if (recovered?.ok !== true || recovered.documentId !== request.catalogId || typeof recovered.url !== 'string') return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_rediscover_mismatch' })
+    if (!/^\d+$/.test(request.catalogId ?? '')) return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_catalog_id_invalid' })
+    if (request.kind !== 'light_document' && request.kind !== 'spreadsheet') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
+    const catalogId = request.catalogId
+    const kind = request.kind
+    const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: catalogId, kind, parentType: parent.parentType, renameOnMismatch: false }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown; name?: unknown; error?: unknown } | undefined
+    if (recovered?.ok !== true || recovered.documentId !== catalogId || typeof recovered.url !== 'string') return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: typeof recovered?.error === 'string' ? recovered.error : 'team_knowledge_item_rediscover_mismatch' })
     let readback: Record<string, unknown>
     try {
       await chrome.tabs.update(request.browserTarget.tabId, { url: recovered.url }); await waitForTeamDocTab(request.browserTarget.tabId, recovered.url)
-      readback = await readCreatedTeamKnowledgeItem(request, { catalogId: request.catalogId!, kind: request.kind!, name: '', url: recovered.url })
+      readback = await readCreatedTeamKnowledgeItem(request, { catalogId, kind, name: typeof recovered.name === 'string' ? recovered.name : request.name ?? '', url: recovered.url })
     } catch (error) { return teamKnowledgeItemPartial({ failedAt: 'readback', error: error instanceof Error ? error.message : 'team_knowledge_item_readback_failed' }) }
     finally { try { await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url) } catch {} }
-    const item = { catalogId: request.catalogId!, kind: request.kind!, name: '', url: recovered.url, fingerprint: teamKnowledgeItemFingerprint(request.kind!, request.catalogId!, recovered.url) }
+    const itemName = typeof recovered.name === 'string' ? recovered.name : request.name ?? ''
+    const item = { catalogId, kind, name: itemName, url: recovered.url, fingerprint: teamKnowledgeItemFingerprint(kind, catalogId, recovered.url) }
     return { status: 'ok', item, readback }
   }
   if (!request.parent || parent.fingerprint !== request.parent.fingerprint || parent.parentId !== request.parent.parentId || parent.bookId !== request.parent.bookId || parent.parentType !== request.parent.parentType) {
@@ -2579,20 +2826,29 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   const recoveryCatalogId = request.recovery?.catalogId ?? checkpoint?.catalogId
   const creatingNewItem = !recoveryCatalogId
   const resolution = recoveryCatalogId
-    ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId, name: request.name!, kind, parentType: parent.parentType }] })
+    ? await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: recoveryCatalogId, name: request.name!, kind, parentType: parent.parentType, renameOnMismatch: true }] })
     : await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, name: request.name!, kind, parentType: parent.parentType }] })
-  const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; catalogId?: unknown; kind?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
+  const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; catalogId?: unknown; kind?: unknown; provisionalKind?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
   const catalogId = typeof created?.catalogId === 'string' ? created.catalogId : typeof created?.documentId === 'string' ? created.documentId : null
+  const returnedIdsAgree = created?.catalogId === undefined || created?.documentId === undefined || created.catalogId === created.documentId
+  const uncertainUrl = typeof created?.url === 'string'
+    ? created.url
+    : created?.failedAt === 'rediscover' && catalogId && /^\d+$/.test(catalogId)
+      ? `https://doc.midea.com/teamKnowledge/detail/docOnline/${catalogId}?id=${catalogId}`
+      : null
+  const uncertainItem = catalogId && /^\d+$/.test(catalogId) && uncertainUrl !== null && returnedIdsAgree
+    ? { catalogId, kind, name: request.name!, url: uncertainUrl, fingerprint: teamKnowledgeItemFingerprint(kind, catalogId, uncertainUrl) }
+    : undefined
   if (creatingNewItem && catalogId && /^\d+$/.test(catalogId)) {
     try { await saveTeamKnowledgeCreateCheckpoint(request.idempotencyIdentity!, { contractHash: checkpointContractHash, catalogId, updatedAt: Date.now() }) } catch {
-      return teamKnowledgeItemPartial({ stages, failedAt: 'create', error: 'team_knowledge_create_checkpoint_failed' })
+      return teamKnowledgeItemPartial({ item: uncertainItem, stages, failedAt: 'create', error: 'team_knowledge_create_checkpoint_failed' })
     }
   }
   if (created?.ok !== true || !catalogId || !/^\d+$/.test(catalogId) || typeof created.url !== 'string'
-    || (created.catalogId !== undefined && created.documentId !== undefined && created.catalogId !== created.documentId)
+    || !returnedIdsAgree
     || (creatingNewItem && created.kind !== kind)
     || (!creatingNewItem && created.kind !== undefined && created.kind !== kind)) {
-    return teamKnowledgeItemPartial({ stages, failedAt: created?.failedAt === 'unsupported' ? 'unsupported' : created?.failedAt === 'rediscover' ? 'rediscover' : 'create', error: typeof created?.error === 'string' ? created.error : 'team_knowledge_create_failed', diagnostic: created?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
+    return teamKnowledgeItemPartial({ item: uncertainItem, stages, failedAt: created?.failedAt === 'unsupported' ? 'unsupported' : created?.failedAt === 'rediscover' ? 'rediscover' : 'create', error: typeof created?.error === 'string' ? created.error : 'team_knowledge_create_failed', diagnostic: created?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
   }
   for (const stage of ['created', 'rediscovered']) if (!stages.includes(stage)) stages.push(stage)
   const item = { catalogId, kind, name: request.name!, url: created.url, fingerprint: teamKnowledgeItemFingerprint(kind, catalogId, created.url) }
@@ -2600,7 +2856,11 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   try {
     await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
     if (kind === 'light_document') {
-      const frame = await teamKnowledgeItemFrame(request.browserTarget.tabId)
+      // A same-parent catalog entry can be authoritative for identity but not
+      // its file type. In that narrowly bounded case, obtain the existing
+      // WebEdit resource identity before any body mutation.
+      if (created.provisionalKind === true) await readCreatedTeamKnowledgeItem(request, item)
+      const frame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
       if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
       const write = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [frame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!] }))[0]?.result as { ok?: unknown; readbackMatches?: unknown; observedBody?: unknown; error?: unknown } | undefined
       if (write?.ok !== true || write.readbackMatches !== true || typeof write.observedBody !== 'string') throw new Error(typeof write?.error === 'string' ? write.error : 'team_knowledge_document_readback_mismatch')

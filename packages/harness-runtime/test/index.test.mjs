@@ -92,11 +92,11 @@ test('installs scoped MCP tools only for continuable children and cleans them up
   globalThis.fetch = async (_url, options) => {
     const request = JSON.parse(options.body)
     requests.push(request)
+    const envelope = { jsonrpc: '2.0', id: request.id, result: request.method === 'tools/list' ? { tools: listedTools } : {} }
     return {
       ok: true,
-      async json() {
-        return { jsonrpc: '2.0', id: request.id, result: request.method === 'tools/list' ? { tools: listedTools } : {} }
-      },
+      async json() { return envelope },
+      async text() { return JSON.stringify(envelope) },
     }
   }
 
@@ -105,6 +105,7 @@ test('installs scoped MCP tools only for continuable children and cleans them up
       serverName: 'chrome',
       url: 'http://connector.test/mcp',
       toolScopes: { code_search: 'continuable-child', knowledge_search: 'continuable-child' },
+      fetch: globalThis.fetch,
     })
 
     assert.equal(typeof installContinuableChild, 'function')
@@ -134,4 +135,71 @@ test('installs scoped MCP tools only for continuable children and cleans them up
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('MCP tools/call keeps a quiet Connector response open and parses keep-alive JSON', async () => {
+  const { createServer } = await import('node:http')
+  const { connectorHttpFetch } = await import('../src/index.mjs')
+  const listedTools = [
+    { name: 'code_search', description: 'search code', inputSchema: { type: 'object' } },
+  ]
+  const server = createServer((request, response) => {
+    const chunks = []
+    request.on('data', (chunk) => chunks.push(chunk))
+    request.on('end', () => {
+      const message = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      const reply = (body, delay = 0) => {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.write('\n')
+        setTimeout(() => response.end(JSON.stringify(body)), delay)
+      }
+      if (message.method === 'initialize') {
+        reply({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'test', version: '0' } } })
+        return
+      }
+      if (message.method === 'notifications/initialized') {
+        response.writeHead(202)
+        response.end()
+        return
+      }
+      if (message.method === 'tools/list') {
+        reply({ jsonrpc: '2.0', id: message.id, result: { tools: listedTools } })
+        return
+      }
+      reply({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ status: 'complete', answer: '事实', sources: [] }) }], structuredContent: { status: 'complete', answer: '事实', sources: [] } } }, 40)
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  const rootTools = toolRegistry()
+  const ctx = {
+    tools: rootTools,
+    subagents: { registerContinuableSetup() { return () => {} } },
+    effect() {},
+    logger: { error(message) { throw new Error(message) } },
+  }
+  try {
+    await apply(ctx, {
+      serverName: 'chrome',
+      url: `http://127.0.0.1:${port}/mcp`,
+      fetch: connectorHttpFetch,
+      failOnStartupError: true,
+    })
+    const result = await rootTools.registered.get('mcp__chrome__code_search').execute({ question: '直通宝司机怎么接单' }, { signal: new AbortController().signal })
+    assert.equal(result.structuredContent.answer, '事实')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('connectorHttpFetch surfaces a transport cause instead of a bare fetch failed', async () => {
+  const { connectorHttpFetch } = await import('../src/index.mjs')
+  await assert.rejects(
+    () => connectorHttpFetch('http://127.0.0.1:1/mcp', { method: 'POST', body: '{}' }),
+    (error) => {
+      assert.match(String(error), /ECONNREFUSED|connect/)
+      assert.doesNotMatch(String(error), /^Error: fetch failed$/)
+      return true
+    },
+  )
 })

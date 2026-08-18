@@ -7,7 +7,7 @@ async function adapter() {
   const background = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const end = background.indexOf('\nconst NATIVE_HOST_NAME')
   assert.notEqual(end, -1, 'knowledge adapter source block must remain before background bootstrap')
-  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
+  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
 }
@@ -40,6 +40,24 @@ test('SSE answer assembly deduplicates cumulative snapshots and excludes reasoni
   assert.equal(isAnswerDelta({ delta: 'legacy visible' }), true)
 })
 
+test('visual progress reports connected before the first answer delta', async () => {
+  const { executeKnowledgeQuery } = await adapter()
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"reasoning","delta":"plan"}\n\ndata: {"delta":"事实"}\n\ndata: [DONE]\n\n'))
+      controller.close()
+    },
+  }), { status: 200 })
+  const progress = []
+  try {
+    await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
+    assert.deepEqual(progress[0], { chars: 0, content: '', eventType: 'connected' })
+    assert.equal(progress.some(item => item.eventType === 'reasoning' && item.process === '远程检索正在分析问题…'), true)
+    assert.equal(progress.at(-1)?.content, '事实')
+  } finally { globalThis.fetch = previousFetch }
+})
+
 test('visual progress excludes upstream reasoning and streams only answer deltas', async () => {
   const { executeKnowledgeQuery } = await adapter()
   const events = [
@@ -51,9 +69,45 @@ test('visual progress excludes upstream reasoning and streams only answer deltas
   globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(events)); controller.close() } }), { status: 200 })
   const progress = []
   try {
-    const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => { if (item.content !== '') progress.push(item.content) })
-    assert.deepEqual(progress, ['最终事实'])
+    const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
+    assert.equal(progress.find(item => item.eventType === 'reasoning')?.process, '远程检索正在分析问题…')
+    assert.deepEqual(progress.filter(item => item.content !== '').map(item => item.content), ['最终事实'])
     assert.equal(value.result.answer, '最终事实')
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('visual progress streams AccrUI-style repository log events as process lines', async () => {
+  const { executeKnowledgeQuery, isProcessEvent, processEventText, appendProcess } = await adapter()
+  assert.equal(isProcessEvent({ type: 'log' }), true)
+  assert.equal(isProcessEvent({ type: 'step' }), true)
+  assert.equal(processEventText({ type: 'reasoning', delta: 'The user wants me to call search_code_repos.' }), '远程检索正在分析问题…')
+  assert.equal(processEventText({ type: 'log', source: 'H5_前端（前端）', message: '🔧 调用: mcp__repo-search__search_code_repos(question: "直通宝司机怎么接单")' }), 'H5_前端（前端） · 🔧 调用: mcp__repo-search__search_code_repos(question: "直通宝司机怎么接单")')
+  assert.equal(appendProcess('远程检索正在分析问题…', 'H5_前端（前端） · 开始检索: H5_前端'), '远程检索正在分析问题…\nH5_前端（前端） · 开始检索: H5_前端')
+  const events = [
+    { type: 'reasoning', delta: 'The user is asking me to search code repositories.' },
+    { type: 'log', source: 'H5_前端（前端）', message: '🔧 调用: mcp__repo-search__search_code_repos(question: "直通宝司机怎么接单")' },
+    { type: 'log', source: 'H5_前端（前端）', message: '✅ mcp__repo-search__search_code_repos 完成（3254 字符）' },
+    { type: 'log', source: 'H5_前端（前端）', message: '正在检索 1 个仓库: H5_前端' },
+    { type: 'log', source: 'H5_前端（前端）', message: '仓库精搜 开始' },
+    { type: 'log', source: 'H5_前端（前端）', message: '开始深度探索: H5_前端' },
+    { type: 'text_delta', source: 'H5_前端（前端）', delta: '子代理正文不应进入答案。' },
+    { type: 'log', source: 'H5_前端（前端）', message: '仓库检索完成: H5_前端（成功）' },
+    { type: 'answer', delta: '司机接单入口在 TakeOrder.vue' },
+    { type: 'done', citations: [], session_id: 'upstream' },
+  ].map(value => `data: ${JSON.stringify(value)}\n\n`).join('') + 'data: [DONE]\n\n'
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(events)); controller.close() } }), { status: 200 })
+  const progress = []
+  try {
+    const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
+    const processSnapshots = progress.filter(item => item.process).map(item => item.process)
+    assert.equal(processSnapshots[0], '远程检索正在分析问题…')
+    assert.match(processSnapshots.at(-1) ?? '', /H5_前端（前端） · 🔧 调用: mcp__repo-search__search_code_repos/)
+    assert.match(processSnapshots.at(-1) ?? '', /仓库精搜 开始/)
+    assert.match(processSnapshots.at(-1) ?? '', /仓库检索完成: H5_前端（成功）/)
+    assert.equal(processSnapshots.at(-1)?.includes('子代理正文不应进入答案'), false)
+    assert.equal(value.result.answer, '司机接单入口在 TakeOrder.vue')
+    assert.equal(value.result.answer.includes('子代理正文'), false)
   } finally { globalThis.fetch = previousFetch }
 })
 
@@ -63,7 +117,8 @@ test('remote retrieval prompt requests facts without agent execution narration',
   assert.match(code, /所选远程代码仓库/)
   assert.match(code, /所有面向用户的流式内容和最终答案都必须使用简体中文/)
   assert.match(code, /即使转述后的问题包含英文，也不要用英文叙述/)
-  assert.match(code, /不要输出思考过程、检索计划、工具选择、工作目录判断/)
+  assert.match(code, /最终答案只保留事实和引用/)
+  assert.match(code, /检索计划、当前正在查的仓库或知识、工具选择和进度可通过独立过程事件流式返回/)
   assert.match(code, /用户问题：有哪些模块/)
   const english = retrievalQuestion('code', 'Which modules exist?')
   assert.match(english, /Use the same language as the user question/)
@@ -145,7 +200,7 @@ test('knowledge search rejects a code-only scope before requesting the platform'
   const { executeKnowledgeQuery } = await adapter()
   await assert.rejects(
     executeKnowledgeQuery('knowledge', 'question', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal),
-    { message: 'knowledge_scope_requires_domain' },
+    { message: /没有选择知识范围/ },
   )
 })
 
@@ -187,6 +242,22 @@ test('a finished stream that only emits [DONE] after answer text is complete', a
     const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal)
     assert.equal(value.result.status, 'complete')
     assert.equal(value.result.answer, '完整答案')
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('an upstream error after answer text is a partial Sourced Answer', async () => {
+  const { executeKnowledgeQuery } = await adapter()
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"delta":"半段事实"}\n\ndata: {"type":"error","error":"upstream reset"}\n\n'))
+      controller.close()
+    },
+  }), { status: 200 })
+  try {
+    const value = await executeKnowledgeQuery('knowledge', 'question', { domainId: 'domain', systemIds: ['system'], repositoryIds: [] }, undefined, new AbortController().signal)
+    assert.equal(value.result.status, 'partial')
+    assert.equal(value.result.answer, '半段事实')
   } finally { globalThis.fetch = previousFetch }
 })
 
@@ -241,5 +312,69 @@ test('knowledgeFetch falls back to Chrome when the native proxy reports a transp
     assert.deepEqual(await response.json(), { ok: true })
     assert.equal(seen.some((url) => url.includes('/knowledge-proxy')), true)
     assert.equal(seen.some((url) => url.endsWith('/api/repos')), true)
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('long RAG streams go through Chrome fetch instead of the native proxy', async () => {
+  const { knowledgeFetch, setKnowledgeProxyConfig, isKnowledgeStream } = await adapter()
+  assert.equal(isKnowledgeStream('https://anapi-uat.annto.com/api-sse-kd/api/rag/repo-search'), true)
+  assert.equal(isKnowledgeStream('https://anapi-uat.annto.com/api-sse-kd/api/repos'), false)
+  setKnowledgeProxyConfig({ url: 'http://127.0.0.1:9/knowledge-proxy', token: 't'.repeat(32) })
+  const previousFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(String(url))
+    return new Response('data: {"delta":"ok"}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+  try {
+    const response = await knowledgeFetch('https://anapi-uat.annto.com/api-sse-kd/api/rag/repo-search', { method: 'POST', body: '{}' })
+    assert.equal(response.status, 200)
+    assert.equal(seen.length, 1)
+    assert.match(seen[0], /\/api\/rag\/repo-search$/)
+    assert.equal(seen.some((url) => url.includes('/knowledge-proxy')), false)
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('a mid-stream transport failure keeps process text and names the cause', async () => {
+  const { executeKnowledgeQuery, describeKnowledgeTransportError } = await adapter()
+  const wrapped = new TypeError('fetch failed', { cause: Object.assign(new Error('body timeout'), { code: 'UND_ERR_BODY_TIMEOUT' }) })
+  assert.match(describeKnowledgeTransportError(wrapped, 'H5_前端（前端） · 仓库精搜 开始'), /空闲超时/)
+  assert.match(describeKnowledgeTransportError(wrapped, 'H5_前端（前端） · 仓库精搜 开始'), /UND_ERR_BODY_TIMEOUT/)
+  assert.match(describeKnowledgeTransportError(wrapped, 'H5_前端（前端） · 仓库精搜 开始'), /仓库精搜 开始/)
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"log","source":"H5_前端（前端）","message":"仓库精搜 开始"}\n\n'))
+    },
+    pull(controller) {
+      controller.error(wrapped)
+    },
+  }), { status: 200 })
+  try {
+    await assert.rejects(
+      executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal),
+      (error) => {
+        assert.match(String(error), /空闲超时|网络传输中断/)
+        assert.match(String(error), /仓库精搜 开始/)
+        return true
+      },
+    )
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('knowledgeFetch does not treat a platform 401 as a proxy transport failure', async () => {
+  const { knowledgeFetch, setKnowledgeProxyConfig } = await adapter()
+  setKnowledgeProxyConfig({ url: 'http://127.0.0.1:9/knowledge-proxy', token: 't'.repeat(32) })
+  const previousFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(String(url))
+    return new Response(JSON.stringify({ error: '请先登录' }), { status: 401, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const response = await knowledgeFetch('https://anapi-uat.annto.com/api-sse-kd/api/repos')
+    assert.equal(response.status, 401)
+    assert.equal(seen.length, 1)
+    assert.match(seen[0], /knowledge-proxy/)
   } finally { globalThis.fetch = previousFetch }
 })

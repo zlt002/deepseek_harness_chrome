@@ -49,3 +49,35 @@ test('the content script accepts every light-document action the MCP surface adv
     assert.ok(allowlist.includes(action), `advertised light-document action '${action}' must be accepted by the content script allowlist`)
   }
 })
+
+test('the content script grants light-document writes a longer budget than reads, under the native connector timeout', async () => {
+  const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
+  const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
+
+  const writeBudgetMatch = /'write'\s*\?\s*(\d[\d_]*)/.exec(contentSource)
+  assert.ok(writeBudgetMatch, 'the light-document dispatcher must define an explicit write timeout budget')
+  const writeBudgetMs = Number(writeBudgetMatch[1].replace(/_/g, ''))
+  const nativeTimeoutMatch = /const REQUEST_TIMEOUT_MS = (\d[\d_]*)/.exec(connectorSource)
+  assert.ok(nativeTimeoutMatch, 'the native connector must define REQUEST_TIMEOUT_MS')
+  const nativeTimeoutMs = Number(nativeTimeoutMatch[1].replace(/_/g, ''))
+
+  // A write legitimately needs longer than a read (runtime APP wait +
+  // CanvasPatch change poll + readback), but must stay under the native
+  // REQUEST_TIMEOUT_MS so the extension answer never races a native abort.
+  assert.ok(writeBudgetMs > 8_000, `write budget ${writeBudgetMs}ms must exceed the 8s read budget`)
+  assert.ok(writeBudgetMs < nativeTimeoutMs, `write budget ${writeBudgetMs}ms must stay under the native ${nativeTimeoutMs}ms request timeout`)
+})
+
+test('the light-document CustomEvent bridge uses a per-load channel and strict envelopes', async () => {
+  const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
+  const runtimeSource = await readFile(new URL('../apps/chrome-extension/public/office-light-document-runtime.js', import.meta.url), 'utf8')
+  assert.match(contentSource, /const documentRuntimeChannel = crypto\.randomUUID\(\)/)
+  assert.match(contentSource, /deepseekHarnessChannel = documentRuntimeChannel/)
+  assert.match(contentSource, /type: 'request', channel: documentRuntimeChannel, id, request/)
+  assert.match(contentSource, /payload\.type === 'response' && payload\.channel === documentRuntimeChannel/)
+  assert.match(runtimeSource, /existingRuntime\.registerChannel\(bridgeChannel\)/)
+  assert.match(runtimeSource, /const registeredChannels = new Map\(\)/)
+  assert.match(runtimeSource, /const consumedRequestIds = new Set\(\)/)
+  assert.match(runtimeSource, /registeredChannels\.has\(value\.channel\)/)
+  assert.match(runtimeSource, /type: 'response', channel, id, ok: true/)
+})

@@ -55,11 +55,16 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
     const createTool = tools.find((candidate) => candidate.name === 'team_knowledge_batch_create')
     assert.equal(tools.some((candidate) => candidate.name === 'team_knowledge_batch'), false)
     assert.deepEqual(harnessProjectedArguments(previewTool.inputSchema), { required: ['batchId', 'items'], properties: ['batchId', 'items'] })
+    assert.deepEqual(previewTool.annotations, { destructiveHint: false, idempotentHint: true, openWorldHint: false })
     assert.equal(previewTool.inputSchema.properties.items.maxItems, 10)
     assert.deepEqual(harnessProjectedArguments(createTool.inputSchema), { required: ['batchId', 'challenge', 'items'], properties: ['batchId', 'challenge', 'items'] })
     const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'batch-success', items: documents })
-    const result = await harness.callTool('team_knowledge_batch_create', 2, { batchId: 'batch-success', challenge: plan.result.structuredContent.challenge, items: documents })
+    const modelVisibleChallenge = plan.result.content[0].text.match(/创建凭证：([A-Za-z0-9_-]+)/)?.[1]
+    assert.equal(modelVisibleChallenge, plan.result.structuredContent.challenge)
+    const result = await harness.callTool('team_knowledge_batch_create', 2, { batchId: 'batch-success', challenge: modelVisibleChallenge, items: documents })
     assert.equal(result.result.structuredContent.status, 'verified_write')
+    assert.equal(result.result.content[0].text, '已完成 2 个子文档的创建、内容写入和回读验证。')
+    assert.doesNotMatch(result.result.content[0].text, /team_knowledge_|partial_delivery/)
     assert.deepEqual(result.result.structuredContent.batch.items.map((item) => item.status), ['created', 'created'])
     const status = await harness.callTool('team_knowledge_batch_status', 3, { batchId: 'batch-success' })
     assert.equal(status.result.structuredContent.batch.status, 'completed'); assert.equal(creates, 2)
@@ -74,7 +79,7 @@ test('rejects a changed ordered payload after preview and does not create docume
   try {
     const plan = await preview(harness, 'batch-drift'); const changed = [{ ...documents[1] }, { ...documents[0] }]
     const response = await create(harness, 'batch-drift', plan.result.structuredContent.challenge, changed)
-    assert.equal(response.result.isError, true); assert.match(response.result.content[0].text, /challenge|changed/i); assert.equal(creates, 0)
+    assert.equal(response.result.isError, true); assert.match(response.result.content[0].text, /创建凭证.*内容已变化/); assert.equal(creates, 0)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
@@ -83,12 +88,14 @@ test('resumes only failed items and accepts a completed duplicate without duplic
   const harness = await open((request) => {
     if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true } }
     calls.push(request.name)
-    if (request.name === 'Two' && ++twoAttempts === 1) return { status: 'partial_delivery', item: { catalogId: '2', kind: 'light_document', name: 'Two', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/2?id=2', fingerprint: 'item-2' }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written'], failedAt: 'readback', error: 'business_failed', diagnostic: { httpStatus: 200, errorCode: '20001' } }
+    if (request.name === 'Two' && ++twoAttempts === 1) return { status: 'partial_delivery', item: { catalogId: '2', kind: 'light_document', name: 'Two', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/2?id=2', fingerprint: 'item-2' }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written'], failedAt: 'readback', error: 'team_knowledge_webedit_frame_unavailable', diagnostic: { httpStatus: 200, errorCode: '20001' } }
     return verified(request, request.name === 'One' ? '1' : '2')
   })
   try {
     const first = await preview(harness, 'batch-recover'); const partial = await create(harness, 'batch-recover', first.result.structuredContent.challenge)
     assert.equal(partial.result.structuredContent.status, 'partial_delivery')
+    assert.match(partial.result.content[0].text, /完成 1\/2 个子文档[\s\S]*失败阶段：内容回读[\s\S]*可重试：是[\s\S]*避免盲目重试/)
+    assert.doesNotMatch(partial.result.content[0].text, /team_knowledge_|partial_delivery/)
     assert.deepEqual(partial.result.structuredContent.batch.items.map((item) => item.status), ['created', 'failed'])
     const retry = await preview(harness, 'batch-recover', documents, 3); const done = await create(harness, 'batch-recover', retry.result.structuredContent.challenge, documents, 4)
     assert.equal(done.result.structuredContent.status, 'verified_write'); assert.deepEqual(calls, ['One', 'Two', 'Two'])
@@ -127,6 +134,37 @@ test('does not complete a batch from a schema-valid result for the wrong item', 
     const response = await create(harness, 'batch-wrong-item', plan.result.structuredContent.challenge, [{ name: 'Right', body: '# Right' }])
     assert.equal(response.result.structuredContent.status, 'partial_delivery')
     assert.equal(response.result.structuredContent.batch.items[0].status, 'failed')
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('accepts a semantic light-document readback instead of requiring raw Markdown bytes', async () => {
+  const markdown = '# Release plan\n\n## 1. Background\n\n1. Create\n2. Read back\n\n> Verified'
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : { ...verified(request, '88'), readback: { body: 'Release plan\nBackground\nCreate\nRead back\nVerified' } })
+  try {
+    const items = [{ name: 'Release plan', body: markdown }]
+    const plan = await preview(harness, 'batch-semantic-readback', items)
+    const response = await create(harness, 'batch-semantic-readback', plan.result.structuredContent.challenge, items)
+    assert.equal(response.result.structuredContent.status, 'verified_write')
+    assert.equal(response.result.structuredContent.batch.items[0].status, 'created')
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('reports a non-retryable item failure and does not blindly retry it', async () => {
+  let createAttempts = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : (++createAttempts, { status: 'partial_delivery', item: null, stages: ['parent_inspected'], failedAt: 'create', error: 'team_doc_exact_name_conflict' }))
+  try {
+    const items = [{ name: 'Duplicate', body: '# Duplicate' }]
+    const first = await preview(harness, 'batch-non-retryable', items)
+    const failed = await create(harness, 'batch-non-retryable', first.result.structuredContent.challenge, items)
+    assert.match(failed.result.content[0].text, /Duplicate：失败阶段：创建；原因：服务端返回的结果无法安全确认[\s\S]*可重试：否/)
+    const second = await preview(harness, 'batch-non-retryable', items, 3)
+    const resumed = await create(harness, 'batch-non-retryable', second.result.structuredContent.challenge, items, 4)
+    assert.equal(resumed.result.structuredContent.status, 'partial_delivery')
+    assert.equal(createAttempts, 1)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 

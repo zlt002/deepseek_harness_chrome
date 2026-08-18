@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 import { TeamDocRecordStore } from '../apps/native-server/src/team-doc-record-store.mjs'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +15,37 @@ test('keeps legacy Team Knowledge creation tools out of the model-facing tool li
     for (const legacy of ['team_doc_create', 'team_knowledge_batch', 'team_knowledge_item']) assert.equal(tools.some((item) => item.name === legacy), false)
     for (const modelTool of ['team_knowledge_batch_preview', 'team_knowledge_batch_create', 'team_knowledge_batch_status', 'team_knowledge_spreadsheet_preview', 'team_knowledge_spreadsheet_create']) assert.ok(tools.some((item) => item.name === modelTool))
   } finally { await connector.stop() }
+})
+
+test('returns a challenge-bound spreadsheet idempotency identity so repeated model calls cannot duplicate a Verified Write', async () => {
+  const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://doc.midea.com/teamKnowledge/catalog/9' }
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-spreadsheet-'))
+  let creates = 0
+  let connector
+  connector = new BrowserConnector({ teamDocStore: new TeamDocRecordStore({ recordPath: join(directory, 'state.json') }), requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+    type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget,
+    result: request.action === 'inspect_parent'
+      ? { status: 'ok', parent: { parentId: '9', bookId: '10', parentName: 'Root', parentType: 'directory', canRead: true, canCreate: true, fingerprint: 'parent-1' }, capabilities: { spreadsheet: true } }
+      : { status: 'verified_write', item: { catalogId: '11', kind: 'spreadsheet', name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/11?id=11', fingerprint: 'sheet-11' }, stages: ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified'], readback: { resource: { kind: 'webedit_spreadsheet' } }, ...(creates += 1, {}) },
+  })) })
+  connector.bindBrowserTarget('run-sheet', target)
+  const endpoint = await connector.start()
+  const call = async (id, name, arguments_) => (await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_ } }) })).json()
+  try {
+    const preview = await call(1, 'team_knowledge_spreadsheet_preview', { name: 'Budget', body: '' })
+    const { challenge, idempotencyIdentity } = preview.result.structuredContent
+    assert.match(idempotencyIdentity, /^team-item:[a-f0-9]{48}$/)
+    const schema = (await call(2, 'team_knowledge_spreadsheet_create', { challenge, idempotencyIdentity: 'model-invented', name: 'Budget', body: '' }))
+    assert.equal(schema.result.isError, true)
+    assert.match(schema.result.content[0].text, /idempotency identity/)
+    const freshPreview = await call(3, 'team_knowledge_spreadsheet_preview', { name: 'Budget', body: '' })
+    const created = await call(4, 'team_knowledge_spreadsheet_create', { challenge: freshPreview.result.structuredContent.challenge, idempotencyIdentity: freshPreview.result.structuredContent.idempotencyIdentity, name: 'Budget', body: '' })
+    assert.equal(created.result.structuredContent.status, 'verified_write')
+    const replayPreview = await call(5, 'team_knowledge_spreadsheet_preview', { name: 'Budget', body: '' })
+    const replay = await call(6, 'team_knowledge_spreadsheet_create', { challenge: replayPreview.result.structuredContent.challenge, idempotencyIdentity: replayPreview.result.structuredContent.idempotencyIdentity, name: 'Budget', body: '' })
+    assert.equal(replay.result.structuredContent.status, 'verified_write')
+    assert.equal(creates, 1)
+  } finally { await connector.stop(); await rm(directory, { recursive: true, force: true }) }
 })
 
 test('accepts empty known inspect placeholders but rejects non-empty and unknown fields', async () => {

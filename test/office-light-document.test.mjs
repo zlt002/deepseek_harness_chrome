@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -189,7 +190,7 @@ test('binds approval and extension readback to the exact operation and payload, 
     const emptyBlocks = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_replace', payload: { type: 'h1', text: '演示内容' } }, 11)
     assert.equal(emptyBlocks.result.isError, true)
     assert.match(emptyBlocks.result.content[0].text, /selection_insert/)
-    const emptyInsert = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: '演示内容', expectedSelectionFingerprint: 'selection-v3-ac78eacf' } }, 12)
+    const emptyInsert = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: '演示内容', expectedSelectionFingerprint: 'selection-v4-ac78eacf0123456789abcdef01234567' } }, 12)
     assert.equal(emptyInsert.result.structuredContent.action, 'inspect_write')
     assert.ok(emptyInsert.result.structuredContent.challenge)
     const drawing = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'insert_drawing', payload: { mermaid: 'flowchart TD\n开始 --> 结束' } }, 13)
@@ -336,7 +337,7 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
 test('selection_insert requires a stable fingerprint and attests payload-bound XML evidence without retrying an uncertain mutation', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 21, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/109?id=109' }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
-  const payload = { text: '写入内容', expectedSelectionFingerprint: 'selection-v3-1234abcd', insertBelow: true }
+  const payload = { text: '写入内容', expectedSelectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', insertBelow: true }
   let writes = 0; let validEvidence = true
   const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
     if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [] } } })
@@ -369,7 +370,7 @@ test('flat selected-content replacement keeps blocks only in preview and fails c
   const movedTarget = { ...target, tabId: 32 }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
   const blocks = [{ type: 'h2', text: '优化结论' }, { type: 'p', text: '稳定替换正文' }]
-  let selectionFingerprint = 'selection-v3-1234abcd'; let writes = 0
+  let selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'; let writes = 0
   const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
     if (request.action === 'write') {
       writes += 1
@@ -379,7 +380,7 @@ test('flat selected-content replacement keeps blocks only in preview and fails c
         observed: { verified: true, verifiedFragments: ['优化结论', '稳定替换正文'], fragmentEvidence: [{ fragment: '优化结论', blockIds: ['one'] }, { fragment: '稳定替换正文', blockIds: ['two'] }], observedBlocks: [{ id: 'one', type: 'h2', text: '优化结论' }, { id: 'two', type: 'p', text: '稳定替换正文' }], replacedTagIds: ['old-one', 'old-two'] },
       } })
     }
-    const selection = { supported: true, stable: true, truncated: false, isCollapsed: false, selectionFingerprint, selectedTagIds: ['old-one', 'old-two'], content: { text: '原内容一 原内容二' } }
+    const selection = { supported: true, stable: true, truncated: false, hasSelection: true, wholeBlockReplaceable: true, isCollapsed: false, selectionFingerprint, selectedTagIds: ['old-one', 'old-two'], content: { text: '原内容一 原内容二' } }
     connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], ...(request.action === 'selection' ? { selection } : {}) } } })
   }) })
   connector.bindBrowserTarget('flat-selection-run', target); const endpoint = await connector.start()
@@ -395,14 +396,44 @@ test('flat selected-content replacement keeps blocks only in preview and fails c
     assert.equal(replay.result.isError, true); assert.equal(writes, 1)
 
     const driftPreview = await call(endpoint, 'light_document_selection_replace_preview', { blocks }, 4)
-    selectionFingerprint = 'selection-v3-deadbeef'
+    selectionFingerprint = 'selection-v4-deadbeefdeadbeefdeadbeefdeadbeef'
     const drifted = await call(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge }, 5)
     assert.equal(drifted.result.isError, true); assert.equal(writes, 2)
 
-    selectionFingerprint = 'selection-v3-1234abcd'
+    selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'
     const movedPreview = await call(endpoint, 'light_document_selection_replace_preview', { blocks }, 6)
     connector.bindBrowserTarget('flat-selection-run', movedTarget)
     const moved = await call(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge }, 7)
     assert.equal(moved.result.isError, true); assert.equal(writes, 2)
   } finally { await connector.stop() }
+})
+
+test('flat selected-content preview rejects a partial or ambiguous selection before issuing an Approval Grant', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 39, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/119?id=119' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
+  const requests = []
+  const connector = new BrowserConnector({ requestExtension: (request) => {
+    requests.push(request)
+    queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+      result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], selection: { supported: true, stable: true, truncated: false, hasSelection: true, isCollapsed: false, wholeBlockReplaceable: false, selectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', selectedTagIds: ['one', 'two'], content: { text: '局部文字' } } } },
+    }))
+  } })
+  connector.bindBrowserTarget('flat-selection-preflight-run', target)
+  const endpoint = await connector.start()
+  try {
+    const preview = await call(endpoint, 'light_document_selection_replace_preview', { blocks: [{ type: 'p', text: '替换内容' }] })
+    assert.equal(preview.result.isError, true)
+    assert.match(preview.result.content[0].text, /complete contiguous whole-block selection/i)
+    assert.equal(connector.officeDocumentChallenges.size, 0)
+    assert.deepEqual(requests.map((request) => request.action), ['selection'])
+  } finally { await connector.stop() }
+})
+
+test('WebEdit light-document Skill prescribes one selection read before preview and requires complete blocks', async () => {
+  const skill = await readFile(new URL('../skills/webedit-light-document/SKILL.md', import.meta.url), 'utf8')
+  assert.equal((skill.match(/mcp__chrome__light_document_selection_read/g) ?? []).length, 1)
+  assert.match(skill, /wholeBlockReplaceable=true/)
+  assert.match(skill, /选区未变化时不要重复 `selection_read`/)
+  assert.match(skill, /局部或歧义选区请用户重新选择完整块/)
 })

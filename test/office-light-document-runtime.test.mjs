@@ -8,11 +8,16 @@ async function runtime(options = {}) {
   const state = options.state
   let xml = options.initialXml ?? '<apcanvas><outlineTitle id="title">旧标题</outlineTitle><p id="one">重复</p><p id="two">重复</p></apcanvas>'
   if (state) state.xml = xml
+  const bridgeChannel = options.bridgeChannel ?? 'test-channel-0123456789abcdef'
   const listeners = new Map()
-  const window = { addEventListener(name, listener) { listeners.set(name, listener) }, dispatchEvent(event) { listeners.get(event.type)?.(event) } }
+  const window = {
+    addEventListener(name, listener) { const group = listeners.get(name) ?? new Set(); group.add(listener); listeners.set(name, group) },
+    removeEventListener(name, listener) { listeners.get(name)?.delete(listener) },
+    dispatchEvent(event) { for (const listener of listeners.get(event.type) ?? []) listener(event) },
+  }
   const canvas = {
     async getDocXml() { return xml },
-    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
+    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.regenerateIds) { let id = 0; xml = xml.replace(/\bid="[^"]*"/g, () => `id="rebuilt-${++id}"`) } if (options.tamperOutside) xml = xml.replace('>前置<', '>被篡改<'); if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
     ...(options.selectionInfo ? { canvas: { getSelectionInfo: () => options.selectionInfo } } : {}),
   }
   const applySelection = (value) => {
@@ -31,16 +36,34 @@ async function runtime(options = {}) {
   } } : {}), ...(options.selection ?? {}) }
   const documentApi = { selection, ...(options.documentApi ?? {}) }
   const editor = { canvas, document: documentApi, ...(options.editorApi ?? {}) }
-  const context = vm.createContext({ window, globalThis: null, APP: { openApi: { editor }, ...(options.otlSelection ? { OTL: { state: { selection: options.otlSelection } } } : {}) }, location: { href: 'https://webedit.midea.com/weboffice/office/o/1', origin: 'https://webedit.midea.com', pathname: '/weboffice/office/o/1' }, document: { title: '测试', createElement() { return { set innerHTML(value) { this.value = String(value).replace(/<[^>]+>/g, '') }, value: '' } } }, crypto: webcrypto, TextEncoder, Uint8Array, URL, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail } }, setTimeout, clearTimeout, Date })
+  const context = vm.createContext({ window, globalThis: null, APP: { openApi: { editor }, ...(options.otlSelection ? { OTL: { state: { selection: options.otlSelection } } } : {}) }, location: { href: 'https://webedit.midea.com/weboffice/office/o/1', origin: 'https://webedit.midea.com', pathname: '/weboffice/office/o/1' }, document: { title: '测试', currentScript: { dataset: { deepseekHarnessChannel: bridgeChannel } }, createElement() { return { set innerHTML(value) { this.value = String(value).replace(/<[^>]+>/g, '') }, value: '' } } }, crypto: webcrypto, TextEncoder, Uint8Array, URL, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail } }, setTimeout, clearTimeout, Date })
   context.globalThis = context
-  vm.runInContext(await readFile(new URL('../apps/chrome-extension/public/office-light-document-runtime.js', import.meta.url), 'utf8'), context)
+  const runtimeSource = await readFile(new URL('../apps/chrome-extension/public/office-light-document-runtime.js', import.meta.url), 'utf8')
+  const inject = (channel) => {
+    context.document.currentScript = { dataset: { deepseekHarnessChannel: channel } }
+    vm.runInContext(runtimeSource, context)
+  }
+  inject(bridgeChannel)
   let id = 0
-  return async (input) => new Promise((resolve) => {
-    const requestId = String(++id)
-    const response = (event) => { if (event.detail.id === requestId) { listeners.set('deepseek-harness-office-document-response/v1', undefined); resolve(event.detail) } }
+  const responses = []
+  window.addEventListener('deepseek-harness-office-document-response/v1', (event) => responses.push(event.detail))
+  const request = (input, channel = bridgeChannel, requestId = String(++id)) => new Promise((resolve) => {
+    const response = (event) => {
+      const detail = event.detail
+      if (detail?.type === 'response' && detail.channel === channel && detail.id === requestId && typeof detail.ok === 'boolean') {
+        window.removeEventListener('deepseek-harness-office-document-response/v1', response)
+        resolve(detail.ok ? { ok: true, result: detail.result } : { ok: false, error: detail.error })
+      }
+    }
     window.addEventListener('deepseek-harness-office-document-response/v1', response)
-    window.dispatchEvent(new context.CustomEvent('deepseek-harness-office-document-request/v1', { detail: { id: requestId, ...input } }))
+    options.beforeRequest?.({ window, CustomEvent: context.CustomEvent, requestId, bridgeChannel: channel, input })
+    window.dispatchEvent(new context.CustomEvent('deepseek-harness-office-document-request/v1', { detail: { type: 'request', channel, id: requestId, request: input } }))
   })
+  request.forChannel = (channel, input) => request(input, channel)
+  request.reinject = (channel) => inject(channel)
+  request.dispatchRaw = (channel, requestId, input) => window.dispatchEvent(new context.CustomEvent('deepseek-harness-office-document-request/v1', { detail: { type: 'request', channel, id: requestId, request: input } }))
+  request.responses = responses
+  return request
 }
 
 test('light-document runtime keeps title outside read indexes and verifies replace/format/delete/title by structure', async () => {
@@ -95,9 +118,123 @@ test('light-document selection_insert permits stable collapsed public anchors an
   for (const options of cases) {
     const state = {}; const call = await runtime({ ...options, state }); const read = await call({ action: 'selection' })
     assert.equal(read.result.document.selection.stable, true); assert.equal(read.result.document.selection.isCollapsed, true)
+    assert.equal(read.result.document.selection.hasCaret, true); assert.equal(read.result.document.selection.hasSelection, false)
+    assert.match(read.result.document.selection.selectionFingerprint, /^selection-v4-[0-9a-f]{32}$/)
     const inserted = await call({ action: 'write', operation: 'selection_insert', resource: read.result.resource, payload: { text: '光标写入', expectedSelectionFingerprint: read.result.document.selection.selectionFingerprint } })
     assert.equal(inserted.ok, true); assert.equal(state.selectionCalls, 1)
   }
+})
+
+test('light-document runtime reports independent verified selection strategies without requiring getSelectionAnchor', async () => {
+  const call = await runtime({
+    otlSelection: { from: 1, to: 4, anchor: 1, head: 4, empty: false },
+    selectionInfo: { selected_tag_ids: ['one'] },
+    selection: { async getSelectionContent() { return { text: '重复' } } },
+  })
+  const capability = await call({ action: 'read', payload: { kind: 'capabilities' } })
+  assert.equal(capability.ok, true)
+  const strategies = capability.result.document.capabilities.selectionStrategies
+  assert.equal(strategies.content, true); assert.equal(strategies.coordinates, true); assert.equal(strategies.wholeBlock, true)
+  assert.equal(strategies.insert, 'public_insert_content'); assert.equal(strategies.replace, 'full_canvas_patch_for_verified_whole_blocks')
+  assert.equal(capability.result.document.capabilities.selection, true)
+  assert.equal(capability.result.document.capabilities.currentWholeBlockReplaceable, true)
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.result.document.selection.hasSelection, true)
+  assert.equal(selected.result.document.selection.isCollapsed, false)
+  assert.equal(selected.result.document.selection.wholeBlockReplaceable, true)
+})
+
+test('light-document resource name and fingerprint use the same public title source', async () => {
+  let title = '公开标题'
+  const call = await runtime({ documentApi: { async getTitleContent() { return { text: title } } } })
+  const first = await call({ action: 'read' })
+  title = '更新标题'
+  const second = await call({ action: 'read' })
+  assert.equal(first.result.resource.documentName, '公开标题')
+  assert.equal(second.result.resource.documentName, '更新标题')
+  assert.notEqual(first.result.resource.fingerprint, second.result.resource.fingerprint)
+})
+
+test('light-document resource falls back to document.title when the public title shape is malformed', async () => {
+  const call = await runtime({ documentApi: { async getTitleContent() { return { unexpected: 'object' } } } })
+  const read = await call({ action: 'read' })
+  assert.equal(read.result.resource.documentName, '测试')
+  assert.notEqual(read.result.resource.documentName, '[object Object]')
+})
+
+test('light-document caret capabilities keep selection readable while whole-block preview stays unavailable', async () => {
+  const call = await runtime({
+    otlSelection: { from: 3, to: 3, anchor: 3, head: 3, empty: true },
+    selectionInfo: { selected_tag_ids: ['one'] },
+    selection: { async getSelectionContent() { return { text: '' } } },
+  })
+  const capability = await call({ action: 'read', payload: { kind: 'capabilities' } })
+  assert.equal(capability.result.document.capabilities.selection, true)
+  assert.equal(capability.result.document.capabilities.currentWholeBlockReplaceable, false)
+  assert.equal(capability.result.document.capabilities.verifiedSelectionInsert, true)
+})
+
+test('light-document bridge ignores stale or crossed envelopes and rejects old selection fingerprints', async () => {
+  const state = {}
+  const call = await runtime({ state, beforeRequest({ window, CustomEvent, requestId, input }) {
+    window.dispatchEvent(new CustomEvent('deepseek-harness-office-document-response/v1', {
+      detail: { type: 'response', channel: 'stale-channel-0123456789abcdef', id: requestId, ok: true, result: { status: 'wrong' } },
+    }))
+  }, selection: { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 3 } } } })
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.ok, true)
+  const rejected = await call({ action: 'write', operation: 'selection_insert', resource: selected.result.resource, payload: { text: '不应写入', expectedSelectionFingerprint: 'selection-v3-1234abcd' } })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.error.code, 'unsupported')
+  assert.equal(state.selectionCalls ?? 0, 0)
+})
+
+test('light-document runtime rebinds a healed content-script channel, revokes the old channel, and scopes replay keys by channel', async () => {
+  const oldChannel = 'old-channel-0123456789abcdef'
+  const newChannel = 'new-channel-0123456789abcdef'
+  const unknownChannel = 'unknown-channel-0123456789'
+  const call = await runtime({ bridgeChannel: oldChannel })
+  call.dispatchRaw(oldChannel, 'shared-request-id', { action: 'probe' })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const beforeRebind = call.responses.length
+  assert.equal(call.responses.at(-1).channel, oldChannel)
+
+  call.reinject(newChannel)
+  const healedProbe = await call.forChannel(newChannel, { action: 'probe' })
+  const healedRead = await call.forChannel(newChannel, { action: 'read' })
+  assert.equal(healedProbe.result.ready, true)
+  assert.equal(healedRead.result.document.blockCount, 2)
+  assert.equal(call.responses.at(-1).channel, newChannel)
+
+  // A new channel may reuse an ID from a revoked channel; replay protection
+  // is keyed by channel+id. Replaying it on the same channel is ignored.
+  call.dispatchRaw(newChannel, 'shared-request-id', { action: 'probe' })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const afterNewChannel = call.responses.length
+  call.dispatchRaw(newChannel, 'shared-request-id', { action: 'probe' })
+  call.dispatchRaw(oldChannel, 'old-channel-rejected', { action: 'probe' })
+  call.dispatchRaw(unknownChannel, 'unknown-channel-rejected', { action: 'probe' })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(call.responses.length, afterNewChannel)
+  assert.equal(afterNewChannel, beforeRebind + 3)
+})
+
+test('light-document selection marks partial and ambiguous block ranges not replaceable before preview', async () => {
+  const partial = await runtime({
+    otlSelection: { from: 2, to: 8, anchor: 2, head: 8, empty: false }, selectionInfo: { selected_tag_ids: ['one', 'two'] },
+    selection: { async getSelectionContent() { return { text: '复 重复' } } },
+  })
+  const partialRead = await partial({ action: 'selection' })
+  assert.equal(partialRead.result.document.selection.hasSelection, true)
+  assert.equal(partialRead.result.document.selection.wholeBlockReplaceable, false)
+
+  const ambiguous = await runtime({
+    otlSelection: { from: 1, to: 9, anchor: 1, head: 9, empty: false }, selectionInfo: { selected_tag_ids: ["p[@id='one']../p"] },
+    selection: { async getSelectionContent() { return { text: '重复' } } },
+  })
+  const ambiguousRead = await ambiguous({ action: 'selection' })
+  assert.equal(ambiguousRead.result.document.selection.selectionIdsValid, false)
+  assert.equal(ambiguousRead.result.document.selection.wholeBlockReplaceable, false)
 })
 
 test('light-document selection_insert rejects drift, ambiguity, runtime failure, and insufficient XML readback without replay', async () => {
@@ -237,6 +374,25 @@ test('light-document runtime atomically replaces complete multi-block rich selec
   assert.ok(result.result.observed.replacedTagIds.includes('two'))
 })
 
+test('light-document runtime verifies full CanvasPatch replacement when WebEdit regenerates every block id', async () => {
+  const initialXml = '<apcanvas><outlineTitle id="title">旧标题</outlineTitle><p id="before">前置</p><p id="one">重复</p><p id="two">重复</p><blockquote id="after">后置</blockquote></apcanvas>'
+  for (const [options, expectedOk] of [[{ regenerateIds: true }, true], [{ regenerateIds: true, tamperOutside: true }, false]]) {
+    const state = {}
+    const call = await runtime({ state, initialXml, ...options, otlSelection: { from: 1, to: 9, anchor: 1, head: 9, empty: false }, selectionInfo: { selected_tag_ids: ['one', 'two'] }, selection: {
+      async getSelectionContent() { return { text: '重复 重复' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 9 } },
+    } })
+    const selected = await call({ action: 'selection' })
+    const result = await call({ action: 'write', operation: 'selection_blocks_replace', resource: selected.result.resource, payload: { expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint, blocks: [{ type: 'h2', text: '优化结论' }, { type: 'p', text: '替换正文' }] } })
+    assert.equal(result.ok, expectedOk, JSON.stringify(result))
+    assert.equal(state.patchCalls, 1)
+    if (expectedOk) {
+      assert.equal(result.result.observed.writeStrategy, 'full_canvas_patch')
+      assert.equal(result.result.observed.idsRegenerated, true)
+      assert.deepEqual(Array.from(result.result.observed.outsideSelectionBlocks, (block) => `${block.type}:${block.text}`), ['p:前置', 'blockquote:后置'])
+    } else assert.equal(result.error.code, 'readback_mismatch')
+  }
+})
+
 test('light-document runtime never CanvasPatches a partial first or last selected block', async () => {
   for (const content of ['复 重复', '重复 重']) {
     const state = {}
@@ -315,6 +471,7 @@ test('light-document runtime pages rich reads and verifies public selection, blo
   const initial = await call({ action: 'read' }); const resource = initial.result.resource
   const capabilities = await call({ action: 'read', payload: { kind: 'capabilities' } })
   assert.equal(capabilities.result.document.capabilities.selection, false); assert.equal(capabilities.result.document.capabilities.wordCount, true)
+  assert.equal(capabilities.result.document.capabilities.currentWholeBlockReplaceable, false)
   assert.equal(capabilities.result.document.capabilities.selectionRichReplace, false)
   assert.equal(capabilities.result.document.capabilities.drawings, true)
   assert.equal(capabilities.result.document.capabilities.blockRichHtml, true)
@@ -411,4 +568,44 @@ test('single and batch formatting preserve links and inline markup while changin
   const ignored = await runtime({ initialXml, ignoreFormat: true }); const ignoredResource = (await ignored({ action: 'read' })).result.resource
   const mismatch = await ignored({ action: 'write', resource: ignoredResource, operation: 'blocks_format', payload: { blocks: [{ id: 'one', style: { italic: true } }] } })
   assert.equal(mismatch.ok, false); assert.equal(mismatch.error.code, 'readback_mismatch')
+})
+
+test('blocks_replace with ul/ol verifies structurally and keeps the target addressable', async () => {
+  const state = {}; const call = await runtime({ state })
+  const resource = (await call({ action: 'read' })).result.resource
+  const replaced = await call({ action: 'write', resource, operation: 'blocks_replace', payload: { id: 'one', type: 'ul', items: ['甲项', '乙项'] } })
+  assert.equal(replaced.ok, true, JSON.stringify(replaced))
+  assert.equal(replaced.result.observed.verified, true)
+  assert.equal(state.patchCalls, 1)
+  // The stable id must survive on the first generated paragraph so later
+  // blocks_delete / blocks_format can still address the replacement.
+  assert.match(state.xml, /<p id="one" paddingLeft="2">/)
+  const olBatched = await call({ action: 'write', resource: replaced.result.resource, operation: 'blocks_batch_replace', payload: { replacements: [{ id: 'two', type: 'ol', items: ['第一', '第二'] }] } })
+  assert.equal(olBatched.ok, true, JSON.stringify(olBatched))
+  const final = await call({ action: 'read' })
+  assert.equal(final.result.document.blocks.map((block) => block.text).join('|'), '- 甲项|- 乙项|1. 第一|2. 第二')
+  const deleted = await call({ action: 'write', resource: olBatched.result.resource, operation: 'blocks_delete', payload: { ids: ['one'] } })
+  assert.equal(deleted.ok, true, JSON.stringify(deleted))
+  const afterDelete = await call({ action: 'read' })
+  assert.equal(afterDelete.result.document.blocks.map((block) => block.text).join('|'), '- 乙项|1. 第一|2. 第二')
+})
+
+test('replace parses markdown into structured blocks instead of dumping raw syntax', async () => {
+  const state = {}; const call = await runtime({ state })
+  const resource = (await call({ action: 'read' })).result.resource
+  const replaced = await call({ action: 'write', resource, operation: 'replace', payload: { index: 0, markdown: '## 小节\n\n- **要点**：说明文字' } })
+  assert.equal(replaced.ok, true, JSON.stringify(replaced))
+  assert.equal(replaced.result.observed.verified, true)
+  assert.doesNotMatch(state.xml, /##|\*\*/)
+  const after = await call({ action: 'read' })
+  assert.equal(after.result.document.blocks.map((block) => block.type).join('|'), 'h2|p|p')
+  assert.equal(after.result.document.blocks[0].text, '小节')
+  assert.equal(after.result.document.blocks[1].text, '- 要点：说明文字')
+  assert.match(state.xml, /<strong>要点<\/strong>/)
+})
+
+test('reads keep inline closing tags on one line inside a paragraph', async () => {
+  const call = await runtime({ initialXml: '<apcanvas><p id="b1"><span><strong>多级标题</strong>：清晰的内容层级结构</span></p></apcanvas>' })
+  const read = await call({ action: 'read' })
+  assert.equal(read.result.document.blocks[0].text, '多级标题：清晰的内容层级结构')
 })

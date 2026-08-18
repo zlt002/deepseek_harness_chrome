@@ -8,6 +8,10 @@ export default defineContentScript({
     let runtimeReady: Promise<void> | undefined
     let documentRuntimeReady: Promise<void> | undefined
     let spreadsheetRuntimeReady: Promise<void> | undefined
+    // Correlates this isolated-world script with its main-world document
+    // adapter. It prevents crossed/stale/side-channel CustomEvent responses;
+    // it does not defend against a script that fully controls the page world.
+    const documentRuntimeChannel = crypto.randomUUID()
 
     function loadRuntime(): Promise<void> {
       if (runtimeReady !== undefined) return runtimeReady
@@ -47,6 +51,7 @@ export default defineContentScript({
       documentRuntimeReady = new Promise((resolve, reject) => {
         const script = document.createElement('script')
         script.src = chrome.runtime.getURL('/office-light-document-runtime.js')
+        script.dataset.deepseekHarnessChannel = documentRuntimeChannel
         script.onload = () => { script.remove(); resolve() }
         script.onerror = () => { script.remove(); reject(new Error('unsupported: light-document runtime adapter could not load')) }
         ;(document.head ?? document.documentElement).append(script)
@@ -65,15 +70,21 @@ export default defineContentScript({
         }, timeoutMs)
         const receive = (event: Event): void => {
           const detail = (event as CustomEvent<unknown>).detail
-          if (!detail || typeof detail !== 'object' || (detail as { id?: unknown }).id !== id) return
+          if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return
+          const payload = detail as { type?: unknown; channel?: unknown; id?: unknown; ok?: unknown; result?: unknown; error?: unknown }
+          const keys = Object.keys(payload)
+          const validSuccess = payload.type === 'response' && payload.channel === documentRuntimeChannel && payload.id === id && payload.ok === true
+            && keys.length === 5 && Object.prototype.hasOwnProperty.call(payload, 'result')
+          const validFailure = payload.type === 'response' && payload.channel === documentRuntimeChannel && payload.id === id && payload.ok === false
+            && keys.length === 5 && Object.prototype.hasOwnProperty.call(payload, 'error')
+          if (!validSuccess && !validFailure) return
           clearTimeout(timeout)
           window.removeEventListener(responseEvent, receive)
-          const payload = detail as { ok?: unknown; result?: unknown; error?: unknown }
-          if (payload.ok === true) resolve(payload.result)
+          if (validSuccess) resolve(payload.result)
           else reject(payload.error ?? { code: 'runtime_error', message: 'WebEdit light-document operation failed' })
         }
         window.addEventListener(responseEvent, receive)
-        window.dispatchEvent(new CustomEvent(requestEvent, { detail: { id, ...request } }))
+        window.dispatchEvent(new CustomEvent(requestEvent, { detail: { type: 'request', channel: documentRuntimeChannel, id, request } }))
       })
     }
 
@@ -120,7 +131,12 @@ export default defineContentScript({
           action: input.action, ...(input.offset === undefined ? {} : { offset: input.offset }), ...(input.limit === undefined ? {} : { limit: input.limit }),
           ...(input.query === undefined ? {} : { query: input.query }), ...(input.operation === undefined ? {} : { operation: input.operation }),
           ...(input.payload === undefined ? {} : { payload: input.payload }), ...(input.resource === undefined ? {} : { resource: input.resource }),
-        }, input.action === 'probe' ? 400 : 8_000)).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
+          // A write's in-frame budget (runtime APP wait + CanvasPatch change
+          // poll + readback) legitimately exceeds the 8s read budget. Give
+          // writes 13s so a slow-but-succeeding patch is not reported as a
+          // timeout while the document actually changed, while staying under
+          // the native connector's 15s REQUEST_TIMEOUT_MS.
+        }, input.action === 'probe' ? 400 : input.action === 'write' ? 13_000 : 8_000)).then((result) => sendResponse({ ok: true, result })).catch((error: unknown) => {
           const typed = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
             ? error : { code: 'runtime_error', message: error instanceof Error ? error.message : 'WebEdit light-document operation failed' }
           sendResponse({ ok: false, error: typed })

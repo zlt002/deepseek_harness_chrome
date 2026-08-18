@@ -26,6 +26,8 @@ function searchProgress(value) {
     && (value.phase === 'querying' || value.phase === 'streaming' || value.phase === 'done' || value.phase === 'error')
     && Number.isInteger(value.chars) && value.chars >= 0
     && typeof value.content === 'string' && value.content.length <= 16_000
+    && (value.eventType === undefined || typeof value.eventType === 'string')
+    && (value.process === undefined || (typeof value.process === 'string' && value.process.length <= 32_000))
 }
 
 export function createScopeProtocol({ createStore, nonce, parentOrigin }) {

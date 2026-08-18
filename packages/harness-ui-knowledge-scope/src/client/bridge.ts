@@ -13,6 +13,8 @@ export interface SearchProgress {
   phase: 'querying' | 'streaming' | 'done' | 'error'
   chars: number
   content: string
+  eventType?: string
+  process?: string
 }
 export { knowledgeScopeBridgeConfig }
 

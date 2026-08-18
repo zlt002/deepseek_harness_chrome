@@ -1,5 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { Readable } from 'node:stream'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { PmdDeliveryRecordStore } from './pmd-delivery-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
@@ -14,6 +17,10 @@ const REQUEST_TIMEOUT_MS = 15_000
 const TEAM_KNOWLEDGE_WRITE_REQUEST_TIMEOUT_MS = 120_000
 const KNOWLEDGE_REQUEST_TIMEOUT_MS = 30 * 60_000
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
+// Node fetch (undici) defaults headersTimeout/bodyTimeout to 300s. A
+// knowledge tools/call must emit response headers and periodic body bytes
+// before the Extension finishes, or the child MCP client dies as fetch failed.
+const MCP_JSON_KEEPALIVE_INTERVAL_MS = 15_000
 const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 60_000
 const OFFICE_DOCUMENT_MAX_RECORDS = 256
 const MCP_PATH = '/mcp'
@@ -312,17 +319,19 @@ const lightDocumentBlockSchema = { type: 'object', additionalProperties: false, 
 const lightDocumentReadTool = {
   name: 'light_document_read', title: 'Read light document',
   description: 'Read a bounded page of the light document on this Browser Target. No target, tab, frame, or resource is model-controlled.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, properties: { offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } } },
 }
 const lightDocumentSelectionReadTool = {
   name: 'light_document_selection_read', title: 'Read selected light-document content',
   description: 'Read the current light-document selection and its stable fingerprint. Use immediately before preparing a replacement.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, properties: {} },
 }
 const lightDocumentSelectionReplacePreviewTool = {
   name: 'light_document_selection_replace_preview', title: 'Preview selected-content replacement',
-  description: 'Preview a rich replacement for the current complete multi-block selection. Supply only the desired blocks. This reads the selection, binds its fingerprint, checks the Browser Target, and returns a one-time approval challenge. It does not write.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  description: 'Preview a rich replacement for the current complete multi-block selection. Supply only the desired blocks. This performs one read-only selection snapshot, binds its fingerprint, checks the Browser Target, and returns a one-time approval challenge. It never changes the document; commit revalidates the resource and selection immediately before mutation.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['blocks'], properties: { blocks: { type: 'array', minItems: 1, maxItems: 50, items: lightDocumentBlockSchema } } },
 }
 const lightDocumentSelectionReplaceCommitTool = {
@@ -371,7 +380,7 @@ const teamKnowledgeSpreadsheetPreviewTool = {
 
 const teamKnowledgeSpreadsheetCreateTool = {
   name: 'team_knowledge_spreadsheet_create', title: 'Create the approved Team Knowledge spreadsheet',
-  description: 'After explicit approval, create exactly the previewed Team Knowledge spreadsheet using its challenge, idempotency identity, name, and unchanged body. Success requires business success, same-parent catalog rediscovery, and spreadsheet identity readback.',
+  description: 'After explicit approval, create exactly the previewed Team Knowledge spreadsheet using the challenge and idempotency identity returned by preview, plus the unchanged name and body. Success requires business success, same-parent catalog rediscovery, and spreadsheet identity readback.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['challenge', 'idempotencyIdentity', 'name', 'body'], properties: { challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
 }
@@ -401,14 +410,14 @@ const teamKnowledgeBatchTool = {
 
 const teamKnowledgeBatchPreviewTool = {
   name: 'team_knowledge_batch_preview', title: 'Preview one to ten Team Knowledge light documents',
-  description: 'The first step for one to ten light documents. Provide a stable batchId and the exact ordered names and bodies. This inspects the currently bound parent itself and returns its fingerprint plus a one-time approval challenge. Do not create documents in this step.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  description: 'The first step for one to ten light documents. Provide a stable batchId and the exact ordered names and bodies. This inspects the currently bound parent and returns a model-visible one-time creation challenge. Copy that exact challenge into team_knowledge_batch_create after explicit user confirmation. No online document is created in this step.',
+  annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'items'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
 }
 
 const teamKnowledgeBatchCreateTool = {
   name: 'team_knowledge_batch_create', title: 'Create the approved Team Knowledge light-document batch',
-  description: 'After explicit approval, provide the batchId, preview challenge, and the unchanged ordered items. The parent is rechecked and every item is created only after business success, same-parent catalog rediscovery, and WebEdit readback. Reuse the same batchId to resume unfinished items.',
+  description: 'After explicit approval, provide the batchId, preview challenge, and the unchanged ordered items. The parent is rechecked and every item is created only after business success, same-parent catalog rediscovery, WebEdit light-document identity, body write, and readback. The Connector handles missing catalog type metadata internally. Reuse the same batchId to resume unfinished items; never fall back to browser_open_tab or manual per-document writes.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'challenge', 'items'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
 }
@@ -698,7 +707,7 @@ function validFlatLightDocumentArguments(name, value) {
     && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000)
     && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
   if (name === 'light_document_selection_read') return keys.length === 0
-  if (name === 'light_document_selection_replace_preview') return keys.length === 1 && selectionBlocksReplaceFragments({ blocks: value.blocks, expectedSelectionFingerprint: 'selection-v3-00000000' }) !== null
+  if (name === 'light_document_selection_replace_preview') return keys.length === 1 && selectionBlocksReplaceFragments({ blocks: value.blocks, expectedSelectionFingerprint: 'selection-v4-00000000000000000000000000000000' }) !== null
   return name === 'light_document_selection_replace_commit' && keys.length === 1
     && typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256
 }
@@ -801,7 +810,7 @@ function selectionInsertFragments(payload) {
   const kinds = ['markdown', 'html', 'text'].filter((key) => typeof payload[key] === 'string')
   if (kinds.length !== 1 || !Object.keys(payload).every((key) => ['markdown', 'html', 'text', 'insertBelow', 'expectedSelectionFingerprint'].includes(key))) return null
   const kind = kinds[0]; const value = payload[kind]
-  if (!value.trim() || value.length > 20_000 || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint) || (payload.insertBelow !== undefined && typeof payload.insertBelow !== 'boolean')) return null
+  if (!value.trim() || value.length > 20_000 || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v4-[0-9a-f]{32}$/.test(payload.expectedSelectionFingerprint) || (payload.insertBelow !== undefined && typeof payload.insertBelow !== 'boolean')) return null
   const fragments = distinctiveLightDocumentFragments(kind === 'html' ? value.replace(/<[^>]*>/g, ' ') : value)
   return fragments.length ? { kind, fragments } : null
 }
@@ -809,7 +818,7 @@ function selectionBlocksReplaceFragments(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
     || !Object.keys(payload).every((key) => ['blocks', 'expectedSelectionFingerprint'].includes(key))
     || !Array.isArray(payload.blocks) || payload.blocks.length < 1 || payload.blocks.length > 50
-    || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v3-[0-9a-f]{8}$/.test(payload.expectedSelectionFingerprint)
+    || typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v4-[0-9a-f]{32}$/.test(payload.expectedSelectionFingerprint)
     || !payload.blocks.every(lightDocumentStructuredBlockValid)) return null
   const fragments = distinctiveLightDocumentFragments(payload.blocks.map(lightDocumentStructuredBlockText).join('\n'))
   return fragments.length ? { fragments } : null
@@ -1295,6 +1304,83 @@ function validTeamKnowledgeBatchArguments(args) {
 function teamKnowledgeBatchFingerprint(items) {
   return hash(JSON.stringify(items.map((item) => ({ name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
 }
+function teamKnowledgeVisibleText(value) {
+  return value
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .trim()
+}
+function teamKnowledgeLightDocumentReadbackMatches(body, observedBody) {
+  if (typeof observedBody !== 'string' || observedBody.trim().length === 0) return false
+  const fragments = body.replace(/<!--[\s\S]*?-->/g, '').split(/\n+/).flatMap((sourceLine) => {
+    const line = sourceLine.trim()
+    if (!line || /^(?:`{3,}|~{3,}|-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return []
+    if (/^\|.*\|$/.test(line)) {
+      const cells = line.slice(1, -1).split('|').map(teamKnowledgeVisibleText)
+      return cells.every((cell) => /^:?-{3,}:?$/.test(cell)) ? [] : [cells.join('\t')]
+    }
+    const heading = /^#{1,6}\s+/.test(line)
+    const withoutBlockPrefix = line.replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
+      .replace(/^(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, '')
+    const fragment = teamKnowledgeVisibleText(heading
+      ? withoutBlockPrefix.replace(/^\d+(?:\.\d+)*[.)、．]?\s+/, '')
+      : withoutBlockPrefix)
+    return fragment ? [fragment] : []
+  }).filter(Boolean)
+  return fragments.length > 0 && fragments.every((fragment) => observedBody.includes(fragment))
+}
+function teamKnowledgeBatchFailure(item) {
+  if (item.status !== 'failed') return null
+  const error = typeof item.error === 'string' ? item.error : ''
+  const stage = error === 'Extension peer verified the wrong Team Knowledge batch item'
+    ? '回读校验'
+    : item.stages.includes('body_written') ? '内容回读'
+      : item.stages.includes('rediscovered') ? '内容写入'
+        : item.stages.includes('created') ? '目录复查'
+          : item.stages.includes('parent_inspected') ? '创建'
+            : '创建前校验'
+  if (error === 'Extension peer verified the wrong Team Knowledge batch item') return { stage, reason: '回读文本格式与原始 Markdown 不同，导致旧版校验误判。', retryable: true }
+  if (/idempotency identity conflicts|exact_name_conflict|item_type_(?:mismatch|unavailable)|directory_required|parent_fingerprint_mismatch|business_failed|readback_mismatch/i.test(error)) {
+    return { stage, reason: '服务端返回的结果无法安全确认，请先检查父级、名称或内容后再发起新的预检。', retryable: false }
+  }
+  if (/webedit_.*(?:unavailable|runtime)|navigation_timeout|write_not_observed|request.*timeout/i.test(error)) {
+    return { stage, reason: '浏览器或文档编辑器暂时未就绪。', retryable: true }
+  }
+  return { stage, reason: '未获得可验证的创建结果。', retryable: false }
+}
+function teamKnowledgeBatchView(batch) {
+  return { ...batch, items: batch.items.map((item) => {
+    const failure = teamKnowledgeBatchFailure(item)
+    return failure ? { ...item, failure, retryable: failure.retryable } : { ...item, retryable: false }
+  }) }
+}
+function teamKnowledgeBatchUserText(result) {
+  if (result.action === 'inspect_parent') return `已确认可创建子文档的父级：${result.parent.parentName}`
+  const items = Array.isArray(result.batch?.items) ? result.batch.items : []
+  const completed = items.filter((item) => item.status === 'created').length
+  const total = items.length
+  if (result.action === 'preview') {
+    if (result.status === 'already_completed') return `这批 ${total} 个子文档已经全部创建并完成内容回读，无需重复操作。`
+    return `已确认父级和 ${total} 个子文档内容。确认后将按顺序创建、写入并回读；已完成 ${completed} 个，剩余 ${total - completed} 个会自动续传。\n创建凭证：${result.challenge}`
+  }
+  if (result.action === 'create') {
+    if (result.status === 'verified_write') return `已完成 ${total} 个子文档的创建、内容写入和回读验证。`
+    const failures = items.filter((item) => item.status === 'failed' && item.failure)
+    const details = failures.map((item) => `- ${item.name}：失败阶段：${item.failure.stage}；原因：${item.failure.reason}；可重试：${item.failure.retryable ? '是' : '否'}`)
+    const retryable = failures.filter((item) => item.failure.retryable).length
+    return `本次完成 ${completed}/${total} 个子文档。${details.length ? `\n失败明细：\n${details.join('\n')}\n` : ''}${retryable > 0 ? `其中 ${retryable} 项可使用同一批次重新预览并确认后续传；其余项请先处理原因，避免盲目重试。` : '请先处理失败原因，避免盲目重试。'}`
+  }
+  if (completed === total) return `这批 ${total} 个子文档已经全部完成。`
+  const failures = items.filter((item) => item.status === 'failed' && item.failure)
+  const details = failures.map((item) => `- ${item.name}：失败阶段：${item.failure.stage}；原因：${item.failure.reason}；可重试：${item.failure.retryable ? '是' : '否'}`)
+  return details.length > 0
+    ? `当前已完成 ${completed}/${total} 个子文档。\n失败明细：\n${details.join('\n')}`
+    : `当前已完成 ${completed}/${total} 个子文档；仍在等待创建完成。`
+}
 function validVerifiedTeamKnowledgeBatchItem(result, approved, persisted = false) {
   if (!validTeamKnowledgeItemResult(result) || result.status !== 'verified_write' || result.item?.kind !== 'light_document' || result.item?.name !== approved.name) return false
   if (typeof result.item.catalogId !== 'string' || !/^\d+$/.test(result.item.catalogId) || !Array.isArray(result.stages)) return false
@@ -1303,7 +1389,7 @@ function validVerifiedTeamKnowledgeBatchItem(result, approved, persisted = false
     const url = new URL(result.item.url)
     if (url.origin !== 'https://doc.midea.com' || !url.pathname.includes(result.item.catalogId)) return false
   } catch { return false }
-  return persisted || result.readback?.body === approved.body
+  return persisted || teamKnowledgeLightDocumentReadbackMatches(approved.body, result.readback?.body)
 }
 
 const PMD_DOCUMENT_KINDS = ['analysis', 'prd']
@@ -1526,6 +1612,59 @@ function knowledgeProxyHeaders(entries, cookie) {
   return headers
 }
 
+/** Node fetch uses undici's 300s bodyTimeout. Repo-search SSE stays quiet
+ *  while Explore agents run, so we stream with https.request instead. */
+export function knowledgeHttpsFetch(input, init = {}, timeouts = {}) {
+  const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(String(input))
+  const headers = new Headers(init.headers)
+  const connectTimeout = timeouts.connectTimeout ?? 30_000
+  const headersTimeout = timeouts.headersTimeout ?? 0
+  const bodyTimeout = timeouts.bodyTimeout ?? 0
+  const transport = url.protocol === 'http:' ? httpRequest : httpsRequest
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const abort = (error) => {
+      request.destroy(error)
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+    const request = transport({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'http:' ? 80 : 443),
+      path: `${url.pathname}${url.search}`,
+      method: init.method ?? 'GET',
+      headers: Object.fromEntries(headers),
+    }, (incoming) => {
+      if (headerTimer !== undefined) clearTimeout(headerTimer)
+      settled = true
+      resolve(new Response(Readable.toWeb(incoming), { status: incoming.statusCode ?? 502, statusText: incoming.statusMessage ?? '', headers: incoming.headers }))
+    })
+    if (bodyTimeout > 0) request.setTimeout(bodyTimeout, () => abort(Object.assign(new Error('body timeout'), { code: 'UND_ERR_BODY_TIMEOUT' })))
+    const headerTimer = headersTimeout > 0 ? setTimeout(() => abort(Object.assign(new Error('headers timeout'), { code: 'UND_ERR_HEADERS_TIMEOUT' })), headersTimeout) : undefined
+    const connectTimer = setTimeout(() => abort(Object.assign(new Error('connect timeout'), { code: 'UND_ERR_CONNECT_TIMEOUT' })), connectTimeout)
+    request.once('socket', (socket) => socket.once('connect', () => clearTimeout(connectTimer)))
+    request.once('error', (error) => {
+      clearTimeout(connectTimer)
+      if (headerTimer !== undefined) clearTimeout(headerTimer)
+      if (!settled) {
+        settled = true
+        reject(error)
+      }
+    })
+    if (init.signal !== undefined) {
+      if (init.signal.aborted) {
+        abort(init.signal.reason instanceof Error ? init.signal.reason : new Error('aborted'))
+        return
+      }
+      init.signal.addEventListener('abort', () => abort(init.signal.reason instanceof Error ? init.signal.reason : new Error('aborted')), { once: true })
+    }
+    if (typeof init.body === 'string') request.end(init.body)
+    else request.end()
+  })
+}
+
 /**
  * Stateless, authenticated MCP endpoint managed by the Native Host. It is
  * deliberately the narrow Issue #2 tracer-bullet: only office_get_context
@@ -1540,7 +1679,11 @@ export class BrowserConnector {
     this.knowledgeRequestTimeoutMs = options.knowledgeRequestTimeoutMs ?? KNOWLEDGE_REQUEST_TIMEOUT_MS
     this.knowledgeCatalogTimeoutMs = options.knowledgeCatalogTimeoutMs ?? KNOWLEDGE_CATALOG_TIMEOUT_MS
     this.onToolsListed = options.onToolsListed
-    this.fetch = options.fetch ?? fetch
+    // Undici's default bodyTimeout is 300s. A repo-search SSE often stays
+    // quiet while the upstream Explore agents run, which looks like "fetch
+    // failed" at ~5 minutes. AccrUI uses Chrome fetch and has no such cut.
+    this.knowledgeFetchOptions = { connectTimeout: 30_000, headersTimeout: this.knowledgeRequestTimeoutMs, bodyTimeout: 0 }
+    this.fetch = options.fetch ?? ((input, init = {}) => knowledgeHttpsFetch(input, init, this.knowledgeFetchOptions))
     this.server = undefined
     this.url = undefined
     this.token = undefined
@@ -2051,10 +2194,13 @@ export class BrowserConnector {
       harnessSessionId: identity.sessionId, ...(identity.parentSessionId === undefined ? {} : { harnessParentSessionId: identity.parentSessionId }),
       question: message.params.arguments.question.trim(),
     }
+    const keepAlive = this.#keepJsonAlive(response)
     try {
       const result = await this.#requestExtension(correlation, response, this.knowledgeRequestTimeoutMs)
+      keepAlive.stop()
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) {
+      keepAlive.stop()
       this.#toolError(response, message.id, knowledgeErrorChain(error))
     }
   }
@@ -2141,20 +2287,18 @@ export class BrowserConnector {
       if (!validOfficeDocumentReadResult(selected.result)) throw new Error('Browser Connector produced an invalid light-document selection')
       const selection = selected.result.document?.selection
       const selectionFingerprint = selection?.selectionFingerprint
-      if (!selection?.supported || selection?.truncated || selection?.isCollapsed || selection?.stable !== true || typeof selectionFingerprint !== 'string') throw new Error('The current light-document selection is not a complete stable non-collapsed selection.')
+      if (!selection?.supported || selection?.truncated || selection?.hasSelection !== true || selection?.isCollapsed || selection?.stable !== true || selection?.wholeBlockReplaceable !== true || typeof selectionFingerprint !== 'string' || !/^selection-v4-[0-9a-f]{32}$/.test(selectionFingerprint)) {
+        throw new Error('The current light-document selection is not a complete contiguous whole-block selection. Select complete document blocks, then read the selection again before preview.')
+      }
       const payload = { blocks: args.blocks, expectedSelectionFingerprint: selectionFingerprint }
       if (!validLightDocumentOperationPayload('selection_blocks_replace', payload)) throw new Error('The requested replacement blocks are invalid.')
-      // Re-inspect after selection.  The resulting resource identity is the
-      // write approval fence, so a navigation/content change cannot be hidden
-      // between preview and commit.
-      const inspectCorrelation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'inspect_write', operation: 'selection_blocks_replace', payload }
-      const inspected = await this.#requestExtension(inspectCorrelation)
-      if (!validOfficeDocumentReadResult(inspected.result) || inspected.result.resource.fingerprint !== selected.result.resource.fingerprint) throw new Error('The light document changed while preparing selected-content replacement.')
       const challenge = randomBytes(32).toString('base64url')
       for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
       if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
-      this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: inspected.result.resource, operation: 'selection_blocks_replace', payload, payloadHash: lightDocumentWriteHash('selection_blocks_replace', payload), idempotencyIdentity: flatSelectionReplaceIdentity(challenge), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-      const result = { runId, requestId: inspectCorrelation.requestId, generation: this.generation, browserTarget: inspected.browserTarget, action: 'selection_blocks_replace_preview', resource: inspected.result.resource, selection, blocks: args.blocks, challenge }
+      // Commit enters the normal write path, whose runtime re-reads both the
+      // resource and selection fingerprint immediately before mutation.
+      this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: selected.result.resource, operation: 'selection_blocks_replace', payload, payloadHash: lightDocumentWriteHash('selection_blocks_replace', payload), idempotencyIdentity: flatSelectionReplaceIdentity(challenge), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+      const result = { runId, requestId: selectionCorrelation.requestId, generation: this.generation, browserTarget: selected.browserTarget, action: 'selection_blocks_replace_preview', resource: selected.result.resource, selection, blocks: args.blocks, challenge }
       this.#reply(response, lightDocumentToolResponse(message.id, result))
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document selection preview failed')
@@ -2390,8 +2534,10 @@ export class BrowserConnector {
         for (const [key, grant] of this.teamKnowledgeItemChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeItemChallenges.delete(key)
         const challenge = randomBytes(32).toString('base64url')
         const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
-        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target: resolved.target, parent, kind: args.kind, name: args.name, contentHash, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', browserTarget: resolved.target, parent, kind: args.kind, name: args.name, contentHash, challenge }
+        const targetFingerprint = teamKnowledgeTargetFingerprint(resolved.target, parent, args.kind)
+        const idempotencyIdentity = `team-item:${hash(JSON.stringify({ targetFingerprint, contentHash })).slice(0, 48)}`
+        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { action: 'preview', browserTarget: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, challenge }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
         return
       }
@@ -2409,8 +2555,8 @@ export class BrowserConnector {
         this.#toolError(response, message.id, 'Team Knowledge approval challenge is missing, stale, or already used.'); return
       }
       const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
-      if (grant.kind !== args.kind || grant.name !== args.name || grant.contentHash !== contentHash) {
-        this.#toolError(response, message.id, 'Team Knowledge approval challenge conflicts with the confirmed kind, name, or body.'); return
+      if (grant.kind !== args.kind || grant.name !== args.name || grant.contentHash !== contentHash || grant.idempotencyIdentity !== args.idempotencyIdentity) {
+        this.#toolError(response, message.id, 'Team Knowledge approval challenge conflicts with the confirmed kind, name, body, or idempotency identity.'); return
       }
       const targetFingerprint = teamKnowledgeTargetFingerprint(grant.target, grant.parent, args.kind)
       const existing = await this.teamDocStore.load(args.idempotencyIdentity)
@@ -2467,14 +2613,14 @@ export class BrowserConnector {
         const batch = await this.teamKnowledgeBatchStore.load(args.batchId)
         if (!batch) throw new Error('team_knowledge_batch_not_found')
         if (batch.targetFingerprint !== teamKnowledgeTargetFingerprint(inspected.target, inspected.result.parent, 'light_document')) throw new Error('team_knowledge_batch_target_mismatch')
-        const result = { action: 'status', browserTarget: inspected.target, parent: inspected.result.parent, batch }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        const result = { action: 'status', browserTarget: inspected.target, parent: inspected.result.parent, batch: teamKnowledgeBatchView(batch) }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
         return
       }
       if (args.action === 'inspect_parent') {
         const inspected = await inspectParent()
         const result = { action: 'inspect_parent', browserTarget: inspected.target, parent: inspected.result.parent, capabilities: inspected.result.capabilities ?? {} }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
         return
       }
       const contentFingerprint = teamKnowledgeBatchFingerprint(args.items)
@@ -2487,22 +2633,22 @@ export class BrowserConnector {
           items: args.items.map((item, index) => ({ index, name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body), idempotencyIdentity: `team-batch:${hash(args.batchId).slice(0, 48)}:${String(index)}` })),
         })
         if (batch.status === 'completed') {
-          const result = { action: 'preview', status: 'already_completed', browserTarget: inspected.target, parent, batch }
-          this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+          const result = { action: 'preview', status: 'already_completed', browserTarget: inspected.target, parent, batch: teamKnowledgeBatchView(batch) }
+          this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
           return
         }
         for (const [key, grant] of this.teamKnowledgeBatchChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeBatchChallenges.delete(key)
         if (this.teamKnowledgeBatchChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.teamKnowledgeBatchChallenges.delete(this.teamKnowledgeBatchChallenges.keys().next().value)
         const challenge = randomBytes(32).toString('base64url')
         this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, batchId: args.batchId, contentFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { action: 'preview', status: batch.status, browserTarget: inspected.target, parent, batch, challenge }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        const result = { action: 'preview', status: batch.status, browserTarget: inspected.target, parent, batch: teamKnowledgeBatchView(batch), challenge }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
         return
       }
       const grant = this.teamKnowledgeBatchChallenges.get(args.challenge)
       this.teamKnowledgeBatchChallenges.delete(args.challenge)
       if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)
-        || grant.batchId !== args.batchId || grant.contentFingerprint !== contentFingerprint) throw new Error('Team Knowledge batch approval challenge is missing, stale, changed, or already used.')
+        || grant.batchId !== args.batchId || grant.contentFingerprint !== contentFingerprint) throw new Error('创建凭证无效、已过期或内容已变化。请重新预检，并原样使用预检结果中的创建凭证。')
       const inspected = await inspectParent()
       if (!sameBrowserTarget(inspected.target, grant.target)) throw new Error('Team Knowledge Browser Target changed after confirmation.')
       if (inspected.result.parent.fingerprint !== grant.parent.fingerprint) throw new Error('Team Knowledge parent changed after confirmation.')
@@ -2510,7 +2656,7 @@ export class BrowserConnector {
       const result = await this.#withTeamKnowledgeBatchLock(JSON.stringify([args.batchId, targetFingerprint]), async () => {
         let batch = await this.teamKnowledgeBatchStore.load(args.batchId)
         if (!batch || batch.targetFingerprint !== targetFingerprint || batch.contentFingerprint !== contentFingerprint) throw new Error('team_knowledge_batch_conflict')
-        for (const item of batch.items.filter((candidate) => candidate.status !== 'created')) {
+        for (const item of batch.items.filter((candidate) => candidate.status !== 'created' && (candidate.status !== 'failed' || teamKnowledgeBatchFailure(candidate)?.retryable === true))) {
           const document = args.items[item.index]
           const existing = await this.teamDocStore.load(item.idempotencyIdentity)
           if (existing && (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== item.contentHash || existing.kind !== 'light_document' || existing.name !== item.name)) {
@@ -2537,9 +2683,9 @@ export class BrowserConnector {
           }
         }
         batch = await this.teamKnowledgeBatchStore.load(args.batchId)
-        return { action: 'create', status: batch.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: grant.target, parent: grant.parent, batch }
+        return { action: 'create', status: batch.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: grant.target, parent: grant.parent, batch: teamKnowledgeBatchView(batch) }
       })
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch operation failed') }
   }
 
@@ -2721,8 +2867,25 @@ export class BrowserConnector {
     })
   }
 
+  #openJson(response) {
+    if (response.headersSent || response.writableEnded || response.destroyed) return
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' })
+  }
+
+  #keepJsonAlive(response, intervalMs = MCP_JSON_KEEPALIVE_INTERVAL_MS) {
+    this.#openJson(response)
+    if (!response.writableEnded && !response.destroyed) response.write('\n')
+    const timer = setInterval(() => {
+      if (response.writableEnded || response.destroyed) return
+      response.write('\n')
+    }, intervalMs)
+    timer.unref?.()
+    return { stop() { clearInterval(timer) } }
+  }
+
   #reply(response, body) {
-    response.writeHead(200, { 'content-type': 'application/json' })
+    if (response.writableEnded || response.destroyed) return
+    this.#openJson(response)
     response.end(JSON.stringify(body))
   }
 

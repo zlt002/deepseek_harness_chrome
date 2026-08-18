@@ -5,7 +5,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { BrowserConnector, knowledgeErrorChain, isRetryableKnowledgeTransport } from '../apps/native-server/src/connector.mjs'
+import { createServer } from 'node:http'
+import { BrowserConnector, knowledgeErrorChain, isRetryableKnowledgeTransport, knowledgeHttpsFetch } from '../apps/native-server/src/connector.mjs'
 import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
 
 async function callOfficeGetContext(endpoint, args = {}, id = 1) {
@@ -124,22 +125,23 @@ test('commits selected-content replacement from a challenge-only flat tool with 
   const movedTarget = { ...target, tabId: 72 }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
   const blocks = [{ type: 'h2', text: '优化结论' }, { type: 'p', text: '稳定正文' }]
-  let selectionFingerprint = 'selection-v3-1234abcd'; let writes = 0
+  let selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'; let writes = 0; const requests = []
   const connector = new BrowserConnector({
     officeDocumentWriteStore: new OfficeDocumentWriteRecordStore({ recordPath: join(tmpdir(), `dsh-flat-selection-${randomUUID()}.json`) }),
-    requestExtension: (request) => queueMicrotask(() => {
+    requestExtension: (request) => { requests.push(request); queueMicrotask(() => {
       if (request.action === 'write') {
         writes += 1
         if (request.payload.expectedSelectionFingerprint !== selectionFingerprint) return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, error: { code: 'fingerprint_mismatch', message: 'The light-document selection changed since preview' } })
         return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: ['优化结论', '稳定正文'], fragmentEvidence: [{ fragment: '优化结论', blockIds: ['one'] }, { fragment: '稳定正文', blockIds: ['two'] }], observedBlocks: [{ id: 'one', type: 'h2', text: '优化结论' }, { id: 'two', type: 'p', text: '稳定正文' }], replacedTagIds: ['old-one', 'old-two'] } } })
       }
-      const selection = { supported: true, stable: true, truncated: false, isCollapsed: false, selectionFingerprint, selectedTagIds: ['old-one', 'old-two'], content: { text: '原内容一 原内容二' } }
+      const selection = { supported: true, stable: true, truncated: false, hasSelection: true, wholeBlockReplaceable: true, isCollapsed: false, selectionFingerprint, selectedTagIds: ['old-one', 'old-two'], content: { text: '原内容一 原内容二' } }
       connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], ...(request.action === 'selection' ? { selection } : {}) } } })
-    }),
+    }) },
   })
   connector.bindBrowserTarget('flat-selection-run', target); const endpoint = await connector.start()
   try {
     const preview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks })
+    assert.deepEqual(requests.map((request) => request.action), ['selection'], 'preview must not perform a redundant inspect_write round trip')
     const challenge = preview.result.structuredContent.challenge
     const invalid = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge, idempotencyIdentity: 'model-must-not-control-this' }, 2)
     assert.equal(invalid.error.code, -32602)
@@ -151,11 +153,11 @@ test('commits selected-content replacement from a challenge-only flat tool with 
     assert.equal(replay.result.isError, true); assert.equal(writes, 1)
 
     const driftPreview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks }, 5)
-    selectionFingerprint = 'selection-v3-deadbeef'
+    selectionFingerprint = 'selection-v4-deadbeefdeadbeefdeadbeefdeadbeef'
     const drift = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge }, 6)
     assert.equal(drift.result.isError, true); assert.equal(writes, 2)
 
-    selectionFingerprint = 'selection-v3-1234abcd'
+    selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'
     const movedPreview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks }, 7)
     connector.bindBrowserTarget('flat-selection-run', movedTarget)
     const moved = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge }, 8)
@@ -310,6 +312,9 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     assert.equal(flatPreview.inputSchema.oneOf, undefined)
     assert.deepEqual(flatPreview.inputSchema.required, ['blocks'])
     assert.ok(Object.hasOwn(flatPreview.inputSchema.properties.blocks.items.properties, 'type'))
+    assert.deepEqual(flatPreview.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false })
+    const flatRead = tools.tools.find((tool) => tool.name === 'light_document_read')
+    assert.deepEqual(flatRead.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
     const spreadsheet = tools.tools.find((tool) => tool.name === 'office_spreadsheet')
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_zoom'))
     assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_freeze_panes'))
@@ -388,6 +393,30 @@ test('rejects a parent-session code_search call and names the remote-code wrappe
     assert.match(body.result.content[0].text, /search_selected_remote_code/)
     assert.match(body.result.content[0].text, /description and prompt/)
     assert.doesNotMatch(body.result.content[0].text, /Knowledge search is available only inside the continuable Knowledge subagent\.$/)
+  } finally { await connector.stop() }
+})
+
+test('knowledge tools/call writes headers and keep-alive bytes before the Extension finishes', async () => {
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      setTimeout(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+        result: { status: 'complete', answer: '事实', sources: [{ id: 'page-1', title: '来源' }] },
+      }), 80)
+    },
+  })
+  connector.registerRun('knowledge-keepalive-run')
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'code_search', arguments: { question: '直通宝司机怎么接单' }, _meta: { 'io.deepseek.harness/sessionId': 'child-1', 'io.deepseek.harness/parentSessionId': 'parent-1' } } }),
+    })
+    assert.equal(response.status, 200)
+    const text = await response.text()
+    assert.match(text, /^\n+\{/)
+    const body = JSON.parse(text)
+    assert.equal(body.result.structuredContent.answer, '事实')
   } finally { await connector.stop() }
 })
 
@@ -479,6 +508,27 @@ test('accepts a large enterprise SSO cookie header within the AccrUI 64KB bounda
   } finally { await connector.stop() }
 })
 
+test('knowledgeHttpsFetch keeps a quiet SSE body open when bodyTimeout is 0', async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' })
+    response.write('data: {"type":"log","message":"仓库精搜 开始"}\n\n')
+    setTimeout(() => {
+      response.write('data: {"delta":"事实"}\n\n')
+      response.end()
+    }, 350)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    const response = await knowledgeHttpsFetch(`http://127.0.0.1:${port}/api/rag/repo-search`, { method: 'POST', body: '{}' }, { connectTimeout: 1_000, headersTimeout: 1_000, bodyTimeout: 0 })
+    const text = await response.text()
+    assert.match(text, /仓库精搜 开始/)
+    assert.match(text, /事实/)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('knowledgeErrorChain keeps undici cause codes instead of a generic fetch failed', () => {
   const wrapped = new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNRESET 10.0.0.1:443'), { code: 'ECONNRESET' }) })
   assert.match(knowledgeErrorChain(wrapped), /fetch failed/)
@@ -501,6 +551,8 @@ test('retries a retryable knowledge-proxy handshake and surfaces the cause chain
   const endpoint = await connector.start()
   try {
     assert.equal(connector.server.requestTimeout, connector.knowledgeRequestTimeoutMs)
+    assert.equal(connector.knowledgeFetchOptions.bodyTimeout, 0)
+    assert.equal(connector.knowledgeFetchOptions.headersTimeout, connector.knowledgeRequestTimeoutMs)
     const response = await fetch(`${endpoint.url}/knowledge-proxy`, {
       method: 'POST',
       headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },

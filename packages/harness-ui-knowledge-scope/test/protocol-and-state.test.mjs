@@ -35,7 +35,7 @@ test('accepts only an exact parent, nonce, and increasing knowledge snapshot seq
 
 test('accepts bounded live search content only from the exact iframe parent', () => {
   const bridge = createScopeProtocol({ createStore: store, nonce: 'nonce', parentOrigin: 'chrome-extension://abc' }); const parent = {}
-  const progress = { requestId: 'request-1', harnessSessionId: 'child', harnessParentSessionId: 'parent', tool: 'code_search', question: 'where', phase: 'streaming', chars: 5, content: 'hello' }
+  const progress = { requestId: 'request-1', harnessSessionId: 'child', harnessParentSessionId: 'parent', tool: 'code_search', question: 'where', phase: 'streaming', chars: 5, content: 'hello', process: '正在检索仓库' }
   const message = { type: 'search-progress/v1', nonce: 'nonce', sequence: 1, progress }
   assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: message }, parent), true)
   assert.deepEqual(bridge.progress.value, [progress])
