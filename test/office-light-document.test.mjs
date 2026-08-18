@@ -388,21 +388,21 @@ test('flat selected-content replacement keeps blocks only in preview and fails c
     assert.equal(preview.result.structuredContent.action, 'selection_blocks_replace_preview')
     assert.deepEqual(preview.result.structuredContent.blocks, blocks)
     const challenge = preview.result.structuredContent.challenge
-    const commit = await call(endpoint, 'light_document_selection_replace_commit', { challenge, idempotencyIdentity: 'flat-selection-1' }, 2)
+    const commit = await call(endpoint, 'light_document_selection_replace_commit', { challenge }, 2)
     assert.equal(commit.result.structuredContent.status, 'verified_write')
     assert.equal(writes, 1)
-    const replay = await call(endpoint, 'light_document_selection_replace_commit', { challenge, idempotencyIdentity: 'flat-selection-1' }, 3)
+    const replay = await call(endpoint, 'light_document_selection_replace_commit', { challenge }, 3)
     assert.equal(replay.result.isError, true); assert.equal(writes, 1)
 
     const driftPreview = await call(endpoint, 'light_document_selection_replace_preview', { blocks }, 4)
     selectionFingerprint = 'selection-v3-deadbeef'
-    const drifted = await call(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge, idempotencyIdentity: 'flat-selection-drift' }, 5)
+    const drifted = await call(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge }, 5)
     assert.equal(drifted.result.isError, true); assert.equal(writes, 2)
 
     selectionFingerprint = 'selection-v3-1234abcd'
     const movedPreview = await call(endpoint, 'light_document_selection_replace_preview', { blocks }, 6)
     connector.bindBrowserTarget('flat-selection-run', movedTarget)
-    const moved = await call(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge, idempotencyIdentity: 'flat-selection-target' }, 7)
+    const moved = await call(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge }, 7)
     assert.equal(moved.result.isError, true); assert.equal(writes, 2)
   } finally { await connector.stop() }
 })

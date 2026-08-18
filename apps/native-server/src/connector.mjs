@@ -1443,6 +1443,65 @@ const KNOWLEDGE_PROXY_PATH = '/knowledge-proxy'
 const KNOWLEDGE_MAX_COOKIE_HEADER_LENGTH = 64_000
 const KNOWLEDGE_ALLOWED_GET_PATHS = new Set(['/api/auth/me', '/api/tags/controlled-vocabulary', '/api/domains', '/api/domains/systems', '/api/repos'])
 const KNOWLEDGE_ALLOWED_POST_PATHS = new Set(['/api/rag/retrieval', '/api/rag/repo-search'])
+const KNOWLEDGE_TRANSPORT_RETRY_LIMIT = 2
+const KNOWLEDGE_TRANSPORT_RETRY_DELAY_MS = 250
+const RETRYABLE_KNOWLEDGE_TRANSPORT_CODES = new Set([
+  'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+])
+
+/** Render a thrown value with its cause chain so undici's `fetch failed` stays diagnostic. */
+export function knowledgeErrorChain(value) {
+  const path = new Set()
+  const render = (current) => {
+    if (path.has(current)) return '<circular cause>'
+    path.add(current)
+    try {
+      if (!(current instanceof Error)) {
+        if (typeof current === 'object' && current !== null) {
+          const message = typeof current.message === 'string' ? current.message : undefined
+          const code = typeof current.code === 'string' ? current.code : undefined
+          if (message && code && !message.includes(code)) return `${message}: ${code}`
+          if (message) return message
+          if (code) return code
+          try { return JSON.stringify(current) } catch { return Object.prototype.toString.call(current) }
+        }
+        return String(current)
+      }
+      const code = typeof current.code === 'string' ? current.code : undefined
+      let text = current.message || current.name
+      if (code && !text.includes(code)) text = `${text}: ${code}`
+      if (current.cause !== undefined) {
+        const cause = render(current.cause)
+        if (cause && cause !== text && !text.includes(cause)) text = `${text}: ${cause}`
+      }
+      return text
+    } finally {
+      path.delete(current)
+    }
+  }
+  return render(value)
+}
+
+function knowledgeTransportCode(value) {
+  let current = value
+  for (let depth = 0; depth < 6 && current; depth += 1) {
+    if (typeof current === 'object' && typeof current.code === 'string' && current.code.length > 0) return current.code
+    current = typeof current === 'object' && current !== null ? current.cause : undefined
+  }
+  return undefined
+}
+
+export function isRetryableKnowledgeTransport(error) {
+  const code = knowledgeTransportCode(error)
+  if (code !== undefined && RETRYABLE_KNOWLEDGE_TRANSPORT_CODES.has(code)) return true
+  const text = knowledgeErrorChain(error)
+  return /fetch failed|socket hang up|network error|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|other side closed/i.test(text)
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 function validKnowledgeProxyRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -1518,6 +1577,11 @@ export class BrowserConnector {
     this.server = createServer((request, response) => {
       void this.#handle(request, response)
     })
+    // Node's default requestTimeout is 300s and would cut a long RAG stream
+    // before the product-owned knowledgeRequestTimeoutMs (30 minutes).
+    this.server.requestTimeout = this.knowledgeRequestTimeoutMs
+    this.server.headersTimeout = this.knowledgeRequestTimeoutMs
+    this.server.keepAliveTimeout = 60_000
     return new Promise((resolve, reject) => {
       this.server.once('error', reject)
       this.server.listen(0, '127.0.0.1', () => {
@@ -1891,13 +1955,28 @@ export class BrowserConnector {
     const timeout = setTimeout(() => controller.abort(), message.method === 'GET' ? this.knowledgeCatalogTimeoutMs : this.knowledgeRequestTimeoutMs)
     try {
       const target = new URL(message.path, `${KNOWLEDGE_API_ORIGIN}${KNOWLEDGE_API_PREFIX}/`)
-      const upstream = await this.fetch(target, {
+      const init = {
         method: message.method,
         headers: knowledgeProxyHeaders(message.headers, message.cookie),
         redirect: 'follow',
         signal: controller.signal,
         ...(message.method === 'POST' ? { body: message.body ?? '' } : {}),
-      })
+      }
+      let lastError
+      let upstream
+      for (let attempt = 0; attempt <= KNOWLEDGE_TRANSPORT_RETRY_LIMIT; attempt += 1) {
+        try {
+          upstream = await this.fetch(target, init)
+          lastError = undefined
+          break
+        } catch (error) {
+          lastError = error
+          const aborted = controller.signal.aborted
+          if (aborted || !isRetryableKnowledgeTransport(error) || attempt === KNOWLEDGE_TRANSPORT_RETRY_LIMIT) throw error
+          await delay(KNOWLEDGE_TRANSPORT_RETRY_DELAY_MS * (attempt + 1))
+        }
+      }
+      if (upstream === undefined) throw lastError ?? new Error('knowledge_proxy_unreachable')
       // Undici has already decoded the upstream body. Forwarding the original
       // content-encoding would make Chrome decode the same bytes a second time.
       const responseHeaders = Object.fromEntries([...upstream.headers].filter(([name]) => !['connection', 'content-encoding', 'content-length', 'transfer-encoding'].includes(name.toLowerCase())))
@@ -1912,7 +1991,7 @@ export class BrowserConnector {
     } catch (error) {
       if (controller.signal.aborted && (request.aborted || response.destroyed)) return
       if (!response.headersSent) response.writeHead(502)
-      if (!response.destroyed) response.end(`Knowledge proxy failed: ${error instanceof Error ? error.message : String(error)}`)
+      if (!response.destroyed) response.end(`Knowledge proxy failed: ${knowledgeErrorChain(error)}`)
     } finally {
       clearTimeout(timeout)
       request.off('aborted', abortUpstream)
@@ -1976,7 +2055,7 @@ export class BrowserConnector {
       const result = await this.#requestExtension(correlation, response, this.knowledgeRequestTimeoutMs)
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) {
-      this.#toolError(response, message.id, error instanceof Error ? error.message : 'Knowledge Platform request failed')
+      this.#toolError(response, message.id, knowledgeErrorChain(error))
     }
   }
 
@@ -2050,10 +2129,10 @@ export class BrowserConnector {
     if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
     if (name === 'light_document_selection_replace_commit') {
       const grant = this.officeDocumentChallenges.get(args.challenge)
-      if (!grant || grant.flatSelectionReplace !== true || !grant.payload) { this.#toolError(response, message.id, 'Selected-content approval challenge is missing, stale, or not issued by preview.'); return }
+      if (!grant || grant.flatSelectionReplace !== true || !grant.payload || typeof grant.idempotencyIdentity !== 'string') { this.#toolError(response, message.id, 'Selected-content approval challenge is missing, stale, or not issued by preview.'); return }
       // Do not permit any raw action, operation, target, or body to enter this
       // endpoint.  Commit reconstitutes exactly what preview approved.
-      await this.#officeDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: args.idempotencyIdentity, operation: 'selection_blocks_replace', payload: grant.payload } } }, response)
+      await this.#officeDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: 'selection_blocks_replace', payload: grant.payload } } }, response)
       return
     }
     const selectionCorrelation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'selection' }
@@ -2074,7 +2153,7 @@ export class BrowserConnector {
       const challenge = randomBytes(32).toString('base64url')
       for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
       if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
-      this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: inspected.result.resource, operation: 'selection_blocks_replace', payload, payloadHash: lightDocumentWriteHash('selection_blocks_replace', payload), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+      this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: inspected.result.resource, operation: 'selection_blocks_replace', payload, payloadHash: lightDocumentWriteHash('selection_blocks_replace', payload), idempotencyIdentity: flatSelectionReplaceIdentity(challenge), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
       const result = { runId, requestId: inspectCorrelation.requestId, generation: this.generation, browserTarget: inspected.browserTarget, action: 'selection_blocks_replace_preview', resource: inspected.result.resource, selection, blocks: args.blocks, challenge }
       this.#reply(response, lightDocumentToolResponse(message.id, result))
     } catch (error) {

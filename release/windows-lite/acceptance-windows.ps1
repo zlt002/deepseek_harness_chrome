@@ -103,6 +103,13 @@ try {
       Assert-Equal $manifest.path (Join-Path $installRoot 'runtime\run_native_host.bat') 'Native Messaging launcher path mismatch.'
     }
   }
+  $productSkill = Join-Path $installRoot 'runtime\skills\pmd-prd\SKILL.md'
+  if (-not (Test-Path -LiteralPath $productSkill -PathType Leaf)) { throw "Product skill is missing: $productSkill" }
+  $skillBody = Get-Content -LiteralPath $productSkill -Raw
+  if ($skillBody -notmatch 'Harness Workspace 是唯一用户界面') { throw 'Installed /pmd-prd is not the product-owned skill.' }
+  if ($skillBody -match 'pmd-workspace|clarification\.md') { throw 'Installed /pmd-prd looks like the legacy Claude skill.' }
+  $launcher = Get-Content -LiteralPath (Join-Path $installRoot 'runtime\run_native_host.bat') -Raw
+  if ($launcher -notmatch 'DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills') { throw 'Native Host launcher does not pin DSH_PRODUCT_SKILLS_ROOT to the packaged skills root.' }
   Invoke-NativeMessageSmoke
   Invoke-ProductUiSmoke
   Invoke-DirectoryPickerSmoke

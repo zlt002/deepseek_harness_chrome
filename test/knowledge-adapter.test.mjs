@@ -7,12 +7,12 @@ async function adapter() {
   const background = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const end = background.indexOf('\nconst NATIVE_HOST_NAME')
   assert.notEqual(end, -1, 'knowledge adapter source block must remain before background bootstrap')
-  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk }\n`
+  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
 }
 
-test('SSE parser buffers split lines and completion requires both done and [DONE]', async () => {
+test('SSE parser buffers split lines and a finished stream with done or [DONE] is complete', async () => {
   const { consumeSseChunk, executeKnowledgeQuery } = await adapter()
   const first = consumeSseChunk('', 'data: {"delta":"hel')
   assert.deepEqual(first.events, [])
@@ -147,4 +147,99 @@ test('knowledge search rejects a code-only scope before requesting the platform'
     executeKnowledgeQuery('knowledge', 'question', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal),
     { message: 'knowledge_scope_requires_domain' },
   )
+})
+
+test('errorChain keeps undici cause codes instead of [object Object]', async () => {
+  const { errorChain, isRetryableKnowledgeTransport } = await adapter()
+  const wrapped = new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNRESET 10.0.0.1:443'), { code: 'ECONNRESET' }) })
+  assert.match(errorChain(wrapped), /fetch failed/)
+  assert.match(errorChain(wrapped), /ECONNRESET/)
+  assert.equal(isRetryableKnowledgeTransport(wrapped), true)
+  assert.equal(errorChain({ message: 'upstream', code: 'ETIMEDOUT' }), 'upstream: ETIMEDOUT')
+})
+
+test('an interrupted SSE stream with answer text is a partial Sourced Answer', async () => {
+  const { executeKnowledgeQuery } = await adapter()
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"delta":"已检索到订单接口"}\n\n'))
+      controller.close()
+    },
+  }), { status: 200 })
+  try {
+    const value = await executeKnowledgeQuery('knowledge', 'question', { domainId: 'domain', systemIds: ['system'], repositoryIds: [] }, undefined, new AbortController().signal)
+    assert.equal(value.result.status, 'partial')
+    assert.equal(value.result.answer, '已检索到订单接口')
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('a finished stream that only emits [DONE] after answer text is complete', async () => {
+  const { executeKnowledgeQuery } = await adapter()
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"delta":"完整答案"}\n\ndata: [DONE]\n\n'))
+      controller.close()
+    },
+  }), { status: 200 })
+  try {
+    const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal)
+    assert.equal(value.result.status, 'complete')
+    assert.equal(value.result.answer, '完整答案')
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('empty incomplete SSE still fails closed', async () => {
+  const { executeKnowledgeQuery } = await adapter()
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.close() } }), { status: 200 })
+  try {
+    await assert.rejects(
+      executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal),
+      { message: 'knowledge_platform_incomplete_sse' },
+    )
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('catalog cache reuses a fresh vocabulary without a second network round trip', async () => {
+  const { loadKnowledgeCatalog, resetKnowledgeCatalogCache } = await adapter()
+  resetKnowledgeCatalogCache()
+  const previousFetch = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = async (url) => {
+    calls += 1
+    const value = String(url)
+    if (value.endsWith('/api/auth/me')) return new Response(JSON.stringify({ data: { id: 'current-user' } }), { status: 200 })
+    if (value.endsWith('/api/tags/controlled-vocabulary')) return new Response(JSON.stringify({ data: [{ id: 'domain', name: '领域', systems: [{ id: 'system', name: '系统' }] }] }), { status: 200 })
+    if (value.endsWith('/api/repos')) return new Response(JSON.stringify({ data: [{ id: 'repo', name: '代码库' }] }), { status: 200 })
+    throw new Error(`unexpected request: ${value}`)
+  }
+  try {
+    const first = await loadKnowledgeCatalog()
+    const second = await loadKnowledgeCatalog()
+    assert.deepEqual(first.domains, [{ id: 'domain', name: '领域' }])
+    assert.equal(second, first)
+    assert.equal(calls, 3)
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('knowledgeFetch falls back to Chrome when the native proxy reports a transport failure', async () => {
+  const { knowledgeFetch, setKnowledgeProxyConfig } = await adapter()
+  setKnowledgeProxyConfig({ url: 'http://127.0.0.1:9/knowledge-proxy', token: 't'.repeat(32) })
+  const previousFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    const value = String(url)
+    seen.push(value)
+    if (value.includes('/knowledge-proxy')) return new Response('Knowledge proxy failed: fetch failed: ECONNRESET', { status: 502 })
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const response = await knowledgeFetch('https://anapi-uat.annto.com/api-sse-kd/api/repos')
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { ok: true })
+    assert.equal(seen.some((url) => url.includes('/knowledge-proxy')), true)
+    assert.equal(seen.some((url) => url.endsWith('/api/repos')), true)
+  } finally { globalThis.fetch = previousFetch }
 })

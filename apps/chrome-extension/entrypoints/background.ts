@@ -3,6 +3,9 @@
 const KNOWLEDGE_API_ORIGIN = 'https://anapi-uat.annto.com'
 const KNOWLEDGE_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-kd`
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
+const KNOWLEDGE_CATALOG_CACHE_TTL_MS = 5 * 60_000
+const KNOWLEDGE_TRANSPORT_RETRY_LIMIT = 2
+const KNOWLEDGE_TRANSPORT_RETRY_DELAY_MS = 250
 const KNOWLEDGE_SCOPE_STORAGE_KEY = 'harnessKnowledgeScopesV1'
 const KNOWLEDGE_SESSION_STORAGE_KEY = 'harnessKnowledgeSessionsV1'
 const KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY = 'harnessKnowledgeEnabledPreferenceV1'
@@ -26,6 +29,56 @@ function validKnowledgeProxyConfig(url: unknown, token: unknown): url is string 
   if (typeof url !== 'string' || typeof token !== 'string' || token.length < 32) return false
   try { const parsed = new URL(url); return parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.port !== '' && parsed.pathname === '/knowledge-proxy' } catch { return false }
 }
+function errorChain(value: unknown): string {
+  const path = new Set<unknown>()
+  const render = (current: unknown): string => {
+    if (path.has(current)) return '<circular cause>'
+    path.add(current)
+    try {
+      if (!(current instanceof Error)) {
+        if (typeof current === 'object' && current !== null) {
+          const record = current as { message?: unknown; code?: unknown }
+          const message = typeof record.message === 'string' ? record.message : undefined
+          const code = typeof record.code === 'string' ? record.code : undefined
+          if (message && code && !message.includes(code)) return `${message}: ${code}`
+          if (message) return message
+          if (code) return code
+          try { return JSON.stringify(current) } catch { return Object.prototype.toString.call(current) }
+        }
+        return String(current)
+      }
+      const code = typeof (current as Error & { code?: unknown }).code === 'string' ? (current as Error & { code: string }).code : undefined
+      let text = current.message || current.name
+      if (code && !text.includes(code)) text = `${text}: ${code}`
+      if (current.cause !== undefined) {
+        const cause = render(current.cause)
+        if (cause && cause !== text && !text.includes(cause)) text = `${text}: ${cause}`
+      }
+      return text
+    } finally { path.delete(current) }
+  }
+  return render(value)
+}
+function knowledgeTransportCode(value: unknown): string | undefined {
+  let current: unknown = value
+  for (let depth = 0; depth < 6 && current; depth += 1) {
+    if (typeof current === 'object' && current !== null && typeof (current as { code?: unknown }).code === 'string') {
+      const code = (current as { code: string }).code
+      if (code.length > 0) return code
+    }
+    current = typeof current === 'object' && current !== null ? (current as { cause?: unknown }).cause : undefined
+  }
+  return undefined
+}
+function isRetryableKnowledgeTransport(error: unknown): boolean {
+  const code = knowledgeTransportCode(error)
+  if (code !== undefined && /^(ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT)$/.test(code)) return true
+  return /fetch failed|Failed to fetch|NetworkError|socket hang up|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|other side closed/i.test(errorChain(error))
+}
+function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)) }
+function proxyFailureText(status: number, text: string): boolean {
+  return status === 502 && /Knowledge proxy failed|fetch failed|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|UND_ERR_/i.test(text)
+}
 async function knowledgeCookieHeader(): Promise<string> {
   if (typeof chrome === 'undefined' || chrome.cookies?.getAll === undefined) return ''
   const now = Date.now() / 1000
@@ -34,20 +87,43 @@ async function knowledgeCookieHeader(): Promise<string> {
     .sort((left, right) => (right.path?.length ?? 0) - (left.path?.length ?? 0))
     .map((cookie) => `${cookie.name}=${cookie.value}`).join('; ')
 }
+async function fetchWithRetry(input: string, init: RequestInit = {}): Promise<Response> {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= KNOWLEDGE_TRANSPORT_RETRY_LIMIT; attempt += 1) {
+    try { return await fetch(input, init) } catch (error) {
+      lastError = error
+      if (init.signal?.aborted || !isRetryableKnowledgeTransport(error) || attempt === KNOWLEDGE_TRANSPORT_RETRY_LIMIT) {
+        throw new Error(errorChain(error), { cause: error instanceof Error ? error : undefined })
+      }
+      await delay(KNOWLEDGE_TRANSPORT_RETRY_DELAY_MS * (attempt + 1))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(errorChain(lastError))
+}
 async function knowledgeFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const proxy = knowledgeProxyConfig
-  if (proxy === undefined) return fetch(input, init)
+  if (proxy === undefined) return fetchWithRetry(input, init)
   const target = new URL(input)
   if (target.origin !== new URL(KNOWLEDGE_BASE_URL).origin || !target.pathname.startsWith('/api-sse-kd/api/')) throw new Error('knowledge_proxy_target_rejected')
   const headers = new Headers(init.headers); headers.delete('cookie'); headers.delete('authorization')
   const cookie = await knowledgeCookieHeader()
-  const response = await fetch(proxy.url, {
+  const proxyInit: RequestInit = {
     method: 'POST',
     headers: { authorization: `Bearer ${proxy.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ path: `${target.pathname}${target.search}`, method: init.method ?? 'GET', headers: [...headers], ...(typeof init.body === 'string' ? { body: init.body } : {}), cookie }),
     signal: init.signal,
-  })
-  return response
+  }
+  try {
+    const response = await fetchWithRetry(proxy.url, proxyInit)
+    if (response.ok) return response
+    const preview = await response.clone().text()
+    if (proxyFailureText(response.status, preview)) return fetchWithRetry(input, init)
+    return response
+  } catch (error) {
+    if (init.signal?.aborted) throw error
+    if (!isRetryableKnowledgeTransport(error) && !/Knowledge proxy failed|fetch failed|Failed to fetch/i.test(errorChain(error))) throw error
+    return fetchWithRetry(input, init)
+  }
 }
 async function knowledgeJson(path: string): Promise<unknown> {
   const controller = new AbortController()
@@ -57,7 +133,7 @@ async function knowledgeJson(path: string): Promise<unknown> {
     response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}${path}`, { credentials: 'include', signal: controller.signal })
   } catch (error) {
     if (controller.signal.aborted) throw new Error('knowledge_catalog_timeout')
-    throw error
+    throw new Error(errorChain(error), { cause: error instanceof Error ? error : undefined })
   } finally {
     clearTimeout(timeout)
   }
@@ -99,7 +175,10 @@ function controlledVocabulary(value: unknown): { domains: Array<{ id: string; na
   }
   return domains.length > 0 ? { domains, systems } : undefined
 }
+let knowledgeCatalogCache: { at: number; domainId: string; value: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> } } | undefined
 async function loadKnowledgeCatalog(domainId?: string): Promise<{ domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> }> {
+  const cacheKey = domainId ?? ''
+  if (knowledgeCatalogCache !== undefined && knowledgeCatalogCache.domainId === cacheKey && Date.now() - knowledgeCatalogCache.at < KNOWLEDGE_CATALOG_CACHE_TTL_MS) return knowledgeCatalogCache.value
   await assertKnowledgeAuthenticated()
   const [vocabularyResult, reposResult] = await Promise.allSettled([
     knowledgeJson('/api/tags/controlled-vocabulary'),
@@ -128,10 +207,16 @@ async function loadKnowledgeCatalog(domainId?: string): Promise<{ domains: Array
     return [{ id, name: field(item, 'name') ?? id, ...(domainId === undefined ? {} : { domainId }), ...(systemId === undefined ? {} : { systemId }), ...(type === undefined ? {} : { type }) }]
   })
   const repositories = reposResult.status === 'fulfilled' ? repositoriesFrom(reposResult.value) : []
-  if (domainId === undefined) return { domains, systems: vocabulary?.systems ?? [], repositories }
+  if (domainId === undefined) {
+    const value = { domains, systems: vocabulary?.systems ?? [], repositories }
+    knowledgeCatalogCache = { at: Date.now(), domainId: cacheKey, value }
+    return value
+  }
   const rawSystems = vocabulary === undefined ? await knowledgeJson(`/api/domains/systems?domain=${encodeURIComponent(domainId)}`).catch(() => undefined) : undefined
   const systems = vocabulary?.systems.filter((item) => item.domainId === domainId) ?? payloadArray(rawSystems).flatMap((item): Array<{ id: string; name: string; domainId?: string }> => { const id = field(item, 'id'); const name = field(item, 'name'); const itemDomain = field(item, 'domain') ?? domainId; return id === undefined || name === undefined ? [] : [{ id, name, ...(itemDomain === undefined ? {} : { domainId: itemDomain }) }] })
-  return { domains, systems, repositories }
+  const value = { domains, systems, repositories }
+  knowledgeCatalogCache = { at: Date.now(), domainId: cacheKey, value }
+  return value
 }
 function sseEvents(buffer: string, chunk: string): { events: string[]; remainder: string } { const parts = `${buffer}${chunk}`.replace(/\r\n/g, '\n').split('\n\n'); const remainder = parts.pop() ?? ''; return { events: parts.map((part) => part.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')).filter(Boolean), remainder } }
 function mergeStreamText(current: string, incoming: string): string {
@@ -161,10 +246,13 @@ async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scop
   const body = kind === 'knowledge' ? { question: directedQuestion, domain_system_config: { [scope.domainId]: { self: false, systems: scope.systemIds } }, forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question: directedQuestion, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
   const response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(body), signal })
   if (!response.ok || response.body === null) throw new Error(`knowledge_platform_http_${response.status}`)
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let visualContent = ''; let sources: Array<{ id: string; title: string }> = []; let sessionId: string | undefined; let done = false; let marker = false
-  try { while (true) { const read = await reader.read(); if (read.done) break; const parsed = sseEvents(buffer, decoder.decode(read.value, { stream: true })); buffer = parsed.remainder; for (const event of parsed.events) { if (event === '[DONE]') { marker = true; continue }; let payload: Record<string, unknown>; try { payload = JSON.parse(event) as Record<string, unknown> } catch { continue }; if (payload.type === 'error') throw new Error(typeof payload.error === 'string' ? payload.error : 'knowledge_platform_error'); if (typeof payload.delta === 'string' && isAnswerDelta(payload)) { answer = mergeStreamText(answer, payload.delta); visualContent = answer; onProgress?.({ chars: visualContent.length, content: visualContent, eventType: typeof payload.type === 'string' ? payload.type : undefined }) } else if (visualContent === '' && typeof payload.type === 'string' && payload.type !== 'done' && payload.type !== 'citations') onProgress?.({ chars: 0, content: '', eventType: payload.type }); if (payload.type === 'citations' || payload.type === 'done') sources = (Array.isArray(payload.citations) ? payload.citations : []).flatMap((item): Array<{ id: string; title: string }> => { const id = field(item, 'page_id') ?? field(item, 'id'); const title = field(item, 'page_title') ?? field(item, 'title'); return id === undefined || title === undefined ? [] : [{ id, title }] }).slice(0, 20); if (payload.type === 'done') { done = true; sessionId = typeof payload.session_id === 'string' ? payload.session_id : sessionId } } } } finally { reader.releaseLock() }
-  if (!done || !marker) throw new Error('knowledge_platform_incomplete_sse')
-  return { result: { status: answer.length >= 16_000 ? 'truncated' : 'complete', answer, sources }, ...(sessionId === undefined ? {} : { sessionId }) }
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let visualContent = ''; let sources: Array<{ id: string; title: string }> = []; let sessionId: string | undefined; let done = false; let marker = false; let stop = false
+  try { while (!stop) { const read = await reader.read(); if (read.done) break; const parsed = sseEvents(buffer, decoder.decode(read.value, { stream: true })); buffer = parsed.remainder; for (const event of parsed.events) { if (event === '[DONE]') { marker = true; continue }; let payload: Record<string, unknown>; try { payload = JSON.parse(event) as Record<string, unknown> } catch { continue }; if (payload.type === 'error') { if (answer.length > 0) { stop = true; break } throw new Error(typeof payload.error === 'string' ? payload.error : 'knowledge_platform_error') }; if (typeof payload.delta === 'string' && isAnswerDelta(payload)) { answer = mergeStreamText(answer, payload.delta); visualContent = answer; onProgress?.({ chars: visualContent.length, content: visualContent, eventType: typeof payload.type === 'string' ? payload.type : undefined }) } else if (visualContent === '' && typeof payload.type === 'string' && payload.type !== 'done' && payload.type !== 'citations') onProgress?.({ chars: 0, content: '', eventType: payload.type }); if (payload.type === 'citations' || payload.type === 'done') sources = (Array.isArray(payload.citations) ? payload.citations : []).flatMap((item): Array<{ id: string; title: string }> => { const id = field(item, 'page_id') ?? field(item, 'id'); const title = field(item, 'page_title') ?? field(item, 'title') ?? id; return id === undefined ? [] : [{ id, title: title ?? id }] }).slice(0, 20); if (payload.type === 'done') { done = true; sessionId = typeof payload.session_id === 'string' ? payload.session_id : sessionId } } } } catch (error) {
+    if (answer.length === 0) throw new Error(errorChain(error), { cause: error instanceof Error ? error : undefined })
+  } finally { reader.releaseLock() }
+  if (answer.length === 0 && !done && !marker) throw new Error('knowledge_platform_incomplete_sse')
+  const complete = (done || marker) && answer.length < 16_000
+  return { result: { status: answer.length >= 16_000 ? 'truncated' : complete ? 'complete' : 'partial', answer, sources }, ...(sessionId === undefined ? {} : { sessionId }) }
 }
 function selectedScopeNames(ids: string[], entries: Array<{ id: string; name: string }>, fallbackToId = false): string[] {
   const byId = new Map(entries.map((entry) => [entry.id, entry.name]))
@@ -256,7 +344,7 @@ let settingsMutation: Promise<void> = Promise.resolve()
 let nativeLifecycle: Promise<void> = Promise.resolve()
 
 function asError(value: unknown): string {
-  return value instanceof Error ? value.message : String(value)
+  return errorChain(value)
 }
 
 interface BrowserTarget {
@@ -1045,6 +1133,9 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     chrome.runtime.sendMessage(snapshot, () => { void chrome.runtime.lastError })
   }
   broadcast('querying')
+  const keepAlive = typeof chrome !== 'undefined' && chrome.runtime?.getPlatformInfo !== undefined
+    ? setInterval(() => { void chrome.runtime.getPlatformInfo(() => { void chrome.runtime.lastError }) }, 20_000)
+    : undefined
   try {
     const record = await resolveKnowledgeScopeRecord(request)
     if (record === undefined) throw new Error('knowledge_scope_missing')
@@ -1066,6 +1157,7 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     broadcast('error')
     port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: asError(error) })
   } finally {
+    if (keepAlive !== undefined) clearInterval(keepAlive)
     activeKnowledgeQueries.delete(request.requestId)
   }
 }
@@ -2844,6 +2936,9 @@ export default defineBackground(() => {
       const sessionId = request.sessionId
       void (async () => {
         if (knowledgeProxyConfig === undefined) await startHarnessForSettings()
+        if (request.action === 'login' || request.action === 'retry') {
+          knowledgeCatalogCache = undefined
+        }
         if (request.action === 'login') {
           await chrome.tabs.create({ url: KNOWLEDGE_LOGIN_URL, active: true })
         }

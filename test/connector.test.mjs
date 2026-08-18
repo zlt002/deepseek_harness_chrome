@@ -2,7 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
+import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { BrowserConnector, knowledgeErrorChain, isRetryableKnowledgeTransport } from '../apps/native-server/src/connector.mjs'
+import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
 
 async function callOfficeGetContext(endpoint, args = {}, id = 1) {
   const response = await fetch(`${endpoint.url}/mcp`, {
@@ -17,6 +21,15 @@ async function callOfficeGetContext(endpoint, args = {}, id = 1) {
       method: 'tools/call',
       params: { name: 'office_get_context', arguments: args },
     }),
+  })
+  assert.equal(response.status, 200)
+  return response.json()
+}
+
+async function callTool(endpoint, name, arguments_, id = 1) {
+  const response = await fetch(`${endpoint.url}/mcp`, {
+    method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_ } }),
   })
   assert.equal(response.status, 200)
   return response.json()
@@ -104,6 +117,50 @@ test('publishes office_get_context and correlates a simulated extension response
   } finally {
     await connector.stop()
   }
+})
+
+test('commits selected-content replacement from a challenge-only flat tool with an internal write fence', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 71, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/71?id=71' }
+  const movedTarget = { ...target, tabId: 72 }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
+  const blocks = [{ type: 'h2', text: '优化结论' }, { type: 'p', text: '稳定正文' }]
+  let selectionFingerprint = 'selection-v3-1234abcd'; let writes = 0
+  const connector = new BrowserConnector({
+    officeDocumentWriteStore: new OfficeDocumentWriteRecordStore({ recordPath: join(tmpdir(), `dsh-flat-selection-${randomUUID()}.json`) }),
+    requestExtension: (request) => queueMicrotask(() => {
+      if (request.action === 'write') {
+        writes += 1
+        if (request.payload.expectedSelectionFingerprint !== selectionFingerprint) return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, error: { code: 'fingerprint_mismatch', message: 'The light-document selection changed since preview' } })
+        return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: ['优化结论', '稳定正文'], fragmentEvidence: [{ fragment: '优化结论', blockIds: ['one'] }, { fragment: '稳定正文', blockIds: ['two'] }], observedBlocks: [{ id: 'one', type: 'h2', text: '优化结论' }, { id: 'two', type: 'p', text: '稳定正文' }], replacedTagIds: ['old-one', 'old-two'] } } })
+      }
+      const selection = { supported: true, stable: true, truncated: false, isCollapsed: false, selectionFingerprint, selectedTagIds: ['old-one', 'old-two'], content: { text: '原内容一 原内容二' } }
+      connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], ...(request.action === 'selection' ? { selection } : {}) } } })
+    }),
+  })
+  connector.bindBrowserTarget('flat-selection-run', target); const endpoint = await connector.start()
+  try {
+    const preview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks })
+    const challenge = preview.result.structuredContent.challenge
+    const invalid = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge, idempotencyIdentity: 'model-must-not-control-this' }, 2)
+    assert.equal(invalid.error.code, -32602)
+    const committed = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge }, 3)
+    assert.equal(committed.result.structuredContent.status, 'verified_write')
+    assert.equal(writes, 1)
+    assert.equal([...connector.officeDocumentWrites.keys()].every((identity) => /^flat-selection:[0-9a-f]{48}$/.test(identity)), true)
+    const replay = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge }, 4)
+    assert.equal(replay.result.isError, true); assert.equal(writes, 1)
+
+    const driftPreview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks }, 5)
+    selectionFingerprint = 'selection-v3-deadbeef'
+    const drift = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge }, 6)
+    assert.equal(drift.result.isError, true); assert.equal(writes, 2)
+
+    selectionFingerprint = 'selection-v3-1234abcd'
+    const movedPreview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks }, 7)
+    connector.bindBrowserTarget('flat-selection-run', movedTarget)
+    const moved = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge }, 8)
+    assert.equal(moved.result.isError, true); assert.equal(writes, 2)
+  } finally { await connector.stop() }
 })
 
 test('surfaces the probed WebEdit document identity so the model can route tools', async () => {
@@ -245,8 +302,10 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     const teamKnowledgeSpreadsheetCreate = tools.tools.find((tool) => tool.name === 'team_knowledge_spreadsheet_create')
     assert.deepEqual(teamKnowledgeSpreadsheetCreate.inputSchema.required, ['challenge', 'idempotencyIdentity', 'name', 'body'])
     const flatCommit = tools.tools.find((tool) => tool.name === 'light_document_selection_replace_commit')
-    assert.deepEqual(flatCommit.inputSchema.required, ['challenge', 'idempotencyIdentity'])
+    assert.deepEqual(flatCommit.inputSchema.required, ['challenge'])
     assert.equal(Object.hasOwn(flatCommit.inputSchema.properties, 'blocks'), false)
+    assert.equal(Object.hasOwn(flatCommit.inputSchema.properties, 'idempotencyIdentity'), false)
+    assert.match(flatCommit.description, /do not retry through office_document or blocks_batch_edit/)
     const flatPreview = tools.tools.find((tool) => tool.name === 'light_document_selection_replace_preview')
     assert.equal(flatPreview.inputSchema.oneOf, undefined)
     assert.deepEqual(flatPreview.inputSchema.required, ['blocks'])
@@ -417,6 +476,59 @@ test('accepts a large enterprise SSO cookie header within the AccrUI 64KB bounda
     })
     assert.equal(response.status, 200)
     assert.equal(upstreamCalls.length, 1)
+  } finally { await connector.stop() }
+})
+
+test('knowledgeErrorChain keeps undici cause codes instead of a generic fetch failed', () => {
+  const wrapped = new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNRESET 10.0.0.1:443'), { code: 'ECONNRESET' }) })
+  assert.match(knowledgeErrorChain(wrapped), /fetch failed/)
+  assert.match(knowledgeErrorChain(wrapped), /ECONNRESET/)
+  assert.equal(isRetryableKnowledgeTransport(wrapped), true)
+})
+
+test('retries a retryable knowledge-proxy handshake and surfaces the cause chain', async () => {
+  let attempts = 0
+  const connector = new BrowserConnector({
+    requestExtension: () => {},
+    fetch: async () => {
+      attempts += 1
+      if (attempts < 3) {
+        throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) })
+      }
+      return new Response(JSON.stringify({ data: { id: 'current-user' } }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const endpoint = await connector.start()
+  try {
+    assert.equal(connector.server.requestTimeout, connector.knowledgeRequestTimeoutMs)
+    const response = await fetch(`${endpoint.url}/knowledge-proxy`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/api-sse-kd/api/auth/me', method: 'GET', cookie: 'session=browser-only' }),
+    })
+    assert.equal(response.status, 200)
+    assert.equal(attempts, 3)
+  } finally { await connector.stop() }
+})
+
+test('knowledge-proxy 502 includes the undici cause instead of a bare fetch failed', async () => {
+  const connector = new BrowserConnector({
+    requestExtension: () => {},
+    fetch: async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED 10.0.0.1:443'), { code: 'ECONNREFUSED' }) })
+    },
+  })
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/knowledge-proxy`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/api-sse-kd/api/auth/me', method: 'GET', cookie: '' }),
+    })
+    assert.equal(response.status, 502)
+    const text = await response.text()
+    assert.match(text, /Knowledge proxy failed/)
+    assert.match(text, /ECONNREFUSED/)
   } finally { await connector.stop() }
 })
 

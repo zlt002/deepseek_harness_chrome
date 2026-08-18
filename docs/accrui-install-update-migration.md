@@ -80,9 +80,13 @@ accr-ui-windows-lite-x64/
 ├── install.vbs       双击入口；CI 时切换为无界面入口
 ├── install-ui.ps1    可视化安装壳
 ├── install.ps1       安装、升级、数据保留、注册和回滚核心
-├── payload.zip       扩展和静态 Harness Runtime
+├── payload.zip       扩展、静态 Harness Runtime、产品插件和产品 skills
 └── README.zh-CN.md
 ```
+
+`payload.zip` 内的 `runtime/skills/pmd-prd` 是内置 `/pmd-prd`。安装后由
+`runtime/run_native_host.bat` 的 `DSH_PRODUCT_SKILLS_ROOT` 指向它，避免用户
+`%USERPROFILE%\.claude\skills` 里的同名旧 skill 成为唯一来源。
 
 `install-ui.ps1` 已迁入以下体验：
 
