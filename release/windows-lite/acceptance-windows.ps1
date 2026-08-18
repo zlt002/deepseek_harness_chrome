@@ -70,12 +70,16 @@ function Invoke-InstallerUiSmoke {
   }
 }
 
-function Start-InstalledRuntimeLockHolder {
+function Start-NativeHostRespawnSupervisor {
   $readyPath = Join-Path $env:RUNNER_TEMP 'accrui-harness-runtime-lock-ready.txt'
-  $scriptPath = Join-Path $installRoot 'runtime\installer-lock-holder.ps1'
+  $suspendedPath = Join-Path $env:RUNNER_TEMP 'accrui-harness-native-registration-suspended.txt'
+  $lockScriptPath = Join-Path $acceptanceRoot 'installer-lock-holder.ps1'
+  $supervisorScriptPath = Join-Path $acceptanceRoot 'native-host-respawn-supervisor.ps1'
+  $configPath = Join-Path $acceptanceRoot 'native-host-respawn-config.json'
   $targetPath = Join-Path $installRoot 'runtime\harness\apps\cli\lib\server.mjs'
   Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
-  $source = @'
+  Remove-Item -LiteralPath $suspendedPath -Force -ErrorAction SilentlyContinue
+  $lockSource = @'
 param([string]$TargetPath, [string]$ReadyPath)
 $handle = [System.IO.File]::Open($TargetPath, 'Open', 'Read', 'None')
 try {
@@ -85,19 +89,55 @@ try {
   $handle.Dispose()
 }
 '@
-  [System.IO.File]::WriteAllText($scriptPath, $source, [System.Text.UTF8Encoding]::new($true))
-  $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $scriptPath + '"'), '-TargetPath', ('"' + $targetPath + '"'), '-ReadyPath', ('"' + $readyPath + '"'))
+  $supervisorSource = @'
+param([string]$ConfigPath)
+$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+$child = $null
+try {
+  while ($true) {
+    if (-not (Test-Path -LiteralPath $config.RegistryKey)) {
+      [System.IO.File]::WriteAllText($config.SuspendedPath, 'suspended', [System.Text.UTF8Encoding]::new($false))
+      break
+    }
+    if ($null -eq $child -or $child.HasExited) {
+      $arguments = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $config.LockScriptPath + '"'),
+        '-TargetPath', ('"' + $config.TargetPath + '"'), '-ReadyPath', ('"' + $config.ReadyPath + '"')
+      )
+      $child = Start-Process -FilePath powershell.exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    }
+    Start-Sleep -Milliseconds 50
+    $child.Refresh()
+  }
+} finally {
+  if ($null -ne $child) {
+    $child.Refresh()
+    if (-not $child.HasExited) { & taskkill.exe /PID $child.Id /T /F | Out-Null }
+  }
+}
+'@
+  [System.IO.File]::WriteAllText($lockScriptPath, $lockSource, [System.Text.UTF8Encoding]::new($true))
+  [System.IO.File]::WriteAllText($supervisorScriptPath, $supervisorSource, [System.Text.UTF8Encoding]::new($true))
+  $config = @{
+    RegistryKey = (Join-Path $registryRoots[0] $nativeHostNames[0])
+    TargetPath = $targetPath
+    ReadyPath = $readyPath
+    SuspendedPath = $suspendedPath
+    LockScriptPath = $lockScriptPath
+  }
+  [System.IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json), [System.Text.UTF8Encoding]::new($false))
+  $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $supervisorScriptPath + '"'), '-ConfigPath', ('"' + $configPath + '"'))
   $process = Start-Process -FilePath powershell.exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
   $deadline = [DateTime]::UtcNow.AddSeconds(10)
   while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf) -and -not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 100
     $process.Refresh()
   }
-  if (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) { throw 'Failed to start the installed runtime lock holder.' }
-  return $process
+  if (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) { throw 'Failed to start the Native Host respawn supervisor.' }
+  return @{ Process = $process; SuspendedPath = $suspendedPath }
 }
 
-$lockProcess = $null
+$respawnSupervisor = $null
 try {
   if (Test-Path -LiteralPath $acceptanceRoot) { Remove-Item -LiteralPath $acceptanceRoot -Recurse -Force }
   New-Item -ItemType Directory -Path $seedRoot -Force | Out-Null
@@ -118,8 +158,10 @@ try {
     Set-Content -LiteralPath $sentinel -Value 'preserve-me' -NoNewline
   }
 
+  & (Join-Path $installRoot 'runtime\register-native-host.ps1') -InstallRoot $installRoot
+
   Invoke-InstallerUiSmoke
-  $lockProcess = Start-InstalledRuntimeLockHolder
+  $respawnSupervisor = Start-NativeHostRespawnSupervisor
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
   $vbsOutput = & cscript.exe //NoLogo $installLauncher 2>&1
   $vbsExitCode = $LASTEXITCODE
@@ -136,9 +178,10 @@ try {
     }
     throw "VBS installer failed with exit code $vbsExitCode."
   }
-  $lockProcess.Refresh()
-  if (-not $lockProcess.HasExited) { throw 'Old installed runtime lock holder was not stopped before upgrade.' }
-  Write-Host 'Old installed runtime lock holder was stopped before upgrade.'
+  $respawnSupervisor.Process.Refresh()
+  if (-not $respawnSupervisor.Process.HasExited) { throw 'Native Host respawn supervisor did not stop after registration was suspended.' }
+  if (-not (Test-Path -LiteralPath $respawnSupervisor.SuspendedPath -PathType Leaf)) { throw 'Installer never suspended Native Messaging registration during upgrade.' }
+  Write-Host 'Browser-style Native Host respawn stopped after registration was suspended.'
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Upgrade did not install the candidate.'
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) '1.1.62' 'Previous version was not retained for rollback.'
   foreach ($relativePath in @('workspace\user.txt', 'logs\user.txt', '.webmcp\user.txt')) {
@@ -179,9 +222,9 @@ try {
   Invoke-ProductUiSmoke
   Write-Host 'Windows install, Native Messaging, upgrade, rollback, and restore acceptance passed.'
 } finally {
-  if ($null -ne $lockProcess) {
-    $lockProcess.Refresh()
-    if (-not $lockProcess.HasExited) { & taskkill.exe /PID $lockProcess.Id /T /F | Out-Null }
+  if ($null -ne $respawnSupervisor) {
+    $respawnSupervisor.Process.Refresh()
+    if (-not $respawnSupervisor.Process.HasExited) { & taskkill.exe /PID $respawnSupervisor.Process.Id /T /F | Out-Null }
   }
   foreach ($registryRoot in $registryRoots) {
     foreach ($nativeHostName in $nativeHostNames) {

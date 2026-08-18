@@ -396,8 +396,19 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     if (!installer.includes('Register-ReleaseTree $installRoot') || !installer.includes('-lt 22')) {
       errors.push('install.ps1 does not validate Node 22+ and register the installed release tree')
     }
-    if (installer.includes('NativeMessagingHosts')) {
-      errors.push('install.ps1 must not duplicate Native Messaging registration logic')
+    for (const requiredText of [
+      'function Suspend-NativeHostRegistration',
+      'function Complete-NativeHostRegistrationTransition',
+      'NativeMessagingHosts',
+      'Stop-Process -Id $processId -Force',
+    ]) {
+      if (!installer.includes(requiredText)) errors.push(`install.ps1 is missing safe Native Host upgrade behavior: ${requiredText}`)
+    }
+    if (!/Suspend-NativeHostRegistration[\s\S]*Stop-InstalledProductProcesses \$installRoot[\s\S]*Move-ManagedTree \$installRoot \$previousRoot/.test(installer)) {
+      errors.push('install.ps1 must suspend browser Native Host restarts before stopping and replacing the old runtime')
+    }
+    if (!/Register-ReleaseTree \$installRoot[\s\S]*Complete-NativeHostRegistrationTransition/.test(installer)) {
+      errors.push('install.ps1 must complete the Native Host transition only after registering the selected release')
     }
     if (installer.includes('Remove-Item -LiteralPath $installRoot -Recurse -Force')) {
       errors.push('install.ps1 must preserve the install root user data')

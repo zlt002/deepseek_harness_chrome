@@ -25,6 +25,13 @@ if ($installRoot.TrimEnd('\') -eq $installRootDrive.TrimEnd('\')) { throw '安�
 $rollbackRoot = Join-Path $installRoot 'rollback'
 $managedNames = @('extension', 'runtime', 'release.json')
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+$nativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
+$nativeHostRegistryRoots = @(
+  'HKCU:\Software\Google\Chrome\NativeMessagingHosts',
+  'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts'
+)
+$script:suspendedNativeHostRegistrations = @()
+$script:nativeHostRegistrationSuspended = $false
 
 function Write-InstallProgress([int]$Percent, [string]$State, [string]$Detail = '') {
   if ([string]::IsNullOrWhiteSpace($ProgressPath)) { return }
@@ -36,8 +43,47 @@ function Write-InstallProgress([int]$Percent, [string]$State, [string]$Detail = 
   )
 }
 
+function Suspend-NativeHostRegistration {
+  if ($script:nativeHostRegistrationSuspended) { return }
+  $captured = @()
+  foreach ($registryRoot in $nativeHostRegistryRoots) {
+    foreach ($nativeHostName in $nativeHostNames) {
+      $key = Join-Path $registryRoot $nativeHostName
+      if (-not (Test-Path -LiteralPath $key)) { continue }
+      $captured += [pscustomobject]@{
+        Path = $key
+        Value = (Get-Item -LiteralPath $key).GetValue('')
+      }
+      Remove-Item -LiteralPath $key -Recurse -Force
+    }
+  }
+  $script:suspendedNativeHostRegistrations = $captured
+  $script:nativeHostRegistrationSuspended = $true
+  Write-Host '已暂停 Chrome 和 Edge 自动重启旧 Harness UI。'
+}
+
+function Restore-SuspendedNativeHostRegistration {
+  if (-not $script:nativeHostRegistrationSuspended) { return }
+  foreach ($registration in $script:suspendedNativeHostRegistrations) {
+    New-Item -Path $registration.Path -Force | Out-Null
+    Set-Item -Path $registration.Path -Value $registration.Value
+  }
+  $script:suspendedNativeHostRegistrations = @()
+  $script:nativeHostRegistrationSuspended = $false
+}
+
+function Complete-NativeHostRegistrationTransition {
+  $script:suspendedNativeHostRegistrations = @()
+  $script:nativeHostRegistrationSuspended = $false
+}
+
 trap {
   $errorText = ($_ | Out-String).Trim()
+  try {
+    Restore-SuspendedNativeHostRegistration
+  } catch {
+    $errorText += "`n恢复 Native Messaging 注册失败：$($_.Exception.Message)"
+  }
   $message = "Harness UI 安装失败：$errorText"
   [System.IO.File]::WriteAllText($installLog, $message + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
   Write-InstallProgress 0 'error' $errorText
@@ -81,6 +127,11 @@ function Stop-InstalledProductProcesses([string]$Root) {
   $roots = @($processes | Where-Object { $ids -notcontains [int]$_.ParentProcessId })
   foreach ($process in $roots) {
     & taskkill.exe /PID $process.ProcessId /T /F 2>$null | Out-Null
+  }
+  foreach ($processId in $ids) {
+    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+      Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    }
   }
   $deadline = [DateTime]::UtcNow.AddSeconds(8)
   do {
@@ -142,11 +193,13 @@ function Restore-Rollback {
     try {
       Register-ReleaseTree $installRoot
       Write-ProductState $installRoot
+      Complete-NativeHostRegistrationTransition
     } catch {
       Move-ManagedTree $installRoot $rollbackRoot
       Move-ManagedTree $swapRoot $installRoot
       Register-ReleaseTree $installRoot
       Write-ProductState $installRoot
+      Complete-NativeHostRegistrationTransition
       throw
     }
     Move-ManagedTree $swapRoot $rollbackRoot
@@ -158,6 +211,7 @@ function Restore-Rollback {
 
 if ($Rollback) {
   Write-InstallProgress 10 'rollback' '正在回滚到上一版本...'
+  Suspend-NativeHostRegistration
   Stop-InstalledProductProcesses $installRoot
   Restore-Rollback
   Write-InstallProgress 100 'complete' '回滚完成。'
@@ -183,6 +237,7 @@ try {
   Assert-ReleaseTree $stagingRoot | Out-Null
   Write-InstallProgress 65 'configuring' '正在保存现有版本并安装新版本...'
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+  Suspend-NativeHostRegistration
   Stop-InstalledProductProcesses $installRoot
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
   Move-ManagedTree $installRoot $previousRoot
@@ -198,6 +253,7 @@ try {
     Write-InstallProgress 90 'registering' '正在注册 Chrome 和 Edge Native Messaging...'
     Register-ReleaseTree $installRoot
     Write-ProductState $installRoot
+    Complete-NativeHostRegistrationTransition
   } catch {
     foreach ($name in $managedNames) {
       $failedPath = Join-Path $installRoot $name
@@ -207,6 +263,7 @@ try {
     if (Test-Path -LiteralPath (Join-Path $installRoot 'runtime\register-native-host.ps1')) {
       Register-ReleaseTree $installRoot
       Write-ProductState $installRoot
+      Complete-NativeHostRegistrationTransition
     }
     throw
   }
