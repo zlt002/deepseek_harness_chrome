@@ -110,6 +110,8 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
     state.phase === 'ready'
     && (state.current === undefined || state.byId[state.current]?.blank === true))
   const currentSessionId = useSessions(state => state.current)
+  const blankSession = useSessions(state =>
+    state.current === undefined || state.byId[state.current]?.blank === true)
   const quickActions = useQuickActions(actions => actions)
   const onboardingStep = onboardingActive
     ? onboardingSteps.find(step => !completedOnboarding.has(step.id))
@@ -127,7 +129,8 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
     if (currentSessionId !== undefined) void action.run(currentSessionId)
     closeQuick()
   }, [closeQuick, currentSessionId])
-  const compactQuickActions = quickActions.filter(action => action.id !== 'conversation')
+  const compactQuickActions = quickActions.filter(action =>
+    action.id !== 'conversation' && !(blankSession && action.id === 'trajectory'))
 
   useEffect(() => {
     if (!quickOpen) return

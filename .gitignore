@@ -9,6 +9,7 @@ packages/*/*.tsbuildinfo
 .generated/
 coverage/
 *.log
+.dsh-uploads/
 apps/chrome-extension/public/assets/
 apps/chrome-extension/public/plugins/
 apps/chrome-extension/public/harness/

@@ -13,6 +13,8 @@ test('responsive sidebar uses the public compact presentation seam without ownin
   ])
   assert.match(manifest, /@accrui\/harness-ui-responsive-sidebar/)
   assert.match(source, /sidebar\.compact\.presentation/)
+  assert.match(source, /settingsQuickActions/)
+  assert.match(source, /conversationViewState/)
   assert.match(
     source,
     /name:\s*'sidebar\.compact\.presentation'[\s\S]*?select:\s*owner\s*=>\s*owner[\s\S]*?ResponsiveSidebarPresentation/,
@@ -22,8 +24,14 @@ test('responsive sidebar uses the public compact presentation seam without ownin
   assert.match(presentation, /owner\.renderSettings\(\)/)
   assert.match(presentation, /owner\.renderDetailActions\(\)/)
   assert.match(presentation, /owner\.startSession\(\)/)
-  assert.doesNotMatch(presentation, /useSessions|useView|Controller|upstream\/deepseek-harness/)
+  assert.match(presentation, /data-testid="compact-detail-back"/)
+  assert.match(presentation, /IconChevronLeftOutline14/)
+  assert.match(presentation, /detail\.back\.conversation/)
+  assert.match(presentation, /detail\.back\.parent/)
+  assert.doesNotMatch(presentation, /useSessions|Controller|upstream\/deepseek-harness/)
   assert.match(styles, /flex: 0 0 50%/)
+  assert.match(styles, /\.detailLead/)
+  assert.match(styles, /\.back\s*\{/)
   assert.match(
     styles,
     /\.settings\s*\{\s*flex:\s*none;\s*\}/,

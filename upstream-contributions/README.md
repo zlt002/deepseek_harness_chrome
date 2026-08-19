@@ -22,6 +22,19 @@ fiber, and adds a runtime-context regression test for describe and mutate.
 `0005` invalidates the browser Skill catalog when an exposed settings document
 changes, without naming or depending on the AccrUI settings owner.
 
+`0014` exposes the existing pi-ai model `input` field as a per-row checkbox on
+the Models settings card. Checking it writes `input: [text, image]`; clearing
+it omits `input` so the adapter keeps its catalog-then-text fallback.
+
+`0015` lets an optional `composerFileIntake` service accept the non-image
+remainder of composer paste or drop. The official image rail still admits only
+PNG, JPEG, WebP, and GIF; without the service a non-image keeps the existing
+unsupported-type notice.
+
+`0016` keeps the composer-above strip mounted when a composer-chain takeover
+replaces the input card, and lets the generic question card collapse to its
+title row.
+
 Verify against the pinned upstream commit:
 
 ```sh

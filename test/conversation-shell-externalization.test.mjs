@@ -27,3 +27,11 @@ test('Composer and transcript retain separate layout responsibilities', async ()
   assert.match(generic, /data-composer-overlay-surface/)
   assert.match(generic, /conversationViewState/)
 })
+
+test('composer takeover hides only the input card and can collapse the question', async () => {
+  const seam = await text('../upstream-contributions/0016-composer-takeover-keeps-above-strip.patch')
+  assert.match(seam, /fallback: inputBar/)
+  assert.match(seam, /data-composer-stack/)
+  assert.match(seam, /data-question-collapsed/)
+  assert.doesNotMatch(seam, /AccrUI|accrui|选择代码库|选择知识范围/)
+})

@@ -67,12 +67,12 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
       'mcp__chrome__light_document_selection_read',
       'mcp__chrome__light_document_selection_replace_commit',
       'mcp__chrome__light_document_selection_replace_preview',
+      'mcp__chrome__list_work_tabs',
       'mcp__chrome__office_document',
-      'mcp__chrome__office_get_context',
       'mcp__chrome__office_read_range',
       'mcp__chrome__office_spreadsheet',
       'mcp__chrome__office_write_range',
-      'mcp__chrome__pmd_prd_delivery',
+      'mcp__chrome__read_work_tab',
       'mcp__chrome__selected_source_scope',
       'mcp__chrome__team_knowledge_batch_create',
       'mcp__chrome__team_knowledge_batch_preview',
@@ -84,7 +84,7 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
       callId: 'dsh-mcp-client-test',
-      name: 'mcp__chrome__office_get_context',
+      name: 'mcp__chrome__list_work_tabs',
       arguments: {},
     })
     assert.equal(result.isError, false)
@@ -124,7 +124,7 @@ test('the product MCP adapter keeps search tools private on clean official Harne
       },
     })
 
-    assert.equal(ctx.tools.get('mcp__chrome__office_get_context') !== undefined, true)
+    assert.equal(ctx.tools.get('mcp__chrome__list_work_tabs') !== undefined, true)
     assert.equal(ctx.tools.get('mcp__chrome__code_search'), undefined)
     assert.equal(ctx.tools.get('mcp__chrome__knowledge_search'), undefined)
     assert.equal(typeof installContinuableChild, 'function')
@@ -170,7 +170,7 @@ test('a real DSH Web profile loads, discovers, and executes its generated Connec
   assert.notEqual(typeof reporterAddress, 'string')
   const patchDir = await mkdtemp(`${tmpdir()}/deepseek-harness-profile-probe-`)
   const patchPath = resolve(patchDir, 'profile-probe.cordis.yml')
-  await writeFile(patchPath, `- insert:\n    - id: profile-tool-probe\n      name: '${pathToFileURL(resolve('test/fixtures/profile-tool-probe.mjs')).href}'\n      config:\n        toolName: mcp__chrome__office_get_context\n        resultUrl: 'http://127.0.0.1:${String(reporterAddress.port)}'\n`)
+  await writeFile(patchPath, `- insert:\n    - id: profile-tool-probe\n      name: '${pathToFileURL(resolve('test/fixtures/profile-tool-probe.mjs')).href}'\n      config:\n        toolName: mcp__chrome__list_work_tabs\n        resultUrl: 'http://127.0.0.1:${String(reporterAddress.port)}'\n`)
   const connector = respondingConnector(browserTarget, {
     onToolsListed: () => listed.resolve(),
   })

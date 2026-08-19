@@ -2,12 +2,39 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createScopeProtocol, knowledgeScopeBridgeConfig } from '../src/client/protocol.js'
 import { scopeLabels } from '../src/client/labels.js'
+import { selectKnowledgeDomain, selectKnowledgeSystem } from '../src/client/selection.js'
 
 function store(initial) { return { value: initial, set(value) { this.value = value } } }
 const snapshot = { sessionId: 'session-1', enabled: true, serviceState: 'ready', scope: { domainId: 'd', systemIds: ['s1', 's2'], repositoryIds: ['r1', 'r2'] }, catalog: { domains: [{ id: 'd', name: '供应链' }], systems: [{ id: 's1', name: '订单知识库' }, { id: 's2', name: '结算知识库' }], repositories: [{ id: 'r1', name: 'OTP-后端-中台' }, { id: 'r2', name: 'OTP-前端-1' }] } }
 
 test('preserves all selected repository and knowledge names for wide composer layouts', () => {
   assert.deepEqual(scopeLabels(snapshot.scope, snapshot.catalog), { repositories: 'OTP-后端-中台、OTP-前端-1', knowledge: '订单知识库、结算知识库' })
+})
+
+test('checking a child system selects its parent domain without a prior parent click', () => {
+  const empty = { domainId: '', systemIds: [], repositoryIds: ['repo'] }
+  assert.deepEqual(selectKnowledgeSystem(empty, 'transport', 'tms', true), {
+    domainId: 'transport', systemIds: ['tms'], repositoryIds: ['repo'],
+  })
+  assert.deepEqual(selectKnowledgeSystem({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'transport', 'oms', true), {
+    domainId: 'transport', systemIds: ['tms', 'oms'], repositoryIds: [],
+  })
+  assert.deepEqual(selectKnowledgeSystem({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'warehouse', 'wms', true), {
+    domainId: 'warehouse', systemIds: ['wms'], repositoryIds: [],
+  })
+  assert.deepEqual(selectKnowledgeSystem({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'transport', 'tms', false), {
+    domainId: '', systemIds: [], repositoryIds: [],
+  })
+})
+
+test('checking a parent domain selects every child system and unchecking clears it', () => {
+  const empty = { domainId: '', systemIds: [], repositoryIds: [] }
+  assert.deepEqual(selectKnowledgeDomain(empty, 'transport', ['tms', 'oms'], true), {
+    domainId: 'transport', systemIds: ['tms', 'oms'], repositoryIds: [],
+  })
+  assert.deepEqual(selectKnowledgeDomain({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'transport', ['tms', 'oms'], false), {
+    domainId: '', systemIds: [], repositoryIds: [],
+  })
 })
 
 test('keeps unselected composer buttons as empty labels so agents do not probe either side', () => {

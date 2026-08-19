@@ -124,6 +124,12 @@ test('installs the native host into a stable macOS location', async () => {
     assert.match(installedSkillSource, /Harness Workspace 是唯一用户界面/)
     assert.match(installedSkillSource, /自动生成内部 `requirementId`/)
     assert.doesNotMatch(installedSkillSource, /pmd-workspace|clarification\.md/)
+    for (const officeSkill of ['pptx', 'xlsx', 'docx', 'pdf']) {
+      const officeSkillPath = join(installRoot, `skills/${officeSkill}/SKILL.md`)
+      await stat(officeSkillPath)
+      assert.match(await readFile(officeSkillPath, 'utf8'), new RegExp(`name:\\s*${officeSkill}`))
+    }
+    await stat(join(nativeServer, 'src/product-office-skills.mjs'))
 
     const manifests = await Promise.all(manifestPaths.map(async (manifestPath) => JSON.parse(await readFile(manifestPath, 'utf8'))))
     for (const manifest of manifests) {

@@ -22,8 +22,8 @@ function displayName(tab: BrowserTargetTab | undefined): string {
 }
 
 function selectedTabs(snapshot: BrowserTargetSnapshot): BrowserTargetTab[] {
-  const ids = new Set(snapshot.settings.pinnedTabs.map(tab => tab.tabId))
-  return snapshot.tabs.filter(tab => ids.has(tab.tabId))
+  const byId = new Map(snapshot.tabs.map(tab => [tab.tabId, tab]))
+  return snapshot.settings.pinnedTabs.map(pin => byId.get(pin.tabId) ?? { ...pin, title: pin.url })
 }
 
 function triggerTab(snapshot: BrowserTargetSnapshot): BrowserTargetTab | undefined {
@@ -35,7 +35,7 @@ function triggerTab(snapshot: BrowserTargetSnapshot): BrowserTargetTab | undefin
 function selectionCount(snapshot: BrowserTargetSnapshot): number {
   if (snapshot.settings.mode === 'follow-active-tab') return snapshot.activeTab === undefined ? 0 : 1
   if (snapshot.settings.mode === 'none') return 0
-  return selectedTabs(snapshot).length
+  return snapshot.settings.pinnedTabs.length
 }
 
 function TabIcon({ tab }: { tab: BrowserTargetTab }) {
@@ -76,11 +76,11 @@ function BrowserTargetPanelBody({ useBrowserTarget, onBrowserTargetCommand }: Pa
     <div className={css.panelHeader}><strong>工作目标上下文</strong><button type="button" className={css.refresh} onClick={() => onBrowserTargetCommand({ command: 'refresh' })}>刷新</button></div>
     <div className={css.modes} role="radiogroup" aria-label="工作目标模式">{(Object.entries(MODE_LABELS) as Array<[BrowserTargetSnapshot['settings']['mode'], string]>).map(([mode, label]) => <button key={mode} type="button" role="radio" aria-checked={snapshot.settings.mode === mode} className={snapshot.settings.mode === mode ? css.modeActive : css.mode} onClick={() => onBrowserTargetCommand({ command: 'set-mode', mode })}>{label}</button>)}</div>
     <div className={css.panelSubhead}><span>当前窗口标签页</span><span>{pinned ? `已选 ${count} 个` : MODE_LABELS[snapshot.settings.mode]}</span></div>
-    <div className={css.tabList}>{snapshot.tabs.map(tab => {
+    <div className={css.tabList}>{(pinned ? [...snapshot.tabs, ...selectedTabs(snapshot).filter(tab => !snapshot.tabs.some(item => item.tabId === tab.tabId))] : snapshot.tabs).map(tab => {
       const selected = selectedIds.has(tab.tabId); const primary = snapshot.settings.primaryTabId === tab.tabId
       return <div className={`${css.tabRow} ${selected ? css.tabRowSelected : ''}`} key={tab.tabId}><input id={`browser-target-tab-${tab.tabId}`} type="checkbox" checked={selected} disabled={!pinned} onChange={event => onBrowserTargetCommand({ command: 'toggle-pinned-tab', tabId: tab.tabId, checked: event.target.checked })} /><label className={css.tabLabel} htmlFor={`browser-target-tab-${tab.tabId}`}><TabIcon tab={tab} /><span className={css.tabCopy}><b>{displayName(tab)}</b><small>{tab.url}</small></span></label>{selected && <button type="button" className={primary ? css.primaryActive : css.primary} disabled={primary} onClick={() => onBrowserTargetCommand({ command: 'set-primary', tabId: tab.tabId })}>{primary ? '主目标' : '设为主目标'}</button>}</div>
-    })}{snapshot.tabs.length === 0 && <p className={css.empty}>没有可选择的标签页。</p>}</div>
-    <p className={css.note}>{pinned ? '固定模式会在下一次浏览器读取中提供全部勾选标签页；主目标用于默认页面和未来写操作。' : snapshot.settings.mode === 'none' ? '下一次浏览器工具调用会明确提示已关闭浏览器能力。' : '跟随模式会在下一次浏览器读取时使用当前标签页。'}</p>
+    })}{snapshot.tabs.length === 0 && (!pinned || snapshot.settings.pinnedTabs.length === 0) && <p className={css.empty}>没有可选择的标签页。</p>}</div>
+    <p className={css.note}>{pinned ? '固定的是勾选的浏览器标签，不是当时的网址。同一标签换了文档时，下一次读取会跟最新内容；关掉标签才失效。主目标用于默认页面和未来写操作。' : snapshot.settings.mode === 'none' ? '下一次浏览器工具调用会明确提示已关闭浏览器能力。' : '跟随模式会在下一次浏览器读取时使用当前标签页。'}</p>
     {snapshot.error !== undefined && <p className={css.error} role="alert">{snapshot.error}</p>}
   </div>
 }

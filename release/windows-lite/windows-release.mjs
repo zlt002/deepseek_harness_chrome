@@ -230,7 +230,7 @@ function startVbs() {
 }
 
 function releaseReadme(version) {
-  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- Harness 核心为静态 JavaScript bundle，不包含 \`runtime/harness/node_modules\`。\n- 内置 skill 在 \`runtime/skills\`，启动器通过 \`DSH_PRODUCT_SKILLS_ROOT\` 挂载；同名时产品 \`/pmd-prd\` 优先于 \`%USERPROFILE%\\.claude\\skills\\pmd-prd\`。\n- 原生 Windows 文件仅在 \`runtime/native\`；用户后安装的插件写入 \`%APPDATA%\\accr-ui-harness\\profile\`，升级主程序不会删除。\n- 在 \`runtime\` 目录可执行 \`dsh-plugin.bat add <插件包名>\` 安装兼容插件，无需重新发布主包。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
+  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- Harness 核心为静态 JavaScript bundle，不包含 \`runtime/harness/node_modules\`。\n- 内置 skill 在 \`runtime/skills\`，启动器通过 \`DSH_PRODUCT_SKILLS_ROOT\` 挂载；产品 \`/pmd-prd\`、\`/pptx\`、\`/xlsx\`、\`/docx\`、\`/pdf\` 优先于 \`%USERPROFILE%\\.claude\\skills\` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。\n- 原生 Windows 文件仅在 \`runtime/native\`；用户后安装的插件写入 \`%APPDATA%\\accr-ui-harness\\profile\`，升级主程序不会删除。\n- 在 \`runtime\` 目录可执行 \`dsh-plugin.bat add <插件包名>\` 安装兼容插件，无需重新发布主包。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
 }
 
 function runZip(cwd, outputPath, input) {
@@ -329,8 +329,15 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     `runtime/${NATIVE_HOST_NAME}.json`,
     `runtime/${LEGACY_NATIVE_HOST_NAME}.json`,
   ]
-  const productSkillEntry = 'runtime/skills/pmd-prd/SKILL.md'
-  const requiredPayloadEntries = [manifestEntry, runtimeCliEntry, nativeLauncherEntry, registerNativeHostEntry, startEntry, productSkillEntry, ...nativeManifestEntries]
+  const productSkillEntries = [
+    'runtime/skills/pmd-prd/SKILL.md',
+    'runtime/skills/pptx/SKILL.md',
+    'runtime/skills/xlsx/SKILL.md',
+    'runtime/skills/docx/SKILL.md',
+    'runtime/skills/pdf/SKILL.md',
+    'runtime/native-server/product-office-skills.mjs',
+  ]
+  const requiredPayloadEntries = [manifestEntry, runtimeCliEntry, nativeLauncherEntry, registerNativeHostEntry, startEntry, ...productSkillEntries, ...nativeManifestEntries]
   let payloadEntries = []
   if (existsSync(payloadZipPath)) {
     payloadEntries = normalizedArchiveEntries(payloadZipPath, requiredPayloadEntries)
@@ -503,10 +510,15 @@ export async function buildWindowsRelease({
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-subagent-compact'), path.join(runtimeDir, 'product-plugins', 'harness-ui-subagent-compact'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-session-log-copy'), path.join(runtimeDir, 'product-plugins', 'harness-ui-session-log-copy'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-settings-shell'), path.join(runtimeDir, 'product-plugins', 'harness-ui-settings-shell'))
+  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-document-intake'), path.join(runtimeDir, 'product-plugins', 'harness-ui-document-intake'))
   await copyDereferenced(path.join(projectRoot, 'packages', 'harness-skill-settings'), path.join(runtimeDir, 'product-plugins', 'harness-skill-settings'))
   await copyDereferenced(path.join(projectRoot, 'skills'), path.join(runtimeDir, 'skills'))
   await rm(path.join(runtimeDir, 'native-server'), { recursive: true, force: true })
   await copyDereferenced(path.join(runtimeSource, 'native-server'), path.join(runtimeDir, 'native-server'))
+  await copyDereferenced(
+    path.join(projectRoot, 'apps', 'native-server', 'src', 'product-office-skills.mjs'),
+    path.join(runtimeDir, 'native-server', 'product-office-skills.mjs'),
+  )
   await copyDereferenced(path.join(runtimeSource, 'harness'), path.join(runtimeDir, 'harness'))
   await copyDereferenced(path.join(runtimeSource, 'native'), path.join(runtimeDir, 'native'))
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })

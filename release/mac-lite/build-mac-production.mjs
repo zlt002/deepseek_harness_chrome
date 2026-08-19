@@ -36,6 +36,7 @@ export const PRODUCT_UI_PACKAGE_NAMES = [
   'harness-ui-subagent-compact',
   'harness-ui-session-log-copy',
   'harness-ui-settings-shell',
+  'harness-ui-document-intake',
   'harness-skill-settings',
 ]
 export const PRODUCT_UI_PLUGIN_PACKAGES = PRODUCT_UI_PACKAGE_NAMES.map(name => `@accrui/${name}`)
@@ -607,6 +608,7 @@ export DSH_ROOT="$PACKAGE_DIR/harness"
 export DSH_CLI_PATH="$DSH_ROOT/apps/cli/lib/server.mjs"
 export DSH_CWD="$PACKAGE_DIR/../workspace"
 export DSH_PRODUCT_PLUGIN_ROOT="$PACKAGE_DIR/product-plugins"
+export DSH_PRODUCT_SKILLS_ROOT="$PACKAGE_DIR/skills"
 export DSH_NODE_PTY_SPAWN_HELPER="$PACKAGE_DIR/native/node-pty/spawn-helper"
 export DSH_NATIVE_LOG="$PACKAGE_DIR/../logs/native-host.log"
 exec "$NODE_EXEC" "$PACKAGE_DIR/native-server/runtime.mjs"
@@ -794,7 +796,12 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
     path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'),
     path.join(runtimeDir, 'native-server', 'selected-source-routing-prompt.mjs'),
   )
+  await cp(
+    path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'product-office-skills.mjs'),
+    path.join(runtimeDir, 'native-server', 'product-office-skills.mjs'),
+  )
   await copyProductUiPackages(path.join(runtimeDir, 'product-plugins'))
+  await copyWithoutSourceMaps(path.join(PROJECT_ROOT, 'skills'), path.join(runtimeDir, 'skills'))
   await copyMacNativeAssets(path.join(runtimeDir, 'native'))
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })
@@ -802,7 +809,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await writeFile(path.join(runtimeDir, 'dsh-plugin'), pluginManagerLauncher(), { mode: 0o755 })
   await writeFile(path.join(runtimeDir, 'register-native-host.sh'), registerNativeHost(), { mode: 0o755 })
   await writeFile(path.join(harnessDir, 'harness-runtime.json'), `${JSON.stringify({ format: 'deepseek-harness-mac-static-web-v1', entrypoint: 'apps/cli/lib/server.mjs', bundled: true, nodeModulesIncluded: false, staticWebPluginCount: aliases.size, dynamicPluginRepository: 'managed-web-profile' }, null, 2)}\n`)
-  await writeFile(path.join(packageDir, 'README.zh-CN.md'), '# Harness UI Mac 生产候选包\n\n核心 Harness Web profile 已打包为 `server.mjs`，只携带 Mac ARM64 必需的原生文件，不含整套 `node_modules`。双击 `install.command` 安装主程序；双击 `install-plugin.command` 可以之后独立安装兼容的 Harness 插件，不需要重新发布主包。插件安装需要本机 `pnpm`。\n')
+  await writeFile(path.join(packageDir, 'README.zh-CN.md'), '# Harness UI Mac 生产候选包\n\n核心 Harness Web profile 已打包为 `server.mjs`，只携带 Mac ARM64 必需的原生文件，不含整套 `node_modules`。内置 skill 在 `runtime/skills`，启动器通过 `DSH_PRODUCT_SKILLS_ROOT` 挂载；产品 `/pmd-prd`、`/pptx`、`/xlsx`、`/docx`、`/pdf` 优先于 `~/.claude/skills` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。双击 `install.command` 安装主程序；双击 `install-plugin.command` 可以之后独立安装兼容的 Harness 插件，不需要重新发布主包。插件安装需要本机 `pnpm`。\n')
   await writeFile(path.join(packageDir, 'install.command'), installer(), { mode: 0o755 })
   await writeFile(path.join(packageDir, 'install-plugin.command'), interactivePluginInstaller(), { mode: 0o755 })
   run('zip', ['-qr', path.join(packageDir, 'payload.zip'), '.'], { cwd: payloadDir })

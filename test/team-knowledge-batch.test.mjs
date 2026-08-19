@@ -43,7 +43,7 @@ async function open(responder, responseTarget = (request) => request.browserTarg
 }
 
 async function preview(harness, batchId, items = documents, id = 1) { return harness.call(id, { action: 'preview', batchId, parentFingerprint: parent.fingerprint, items }) }
-async function create(harness, batchId, challenge, items = documents, id = 2) { return harness.call(id, { action: 'create', batchId, challenge, items }) }
+async function create(harness, batchId, challenge, id = 2) { return harness.call(id, { action: 'create', batchId, challenge }) }
 
 test('publishes, creates, reports status, and stores a body-free batch of light documents', async () => {
   let creates = 0
@@ -58,13 +58,14 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
     assert.deepEqual(harnessProjectedArguments(previewTool.inputSchema), { required: ['batchId', 'items'], properties: ['batchId', 'items'] })
     assert.deepEqual(previewTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
     assert.equal(previewTool.inputSchema.properties.items.maxItems, 10)
-    assert.deepEqual(harnessProjectedArguments(createTool.inputSchema), { required: ['batchId', 'challenge', 'items'], properties: ['batchId', 'challenge', 'items'] })
+    assert.deepEqual(harnessProjectedArguments(createTool.inputSchema), { required: ['batchId', 'challenge'], properties: ['batchId', 'challenge'] })
+    assert.match(createTool.description, /names and bodies must not be sent again/)
     assert.deepEqual(statusTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
     const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'batch-success', items: documents })
     const modelVisibleChallenge = plan.result.content[0].text.match(/创建凭证：([A-Za-z0-9_-]+)/)?.[1]
     assert.equal(modelVisibleChallenge, plan.result.structuredContent.challenge)
     assert.ok(plan.result.structuredContent.expiresAt - Date.now() > 9 * 60_000)
-    const result = await harness.callTool('team_knowledge_batch_create', 2, { batchId: 'batch-success', challenge: modelVisibleChallenge, items: documents })
+    const result = await harness.callTool('team_knowledge_batch_create', 2, { batchId: 'batch-success', challenge: modelVisibleChallenge })
     assert.equal(result.result.structuredContent.status, 'verified_write')
     assert.equal(result.result.content[0].text, '已完成 2 个子文档的创建、内容写入和回读验证。')
     assert.doesNotMatch(result.result.content[0].text, /team_knowledge_|partial_delivery/)
@@ -76,13 +77,95 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('rejects a changed ordered payload after preview and does not create documents', async () => {
+test('passes an independent visible user-confirmation context for every batch document', async () => {
+  const confirmations = []
+  const harness = await open((request) => {
+    if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true } }
+    confirmations.push(request.userConfirmation)
+    return verified(request, request.name === 'One' ? '101' : '102')
+  })
+  try {
+    const plan = await preview(harness, 'batch-per-document-confirmation')
+    const result = await create(harness, 'batch-per-document-confirmation', plan.result.structuredContent.challenge)
+    assert.equal(result.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(confirmations, [
+      { itemIndex: 1, totalItems: 2 },
+      { itemIndex: 2, totalItems: 2 },
+    ])
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('does not start the next document when the current document lacks user confirmation', async () => {
+  const calls = []
+  const harness = await open((request) => {
+    if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true } }
+    calls.push(request.name)
+    return { status: 'partial_delivery', item: { catalogId: '103', kind: 'light_document', name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/103?id=103', fingerprint: 'item-103' }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written'], failedAt: 'confirmation', error: 'team_knowledge_user_confirmation_stopped' }
+  })
+  try {
+    const plan = await preview(harness, 'batch-stop-after-unconfirmed-document')
+    const result = await create(harness, 'batch-stop-after-unconfirmed-document', plan.result.structuredContent.challenge)
+    assert.equal(result.result.isError, true)
+    assert.deepEqual(calls, ['One'])
+    assert.deepEqual(result.result.structuredContent.batch.items.map((item) => item.status), ['failed', 'pending'])
+    assert.match(result.result.content[0].text, /失败阶段：用户确认[\s\S]*尚未获得用户页面确认/)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('rejects create-time item replay and does not create documents', async () => {
   let creates = 0
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : (creates += 1, verified(request, '1')))
   try {
-    const plan = await preview(harness, 'batch-drift'); const changed = [{ ...documents[1] }, { ...documents[0] }]
-    const response = await create(harness, 'batch-drift', plan.result.structuredContent.challenge, changed)
-    assert.equal(response.result.isError, true); assert.match(response.result.content[0].text, /创建凭证.*内容已变化/); assert.equal(creates, 0)
+    const plan = await preview(harness, 'batch-drift')
+    const response = await harness.call(2, { action: 'create', batchId: 'batch-drift', challenge: plan.result.structuredContent.challenge, items: documents })
+    assert.equal(response.error.code, -32602); assert.equal(creates, 0)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('creates from the exact ephemeral preview snapshot without resending bodies', async () => {
+  const requestedBodies = []
+  const harness = await open((request) => {
+    if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true } }
+    requestedBodies.push(request.body)
+    return verified(request, String(requestedBodies.length))
+  })
+  try {
+    const items = [{ name: 'Frozen one', body: '# Original one' }, { name: 'Frozen two', body: '# Original two' }]
+    const plan = await preview(harness, 'batch-frozen', items)
+    items[0].body = '# Mutated after preview'
+    const response = await create(harness, 'batch-frozen', plan.result.structuredContent.challenge)
+    assert.equal(response.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(requestedBodies, ['# Original one', '# Original two'])
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('fails safely when the ephemeral preview snapshot is unavailable', async () => {
+  let creates = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : (++creates, verified(request, '1')))
+  try {
+    const plan = await preview(harness, 'batch-plan-missing')
+    harness.connector.teamKnowledgeBatchChallenges.clear()
+    const response = await create(harness, 'batch-plan-missing', plan.result.structuredContent.challenge)
+    assert.equal(response.result.isError, true)
+    assert.match(response.result.content[0].text, /team_knowledge_batch_approval_missing_or_already_used/)
+    assert.equal(creates, 0)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('distinguishes an expired Approval Grant and never reaches creation', async () => {
+  let creates = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : (++creates, verified(request, '1')))
+  try {
+    const plan = await preview(harness, 'batch-expired')
+    harness.connector.teamKnowledgeBatchChallenges.get(plan.result.structuredContent.challenge).expiresAt = Date.now() - 1
+    const response = await create(harness, 'batch-expired', plan.result.structuredContent.challenge)
+    assert.equal(response.result.isError, true)
+    assert.match(response.result.content[0].text, /team_knowledge_batch_approval_expired/)
+    assert.equal(creates, 0)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
@@ -100,7 +183,7 @@ test('resumes only failed items and accepts a completed duplicate without duplic
     assert.match(partial.result.content[0].text, /完成 1\/2 个子文档[\s\S]*失败阶段：内容回读[\s\S]*可重试：是[\s\S]*避免盲目重试/)
     assert.doesNotMatch(partial.result.content[0].text, /team_knowledge_|partial_delivery/)
     assert.deepEqual(partial.result.structuredContent.batch.items.map((item) => item.status), ['created', 'failed'])
-    const retry = await preview(harness, 'batch-recover', documents, 3); const done = await create(harness, 'batch-recover', retry.result.structuredContent.challenge, documents, 4)
+    const retry = await preview(harness, 'batch-recover', documents, 3); const done = await create(harness, 'batch-recover', retry.result.structuredContent.challenge, 4)
     assert.equal(done.result.structuredContent.status, 'verified_write'); assert.deepEqual(calls, ['One', 'Two', 'Two'])
     const duplicate = await preview(harness, 'batch-recover', documents, 5); assert.equal(duplicate.result.structuredContent.status, 'already_completed')
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
@@ -112,7 +195,7 @@ test('serializes concurrent confirmed creates and accepts exactly ten items', as
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : (creates += 1, verified(request, String(creates))))
   try {
     const first = await preview(harness, 'batch-concurrent', ten); const second = await preview(harness, 'batch-concurrent', ten, 2)
-    const [left, right] = await Promise.all([create(harness, 'batch-concurrent', first.result.structuredContent.challenge, ten, 3), create(harness, 'batch-concurrent', second.result.structuredContent.challenge, ten, 4)])
+    const [left, right] = await Promise.all([create(harness, 'batch-concurrent', first.result.structuredContent.challenge, 3), create(harness, 'batch-concurrent', second.result.structuredContent.challenge, 4)])
     assert.equal(left.result.structuredContent.status, 'verified_write'); assert.equal(right.result.structuredContent.status, 'verified_write'); assert.equal(creates, 10)
     const tooMany = await preview(harness, 'batch-too-many', [...ten, { name: 'Doc 11', body: 'body 11' }], 5)
     assert.equal(tooMany.error.code, -32602)
@@ -127,6 +210,89 @@ test('rejects non-canonical duplicate names before preview', async () => {
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
+test('rejects a PMD batch that replaces the two authoritative templates with summaries', async () => {
+  let inspections = 0
+  const harness = await open((request) => { inspections += 1; return request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1') })
+  try {
+    const response = await preview(harness, 'pmd:req-crm', [
+      { name: 'req_crm_01_需求分析与研发交付', body: '# 需求分析与研发交付\n## 1. 需求背景与痛点' },
+      { name: 'req_crm_02_PRD', body: '# PRD: req_crm\\n## 1. 文档信息与变更历史' },
+    ])
+    assert.equal(response.result.isError, true)
+    assert.match(response.result.content[0].text, /pmd_prd_template_invalid/)
+    assert.equal(inspections, 0, 'invalid PMD bodies must fail before inspecting or mutating a Browser Target')
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('accepts a PMD batch only when both authoritative template structures are complete', async () => {
+  const analysisBody = `# 需求分析与研发交付：REQ - CRM
+## 1. 需求理解与范围
+[待确认]
+## 2. 证据分类
+| Evidence ID | 类型 |
+|---|---|
+## 3. 规模评估与拆分
+[待确认]
+## 4. 代码影响地图
+| Impact ID | 仓库 |
+|---|---|
+## 5. 纵向任务
+| Task ID | PRD章节 |
+|---|---|
+## 6. 验收合同
+| AC ID | 需求/PRD章节 |
+|---|---|
+## 7. 研发交付与风险
+[待确认]`
+  const prdBody = `# PRD: REQ - CRM
+## 需求基本信息
+| 业务需求名称 | [必填] |
+|---|---|
+## 修订记录 [必填]
+| 版本 | 日期 |
+|---|---|
+# 一、术语与缩写 [建议填写]
+[待确认]
+# 二、背景与目标
+[待确认]
+# 三、整体流程
+不适用（待确认）
+# 四、功能性需求 [必填]
+[待确认]
+# 五、角色权限 [必填]
+| 角色 | 功能/页面 |
+|---|---|
+# 六、非功能性需求 [必填]
+| 指标项 | 目标值 |
+|---|---|
+# 七、配置与开关 【选填】
+不适用（无配置项）
+# 八、测试关注点 [必填]
+[待确认]
+# 九、参考文档 【选填】
+不适用（暂无参考文档）
+## AccrUI 需求交接附录（必须追加，不替代上文模板）
+### A. 需求过程与证据分类
+[待确认]
+### B. 需求交接索引
+[待确认]
+### C. 研发继续工作入口
+[待确认]
+### D. 生成完整性规则
+[待确认]`
+  let inspections = 0
+  const harness = await open((request) => { inspections += 1; return request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1') })
+  try {
+    const response = await preview(harness, 'pmd:req-crm-valid', [
+      { name: 'req_crm_01_需求分析与研发交付', body: analysisBody },
+      { name: 'req_crm_02_PRD', body: prdBody },
+    ])
+    assert.equal(response.result.isError, undefined)
+    assert.equal(typeof response.result.structuredContent.challenge, 'string')
+    assert.equal(inspections, 1)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
 test('does not complete a batch from a schema-valid result for the wrong item', async () => {
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : {
     status: 'verified_write', item: { catalogId: '77', kind: 'spreadsheet', name: 'Wrong', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/77?id=77', fingerprint: 'wrong-77' },
@@ -134,7 +300,7 @@ test('does not complete a batch from a schema-valid result for the wrong item', 
   })
   try {
     const plan = await preview(harness, 'batch-wrong-item', [{ name: 'Right', body: '# Right' }])
-    const response = await create(harness, 'batch-wrong-item', plan.result.structuredContent.challenge, [{ name: 'Right', body: '# Right' }])
+    const response = await create(harness, 'batch-wrong-item', plan.result.structuredContent.challenge)
     assert.equal(response.result.structuredContent.status, 'partial_delivery')
     assert.equal(response.result.structuredContent.batch.items[0].status, 'failed')
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
@@ -148,7 +314,7 @@ test('accepts a semantic light-document readback instead of requiring raw Markdo
   try {
     const items = [{ name: 'Release plan', body: markdown }]
     const plan = await preview(harness, 'batch-semantic-readback', items)
-    const response = await create(harness, 'batch-semantic-readback', plan.result.structuredContent.challenge, items)
+    const response = await create(harness, 'batch-semantic-readback', plan.result.structuredContent.challenge)
     assert.equal(response.result.structuredContent.status, 'verified_write')
     assert.equal(response.result.structuredContent.batch.items[0].status, 'created')
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
@@ -162,12 +328,55 @@ test('reports a non-retryable item failure and does not blindly retry it', async
   try {
     const items = [{ name: 'Duplicate', body: '# Duplicate' }]
     const first = await preview(harness, 'batch-non-retryable', items)
-    const failed = await create(harness, 'batch-non-retryable', first.result.structuredContent.challenge, items)
+    const failed = await create(harness, 'batch-non-retryable', first.result.structuredContent.challenge)
     assert.match(failed.result.content[0].text, /Duplicate：失败阶段：创建；原因：服务端返回的结果无法安全确认[\s\S]*可重试：否/)
     const second = await preview(harness, 'batch-non-retryable', items, 3)
-    const resumed = await create(harness, 'batch-non-retryable', second.result.structuredContent.challenge, items, 4)
+    const resumed = await create(harness, 'batch-non-retryable', second.result.structuredContent.challenge, 4)
     assert.equal(resumed.result.structuredContent.status, 'partial_delivery')
     assert.equal(createAttempts, 1)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('resumes the same document when persisted reopen readback is empty once', async () => {
+  let createAttempts = 0
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : ++createAttempts === 1
+      ? { status: 'partial_delivery', item: { catalogId: '91', kind: 'light_document', name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/91?id=91', fingerprint: 'item-91' }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written'], failedAt: 'readback', error: 'team_knowledge_document_persisted_readback_mismatch' }
+      : verified(request, '91'))
+  try {
+    const items = [{ name: 'Persisted retry', body: '# Persisted retry' }]
+    const first = await preview(harness, 'batch-persisted-retry', items)
+    const failed = await create(harness, 'batch-persisted-retry', first.result.structuredContent.challenge)
+    assert.match(failed.result.content[0].text, /重新打开后未读到已持久化的正文[\s\S]*可重试：是/)
+    const second = await preview(harness, 'batch-persisted-retry', items, 3)
+    const resumed = await create(harness, 'batch-persisted-retry', second.result.structuredContent.challenge, 4)
+    assert.equal(resumed.result.structuredContent.status, 'verified_write')
+    assert.equal(createAttempts, 2)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('resumes the same empty document when the initial WebEdit body readback mismatches', async () => {
+  let createAttempts = 0
+  const recoveries = []
+  const harness = await open((request) => request.action === 'inspect_parent'
+    ? { status: 'ok', parent, capabilities: { light_document: true } }
+    : (recoveries.push(request.recovery), ++createAttempts === 1)
+      ? { status: 'partial_delivery', item: { catalogId: '92', kind: 'light_document', name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/92?id=92', fingerprint: 'item-92' }, stages: ['parent_inspected', 'created', 'rediscovered'], failedAt: 'readback', error: 'team_doc_readback_mismatch' }
+      : verified(request, '92'))
+  try {
+    const items = [{ name: 'Empty PRD recovery', body: '# Empty PRD recovery' }]
+    const first = await preview(harness, 'batch-empty-prd-retry', items)
+    const failed = await create(harness, 'batch-empty-prd-retry', first.result.structuredContent.challenge)
+    assert.equal(failed.result.isError, true)
+    assert.match(failed.result.content[0].text, /^未完成：/)
+    assert.match(failed.result.content[0].text, /正文未通过编辑器回读校验[\s\S]*可重试：是/)
+    const second = await preview(harness, 'batch-empty-prd-retry', items, 3)
+    const resumed = await create(harness, 'batch-empty-prd-retry', second.result.structuredContent.challenge, 4)
+    assert.equal(resumed.result.structuredContent.status, 'verified_write')
+    assert.equal(createAttempts, 2)
+    assert.equal(recoveries[0], undefined)
+    assert.deepEqual(recoveries[1], { catalogId: '92', stages: ['parent_inspected', 'created', 'rediscovered'] })
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
@@ -175,7 +384,7 @@ test('binds batch status to the current Run Browser Target and parent', async ()
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
   try {
     const plan = await preview(harness, 'batch-status-target', [{ name: 'One', body: '# One' }])
-    await create(harness, 'batch-status-target', plan.result.structuredContent.challenge, [{ name: 'One', body: '# One' }])
+    await create(harness, 'batch-status-target', plan.result.structuredContent.challenge)
     harness.connector.bindBrowserTarget('other-run', { ...target, tabId: 99 })
     const response = await harness.call(9, { action: 'status', batchId: 'batch-status-target' })
     assert.equal(response.result.isError, true)
@@ -194,7 +403,7 @@ test('uses the inspect-migrated Browser Target for batch grants, fingerprints, a
     assert.deepEqual(inspected.result.structuredContent.browserTarget, migrated)
     const plan = await preview(harness, 'migrated-batch', documents, 2)
     assert.deepEqual(plan.result.structuredContent.browserTarget, migrated)
-    const created = await create(harness, 'migrated-batch', plan.result.structuredContent.challenge, documents, 3)
+    const created = await create(harness, 'migrated-batch', plan.result.structuredContent.challenge, 3)
     assert.equal(created.result.structuredContent.status, 'verified_write')
     assert.deepEqual(created.result.structuredContent.browserTarget, migrated)
     const record = await harness.batchStore.load('migrated-batch')

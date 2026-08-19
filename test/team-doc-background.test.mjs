@@ -33,6 +33,7 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   let runtimeListener; const nativeMessages = []; const nativeListeners = new Set(); const executions = []
   const tab = { id: initialTab.tabId, windowId: initialTab.windowId, url: initialTab.url, title: 'Team Knowledge', status: 'complete' }
+  const tabUpdates = []
   const port = {
     onDisconnect: { addListener: () => {}, removeListener: () => {} },
     onMessage: { addListener: (listener) => nativeListeners.add(listener), removeListener: (listener) => nativeListeners.delete(listener) },
@@ -50,7 +51,7 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
     windows: { getLastFocused: async () => ({ id: target.windowId }), onFocusChanged: { addListener: () => {} } },
     tabs: {
       query: async () => [tab], get: async (tabId) => { if (tabId !== tab.id) throw new Error('tab not found'); return { ...tab } },
-      update: async (tabId, update) => { if (tabId !== tab.id) throw new Error('tab not found'); if (typeof update.url === 'string') tab.url = update.url; tab.status = 'complete'; return { ...tab } },
+      update: async (tabId, update) => { if (tabId !== tab.id) throw new Error('tab not found'); tabUpdates.push({ ...update }); if (typeof update.url === 'string') tab.url = update.url; tab.status = 'complete'; return { ...tab } },
       sendMessage: async (tabId, message, options) => {
         if (webeditLightDocument && message?.action === 'probe') {
           webeditProbeCalls += 1
@@ -82,7 +83,7 @@ async function loadBackground({ execute = async ({ func }) => func.name === 'ins
     }
     return undefined
   }
-  return { executions, localStorage, sendNative, cleanup: () => { delete globalThis.chrome; delete globalThis.defineBackground; delete globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS } }
+  return { executions, tabUpdates, localStorage, sendNative, cleanup: () => { delete globalThis.chrome; delete globalThis.defineBackground; delete globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS } }
 }
 
 const inspectRequest = (overrides = {}) => ({ type: 'connector_request', requestId: 'inspect-1', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target, tool: 'team_doc_create', phase: 'inspect', ...overrides })
@@ -115,6 +116,86 @@ test('creates a child light document only after the verified parent, rediscovery
     assert.equal(response.result.readback.body, 'Child')
   } finally { harness.cleanup() }
 })
+
+test('waits for each batch item confirmation after in-memory XML readback before it leaves the created light document', async () => {
+  const calls = []
+  const harness = await loadBackground({ execute: async ({ func, args }) => {
+    calls.push({ name: func.name, args })
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+    if (func.name === 'createTeamDocInPage') return { ok: true, catalogId: '9007199254740995', documentId: '9007199254740995', kind: 'light_document', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995' }
+    if (func.name === 'writeTeamDocInWebEdit') return { ok: true, readbackMatches: true, observedBody: 'Child' }
+    if (func.name === 'waitForTeamKnowledgeUserConfirmation') return { status: 'confirmed' }
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(itemRequest({
+      requestId: 'item-confirmed',
+      userConfirmation: { itemIndex: 2, totalItems: 3 },
+    }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.deepEqual(calls.map((call) => call.name), [
+      'inspectTeamDocParentInPage', 'createTeamDocInPage', 'writeTeamDocInWebEdit',
+      'waitForTeamKnowledgeUserConfirmation', 'writeTeamDocInWebEdit',
+    ])
+    assert.deepEqual(calls[3].args, [{ name: 'Child', itemIndex: 2, totalItems: 3 }])
+    assert.deepEqual(harness.tabUpdates.map((update) => update.url), [
+      'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995',
+      target.url,
+      'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995',
+      target.url,
+    ])
+  } finally { harness.cleanup() }
+})
+
+test('stopping the per-document confirmation leaves the created light document open and reports partial delivery', async () => {
+  const harness = await loadBackground({ execute: async ({ func }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+    if (func.name === 'createTeamDocInPage') return { ok: true, catalogId: '9007199254740995', documentId: '9007199254740995', kind: 'light_document', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995' }
+    if (func.name === 'writeTeamDocInWebEdit') return { ok: true, readbackMatches: true, observedBody: 'Child' }
+    if (func.name === 'waitForTeamKnowledgeUserConfirmation') return { status: 'stopped' }
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(itemRequest({
+      requestId: 'item-stopped',
+      userConfirmation: { itemIndex: 1, totalItems: 2 },
+    }))
+    assert.equal(response.result.status, 'partial_delivery')
+    assert.equal(response.result.failedAt, 'confirmation')
+    assert.equal(response.result.error, 'team_knowledge_user_confirmation_stopped')
+    assert.deepEqual(harness.tabUpdates.map((update) => update.url), ['https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995'])
+    assert.equal(harness.executions.filter((execution) => execution.func.name === 'writeTeamDocInWebEdit' && execution.args[1] === true).length, 0)
+  } finally { harness.cleanup() }
+})
+
+for (const [confirmationStatus, expectedError] of [
+  ['timeout', 'team_knowledge_user_confirmation_timeout'],
+  ['unloaded', 'team_knowledge_user_confirmation_page_unloaded'],
+]) {
+  test(`reports ${confirmationStatus} while keeping the created light document open`, async () => {
+    const harness = await loadBackground({ execute: async ({ func }) => {
+      if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent: teamKnowledgeParent }
+      if (func.name === 'createTeamDocInPage') return { ok: true, catalogId: '9007199254740995', documentId: '9007199254740995', kind: 'light_document', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995' }
+      if (func.name === 'writeTeamDocInWebEdit') return { ok: true, readbackMatches: true, observedBody: 'Child' }
+      if (func.name === 'waitForTeamKnowledgeUserConfirmation') return { status: confirmationStatus }
+      throw new Error(`unexpected function ${func.name}`)
+    } })
+    try {
+      const response = await harness.sendNative(itemRequest({
+        requestId: `item-confirmation-${confirmationStatus}`,
+        userConfirmation: { itemIndex: 1, totalItems: 1 },
+      }))
+      assert.deepEqual(response.result, {
+        status: 'partial_delivery',
+        item: { catalogId: '9007199254740995', kind: 'light_document', name: 'Child', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995', fingerprint: 'team-knowledge-item-v1-9cd1a21b' },
+        stages: ['parent_inspected', 'created', 'rediscovered', 'body_written'],
+        failedAt: 'confirmation',
+        error: expectedError,
+      })
+      assert.deepEqual(harness.tabUpdates.map((update) => update.url), ['https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995'])
+    } finally { harness.cleanup() }
+  })
+}
 
 test('writes through the ready light-document frame after a preload frame and iframe rebuild', async () => {
   let frameReads = 0
@@ -591,9 +672,11 @@ test('accepts semantic WebEdit readback for numbered headings, formatted lists, 
   const originalLocation = globalThis.location
   const originalDocument = globalThis.document
   const originalApp = globalThis.APP
+  const originalPersistenceSettleMs = globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS
   let xml = '<p>before</p>'
   globalThis.location = new URL('https://webedit.midea.com/weboffice/office/o/1')
   globalThis.document = { createElement: () => ({ innerHTML: '', get value() { return this.innerHTML } }) }
+  globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS = 0
   globalThis.APP = { openApi: { editor: { document: { selection: { insertContent: async () => { xml = '<outlineTitle>发布计划</outlineTitle><h2>项目背景</h2><li>准备发布</li><li>接入层：验证回读</li><table><tr><th>阶段</th><th>负责人</th></tr><tr><td>发布</td><td>张三</td></tr></table>' } } }, canvas: { getDocXml: async () => xml } } } }
   const body = '# 发布计划\n## 1. 项目背景\n- 准备发布\n- **接入层**：验证回读\n\n| 阶段 | 负责人 |\n| --- | --- |\n| 发布 | 张三 |'
   const harness = await loadBackground({ execute: async ({ func, args }) => {
@@ -611,6 +694,46 @@ test('accepts semantic WebEdit readback for numbered headings, formatted lists, 
     if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
     if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
     if (originalApp === undefined) delete globalThis.APP; else globalThis.APP = originalApp
+    if (originalPersistenceSettleMs === undefined) delete globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS; else globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS = originalPersistenceSettleMs
+  }
+})
+
+test('writes a long Team Knowledge PRD with the public WebEdit Markdown shape when explicit false options only change unrelated XML', async () => {
+  const originalLocation = globalThis.location
+  const originalDocument = globalThis.document
+  const originalApp = globalThis.APP
+  const originalPersistenceSettleMs = globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS
+  const body = ['# 长 PRD 回归', ...Array.from({ length: 144 }, (_, index) => `## ${index + 1}. 验收章节\n需求条目 ${String(index + 1).padStart(2, '0')}：正文必须经过同目标回读确认。`)].join('\n\n')
+  assert.ok(body.length >= 4_800, `fixture must represent the 4.8k-character PRD, got ${body.length}`)
+  const calls = []
+  let xml = '<p>空壳文档</p>'
+  globalThis.location = new URL('https://webedit.midea.com/weboffice/office/o/1')
+  globalThis.document = { createElement: () => ({ innerHTML: '', get value() { return this.innerHTML } }) }
+  globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS = 0
+  globalThis.APP = { openApi: { editor: { document: { selection: { insertContent: async (content) => {
+    calls.push(content)
+    xml = 'insertBlow' in content || 'insertBelow' in content
+      ? '<p data-editor-selection="moved">空壳文档</p>'
+      : `<p>${content.markdown.replace(/^#{1,6}\\s+/gm, '')}</p>`
+  } } }, canvas: { getDocXml: async () => xml } } } }
+  const harness = await loadBackground({ execute: async ({ func, args }) => {
+    if (func.name === 'inspectTeamDocParentInPage') return { ok: true, parent }
+    if (func.name === 'createTeamDocInPage') return { ok: true, documentId: '9007199254740995', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995' }
+    if (func.name === 'writeTeamDocInWebEdit') return func(...args)
+    throw new Error(`unexpected function ${func.name}`)
+  } })
+  try {
+    const response = await harness.sendNative(createRequest({ requestId: 'long-prd-insert-content-retry', body }))
+    assert.equal(response.result.status, 'verified_write')
+    assert.equal(response.result.readbackMatches, true)
+    assert.deepEqual(calls, [{ markdown: body }])
+    assert.match(response.result.observedBody, /需求条目 144：正文必须经过同目标回读确认。/)
+  } finally {
+    harness.cleanup()
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument
+    if (originalApp === undefined) delete globalThis.APP; else globalThis.APP = originalApp
+    if (originalPersistenceSettleMs === undefined) delete globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS; else globalThis.__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS = originalPersistenceSettleMs
   }
 })
 

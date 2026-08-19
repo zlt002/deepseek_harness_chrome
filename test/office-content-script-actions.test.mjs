@@ -18,6 +18,14 @@ function arrayOnFirstMatchingLine(source, predicate, label) {
   return match[1].split(',').map((item) => item.trim().replace(/['"]/g, '')).filter(Boolean)
 }
 
+function assignedArrayOnFirstMatchingLine(source, predicate, label) {
+  const line = source.split('\n').find((line) => predicate(line))
+  assert.ok(line, `${label} line must exist in the source`)
+  const match = /=\s*\[([^\]]*)\]/.exec(line)
+  assert.ok(match, `${label} line must contain an assigned array literal`)
+  return match[1].split(',').map((item) => item.trim().replace(/['"]/g, '')).filter(Boolean)
+}
+
 test('the content script accepts every spreadsheet action the MCP surface advertises', async () => {
   const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
   const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
@@ -40,13 +48,25 @@ test('the content script accepts every light-document action the MCP surface adv
   const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
 
   const advertised = [
-    ...arrayOnFirstMatchingLine(connectorSource, (line) => line.includes('action: { enum:') && line.includes("'selection'"), 'the connector office_document action enum'),
+    ...arrayOnFirstMatchingLine(connectorSource, (line) => line.includes("action: { enum: ['read', 'search', 'inspect_write', 'write']"), 'the connector office_document action enum'),
     ...arrayOnFirstMatchingLine(backgroundSource, (line) => line.includes("'read', 'search', 'selection'"), 'the background office_document action list'),
   ]
   const allowlist = arrayOnFirstMatchingLine(contentSource, (line) => line.includes("'read', 'search', 'selection', 'inspect_write'"), 'the content-script light-document allowlist')
 
   for (const action of new Set(advertised)) {
     assert.ok(allowlist.includes(action), `advertised light-document action '${action}' must be accepted by the content script allowlist`)
+  }
+})
+
+test('the Extension background accepts every light-document operation the Native Connector can send', async () => {
+  const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
+  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+
+  const connectorOperations = assignedArrayOnFirstMatchingLine(connectorSource, (line) => line.includes('const LIGHT_DOCUMENT_OPERATIONS ='), 'the Native Connector light-document operations')
+  const backgroundOperations = assignedArrayOnFirstMatchingLine(backgroundSource, (line) => line.includes('const OFFICE_DOCUMENT_OPERATIONS:'), 'the Extension background light-document operations')
+
+  for (const operation of connectorOperations) {
+    assert.ok(backgroundOperations.includes(operation), `Native light-document operation '${operation}' must be accepted by the Extension background`)
   }
 })
 
@@ -60,12 +80,19 @@ test('the content script grants light-document writes a longer budget than reads
   const nativeTimeoutMatch = /const REQUEST_TIMEOUT_MS = (\d[\d_]*)/.exec(connectorSource)
   assert.ok(nativeTimeoutMatch, 'the native connector must define REQUEST_TIMEOUT_MS')
   const nativeTimeoutMs = Number(nativeTimeoutMatch[1].replace(/_/g, ''))
+  const officeTimeoutMatch = /const OFFICE_REQUEST_TIMEOUT_MS = (\d[\d_]*)/.exec(connectorSource)
+  assert.ok(officeTimeoutMatch, 'the native connector must define OFFICE_REQUEST_TIMEOUT_MS')
+  const officeTimeoutMs = Number(officeTimeoutMatch[1].replace(/_/g, ''))
 
   // A write legitimately needs longer than a read (runtime APP wait +
-  // CanvasPatch change poll + readback), but must stay under the native
-  // REQUEST_TIMEOUT_MS so the extension answer never races a native abort.
+  // CanvasPatch change poll + readback), but must stay under the office
+  // Native cap so the extension answer never races a native abort.
   assert.ok(writeBudgetMs > 8_000, `write budget ${writeBudgetMs}ms must exceed the 8s read budget`)
-  assert.ok(writeBudgetMs < nativeTimeoutMs, `write budget ${writeBudgetMs}ms must stay under the native ${nativeTimeoutMs}ms request timeout`)
+  assert.ok(writeBudgetMs < officeTimeoutMs, `write budget ${writeBudgetMs}ms must stay under the office ${officeTimeoutMs}ms request timeout`)
+  // Cold WebEdit reads sweep iframes for 8s then the in-frame runtime budgets
+  // another 8s. The short REQUEST_TIMEOUT_MS must not abort that path.
+  assert.ok(officeTimeoutMs >= 16_000, `office timeout ${officeTimeoutMs}ms must cover an 8s probe plus an 8s in-frame read`)
+  assert.ok(officeTimeoutMs > nativeTimeoutMs, `office timeout ${officeTimeoutMs}ms must exceed the generic ${nativeTimeoutMs}ms request timeout`)
 })
 
 test('the light-document CustomEvent bridge uses a per-load channel and strict envelopes', async () => {

@@ -179,7 +179,8 @@ export function resolveUserHome(env = process.env) {
  * Resolve the product-owned skill root shipped with this Native Host.
  * An explicit `DSH_PRODUCT_SKILLS_ROOT` wins; otherwise the first existing
  * candidate is used so source, Mac install, and Windows package layouts
- * all mount the same `/pmd-prd` contract.
+ * all mount the same product skill catalog, including `/pmd-prd` and the
+ * four product office skills.
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
@@ -188,23 +189,45 @@ export function resolveProductSkillsRoot(env = process.env) {
   return [
     // Product source: apps/native-server/src -> repository skills/.
     resolve(THIS_DIR, '../../../skills'),
-    // Installed Mac runtime: DeepSeekHarness/native-server/src -> ../skills.
+    // Installed Mac Native Host: DeepSeekHarness/native-server/src -> ../skills.
     resolve(THIS_DIR, '../../skills'),
-    // Packaged Windows runtime: runtime/native-server -> runtime/skills.
+    // Packaged Mac/Windows runtime: runtime/native-server -> runtime/skills.
     resolve(THIS_DIR, '../skills'),
   ].find(existsSync) ?? resolve(THIS_DIR, '../../../skills')
 }
 
+/** Product-owned PPT / Excel / Word / PDF skill names that user catalogs cannot replace. */
+export const PRODUCT_OFFICE_SKILL_NAMES = Object.freeze(['docx', 'pdf', 'pptx', 'xlsx'])
+
+/** Resolve the self-contained office-skill plugin shipped beside the Native Host. */
+export function resolveProductOfficeSkillsPlugin(env = process.env) {
+  const explicit = env.DSH_PRODUCT_OFFICE_SKILLS_PLUGIN?.trim()
+  if (explicit) return resolve(explicit)
+  const candidates = [
+    resolve(THIS_DIR, 'product-office-skills.mjs'),
+    resolve(THIS_DIR, '../product-office-skills.mjs'),
+    resolve(THIS_DIR, '../../../apps/native-server/src/product-office-skills.mjs'),
+  ]
+  return candidates.find(existsSync) ?? candidates[0]
+}
+
 /**
- * Mount the installed Harness-native skills before the optional Claude catalog
- * so the product-owned contract wins when both roots contain the same name.
+ * Mount the four product office skills first, then the remaining product
+ * catalog and the optional Claude catalog. Office names are owned by a
+ * dedicated provider at rank 1 so user-side duplicates cannot replace them.
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
  */
 export function claudeSkillsPatch(env = process.env) {
   const claudeSkillsDir = resolve(resolveUserHome(env), '.claude/skills')
   const harnessChromeSkillsDir = resolveProductSkillsRoot(env)
+  const officePlugin = resolveProductOfficeSkillsPlugin(env)
   return `- insert:
+    - id: deepseek-harness-chrome-product-office-skills
+      name: ${yamlString(loaderModuleSpecifier(officePlugin))}
+      config:
+        skillsRoot: ${yamlString(harnessChromeSkillsDir)}
+
     - id: deepseek-harness-chrome-claude-skills
       name: '@deepseek-ai/dsh-skill-filesystem'
       config:
@@ -243,6 +266,7 @@ function productUiPackages() {
     '@accrui/harness-ui-session-log-copy',
     '@accrui/harness-ui-settings-shell',
     '@accrui/harness-ui-knowledge-scope',
+    '@accrui/harness-ui-document-intake',
     '@accrui/harness-skill-settings',
   ]
 }

@@ -91,6 +91,7 @@ test('Harness client plugins execute the portable tsdown JavaScript entrypoint',
     'harness-ui-session-log-copy',
     'harness-ui-settings-shell',
     'harness-ui-workspace-picker',
+    'harness-ui-document-intake',
     'harness-skill-settings',
   ]) {
     const config = await readFile(resolve(root, 'packages', name, 'tsdown.config.ts'), 'utf8')

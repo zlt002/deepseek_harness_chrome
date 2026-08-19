@@ -16,7 +16,7 @@ const DEFAULT_FRAMES = [
   { frameId: 17, url: 'https://webedit.midea.com/edit/abc' },
 ]
 
-async function driveOfficeReadRange({ sendMessageBehavior, frames = DEFAULT_FRAMES, probeWaitMs = 80, request = {} }) {
+async function driveOfficeReadRange({ sendMessageBehavior, frames = DEFAULT_FRAMES, probeWaitMs = 80, frameOperationMs, request = {} }) {
   const compiled = await compileBackground()
   let runtimeListener
   const sentToFrames = []
@@ -52,6 +52,7 @@ async function driveOfficeReadRange({ sendMessageBehavior, frames = DEFAULT_FRAM
   }
   globalThis.defineBackground = (setup) => setup()
   globalThis.__DSH_OFFICE_PROBE_WAIT_MS = probeWaitMs
+  if (frameOperationMs !== undefined) globalThis.__DSH_OFFICE_FRAME_OPERATION_MS = frameOperationMs
   try {
     await import(`data:text/javascript,${encodeURIComponent(compiled)}#office-healing-${Date.now()}-${Math.random().toString(36).slice(2)}`)
     await new Promise((resolve, reject) => {
@@ -68,6 +69,7 @@ async function driveOfficeReadRange({ sendMessageBehavior, frames = DEFAULT_FRAM
     delete globalThis.chrome
     delete globalThis.defineBackground
     delete globalThis.__DSH_OFFICE_PROBE_WAIT_MS
+    delete globalThis.__DSH_OFFICE_FRAME_OPERATION_MS
   }
 }
 
@@ -360,6 +362,20 @@ test('keeps the plain none-ready error when the sibling channel is also silent',
   assert.equal(response.error.code, 'unsupported')
   assert.match(response.error.message, /none exposed a ready light-document editor within 0\.1s\.$/)
   assert.ok(!response.error.message.includes('instead'), 'no wrong-type hint when nothing is ready anywhere')
+})
+
+test('times out a hung WebEdit operation after the ready probe instead of stalling Native', async () => {
+  const { nativeMessages } = await driveOfficeReadRange({
+    probeWaitMs: 80,
+    frameOperationMs: 200,
+    sendMessageBehavior: (message) => {
+      if (message.action === 'probe') return Promise.resolve({ ok: true, result: { status: 'probe', ready: true } })
+      return new Promise(() => {})
+    },
+  })
+  const response = nativeMessages.find((message) => message.type === 'connector_response')
+  assert.equal(response.error.code, 'timeout')
+  assert.match(response.error.message, /did not finish the editor runtime operation within 0\.2s/)
 })
 
 test('keeps sweeping until a slow-booting editor becomes ready instead of failing on the first probe', async () => {

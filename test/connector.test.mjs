@@ -20,7 +20,7 @@ async function callOfficeGetContext(endpoint, args = {}, id = 1) {
       jsonrpc: '2.0',
       id,
       method: 'tools/call',
-      params: { name: 'office_get_context', arguments: args },
+      params: { name: 'list_work_tabs', arguments: args },
     }),
   })
   assert.equal(response.status, 200)
@@ -36,7 +36,7 @@ async function callTool(endpoint, name, arguments_, id = 1) {
   return response.json()
 }
 
-test('publishes office_get_context and correlates a simulated extension response', async () => {
+test('publishes list_work_tabs and correlates a simulated extension response', async () => {
   const requests = []
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/budget' }
   const connector = new BrowserConnector({
@@ -71,7 +71,7 @@ test('publishes office_get_context and correlates a simulated extension response
     })
     assert.equal(listed.status, 200)
     const listBody = await listed.json()
-    assert.equal(listBody.result.tools[0].name, 'office_get_context')
+    assert.equal(listBody.result.tools[0].name, 'list_work_tabs')
     assert.deepEqual(listBody.result.tools[0].inputSchema, {
       type: 'object', additionalProperties: false, properties: {},
     })
@@ -91,7 +91,7 @@ test('publishes office_get_context and correlates a simulated extension response
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'office_get_context',
+          name: 'list_work_tabs',
           arguments: {},
         },
       }),
@@ -125,21 +125,29 @@ test('commits selected-content replacement from a challenge-only flat tool with 
   const movedTarget = { ...target, tabId: 72 }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
   const blocks = [{ type: 'h2', text: '优化结论' }, { type: 'p', text: '稳定正文' }]
-  let selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'; let writes = 0; const requests = []
+  let selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'; let failWithReadbackMismatch = false; let writes = 0; const requests = []
   const connector = new BrowserConnector({
     officeDocumentWriteStore: new OfficeDocumentWriteRecordStore({ recordPath: join(tmpdir(), `dsh-flat-selection-${randomUUID()}.json`) }),
     requestExtension: (request) => { requests.push(request); queueMicrotask(() => {
       if (request.action === 'write') {
         writes += 1
-        if (request.payload.expectedSelectionFingerprint !== selectionFingerprint) return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, error: { code: 'fingerprint_mismatch', message: 'The light-document selection changed since preview' } })
-        return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: ['优化结论', '稳定正文'], fragmentEvidence: [{ fragment: '优化结论', blockIds: ['one'] }, { fragment: '稳定正文', blockIds: ['two'] }], observedBlocks: [{ id: 'one', type: 'h2', text: '优化结论' }, { id: 'two', type: 'p', text: '稳定正文' }], replacedTagIds: ['old-one', 'old-two'] } } })
+        if (failWithReadbackMismatch) return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: { code: 'readback_mismatch', message: 'WebEdit selection_blocks_replace did not return matching block structure and fragments' } })
+        if (request.payload.expectedSelectionFingerprint !== selectionFingerprint) return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: { code: 'fingerprint_mismatch', message: 'The light-document selection changed since preview' } })
+        return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: ['优化结论', '稳定正文'], fragmentEvidence: [{ fragment: '优化结论', blockIds: ['one'] }, { fragment: '稳定正文', blockIds: ['two'] }], observedBlocks: [{ id: 'one', type: 'h2', text: '优化结论' }, { id: 'two', type: 'p', text: '稳定正文' }], replacedTagIds: ['old-one', 'old-two'] } } })
       }
       const selection = { supported: true, stable: true, truncated: false, hasSelection: true, wholeBlockReplaceable: true, isCollapsed: false, selectionFingerprint, selectedTagIds: ['old-one', 'old-two'], content: { text: '原内容一 原内容二' } }
-      connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], ...(request.action === 'selection' ? { selection } : {}) } } })
+      connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], ...(request.action === 'selection' ? { selection } : {}) } } })
     }) },
   })
   connector.bindBrowserTarget('flat-selection-run', target); const endpoint = await connector.start()
   try {
+    const legacySelection = await callTool(endpoint, 'office_document', { action: 'selection' })
+    assert.equal(legacySelection.error.code, -32602)
+    const legacyReplace = await callTool(endpoint, 'office_document', {
+      action: 'inspect_write', operation: 'selection_replace', payload: { text: '旧入口', expectedSelectionFingerprint: selectionFingerprint },
+    })
+    assert.equal(legacyReplace.error.code, -32602)
+    assert.deepEqual(requests, [])
     const preview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks })
     assert.deepEqual(requests.map((request) => request.action), ['selection'], 'preview must not perform a redundant inspect_write round trip')
     const challenge = preview.result.structuredContent.challenge
@@ -153,14 +161,23 @@ test('commits selected-content replacement from a challenge-only flat tool with 
     assert.equal(replay.result.isError, true); assert.equal(writes, 1)
 
     const driftPreview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks }, 5)
-    selectionFingerprint = 'selection-v4-deadbeefdeadbeefdeadbeefdeadbeef'
+    failWithReadbackMismatch = true
     const drift = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge }, 6)
     assert.equal(drift.result.isError, true); assert.equal(writes, 2)
+    assert.match(drift.result.content[0].text, /readback_mismatch/)
+    const forbiddenRecovery = await callTool(endpoint, 'office_document', {
+      action: 'inspect_write', operation: 'blocks_replace', payload: { id: 'old-one', text: '再次覆盖' },
+    }, 7)
+    assert.equal(forbiddenRecovery.result.isError, true)
+    assert.match(forbiddenRecovery.result.content[0].text, /selected-content write is uncertain/i)
+    assert.equal(writes, 2)
 
-    selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'
-    const movedPreview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks }, 7)
     connector.bindBrowserTarget('flat-selection-run', movedTarget)
-    const moved = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge }, 8)
+    failWithReadbackMismatch = false
+    selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'
+    const movedPreview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks }, 8)
+    connector.bindBrowserTarget('flat-selection-run', target)
+    const moved = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: movedPreview.result.structuredContent.challenge }, 9)
     assert.equal(moved.result.isError, true); assert.equal(writes, 2)
   } finally { await connector.stop() }
 })
@@ -194,7 +211,7 @@ test('surfaces the probed WebEdit document identity so the model can route tools
     const called = await fetch(`${started.url}/mcp`, {
       method: 'POST',
       headers: { authorization: `Bearer ${started.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_get_context', arguments: {} } }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_work_tabs', arguments: {} } }),
     })
     assert.equal(called.status, 200)
     const body = await called.json()
@@ -226,7 +243,7 @@ test('still rejects a malformed document identity object', async () => {
     const called = await fetch(`${started.url}/mcp`, {
       method: 'POST',
       headers: { authorization: `Bearer ${started.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_get_context', arguments: {} } }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_work_tabs', arguments: {} } }),
     })
     assert.equal(called.status, 200)
     const body = await called.json()
@@ -269,6 +286,74 @@ test('publishes every trusted pinned context and unavailable item without model-
   }
 })
 
+test('read_work_tab reads a roster page by 1-based index and rejects a raw tabId', async () => {
+  const first = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/one' }
+  const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
+  const requests = []
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      requests.push(request)
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+        browserTarget: primary, browserTargets: [first, primary],
+        result: {
+          status: 'ok', tab: 1, page: first, pageIdentity: { title: 'One', url: first.url },
+          kind: 'webedit_light_document', content: 'child document body', truncated: false, isPrimary: false,
+        },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-pinned', primary, [first, primary], [])
+  const endpoint = await connector.start()
+  try {
+    const rejected = await callTool(endpoint, 'read_work_tab', { tabId: 12 }, 1)
+    assert.equal(rejected.error.code, -32602)
+    const outOfRange = await callTool(endpoint, 'read_work_tab', { tab: 3 }, 2)
+    assert.equal(outOfRange.result.isError, true)
+    assert.match(outOfRange.result.content[0].text, /1 to 2/)
+    const body = await callTool(endpoint, 'read_work_tab', { tab: 1 }, 3)
+    assert.equal(body.result.structuredContent.content, 'child document body')
+    assert.equal(body.result.structuredContent.tab, 1)
+    assert.deepEqual(body.result.structuredContent.page, first)
+    assert.equal(body.result.structuredContent.isPrimary, false)
+    assert.equal(requests.at(-1).tool, 'read_work_tab')
+    assert.equal(requests.at(-1).tab, 1)
+    assert.deepEqual(requests.at(-1).browserTarget, primary)
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('office reads wait longer than the generic connector timeout so a cold WebEdit probe can finish', async () => {
+  const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
+  let officeTimeoutMs
+  const connector = new BrowserConnector({
+    requestTimeoutMs: 30,
+    officeRequestTimeoutMs: 80,
+    requestExtension: (request) => {
+      if (request.tool !== 'read_work_tab') return
+      officeTimeoutMs = connector.officeRequestTimeoutMs
+      setTimeout(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+        browserTarget: primary,
+        result: {
+          status: 'ok', tab: 1, page: primary, pageIdentity: { title: 'Two', url: primary.url },
+          kind: 'webedit_light_document', content: 'late office body', truncated: false, isPrimary: true,
+        },
+      }), 50)
+    },
+  })
+  connector.bindBrowserTarget('run-office-timeout', primary)
+  const endpoint = await connector.start()
+  try {
+    const body = await callTool(endpoint, 'read_work_tab', { tab: 1 })
+    assert.equal(officeTimeoutMs, 80)
+    assert.equal(body.result.structuredContent.content, 'late office body')
+  } finally {
+    await connector.stop()
+  }
+})
+
 test('accepts the official MCP client at the public tools/list and tools/call seam', async () => {
   const target = { browser: 'chrome', windowId: 3, tabId: 8, url: 'https://docs.example.test/official' }
   const connector = new BrowserConnector({
@@ -297,7 +382,7 @@ test('accepts the official MCP client at the public tools/list and tools/call se
   try {
     await client.connect(transport)
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['office_get_context', 'office_read_range', 'office_write_range', 'office_document', 'light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'office_spreadsheet', 'team_knowledge_spreadsheet_preview', 'team_knowledge_spreadsheet_create', 'team_knowledge_spreadsheet_readback', 'team_knowledge_batch_preview', 'team_knowledge_batch_create', 'team_knowledge_batch_status', 'pmd_prd_delivery', 'browser_open_tab', 'knowledge_search', 'code_search', 'selected_source_scope'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['list_work_tabs', 'read_work_tab', 'office_read_range', 'office_write_range', 'light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'office_document', 'office_spreadsheet', 'team_knowledge_spreadsheet_preview', 'team_knowledge_spreadsheet_create', 'team_knowledge_spreadsheet_readback', 'team_knowledge_batch_preview', 'team_knowledge_batch_create', 'team_knowledge_batch_status', 'browser_open_tab', 'knowledge_search', 'code_search', 'selected_source_scope'])
     const teamKnowledgeBatchPreview = tools.tools.find((tool) => tool.name === 'team_knowledge_batch_preview')
     assert.deepEqual(teamKnowledgeBatchPreview.inputSchema.required, ['batchId', 'items'])
     assert.equal(teamKnowledgeBatchPreview.inputSchema.oneOf, undefined)
@@ -313,6 +398,11 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     assert.deepEqual(flatPreview.inputSchema.required, ['blocks'])
     assert.ok(Object.hasOwn(flatPreview.inputSchema.properties.blocks.items.properties, 'type'))
     assert.deepEqual(flatPreview.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false })
+    const legacyDocument = tools.tools.find((tool) => tool.name === 'office_document')
+    assert.equal(legacyDocument.inputSchema.properties.action.enum.includes('selection'), false)
+    assert.equal(legacyDocument.inputSchema.properties.operation.enum.includes('selection_replace'), false)
+    assert.equal(legacyDocument.inputSchema.properties.operation.enum.includes('selection_content_replace'), false)
+    assert.equal(legacyDocument.inputSchema.properties.operation.enum.includes('selection_blocks_replace'), false)
     const flatRead = tools.tools.find((tool) => tool.name === 'light_document_read')
     assert.deepEqual(flatRead.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
     const spreadsheet = tools.tools.find((tool) => tool.name === 'office_spreadsheet')
@@ -335,7 +425,7 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     })
 
     const result = await client.callTool({
-      name: 'office_get_context',
+      name: 'list_work_tabs',
       arguments: {},
     })
     assert.equal(result.structuredContent.runId, 'run-official-client')
@@ -688,7 +778,7 @@ test('rejects browser_open_tab for an unbound none Run without requesting the Ex
   }
 })
 
-test('rejects office_get_context before extension execution until the trusted Native Host binding exists', async () => {
+test('rejects list_work_tabs before extension execution until the trusted Native Host binding exists', async () => {
   const boundTarget = { browser: 'chrome', windowId: 9, tabId: 6, url: 'https://docs.example.test/bound' }
   let extensionRequests = 0
   const connector = new BrowserConnector({
@@ -770,7 +860,7 @@ test('uses an Extension-confirmed Browser Target transfer for the next office tu
   }
 })
 
-test('rejects an Extension response that does not satisfy the canonical office_get_context output schema', async () => {
+test('rejects an Extension response that does not satisfy the canonical list_work_tabs output schema', async () => {
   const target = { browser: 'chrome', windowId: 2, tabId: 5, url: 'https://docs.example.test/canonical' }
   const connector = new BrowserConnector({
     requestExtension: (request) => {

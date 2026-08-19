@@ -18,6 +18,8 @@ test('knowledge scope state follows the AccrUI session and remember precedence',
   assert.match(background, /tool: 'selected_source_scope'/)
   assert.match(background, /function errorChain/)
   assert.match(background, /KNOWLEDGE_CATALOG_CACHE_TTL_MS/)
+  assert.match(background, /function filterCatalogByIdentity/)
+  assert.match(background, /function pruneScope/)
   assert.match(background, /proxyFailureText/)
   assert.match(background, /setInterval\(\(\) => \{ void chrome\.runtime\.getPlatformInfo/)
 })

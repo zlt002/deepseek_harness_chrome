@@ -76,6 +76,8 @@ importers:
 
   packages/harness-ui-conversation-shell: {}
 
+  packages/harness-ui-document-intake: {}
+
   packages/harness-ui-knowledge-scope: {}
 
   packages/harness-ui-responsive-sidebar: {}

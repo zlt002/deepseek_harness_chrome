@@ -15,7 +15,7 @@
 .login { border: 0; background: transparent; color: var(--dsw-alias-state-business-primary); cursor: pointer; font: inherit; }
 .scopeTrigger { min-width: 0; width: 100%; justify-content: center; overflow: hidden; text-overflow: ellipsis; }
 .scopeLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.panel { position: absolute; bottom: calc(100% + 8px); left: 50%; z-index: 100; box-sizing: border-box; width: min(100%, var(--dsh-composer-card-max-width)); max-height: min(480px, calc(100vh - 140px)); overflow: auto; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; background: var(--dsw-specific-menu); color: var(--dsw-alias-label-primary); box-shadow: var(--dsw-shadow-lv3); transform: translateX(-50%); }
+.panel { position: absolute; bottom: calc(100% + 8px); left: 50%; z-index: 100; box-sizing: border-box; width: min(100%, var(--dsh-composer-card-max-width)); max-height: calc(100dvh - 140px); overflow: auto; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; background: var(--dsw-specific-menu); color: var(--dsw-alias-label-primary); box-shadow: var(--dsw-shadow-lv3); transform: translateX(-50%); }
 .panelHeader { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 14px; }
 .panelHeader span, .sectionHint { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
 .section { padding-top: 10px; }

@@ -26,6 +26,7 @@ const productPluginNames = [
   'harness-ui-subagent-compact',
   'harness-ui-session-log-copy',
   'harness-ui-settings-shell',
+  'harness-ui-document-intake',
   'harness-skill-settings',
 ]
 const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined

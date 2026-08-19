@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { claudeSkillsPatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
+import { claudeSkillsPatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
 import { mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -83,21 +83,20 @@ test('passes the Native Host-owned MCP patch to the official Harness client', ()
 
 test('mounts Harness-native skills before Claude skills so duplicate names resolve to this project', () => {
   const harnessSkillsDir = resolve(projectRoot, 'skills')
+  const officePlugin = resolve(projectRoot, 'apps/native-server/src/product-office-skills.mjs')
   assert.equal(resolveProductSkillsRoot({}), harnessSkillsDir)
   assert.equal(resolveProductSkillsRoot({ DSH_PRODUCT_SKILLS_ROOT: '/opt/runtime/skills' }), '/opt/runtime/skills')
+  assert.equal(resolveProductOfficeSkillsPlugin({}), officePlugin)
+  assert.deepEqual([...PRODUCT_OFFICE_SKILL_NAMES], ['docx', 'pdf', 'pptx', 'xlsx'])
   assert.equal(resolveUserHome({ USERPROFILE: 'C:\\Users\\alice' }), 'C:\\Users\\alice')
-  assert.equal(
-    claudeSkillsPatch({ HOME: '/Users/alice' }),
-    `- insert:
-    - id: deepseek-harness-chrome-claude-skills
-      name: '@deepseek-ai/dsh-skill-filesystem'
-      config:
-        includeDefaultRoots: false
-        customSkillDirs:
-          - '${harnessSkillsDir}'
-          - '/Users/alice/.claude/skills'
-`,
-  )
+  const patch = claudeSkillsPatch({ HOME: '/Users/alice' })
+  assert.match(patch, /id: deepseek-harness-chrome-product-office-skills/)
+  assert.match(patch, new RegExp(officePlugin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(patch, /skillsRoot: '.*skills'/)
+  assert.match(patch, /id: deepseek-harness-chrome-claude-skills/)
+  assert.match(patch, /includeDefaultRoots: false/)
+  assert.match(patch, new RegExp(`customSkillDirs:\\n\\s+- '${harnessSkillsDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'\\n\\s+- '/Users/alice/\\.claude/skills'`))
+  assert.ok(patch.indexOf('deepseek-harness-chrome-product-office-skills') < patch.indexOf('deepseek-harness-chrome-claude-skills'))
   assert.match(
     claudeSkillsPatch({ USERPROFILE: 'C:\\Users\\alice', DSH_PRODUCT_SKILLS_ROOT: 'C:\\AccrUI\\runtime\\skills' }),
     /C:\\AccrUI\\runtime\\skills/,
@@ -124,6 +123,7 @@ test('mounts every product UI package outside upstream by default', () => {
   assert.equal(patch.match(/@accrui\/harness-ui-session-log-copy/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-settings-shell/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-knowledge-scope/g)?.length, 1)
+  assert.equal(patch.match(/@accrui\/harness-ui-document-intake/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-skill-settings/g)?.length, 1)
 })
 
@@ -160,7 +160,10 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   const capabilityMatrix = await readFile(new URL('../skills/pmd-prd/references/capability-matrix.md', import.meta.url), 'utf8')
   assert.match(skill, /name: pmd-prd/)
   assert.match(skill, /disable-model-invocation: true/)
-  assert.match(skill, /pmd_prd_delivery/)
+  for (const tool of ['mcp__chrome__team_knowledge_batch_preview', 'mcp__chrome__team_knowledge_batch_create', 'mcp__chrome__team_knowledge_batch_status']) assert.match(skill, new RegExp(tool))
+  assert.doesNotMatch(skill, /pmd_prd_delivery/)
+  assert.doesNotMatch(capabilityMatrix, /pmd_prd_delivery/)
+  assert.doesNotMatch(capabilityMatrix, /deliveryRunId/)
   assert.match(skill, /documents_confirmed/)
   assert.match(skill, /partial_delivery/)
   assert.match(skill, /父会话不得直调这两个检索 MCP 工具/)
@@ -217,6 +220,8 @@ test('declares pmd-prd run binding, isolated scope, persisted state, and stale-c
   assert.match(processState, /旧确认在恢复后失效/)
   assert.match(processState, /阶段 4 确认正文快照是唯一交付正文/)
   assert.match(processState, /阶段 5 的父目录确认与线上创建严格分离/)
+  assert.match(processState, /稳定的 `batchId = pmd:\$\{requirementId\}`/)
+  assert.match(processState, /`team_knowledge_batch_preview` 内部只检查父节点并冻结目标与正文/)
   assert.match(processState, /预估超过 10 人天/)
   assert.match(processState, /多个系统\/仓库/)
   assert.match(processState, /多个角色\/权限范围/)
@@ -234,11 +239,15 @@ test('declares pmd-prd run binding, isolated scope, persisted state, and stale-c
   assert.match(skill, /抽取并执行设计树\/frontier、领域术语\/边界\/不变量、纵向 tracer-bullet、测试 seam、复杂需求地图和按需原型/)
   assert.match(skill, /decomposition_decided/)
   assert.match(skill, /需求\/PRD → Evidence → Impact → Task → AC/)
-  assert.match(skill, /稳定、非空且后续始终复用的 `deliveryRunId`/)
-  assert.match(skill, /`action=preview`、内部 `requirementId`、稳定 `deliveryRunId`、`parentFingerprint`/)
-  assert.match(skill, /user confirmation → fresh preview → immediate create → status/)
-  assert.match(skill, /不得使用确认前 preview 的旧 challenge/)
-  assert.match(skill, /`status` 必须且只能传 `action=status`、相同的 `requirementId` 与 `deliveryRunId`/)
+  assert.match(skill, /`pmd:\$\{requirementId\}`/)
+  assert.match(skill, /生成并持久化稳定的 `batchId`/)
+  assert.doesNotMatch(skill, /deliveryRunId/)
+  assert.match(skill, /恰好两项 `items`/)
+  assert.match(skill, /参数只能是 `\{ batchId, challenge \}`/)
+  assert.match(skill, /team_knowledge_batch_status`，且参数只能是 `\{ batchId \}`/)
+  assert.match(skill, /challenge 过期、已消费或 ephemeral plan 缺失/)
+  assert.match(skill, /重新 preview，取得新 challenge，并重新完成这一次用户确认/)
+  assert.doesNotMatch(skill, /fresh preview/)
 
   for (const artifact of [
     'manifest\\.json',

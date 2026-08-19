@@ -203,6 +203,14 @@ try {
   $skillBody = Get-Content -LiteralPath $productSkill -Raw
   if ($skillBody -notmatch 'Harness Workspace 是唯一用户界面') { throw 'Installed /pmd-prd is not the product-owned skill.' }
   if ($skillBody -match 'pmd-workspace|clarification\.md') { throw 'Installed /pmd-prd looks like the legacy Claude skill.' }
+  foreach ($officeSkill in @('pptx', 'xlsx', 'docx', 'pdf')) {
+    $officeSkillPath = Join-Path $installRoot ('runtime\skills\' + $officeSkill + '\SKILL.md')
+    if (-not (Test-Path -LiteralPath $officeSkillPath -PathType Leaf)) { throw "Product office skill is missing: $officeSkillPath" }
+    $officeSkillBody = Get-Content -LiteralPath $officeSkillPath -Raw
+    if ($officeSkillBody -notmatch ('name:\s*' + $officeSkill)) { throw "Installed /$officeSkill is not the product-owned office skill." }
+  }
+  $officePlugin = Join-Path $installRoot 'runtime\native-server\product-office-skills.mjs'
+  if (-not (Test-Path -LiteralPath $officePlugin -PathType Leaf)) { throw "Product office skill plugin is missing: $officePlugin" }
   $launcher = Get-Content -LiteralPath (Join-Path $installRoot 'runtime\run_native_host.bat') -Raw
   if ($launcher -notmatch 'DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills') { throw 'Native Host launcher does not pin DSH_PRODUCT_SKILLS_ROOT to the packaged skills root.' }
   Invoke-NativeMessageSmoke

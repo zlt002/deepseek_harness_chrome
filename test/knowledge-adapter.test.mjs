@@ -7,7 +7,7 @@ async function adapter() {
   const background = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const end = background.indexOf('\nconst NATIVE_HOST_NAME')
   assert.notEqual(end, -1, 'knowledge adapter source block must remain before background bootstrap')
-  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream, knowledgeConversationOwner, planKnowledgeContinuation }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
+  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream, knowledgeConversationOwner, planKnowledgeContinuation, controlledVocabulary, knowledgeIdentity, filterCatalogByIdentity, pruneScope }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
 }
@@ -180,20 +180,23 @@ test('initial catalog preserves repository grouping and type metadata for the co
   const previousFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (url) => {
-    calls.push(String(url))
-    return new Response(JSON.stringify(String(url).endsWith('/api/auth/me')
-      ? { data: { id: 'current-user' } }
-      : String(url).endsWith('/api/domains')
-      ? { data: [{ id: 'domain', name: '领域' }] }
-      : { data: [{ id: 'repo', name: '代码库', domain: 'domain', system_key: 'system', repo_type: 'frontend' }] }), { status: 200 })
+    const value = String(url)
+    calls.push(value)
+    if (value.endsWith('/api/auth/me')) return new Response(JSON.stringify({ data: { userCode: 'current-user', roleLevel: 'super_admin', domainIds: [] } }), { status: 200 })
+    if (value.endsWith('/api/tags/controlled-vocabulary')) return new Response(JSON.stringify({ data: { domains: [{ id: 'domain', name: '领域' }], systems: [{ id: 'system', name: '系统', domain: 'domain' }] } }), { status: 200 })
+    if (value.endsWith('/api/repos')) return new Response(JSON.stringify({ data: [{ id: 'repo', name: '代码库', domain: 'domain', system_key: 'system', repo_type: 'frontend' }] }), { status: 200 })
+    throw new Error(`unexpected request: ${value}`)
   }
   try {
     assert.equal(validScope({ domainId: '', systemIds: [], repositoryIds: ['repo'] }), true)
     assert.deepEqual(await loadKnowledgeCatalog(), {
-      domains: [{ id: 'domain', name: '领域' }], systems: [], repositories: [{ id: 'repo', name: '代码库', domainId: 'domain', systemId: 'system', type: 'frontend' }],
+      domains: [{ id: 'domain', name: '领域' }],
+      systems: [{ id: 'system', name: '系统', domainId: 'domain' }],
+      repositories: [{ id: 'repo', name: '代码库', domainId: 'domain', systemId: 'system', type: 'frontend' }],
     })
     assert.ok(calls.some((url) => url.endsWith('/api/auth/me')))
     assert.ok(calls.some((url) => url.endsWith('/api/repos')))
+    assert.equal(calls.some((url) => url.includes('/api/domains')), false)
   } finally { globalThis.fetch = previousFetch }
 })
 
@@ -213,9 +216,9 @@ test('catalog does not wait for the legacy domains endpoint when controlled voca
   globalThis.fetch = async (url) => {
     const value = String(url)
     calls.push(value)
-    if (value.endsWith('/api/auth/me')) return new Response(JSON.stringify({ data: { id: 'current-user' } }), { status: 200 })
+    if (value.endsWith('/api/auth/me')) return new Response(JSON.stringify({ data: { userCode: 'current-user', roleLevel: 'member', domainIds: ['domain'] } }), { status: 200 })
     if (value.endsWith('/api/tags/controlled-vocabulary')) return new Response(JSON.stringify({ data: [{ id: 'domain', name: '领域', systems: [{ id: 'system', name: '系统' }] }] }), { status: 200 })
-    if (value.endsWith('/api/repos')) return new Response(JSON.stringify({ data: [{ id: 'repo', name: '代码库' }] }), { status: 200 })
+    if (value.endsWith('/api/repos')) return new Response(JSON.stringify({ data: [{ id: 'repo', name: '代码库', domain: 'domain', system_key: 'system' }] }), { status: 200 })
     if (value.endsWith('/api/domains')) return new Promise(() => {})
     throw new Error(`unexpected request: ${value}`)
   }
@@ -225,8 +228,59 @@ test('catalog does not wait for the legacy domains endpoint when controlled voca
       new Promise((_, reject) => setTimeout(() => reject(new Error('catalog_still_checking')), 100)),
     ])
     assert.deepEqual(catalog.domains, [{ id: 'domain', name: '领域' }])
+    assert.deepEqual(catalog.systems, [{ id: 'system', name: '系统', domainId: 'domain' }])
     assert.equal(calls.some((url) => url.endsWith('/api/domains')), false)
   } finally { globalThis.fetch = previousFetch }
+})
+
+test('controlled vocabulary keeps empty domains and attaches top-level systems', async () => {
+  const { controlledVocabulary } = await adapter()
+  assert.deepEqual(controlledVocabulary({
+    data: {
+      domains: [
+        { id: 'AI', name: 'AI 领域' },
+        { id: 'OPS', name: '运营', children: [{ id: 'tms', name: 'TMS' }] },
+      ],
+      systems: [
+        { id: 'ai-test', name: 'AI 测试', domain: 'AI' },
+        { id: 'ai-test', name: '重复 AI 测试', domain: 'AI' },
+        { id: 'wms', name: 'WMS', domain: 'OPS' },
+        { id: 'unknown', name: '未知领域系统', domain: 'UNKNOWN' },
+      ],
+    },
+  }), {
+    domains: [
+      { id: 'AI', name: 'AI 领域' },
+      { id: 'OPS', name: '运营' },
+    ],
+    systems: [
+      { id: 'tms', name: 'TMS', domainId: 'OPS' },
+      { id: 'ai-test', name: 'AI 测试', domainId: 'AI' },
+      { id: 'wms', name: 'WMS', domainId: 'OPS' },
+    ],
+  })
+})
+
+test('ordinary members only see authorized domains, systems, and repositories', async () => {
+  const { knowledgeIdentity, filterCatalogByIdentity, pruneScope } = await adapter()
+  const catalog = {
+    domains: [{ id: 'AI', name: 'AI 领域' }, { id: 'OPS', name: '运营' }],
+    systems: [{ id: 'ai-test', name: 'AI 测试', domainId: 'AI' }, { id: 'tms', name: 'TMS', domainId: 'OPS' }],
+    repositories: [{ id: 'ai-repo', name: 'AI 仓库', domainId: 'AI' }, { id: 'ops-repo', name: '运营仓库', domainId: 'OPS' }],
+  }
+  const member = knowledgeIdentity({ data: { userCode: 'u-1', roleLevel: 'member', domainIds: ['OPS'] } })
+  const superAdmin = knowledgeIdentity({ data: { userCode: 'admin', roleLevel: 'super_admin', domainIds: [] } })
+  assert.deepEqual(filterCatalogByIdentity(catalog, member), {
+    domains: [{ id: 'OPS', name: '运营' }],
+    systems: [{ id: 'tms', name: 'TMS', domainId: 'OPS' }],
+    repositories: [{ id: 'ops-repo', name: '运营仓库', domainId: 'OPS' }],
+  })
+  assert.deepEqual(filterCatalogByIdentity(catalog, superAdmin), catalog)
+  assert.deepEqual(pruneScope({ domainId: 'AI', systemIds: ['ai-test'], repositoryIds: ['ai-repo', 'ops-repo'] }, filterCatalogByIdentity(catalog, member)), {
+    domainId: '',
+    systemIds: [],
+    repositoryIds: ['ops-repo'],
+  })
 })
 
 test('selected-source echo reports composer names without treating placeholders as selected', async () => {
@@ -326,15 +380,16 @@ test('catalog cache reuses a fresh vocabulary without a second network round tri
   globalThis.fetch = async (url) => {
     calls += 1
     const value = String(url)
-    if (value.endsWith('/api/auth/me')) return new Response(JSON.stringify({ data: { id: 'current-user' } }), { status: 200 })
-    if (value.endsWith('/api/tags/controlled-vocabulary')) return new Response(JSON.stringify({ data: [{ id: 'domain', name: '领域', systems: [{ id: 'system', name: '系统' }] }] }), { status: 200 })
-    if (value.endsWith('/api/repos')) return new Response(JSON.stringify({ data: [{ id: 'repo', name: '代码库' }] }), { status: 200 })
+    if (value.endsWith('/api/auth/me')) return new Response(JSON.stringify({ data: { userCode: 'current-user', roleLevel: 'member', domainIds: ['domain'] } }), { status: 200 })
+    if (value.endsWith('/api/tags/controlled-vocabulary')) return new Response(JSON.stringify({ data: { domains: [{ id: 'domain', name: '领域' }], systems: [{ id: 'system', name: '系统', domain: 'domain' }] } }), { status: 200 })
+    if (value.endsWith('/api/repos')) return new Response(JSON.stringify({ data: [{ id: 'repo', name: '代码库', domain: 'domain', system_key: 'system' }] }), { status: 200 })
     throw new Error(`unexpected request: ${value}`)
   }
   try {
     const first = await loadKnowledgeCatalog()
     const second = await loadKnowledgeCatalog()
     assert.deepEqual(first.domains, [{ id: 'domain', name: '领域' }])
+    assert.deepEqual(first.systems, [{ id: 'system', name: '系统', domainId: 'domain' }])
     assert.equal(second, first)
     assert.equal(calls, 3)
   } finally { globalThis.fetch = previousFetch }

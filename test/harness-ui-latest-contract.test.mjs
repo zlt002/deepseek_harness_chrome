@@ -43,8 +43,9 @@ test('materialized Harness preserves the latest compact product UI contracts', a
   ])
 
   const scopeSeat = conversation.indexOf("renderSlot('conversation.composer.above', zone)")
-  const inputSeat = conversation.indexOf('{inputBar}')
-  assert.ok(scopeSeat >= 0 && inputSeat > scopeSeat, 'knowledge/code scope must stay above the input card')
+  const composerSeat = conversation.indexOf('{composer}', scopeSeat)
+  assert.match(conversation, /\{ fallback: inputBar, overlay: true \}/)
+  assert.ok(scopeSeat >= 0 && composerSeat > scopeSeat, 'knowledge/code scope must stay above the input card')
   assert.match(knowledgeScope, /PropsRuntime<'conversation\.composer\.above'>/)
   assert.match(selectedSourceToolviewIndex, /mcp__chrome__selected_source_scope/)
   assert.match(selectedSourceToolview, /已选远程范围/)
@@ -56,7 +57,7 @@ test('materialized Harness preserves the latest compact product UI contracts', a
     'knowledge scope must stay outside the official Harness package tree',
   )
 
-  assert.match(settings, /quickActions\.filter\(action => action\.id !== 'conversation'\)/)
+  assert.match(settings, /quickActions\.filter\(action =>\s*action\.id !== 'conversation' && !\(blankSession && action\.id === 'trajectory'\)\)/)
   assert.match(settings, /IconSkillOutline16/)
   assert.match(settingsCss, /\.panel \{[\s\S]*?width: 100%;[\s\S]*?height: 100%;[\s\S]*?border-radius: 0;/)
   assert.match(settingsCss, /\.navList \{[\s\S]*?flex-direction: row;/)

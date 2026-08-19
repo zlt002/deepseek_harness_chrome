@@ -18,6 +18,7 @@ const PRODUCT_CLIENT_IDS = [
   '@accrui/harness-ui-subagent-compact',
   '@accrui/harness-ui-session-log-copy',
   '@accrui/harness-ui-settings-shell',
+  '@accrui/harness-ui-document-intake',
   '@accrui/harness-skill-settings',
 ]
 
@@ -36,8 +37,14 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.match(entries, /runtime\/harness\/apps\/cli\/lib\/code-runtime-worker\.cjs/m)
   assert.match(entries, /runtime\/harness\/apps\/cli\/lib\/workflow-worker\.cjs/m)
   assert.match(entries, /runtime\/native-server\/selected-source-routing-prompt\.mjs/m)
+  assert.match(entries, /runtime\/native-server\/product-office-skills\.mjs/m)
   assert.match(entries, /runtime\/native-server\/harness-runtime\.mjs/m)
   assert.match(entries, /runtime\/native-server\/harness-tracking\.mjs/m)
+  assert.match(entries, /runtime\/skills\/pmd-prd\/SKILL\.md/m)
+  assert.match(entries, /runtime\/skills\/pptx\/SKILL\.md/m)
+  assert.match(entries, /runtime\/skills\/xlsx\/SKILL\.md/m)
+  assert.match(entries, /runtime\/skills\/docx\/SKILL\.md/m)
+  assert.match(entries, /runtime\/skills\/pdf\/SKILL\.md/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-conversation-shell\/package\.json/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-responsive-sidebar\/package\.json/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-subagent-compact\/lib\/client\.js/m)
@@ -52,6 +59,10 @@ test('Mac production package boots the real Web surface without node_modules', {
   const packagedLauncher = await readFile(path.join(installed, 'runtime/run-native-host.sh'), 'utf8')
   assert.doesNotMatch(packagedLauncher, /DSH_(?:LEGACY_UI_OVERLAY|ENABLE_KNOWLEDGE_SCOPE_UI|ENABLE_SKILL_SETTINGS_UI)/)
   assert.match(packagedLauncher, /DSH_PRODUCT_PLUGIN_ROOT=/)
+  assert.match(packagedLauncher, /DSH_PRODUCT_SKILLS_ROOT=/)
+  const packagedReadme = await readFile(path.join(result.packageDir, 'README.zh-CN.md'), 'utf8')
+  assert.match(packagedReadme, /DSH_PRODUCT_SKILLS_ROOT/)
+  assert.match(packagedReadme, /\/pptx/)
   const helper = path.join(installed, 'runtime/native/node-pty/spawn-helper')
   const home = path.join(root, 'home')
   const profile = path.join(home, 'profiles/web')

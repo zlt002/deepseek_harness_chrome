@@ -24,7 +24,9 @@ async function runtime(options = {}) {
     if (options.selectionInsert === 'throws') throw new Error('insert failed')
     if (options.selectionInsert === 'unchanged') return
     const next = options.selectionInsert === 'mismatch' ? 'unrelated content' : value
-    xml = options.selectionReplace === true ? xml.replace('>重复<', `>${next}<`) : xml.replace('</apcanvas>', `<p id="inserted">${next}</p></apcanvas>`)
+    xml = options.selectionInsert === 'replace-selected' || options.selectionReplace === true
+      ? xml.replace('已选内容', next).replace('选区', next).replace('>重复<', `>${next}<`)
+      : xml.replace('</apcanvas>', `<p id="inserted">${next}</p></apcanvas>`)
     if (state) state.xml = xml
   }
   const selection = { async insertContent({ markdown, html, text }) {
@@ -249,6 +251,20 @@ test('light-document selection accepts complete contiguous WebEdit list blocks w
   assert.equal(selected.result.document.selection.wholeBlockReplaceable, true)
 })
 
+test('light-document selection accepts complete nested WebEdit list envelopes', async () => {
+  const call = await runtime({
+    initialXml: '<apcanvas><outlineTitle id="title">列表</outlineTitle><p id="one"><span>Phase 1（核心闭环）：基础能力</span></p><p id="two"><span>Phase 2（高级扩展）：扩展能力</span></p></apcanvas>',
+    otlSelection: { from: 143, to: 256, anchor: 143, head: 256, empty: false },
+    selectionInfo: { selected_tag_ids: ['one', 'two'] },
+    selection: { async getSelectionContent() { return {
+      text: '◦ Phase 1（核心闭环）：基础能力\n◦ Phase 2（高级扩展）：扩展能力',
+      html: '<html><head><meta charset="utf-8"></meta></head><body><div><ul><ul><li><strong>Phase 1（核心闭环）</strong>：基础能力</li><li><strong>Phase 2（高级扩展）</strong>：扩展能力</li></ul></ul></div></body></html>',
+    } } },
+  })
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.result.document.selection.wholeBlockReplaceable, true)
+})
+
 test('light-document selection still rejects a partial first WebEdit list item after HTML list proof', async () => {
   const call = await runtime({
     initialXml: '<apcanvas><outlineTitle id="title">列表</outlineTitle><p id="one"><span>完成核对</span></p><p id="two"><span>校验结果</span></p><p id="three"><span>确认交付</span></p></apcanvas>',
@@ -311,6 +327,22 @@ test('light-document selection_insert rejects drift, ambiguity, runtime failure,
   }
 })
 
+test('light-document selection_insert replaces an arbitrary stable selection and rejects append-only readback', async () => {
+  for (const [selectionInsert, expectedOk] of [['replace-selected', true], [undefined, false]]) {
+    const state = {}
+    const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title">标题</outlineTitle><p id="one">前缀选区后缀</p></apcanvas>', selectionInsert,
+      selectionInfo: { selected_tag_ids: ['one'] }, otlSelection: { from: 3, to: 5, anchor: 3, head: 5, empty: false },
+      selection: { async getSelectionContent() { return { text: '选区' } }, async getSelectionAnchor() { return { blockId: 'one', start: 3, end: 5 } } },
+    })
+    const selected = await call({ action: 'selection' })
+    const result = await call({ action: 'write', operation: 'selection_content_replace', resource: selected.result.resource, payload: { text: '新内容', expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint } })
+    assert.equal(result.ok, expectedOk, JSON.stringify(result))
+    const after = await call({ action: 'read' })
+    if (expectedOk) assert.equal(after.result.document.blocks[0].text, '前缀新内容后缀')
+    else assert.equal(result.error.code, 'readback_mismatch')
+  }
+})
+
 test('light-document runtime inserts mermaid drawings, structured blocks, and selection replace with XML evidence', async () => {
   const emptyXml = '<apcanvas><outlineTitle id="title">未命名文档</outlineTitle></apcanvas>'
   const insert = await runtime({ initialXml: emptyXml })
@@ -348,6 +380,7 @@ test('light-document runtime inserts mermaid drawings, structured blocks, and se
   const state = {}
   const replace = await runtime({
     state,
+    initialXml: '<apcanvas><outlineTitle id="title">旧标题</outlineTitle><p id="one">已选内容</p></apcanvas>',
     selectionReplace: true,
     selection: {
       async getSelectionContent() { return { text: '已选内容' } },

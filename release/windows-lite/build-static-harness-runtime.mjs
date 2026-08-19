@@ -208,6 +208,7 @@ export async function buildWindowsStaticHarnessRuntime({
     await mkdir(path.join(staging, 'native-server'), { recursive: true })
     await cp(nativeServerPath, path.join(staging, 'native-server', 'runtime.mjs'))
     await cp(path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'), path.join(staging, 'native-server', 'selected-source-routing-prompt.mjs'))
+    await cp(path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'product-office-skills.mjs'), path.join(staging, 'native-server', 'product-office-skills.mjs'))
     await bundleHarnessRuntimePlugin({ outfile: path.join(staging, 'native-server', 'harness-runtime.mjs'), projectRoot: PROJECT_ROOT })
     await bundleHarnessTrackingPlugin({ outfile: path.join(staging, 'native-server', 'harness-tracking.mjs'), projectRoot: PROJECT_ROOT })
     await copyWindowsNativeAssets(harnessRoot, path.join(staging, 'native'))

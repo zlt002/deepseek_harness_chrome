@@ -36,6 +36,46 @@ function planKnowledgeContinuation(sessions: Record<string, { sessionId: string;
 }
 function payloadArray(value: unknown): unknown[] { return Array.isArray(value) ? value : Array.isArray((value as { data?: unknown } | undefined)?.data) ? (value as { data: unknown[] }).data : [] }
 function field(value: unknown, key: string): string | undefined { const item = value as Record<string, unknown> | undefined; return typeof item?.[key] === 'string' && item[key].trim().length > 0 ? item[key].trim() : undefined }
+function unwrapKnowledgeData(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
+  const record = value as Record<string, unknown>
+  return record.data ?? record.result ?? value
+}
+function isKnowledgeRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+function stringishField(value: unknown, keys: string[]): string | undefined {
+  if (!isKnowledgeRecord(value)) return undefined
+  for (const key of keys) {
+    const candidate = value[key]
+    if (typeof candidate === 'string' && candidate.trim().length > 0) return candidate.trim()
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return String(candidate)
+  }
+  return undefined
+}
+function stringishList(value: unknown, keys: string[]): string[] {
+  if (!isKnowledgeRecord(value)) return []
+  for (const key of keys) {
+    const candidate = value[key]
+    if (!Array.isArray(candidate)) continue
+    return [...new Set(candidate.flatMap((item) => typeof item === 'string' && item.trim().length > 0 ? [item.trim()] : typeof item === 'number' && Number.isFinite(item) ? [String(item)] : []))]
+  }
+  return []
+}
+type KnowledgeRoleLevel = 'super_admin' | 'domain_admin' | 'member'
+interface KnowledgeIdentity { roleLevel: KnowledgeRoleLevel; domainIds: string[] }
+function knowledgeIdentity(value: unknown): KnowledgeIdentity {
+  const data = unwrapKnowledgeData(value)
+  const record = isKnowledgeRecord(data) ? data : {}
+  const user = isKnowledgeRecord(record.user) ? record.user : record
+  const rawRole = stringishField(user, ['roleLevel', 'role_level'])
+  const roleLevel: KnowledgeRoleLevel = rawRole === 'super_admin' || rawRole === 'domain_admin' || rawRole === 'member' ? rawRole : 'member'
+  return { roleLevel, domainIds: stringishList(user, ['domainIds', 'domain_ids']) }
+}
+function authorizedDomainIds(identity: KnowledgeIdentity, domains: Array<{ id: string }>): Set<string> {
+  if (identity.roleLevel === 'super_admin') return new Set(domains.map((domain) => domain.id))
+  return new Set(identity.domainIds)
+}
 function validKnowledgeProxyConfig(url: unknown, token: unknown): url is string {
   if (typeof url !== 'string' || typeof token !== 'string' || token.length < 32) return false
   try { const parsed = new URL(url); return parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.port !== '' && parsed.pathname === '/knowledge-proxy' } catch { return false }
@@ -188,33 +228,65 @@ async function knowledgeJson(path: string): Promise<unknown> {
   if (payload === undefined) throw new Error('knowledge_platform_invalid_json')
   return payload
 }
-async function assertKnowledgeAuthenticated(): Promise<void> { await knowledgeJson('/api/auth/me') }
+async function assertKnowledgeAuthenticated(): Promise<unknown> { return knowledgeJson('/api/auth/me') }
 function knowledgeServiceState(error: unknown): 'unauthenticated' | 'unavailable' {
   return error instanceof Error && error.message === 'knowledge_login_required' ? 'unauthenticated' : 'unavailable'
 }
 function controlledVocabulary(value: unknown): { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }> } | undefined {
-  const data = typeof value === 'object' && value !== null && !Array.isArray(value) && 'data' in value ? (value as { data: unknown }).data : value
-  const rawDomains = Array.isArray(data) ? data : payloadArray((data as { domains?: unknown; items?: unknown; vocabulary?: unknown } | undefined)?.domains ?? (data as { items?: unknown } | undefined)?.items ?? (data as { vocabulary?: unknown } | undefined)?.vocabulary)
+  const data = unwrapKnowledgeData(value)
+  const rawDomains = Array.isArray(data)
+    ? data
+    : payloadArray((data as { domains?: unknown; items?: unknown; vocabulary?: unknown } | undefined)?.domains ?? (data as { items?: unknown } | undefined)?.items ?? (data as { vocabulary?: unknown } | undefined)?.vocabulary)
   const domains: Array<{ id: string; name: string }> = []
   const systems: Array<{ id: string; name: string; domainId?: string }> = []
+  const seenDomains = new Set<string>()
+  const seenSystems = new Set<string>()
   for (const item of rawDomains) {
-    const id = field(item, 'id') ?? field(item, 'value') ?? field(item, 'code')
-    if (id === undefined) continue
+    const id = stringishField(item, ['id', 'value', 'code', 'domainId', 'domain_id'])
+    if (id === undefined || seenDomains.has(id)) continue
+    seenDomains.add(id)
+    domains.push({ id, name: stringishField(item, ['name', 'label', 'title', 'domainName', 'domain_name']) ?? id })
     const children = payloadArray((item as { systems?: unknown; children?: unknown; items?: unknown }).systems ?? (item as { children?: unknown }).children ?? (item as { items?: unknown }).items)
-    if (children.length === 0) continue
-    domains.push({ id, name: field(item, 'name') ?? field(item, 'label') ?? field(item, 'title') ?? id })
     for (const child of children) {
-      const systemId = field(child, 'id') ?? field(child, 'value') ?? field(child, 'code')
-      if (systemId !== undefined) systems.push({ id: systemId, name: field(child, 'name') ?? field(child, 'label') ?? field(child, 'title') ?? systemId, domainId: id })
+      const systemId = stringishField(child, ['id', 'value', 'code', 'systemId', 'system_id'])
+      if (systemId === undefined || seenSystems.has(`${id}\u0000${systemId}`)) continue
+      seenSystems.add(`${id}\u0000${systemId}`)
+      systems.push({ id: systemId, name: stringishField(child, ['name', 'label', 'title', 'systemName', 'system_name']) ?? systemId, domainId: id })
     }
+  }
+  const rawSystems = isKnowledgeRecord(data) && Array.isArray(data.systems) ? data.systems : []
+  for (const item of rawSystems) {
+    const systemId = stringishField(item, ['id', 'value', 'code', 'systemId', 'system_id'])
+    const domainId = stringishField(item, ['domain', 'domainId', 'domain_id'])
+    if (systemId === undefined || domainId === undefined || !seenDomains.has(domainId) || seenSystems.has(`${domainId}\u0000${systemId}`)) continue
+    seenSystems.add(`${domainId}\u0000${systemId}`)
+    systems.push({ id: systemId, name: stringishField(item, ['name', 'label', 'title', 'systemName', 'system_name']) ?? systemId, domainId })
   }
   return domains.length > 0 ? { domains, systems } : undefined
 }
-let knowledgeCatalogCache: { at: number; domainId: string; value: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> } } | undefined
-async function loadKnowledgeCatalog(domainId?: string): Promise<{ domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> }> {
-  const cacheKey = domainId ?? ''
-  if (knowledgeCatalogCache !== undefined && knowledgeCatalogCache.domainId === cacheKey && Date.now() - knowledgeCatalogCache.at < KNOWLEDGE_CATALOG_CACHE_TTL_MS) return knowledgeCatalogCache.value
-  await assertKnowledgeAuthenticated()
+function filterCatalogByIdentity<T extends { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> }>(catalog: T, identity: KnowledgeIdentity): T {
+  const allowed = authorizedDomainIds(identity, catalog.domains)
+  const domains = catalog.domains.filter((domain) => allowed.has(domain.id))
+  const systems = catalog.systems.filter((system) => system.domainId !== undefined && allowed.has(system.domainId))
+  const repositories = catalog.repositories.filter((repository) => repository.domainId !== undefined && allowed.has(repository.domainId))
+  return { ...catalog, domains, systems, repositories }
+}
+function pruneScope(scope: KnowledgeScope, catalog: { domains: Array<{ id: string }>; systems: Array<{ id: string; domainId?: string }>; repositories: Array<{ id: string }> }): KnowledgeScope {
+  const allowedDomains = new Set(catalog.domains.map((domain) => domain.id))
+  const domainId = allowedDomains.has(scope.domainId) ? scope.domainId : ''
+  const allowedSystems = new Set(catalog.systems.filter((system) => system.domainId === domainId).map((system) => system.id))
+  const allowedRepositories = new Set(catalog.repositories.map((repository) => repository.id))
+  return {
+    domainId,
+    systemIds: domainId === '' ? [] : scope.systemIds.filter((id) => allowedSystems.has(id)),
+    repositoryIds: scope.repositoryIds.filter((id) => allowedRepositories.has(id)),
+  }
+}
+let knowledgeCatalogCache: { at: number; value: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> } } | undefined
+async function loadKnowledgeCatalog(_domainId?: string): Promise<{ domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> }> {
+  if (knowledgeCatalogCache !== undefined && Date.now() - knowledgeCatalogCache.at < KNOWLEDGE_CATALOG_CACHE_TTL_MS) return knowledgeCatalogCache.value
+  const identityPayload = await assertKnowledgeAuthenticated()
+  const identity = knowledgeIdentity(identityPayload)
   const [vocabularyResult, reposResult] = await Promise.allSettled([
     knowledgeJson('/api/tags/controlled-vocabulary'),
     knowledgeJson('/api/repos'),
@@ -232,25 +304,31 @@ async function loadKnowledgeCatalog(domainId?: string): Promise<{ domains: Array
     }
   }
   if (vocabulary === undefined && rawDomains === undefined && reposResult.status === 'rejected') throw domainsError ?? reposResult.reason
-  const domains = vocabulary?.domains ?? payloadArray(rawDomains).flatMap((item): Array<{ id: string; name: string }> => { const id = field(item, 'id'); const name = field(item, 'name'); return id === undefined || name === undefined ? [] : [{ id, name }] })
-  const repositoriesFrom = (value: unknown) => payloadArray(value).flatMap((item): Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> => {
-    const id = field(item, 'id')
+  const domains = vocabulary?.domains ?? payloadArray(rawDomains).flatMap((item): Array<{ id: string; name: string }> => {
+    const id = stringishField(item, ['id', 'value', 'code', 'domainId', 'domain_id'])
     if (id === undefined) return []
-    const domainId = field(item, 'domain') ?? field(item, 'domain_id')
-    const systemId = field(item, 'system_key') ?? field(item, 'systemId')
-    const type = field(item, 'repo_type') ?? field(item, 'type')
-    return [{ id, name: field(item, 'name') ?? id, ...(domainId === undefined ? {} : { domainId }), ...(systemId === undefined ? {} : { systemId }), ...(type === undefined ? {} : { type }) }]
+    return [{ id, name: stringishField(item, ['name', 'label', 'title', 'domainName', 'domain_name']) ?? id }]
+  })
+  const repositoriesFrom = (value: unknown) => payloadArray(value).flatMap((item): Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> => {
+    const id = stringishField(item, ['id', 'key', 'repoKey', 'repo_key'])
+    if (id === undefined) return []
+    const itemDomainId = stringishField(item, ['domain', 'domainId', 'domain_id'])
+    const systemId = stringishField(item, ['system_key', 'systemKey', 'systemId', 'system_id'])
+    const type = stringishField(item, ['repo_type', 'repoType', 'type'])
+    return [{ id, name: stringishField(item, ['name', 'repoName', 'repo_name']) ?? id, ...(itemDomainId === undefined ? {} : { domainId: itemDomainId }), ...(systemId === undefined ? {} : { systemId }), ...(type === undefined ? {} : { type }) }]
   })
   const repositories = reposResult.status === 'fulfilled' ? repositoriesFrom(reposResult.value) : []
-  if (domainId === undefined) {
-    const value = { domains, systems: vocabulary?.systems ?? [], repositories }
-    knowledgeCatalogCache = { at: Date.now(), domainId: cacheKey, value }
-    return value
-  }
-  const rawSystems = vocabulary === undefined ? await knowledgeJson(`/api/domains/systems?domain=${encodeURIComponent(domainId)}`).catch(() => undefined) : undefined
-  const systems = vocabulary?.systems.filter((item) => item.domainId === domainId) ?? payloadArray(rawSystems).flatMap((item): Array<{ id: string; name: string; domainId?: string }> => { const id = field(item, 'id'); const name = field(item, 'name'); const itemDomain = field(item, 'domain') ?? domainId; return id === undefined || name === undefined ? [] : [{ id, name, ...(itemDomain === undefined ? {} : { domainId: itemDomain }) }] })
-  const value = { domains, systems, repositories }
-  knowledgeCatalogCache = { at: Date.now(), domainId: cacheKey, value }
+  const rawSystems = vocabulary === undefined || (vocabulary.systems.length === 0 && vocabulary.domains.length > 0)
+    ? await knowledgeJson('/api/domains/systems').catch(() => undefined)
+    : undefined
+  const systems = (vocabulary?.systems.length ? vocabulary.systems : payloadArray(rawSystems).flatMap((item): Array<{ id: string; name: string; domainId?: string }> => {
+    const id = stringishField(item, ['id', 'value', 'code', 'systemId', 'system_id'])
+    if (id === undefined) return []
+    const itemDomain = stringishField(item, ['domain', 'domainId', 'domain_id'])
+    return [{ id, name: stringishField(item, ['name', 'label', 'title', 'systemName', 'system_name']) ?? id, ...(itemDomain === undefined ? {} : { domainId: itemDomain }) }]
+  }))
+  const value = filterCatalogByIdentity({ domains, systems, repositories }, identity)
+  knowledgeCatalogCache = { at: Date.now(), value }
   return value
 }
 function sseEvents(buffer: string, chunk: string): { events: string[]; remainder: string } { const parts = `${buffer}${chunk}`.replace(/\r\n/g, '\n').split('\n\n'); const remainder = parts.pop() ?? ''; return { events: parts.map((part) => part.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')).filter(Boolean), remainder } }
@@ -418,6 +496,7 @@ interface NativeMessage {
   browserTargets?: unknown
   unavailableBrowserTargets?: unknown
   tool?: unknown
+  tab?: unknown
   url?: unknown
   range?: unknown
   values?: unknown
@@ -527,6 +606,20 @@ interface ConnectorRequest {
   tool: 'office_get_context'
 }
 
+interface ReadWorkTabRequest {
+  type: 'connector_request'
+  requestId: string
+  runId: string
+  generation: string
+  browserTarget: BrowserTarget
+  browserTargets?: BrowserTarget[]
+  unavailableBrowserTargets?: UnavailableBrowserTarget[]
+  tool: 'read_work_tab'
+  tab: number
+  offset?: number
+  limit?: number
+}
+
 interface OfficeReadRangeRequest {
   type: 'connector_request'
   requestId: string
@@ -558,8 +651,8 @@ interface OfficeWriteRangeRequest {
 }
 
 type OfficeDocumentAction = 'read' | 'search' | 'selection' | 'inspect_write' | 'write'
-type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format' | 'blocks_insert' | 'insert_drawing' | 'selection_insert' | 'selection_replace' | 'selection_blocks_replace'
-const OFFICE_DOCUMENT_OPERATIONS: readonly OfficeDocumentOperation[] = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_blocks_replace']
+type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format' | 'blocks_insert' | 'insert_drawing' | 'selection_insert' | 'selection_replace' | 'selection_content_replace' | 'selection_blocks_replace'
+const OFFICE_DOCUMENT_OPERATIONS: readonly OfficeDocumentOperation[] = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_content_replace', 'selection_blocks_replace']
 
 interface LightDocumentResourceIdentity {
   kind: 'webedit_light_document'
@@ -653,6 +746,11 @@ interface TeamDocParent {
 type TeamKnowledgeItemKind = 'light_document' | 'spreadsheet'
 type TeamKnowledgeItemAction = 'inspect_parent' | 'create' | 'readback'
 
+interface TeamKnowledgeUserConfirmation {
+  itemIndex: number
+  totalItems: number
+}
+
 interface TeamKnowledgeParent extends TeamDocParent { parentType: string }
 
 interface TeamKnowledgeItemRequest {
@@ -670,6 +768,7 @@ interface TeamKnowledgeItemRequest {
   catalogId?: string
   idempotencyIdentity?: string
   recovery?: { catalogId: string | null; stages: string[] }
+  userConfirmation?: TeamKnowledgeUserConfirmation
 }
 
 interface TeamDocRequest {
@@ -761,6 +860,21 @@ function isConnectorRequest(message: NativeMessage): message is ConnectorRequest
     && Number.isInteger((target as BrowserTarget).windowId) && (target as BrowserTarget).windowId >= 0
     && Number.isInteger((target as BrowserTarget).tabId) && (target as BrowserTarget).tabId >= 0
     && typeof (target as BrowserTarget).url === 'string'
+    && (message.browserTargets === undefined || (Array.isArray(message.browserTargets) && message.browserTargets.every(isBrowserTarget)))
+    && (message.unavailableBrowserTargets === undefined || (Array.isArray(message.unavailableBrowserTargets)
+      && message.unavailableBrowserTargets.every(isUnavailableBrowserTarget)))
+}
+
+function isReadWorkTabRequest(message: NativeMessage): message is ReadWorkTabRequest {
+  return message.type === 'connector_request'
+    && typeof message.requestId === 'string'
+    && typeof message.runId === 'string'
+    && typeof message.generation === 'string'
+    && message.tool === 'read_work_tab'
+    && isBrowserTarget(message.browserTarget)
+    && Number.isInteger(message.tab) && (message.tab as number) >= 1 && (message.tab as number) <= 20
+    && (message.offset === undefined || (Number.isInteger(message.offset) && (message.offset as number) >= 0 && (message.offset as number) <= 100000))
+    && (message.limit === undefined || (Number.isInteger(message.limit) && (message.limit as number) >= 1 && (message.limit as number) <= 200))
     && (message.browserTargets === undefined || (Array.isArray(message.browserTargets) && message.browserTargets.every(isBrowserTarget)))
     && (message.unavailableBrowserTargets === undefined || (Array.isArray(message.unavailableBrowserTargets)
       && message.unavailableBrowserTargets.every(isUnavailableBrowserTarget)))
@@ -1014,14 +1128,17 @@ function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnow
   if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
     && typeof message.generation === 'string' && message.tool === 'team_knowledge_item' && isBrowserTarget(message.browserTarget)
     && ['inspect_parent', 'create', 'readback'].includes(String(candidate.action)))) return false
-  if (candidate.action === 'inspect_parent') return candidate.parent === undefined && candidate.kind === undefined && candidate.name === undefined && candidate.body === undefined && candidate.catalogId === undefined
-  if (candidate.action === 'readback') return (candidate.kind === 'light_document' || candidate.kind === 'spreadsheet') && typeof candidate.catalogId === 'string' && /^\d+$/.test(candidate.catalogId)
+  if (candidate.action === 'inspect_parent') return candidate.parent === undefined && candidate.kind === undefined && candidate.name === undefined && candidate.body === undefined && candidate.catalogId === undefined && candidate.userConfirmation === undefined
+  if (candidate.action === 'readback') return (candidate.kind === 'light_document' || candidate.kind === 'spreadsheet') && typeof candidate.catalogId === 'string' && /^\d+$/.test(candidate.catalogId) && candidate.userConfirmation === undefined
   const recovery = candidate.recovery
   return isTeamKnowledgeParent(candidate.parent) && (candidate.kind === 'light_document' || candidate.kind === 'spreadsheet')
     && typeof candidate.name === 'string' && candidate.name.trim().length > 0 && candidate.name.length <= 120
     && typeof candidate.body === 'string' && candidate.body.length <= 100_000 && (candidate.kind === 'spreadsheet' || candidate.body.trim().length > 0)
     && typeof candidate.idempotencyIdentity === 'string' && candidate.idempotencyIdentity.length > 0 && candidate.idempotencyIdentity.length <= 128
     && (recovery === undefined || (typeof recovery === 'object' && recovery !== null && ((recovery.catalogId === null) || (typeof recovery.catalogId === 'string' && /^\d+$/.test(recovery.catalogId))) && Array.isArray(recovery.stages)))
+    && (candidate.userConfirmation === undefined || (typeof candidate.userConfirmation === 'object' && candidate.userConfirmation !== null
+      && Number.isSafeInteger(candidate.userConfirmation.itemIndex) && candidate.userConfirmation.itemIndex >= 1
+      && Number.isSafeInteger(candidate.userConfirmation.totalItems) && candidate.userConfirmation.totalItems >= candidate.userConfirmation.itemIndex))
 }
 
 const TEAM_DOC_STAGES: TeamDocStage[] = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
@@ -1070,6 +1187,10 @@ function sameBrowserTarget(left: BrowserTarget, right: BrowserTarget): boolean {
     && left.windowId === right.windowId
     && left.tabId === right.tabId
     && left.url === right.url
+}
+
+function samePinnedTab(left: BrowserTarget, right: BrowserTarget): boolean {
+  return left.browser === right.browser && left.tabId === right.tabId
 }
 
 function targetFromActionTab(tab: chrome.tabs.Tab): BrowserTarget | undefined {
@@ -1237,9 +1358,12 @@ async function respondToSelectedSourceScope(port: chrome.runtime.Port, request: 
     const empty = { domainId: '', systemIds: [], repositoryIds: [] }
     const preference = await knowledgeEnabledPreference()
     const enabled = record?.enabled ?? (preference.remember ? preference.enabled : true)
-    const scope = record?.scope ?? empty
+    let scope = record?.scope ?? empty
     let catalog: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string }>; repositories: Array<{ id: string; name: string }> } = { domains: [], systems: [], repositories: [] }
-    try { catalog = await loadKnowledgeCatalog(scope.domainId || undefined) } catch { /* names fall back to stored ids when the catalog is unavailable */ }
+    try {
+      catalog = await loadKnowledgeCatalog()
+      scope = pruneScope(scope, catalog)
+    } catch { /* names fall back to stored ids when the catalog is unavailable */ }
     port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, result: selectedSourceScopeEcho({ scope, enabled }, catalog) })
   } catch (error) {
     port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: asError(error) })
@@ -1271,7 +1395,8 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     const record = await resolveKnowledgeScopeRecord(request)
     if (record === undefined) throw new Error('当前会话还没有知识/代码范围记录。请先在输入框上方选择知识范围或代码库，再发起检索。')
     if (!record.enabled) throw new Error('知识查询开关已关闭。请打开输入框上方的知识查询开关后再试。')
-    const scope = record.scope
+    let scope = record.scope
+    try { scope = pruneScope(record.scope, await loadKnowledgeCatalog()) } catch { /* keep stored ids when the catalog is unavailable */ }
     const kind: KnowledgeKind = request.tool === 'knowledge_search' ? 'knowledge' : 'code'
     const fingerprint = scopeFingerprint(scope)
     const sessions = await knowledgeSessions()
@@ -1345,15 +1470,30 @@ async function pinnedBrowserTargets(settings: BrowserTargetSettings): Promise<Br
   if (settings.pinnedTabs.length === 0) throw new Error('Select at least one pinned tab before starting a browser-bound Harness Run.')
   const available: BrowserTarget[] = []
   const unavailable: UnavailableBrowserTarget[] = []
+  const nextPins: BrowserTarget[] = []
+  let pinsChanged = false
   for (const target of settings.pinnedTabs) {
     try {
       const tab = await chrome.tabs.get(target.tabId)
       const refreshed = targetFromActionTab(tab)
-      if (refreshed !== undefined && sameBrowserTarget(refreshed, target)) available.push(refreshed)
-      else unavailable.push({ browserTarget: target, reason: 'closed_or_changed' })
+      // Pinned mode follows the checked tab, not the URL saved when it was checked.
+      // A same-tab navigation (Team Knowledge child document) stays available and
+      // is transferred on the next Connector turn with the live URL.
+      if (refreshed !== undefined && samePinnedTab(refreshed, target)) {
+        available.push(refreshed)
+        nextPins.push(refreshed)
+        if (!sameBrowserTarget(refreshed, target)) pinsChanged = true
+      } else {
+        unavailable.push({ browserTarget: target, reason: 'closed_or_changed' })
+        nextPins.push(target)
+      }
     } catch {
       unavailable.push({ browserTarget: target, reason: 'closed_or_changed' })
+      nextPins.push(target)
     }
+  }
+  if (pinsChanged) {
+    await saveBrowserTargetSettings({ ...settings, pinnedTabs: nextPins })
   }
   const browserTarget = available.find((target) => target.tabId === settings.primaryTabId) ?? available[0]
   if (browserTarget === undefined) throw new Error('None of the pinned Browser Targets is still available. Select it again before starting.')
@@ -1466,15 +1606,196 @@ async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<Br
   return binding
 }
 
+const WORK_TAB_CONTENT_LIMIT = 12_000
+
+function pageFromRoster(binding: BrowserTargetBinding, tab: number): BrowserTarget {
+  const page = binding.browserTargets[tab - 1]
+  if (page === undefined) {
+    throw new Error(`list_work_tabs currently has ${binding.browserTargets.length} available page(s). Call list_work_tabs again, then pass a tab from 1 to ${Math.max(binding.browserTargets.length, 1)}.`)
+  }
+  return page
+}
+
+async function liveRosterPage(page: BrowserTarget): Promise<BrowserTarget> {
+  try {
+    const tab = await chrome.tabs.get(page.tabId)
+    const live = targetFromActionTab(tab)
+    if (live === undefined || !samePinnedTab(live, page)) {
+      throw { code: 'navigation', message: 'That work tab closed or was replaced. Call list_work_tabs again.' } satisfies OfficeReadFailure
+    }
+    return live
+  } catch (error) {
+    if (error && typeof error === 'object' && (error as OfficeReadFailure).code === 'navigation') throw error
+    throw { code: 'navigation', message: 'That work tab closed or was replaced. Call list_work_tabs again.' } satisfies OfficeReadFailure
+  }
+}
+
+function webeditFramesOf(frames: chrome.webNavigation.GetAllFrameResultDetails[]): chrome.webNavigation.GetAllFrameResultDetails[] {
+  return frames.filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
+}
+
+function clipWorkTabContent(text: string, maxChars = WORK_TAB_CONTENT_LIMIT): { content: string; truncated: boolean } {
+  if (text.length <= maxChars) return { content: text, truncated: false }
+  return { content: text.slice(0, maxChars), truncated: true }
+}
+
+function textFromLightDocument(result: Record<string, unknown>): string {
+  const document = result.document
+  if (!document || typeof document !== 'object' || Array.isArray(document)) return ''
+  const body = document as Record<string, unknown>
+  if (Array.isArray(body.blocks)) {
+    return body.blocks.flatMap((block) => {
+      if (!block || typeof block !== 'object' || Array.isArray(block)) return []
+      const item = block as Record<string, unknown>
+      if (typeof item.text === 'string' && item.text.length > 0) return [item.text]
+      if (Array.isArray(item.items)) return [item.items.filter((entry): entry is string => typeof entry === 'string').join('\n')]
+      if (Array.isArray(item.rows)) {
+        return [item.rows.map((row) => Array.isArray(row) ? row.map((cell) => String(cell ?? '')).join('\t') : '').join('\n')]
+      }
+      return []
+    }).join('\n')
+  }
+  const title = body.title
+  if (title && typeof title === 'object' && !Array.isArray(title) && typeof (title as { text?: unknown }).text === 'string') {
+    return (title as { text: string }).text
+  }
+  return ''
+}
+
+function textFromSpreadsheet(result: Record<string, unknown>): string {
+  const usedRange = result.usedRange
+  if (usedRange && typeof usedRange === 'object' && !Array.isArray(usedRange)) {
+    const range = usedRange as { address?: unknown; text?: unknown; value2?: unknown }
+    if (typeof range.text === 'string' && range.text.length > 0) return range.text
+    if (typeof range.address === 'string') return JSON.stringify(usedRange)
+  }
+  return JSON.stringify(result)
+}
+
+const VISIBLE_PAGE_TEXT_BUDGET_MS = 4_000
+
+function asChromeError(error: unknown): string {
+  const runtime = chrome.runtime.lastError?.message
+  if (typeof runtime === 'string' && runtime.length > 0) return runtime
+  return asError(error)
+}
+
+function missingHostPermission(error: unknown): boolean {
+  return /Cannot access contents of (the page|url)|Missing host permission|Cannot access a chrome:|Extension manifest must request permission/i.test(asChromeError(error))
+}
+
+async function readVisiblePageText(tabId: number): Promise<{ content: string; truncated: boolean }> {
+  try {
+    const injected = await Promise.race([
+      chrome.scripting.executeScript({
+        target: { tabId },
+        injectImmediately: true,
+        func: () => (document.body?.innerText ?? document.documentElement?.innerText ?? '').replace(/[ \t]+\n/g, '\n').trim(),
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(Object.assign(new Error(`Visible-text capture exceeded ${VISIBLE_PAGE_TEXT_BUDGET_MS / 1000}s.`), { code: 'timeout' })), VISIBLE_PAGE_TEXT_BUDGET_MS)
+      }),
+    ])
+    const text = typeof injected[0]?.result === 'string' ? injected[0].result : ''
+    return clipWorkTabContent(text)
+  } catch (error) {
+    if (missingHostPermission(error)) {
+      throw { code: 'unsupported', message: 'This page is outside the extension host permission, so visible text cannot be captured. Reload the extension after granting all-sites access, then retry read_work_tab.' } satisfies OfficeReadFailure
+    }
+    throw { code: 'timeout', message: asChromeError(error) } satisfies OfficeReadFailure
+  }
+}
+
+async function readWorkTabContent(request: ReadWorkTabRequest): Promise<Record<string, unknown>> {
+  const binding = await resolveOfficeBrowserTarget({
+    type: 'connector_request',
+    requestId: request.requestId,
+    runId: request.runId,
+    generation: request.generation,
+    browserTarget: request.browserTarget,
+    browserTargets: request.browserTargets,
+    unavailableBrowserTargets: request.unavailableBrowserTargets,
+    tool: 'office_get_context',
+  })
+  const live = await liveRosterPage(pageFromRoster(binding, request.tab))
+  const tab = await chrome.tabs.get(live.tabId)
+  const pageIdentity = { title: tab.title ?? '', url: live.url }
+  const isPrimary = samePinnedTab(live, binding.browserTarget)
+  const identity = await probeDocumentIdentity(live.tabId)
+  const offset = request.offset ?? 0
+  const limit = request.limit ?? 80
+  if (identity?.kind === 'webedit_light_document' || identity?.kind === 'webedit_spreadsheet') {
+    const frames = webeditFramesOf(await chrome.webNavigation.getAllFrames({ tabId: live.tabId }) ?? [])
+    if (frames.length === 0) throw { code: 'unsupported', message: 'That work tab has no supported WebEdit iframe.' } satisfies OfficeReadFailure
+    const message = identity.kind === 'webedit_light_document'
+      ? { type: 'office-document/v1', action: 'read', offset, limit }
+      : { type: 'office-spreadsheet/v1', action: 'used_range' }
+    const { reply, frame } = await sendToWebEditFrame(live.tabId, frames, message)
+    if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while reading that work tab.' }
+    const latest = await chrome.webNavigation.getAllFrames({ tabId: live.tabId }) ?? []
+    if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) {
+      throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while reading that work tab.' } satisfies OfficeReadFailure
+    }
+    const raw = reply.result as Record<string, unknown>
+    const extracted = identity.kind === 'webedit_light_document' ? textFromLightDocument(raw) : textFromSpreadsheet(raw)
+    const clipped = clipWorkTabContent(extracted)
+    return { status: 'ok', tab: request.tab, page: live, pageIdentity, kind: identity.kind, ...clipped, isPrimary }
+  }
+  const clipped = await readVisiblePageText(live.tabId)
+  return { status: 'ok', tab: request.tab, page: live, pageIdentity, kind: 'web_page', ...clipped, isPrimary }
+}
+
+function respondToReadWorkTab(port: chrome.runtime.Port, request: ReadWorkTabRequest): void {
+  // Roster and page reads must not share the Native start/stop queue. A hung
+  // iframe or executeScript on one checked tab would otherwise stall every
+  // later list_work_tabs until Native times out the whole peer.
+  void (async () => {
+    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
+    const binding = await resolveOfficeBrowserTarget({
+      type: 'connector_request',
+      requestId: request.requestId,
+      runId: request.runId,
+      generation: request.generation,
+      browserTarget: request.browserTarget,
+      browserTargets: request.browserTargets,
+      unavailableBrowserTargets: request.unavailableBrowserTargets,
+      tool: 'office_get_context',
+    })
+    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
+    const result = await readWorkTabContent({ ...request, ...binding })
+    return { ...binding, result }
+  })().then(({ browserTarget, browserTargets, unavailableBrowserTargets, result }) => {
+    port.postMessage({
+      type: 'connector_response',
+      requestId: request.requestId,
+      runId: request.runId,
+      generation: request.generation,
+      browserTarget,
+      browserTargets,
+      unavailableBrowserTargets,
+      result,
+    })
+  }).catch((error: unknown) => {
+    port.postMessage({
+      type: 'connector_response',
+      requestId: request.requestId,
+      runId: request.runId,
+      generation: request.generation,
+      browserTarget: request.browserTarget,
+      error: officeReadFailure(error),
+    })
+  })
+}
+
 function respondToConnector(port: chrome.runtime.Port, request: ConnectorRequest): void {
-  void queueNativeLifecycle(async () => {
+  void (async () => {
     if (nativePort !== port) throw new Error('Connector request belongs to a stale Native connection.')
     const binding = await resolveOfficeBrowserTarget(request)
     if (nativePort !== port) throw new Error('Connector request became stale before Office context could be read.')
     const resolvedRequest = { ...request, ...binding }
     const result = await readOfficeContext(resolvedRequest)
     return { ...binding, result }
-  })
+  })()
     .then(({ browserTarget, browserTargets, unavailableBrowserTargets, result }) => {
       port.postMessage({
         type: 'connector_response',
@@ -1552,6 +1873,12 @@ function probeSucceeded(reply: { ok?: unknown; result?: unknown } | undefined): 
 
 const OFFICE_PROBE_WAIT_MS_DEFAULT = 8_000
 const OFFICE_PROBE_RETRY_MS = 250
+const OFFICE_FRAME_OPERATION_MS_DEFAULT = 8_000
+
+function officeFrameOperationBudgetMs(): number {
+  const configured = Number((globalThis as typeof globalThis & { __DSH_OFFICE_FRAME_OPERATION_MS?: unknown }).__DSH_OFFICE_FRAME_OPERATION_MS)
+  return Number.isFinite(configured) && configured >= 0 ? configured : OFFICE_FRAME_OPERATION_MS_DEFAULT
+}
 
 /**
  * Chrome never re-injects content scripts into already-loaded frames, so every
@@ -1760,8 +2087,16 @@ async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.Ge
     })
     if (readyCandidates.length > 0) {
       const chosen = readyCandidates.reduce((best, candidate) => framePreference(candidate.identity) < framePreference(best.identity) ? candidate : best)
-      const reply = await chrome.tabs.sendMessage(tabId, message, { frameId: chosen.frame.frameId }) as { ok?: unknown; result?: unknown; error?: unknown }
-      return { reply, frame: chosen.frame }
+      const operationBudgetMs = officeFrameOperationBudgetMs()
+      try {
+        const reply = await sendMessageWithBudget(tabId, message, chosen.frame.frameId, operationBudgetMs)
+        return { reply, frame: chosen.frame }
+      } catch (error) {
+        if (isProbeTimeout(error)) {
+          throw { code: 'timeout', message: `The WebEdit iframe did not finish the ${channelReadyLabel(String(message.type))} operation within ${Math.round(operationBudgetMs / 100) / 10}s.` } satisfies OfficeReadFailure
+        }
+        throw error
+      }
     }
     if (Date.now() >= deadline) break
     await new Promise((resolve) => setTimeout(resolve, Math.min(OFFICE_PROBE_RETRY_MS, Math.max(0, deadline - Date.now()))))
@@ -2547,9 +2882,9 @@ async function rediscoverTeamDocInPage(input: {
   }
 }
 
-async function writeTeamDocInWebEdit(body: string): Promise<unknown> {
+async function writeTeamDocInWebEdit(body: string, readOnly = false): Promise<unknown> {
   if (location.protocol !== 'https:' || location.hostname !== 'webedit.midea.com') {
-    return { ok: false, failedAt: 'write', error: 'team_doc_wrong_webedit_origin' }
+    return { ok: false, failedAt: readOnly ? 'readback' : 'write', error: readOnly ? 'team_knowledge_document_persisted_readback_wrong_origin' : 'team_doc_wrong_webedit_origin' }
   }
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
   const decodeXml = (xml: string) => {
@@ -2566,23 +2901,27 @@ async function writeTeamDocInWebEdit(body: string): Promise<unknown> {
     const deadline = Date.now() + 30_000
     while (Date.now() < deadline) {
       app = (globalThis as typeof globalThis & { APP?: unknown }).APP
-      if (app?.openApi?.editor?.document?.selection?.insertContent && app?.openApi?.editor?.canvas?.getDocXml) break
+      if (app?.openApi?.editor?.canvas?.getDocXml && (readOnly || app?.openApi?.editor?.document?.selection?.insertContent)) break
       await wait(100)
     }
     const selection = app?.openApi?.editor?.document?.selection
     const canvas = app?.openApi?.editor?.canvas
-    if (!selection?.insertContent || !canvas?.getDocXml) return { ok: false, failedAt: 'write', error: 'team_doc_webedit_runtime_unavailable' }
+    if (!canvas?.getDocXml || (!readOnly && !selection?.insertContent)) return { ok: false, failedAt: readOnly ? 'readback' : 'write', error: readOnly ? 'team_knowledge_document_persisted_readback_unavailable' : 'team_doc_webedit_runtime_unavailable' }
     const beforeXml = await canvas.getDocXml()
-    // WebEdit builds have only ever been observed accepting `insertBlow`
-    // (sic). Send both spellings until the public API contract is confirmed
-    // against a live editor target.
-    await selection.insertContent({ markdown: body, insertBlow: false, insertBelow: false })
-    let afterXml = await canvas.getDocXml()
-    const changeDeadline = Date.now() + 3_000
-    while (Date.now() < changeDeadline && (typeof afterXml !== 'string' || afterXml === beforeXml)) {
-      await wait(50); afterXml = await canvas.getDocXml()
+    let afterXml = beforeXml
+    if (!readOnly) {
+      // Match the public WebEdit Markdown call shape. Explicit false
+      // positioning flags can move editor selection state without inserting
+      // the content, which is observable only through the strict readback.
+      await selection!.insertContent({ markdown: body })
+      afterXml = await canvas.getDocXml()
+      const changeDeadline = Date.now() + 3_000
+      while (Date.now() < changeDeadline && (typeof afterXml !== 'string' || afterXml === beforeXml)) {
+        await wait(50); afterXml = await canvas.getDocXml()
+      }
+      if (typeof afterXml !== 'string' || afterXml === beforeXml) return { ok: false, failedAt: 'write', error: 'team_doc_write_not_observed' }
     }
-    if (typeof afterXml !== 'string' || afterXml === beforeXml) return { ok: false, failedAt: 'write', error: 'team_doc_write_not_observed' }
+    if (typeof afterXml !== 'string') return { ok: false, failedAt: 'readback', error: readOnly ? 'team_knowledge_document_persisted_readback_unavailable' : 'team_doc_readback_mismatch' }
     const observedBody = decodeXml(afterXml)
     const visibleText = (value: string) => value
       .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -2610,12 +2949,39 @@ async function writeTeamDocInWebEdit(body: string): Promise<unknown> {
       const fragment = visibleText(withoutHeadingNumber)
       return fragment ? [fragment] : []
     }).filter(Boolean)
-    const readbackMatches = observedBody.length > 0 && visibleFragments.every((fragment) => observedBody.includes(fragment))
+    const readbackMatches = observedBody.length > 0 && visibleFragments.length > 0 && visibleFragments.every((fragment) => observedBody.includes(fragment))
+    if (readbackMatches && !readOnly) {
+      // An XML change proves only the editor's in-memory state. Give WebEdit's
+      // asynchronous save/sync cycle a bounded chance to settle before the
+      // caller leaves this page. The caller still reopens the same catalogId
+      // and performs a fresh read, which remains the authoritative gate.
+      const configuredSettleMs = Number((globalThis as typeof globalThis & { __DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS?: unknown }).__DSH_TEAM_DOC_PERSISTENCE_SETTLE_MS)
+      const minimumSettleMs = Number.isFinite(configuredSettleMs) && configuredSettleMs >= 0 ? Math.min(configuredSettleMs, 10_000) : 1_500
+      const settleStartedAt = Date.now()
+      const settleDeadline = settleStartedAt + Math.max(minimumSettleMs, 10_000)
+      const booleanSignal = async (names: string[]) => {
+        for (const name of names) {
+          const candidate = app?.[name]
+          try {
+            const value = typeof candidate === 'function' ? await candidate.call(app) : candidate
+            if (typeof value === 'boolean') return value
+          } catch { /* an optional save signal must not replace reopen readback */ }
+        }
+        return undefined
+      }
+      while (Date.now() < settleDeadline) {
+        const saving = await booleanSignal(['isSaving', 'getIsSaving', 'IsSaving'])
+        const syncing = await booleanSignal(['isSyncing', 'getIsSyncing', 'IsSyncing'])
+        const busy = saving === true || syncing === true
+        if (!busy && Date.now() - settleStartedAt >= minimumSettleMs) break
+        await wait(100)
+      }
+    }
     return readbackMatches
       ? { ok: true, readbackMatches: true, observedBody }
-      : { ok: false, failedAt: 'readback', error: 'team_doc_readback_mismatch', observedBody }
+      : { ok: false, failedAt: 'readback', error: readOnly ? 'team_knowledge_document_persisted_readback_mismatch' : 'team_doc_readback_mismatch', observedBody }
   } catch {
-    return { ok: false, failedAt: 'write', error: 'team_doc_webedit_write_failed' }
+    return { ok: false, failedAt: readOnly ? 'readback' : 'write', error: readOnly ? 'team_knowledge_document_persisted_readback_failed' : 'team_doc_webedit_write_failed' }
   }
 }
 
@@ -2733,7 +3099,7 @@ async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
 }
 
 function teamKnowledgeItemPartial(input: {
-  failedAt: 'inspect' | 'create' | 'rediscover' | 'write' | 'readback' | 'unsupported'
+  failedAt: 'inspect' | 'create' | 'rediscover' | 'write' | 'readback' | 'unsupported' | 'confirmation'
   error: string
   stages?: string[]
   item?: { catalogId: string; kind: TeamKnowledgeItemKind; name: string; url: string; fingerprint: string }
@@ -2750,6 +3116,15 @@ function teamKnowledgeItemFingerprint(kind: TeamKnowledgeItemKind, catalogId: st
   const source = `${kind}|${catalogId}|${url}`
   for (let index = 0; index < source.length; index += 1) { hash ^= source.charCodeAt(index); hash = Math.imul(hash, 16777619) }
   return `team-knowledge-item-v1-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+function teamKnowledgeItemUrlMatchesCatalogId(url: string, catalogId: string): boolean {
+  try {
+    const parsed = new URL(url)
+    const pathCatalogId = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).at(-1) ?? '')
+    const queryCatalogId = parsed.searchParams.get('id')
+    return parsed.origin === 'https://doc.midea.com' && pathCatalogId === catalogId && (queryCatalogId === null || queryCatalogId === catalogId)
+  } catch { return false }
 }
 
 interface TeamKnowledgeCreateCheckpoint {
@@ -2806,6 +3181,77 @@ async function readCreatedTeamKnowledgeItem(request: TeamKnowledgeItemRequest, i
   const result = reply?.result as { status?: unknown; resource?: unknown; document?: unknown } | undefined
   if (reply?.ok !== true || result?.status !== 'ok' || !isLightDocumentResourceIdentity(result.resource) || !result.document || typeof result.document !== 'object') throw new Error('team_knowledge_document_readback_unavailable')
   return { resource: result.resource, document: result.document }
+}
+
+async function waitForTeamKnowledgeUserConfirmation(input: TeamKnowledgeUserConfirmation & { name: string }): Promise<{ status: 'confirmed' | 'stopped' | 'timeout' | 'unloaded' | 'unavailable' }> {
+  if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com' || !document.body) return { status: 'unavailable' }
+  const stateKey = '__dshTeamKnowledgeUserConfirmation'
+  type ConfirmationState = { finish: (status: 'confirmed' | 'stopped' | 'timeout' | 'unloaded') => void }
+  const hostWindow = window as Window & { [stateKey]?: ConfirmationState }
+  hostWindow[stateKey]?.finish('unloaded')
+
+  return new Promise((resolve) => {
+    const previous = document.querySelector('[data-dsh-team-knowledge-confirmation="card"]')
+    previous?.remove()
+    const card = document.createElement('section')
+    card.dataset.dshTeamKnowledgeConfirmation = 'card'
+    card.setAttribute('role', 'status')
+    card.setAttribute('aria-live', 'polite')
+    card.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;max-width:360px;padding:14px 16px;border:1px solid #d9e2f2;border-radius:12px;background:#fff;color:#1f2937;box-shadow:0 12px 32px rgba(15,23,42,.18);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
+    const title = document.createElement('strong')
+    title.dataset.dshTeamKnowledgeConfirmation = 'title'
+    title.textContent = `第 ${input.itemIndex} 份 / 共 ${input.totalItems} 份已写入`
+    const description = document.createElement('div')
+    description.dataset.dshTeamKnowledgeConfirmation = 'document-name'
+    description.style.cssText = 'margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+    description.textContent = input.name
+    const hint = document.createElement('div')
+    hint.dataset.dshTeamKnowledgeConfirmation = 'hint'
+    hint.style.cssText = 'margin-top:8px;color:#52606d;font-size:12px;'
+    hint.textContent = '请确认内容；编辑器会继续自动保存。'
+    const actions = document.createElement('div')
+    actions.dataset.dshTeamKnowledgeConfirmation = 'actions'
+    actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px;'
+    const stop = document.createElement('button')
+    stop.type = 'button'
+    stop.dataset.dshTeamKnowledgeConfirmationAction = 'stop'
+    stop.textContent = '停止并留在此文档'
+    stop.style.cssText = 'border:0;background:transparent;color:#52606d;cursor:pointer;padding:6px 8px;'
+    const confirm = document.createElement('button')
+    confirm.type = 'button'
+    confirm.dataset.dshTeamKnowledgeConfirmationAction = 'confirm'
+    confirm.textContent = '已确认并继续'
+    confirm.style.cssText = 'border:0;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;padding:6px 10px;'
+    actions.append(stop, confirm)
+    card.append(title, description, hint, actions)
+    document.body.append(card)
+
+    let settled = false
+    const cleanup = () => {
+      clearTimeout(timeout)
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('beforeunload', onPageHide)
+      stop.removeEventListener('click', onStop)
+      confirm.removeEventListener('click', onConfirm)
+      card.remove()
+      if (hostWindow[stateKey]?.finish === finish) delete hostWindow[stateKey]
+    }
+    const finish = (status: 'confirmed' | 'stopped' | 'timeout' | 'unloaded') => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve({ status })
+    }
+    const onStop = () => finish('stopped')
+    const onConfirm = () => finish('confirmed')
+    const onPageHide = () => finish('unloaded')
+    const timeout = setTimeout(() => finish('timeout'), 10 * 60 * 1_000)
+    hostWindow[stateKey] = { finish }
+    stop.addEventListener('click', onStop)
+    confirm.addEventListener('click', onConfirm)
+    window.addEventListener('pagehide', onPageHide, { once: true })
+    window.addEventListener('beforeunload', onPageHide, { once: true })
+  })
 }
 
 async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): Promise<object> {
@@ -2880,7 +3326,11 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   }
   for (const stage of ['created', 'rediscovered']) if (!stages.includes(stage)) stages.push(stage)
   const item = { catalogId, kind, name: request.name!, url: created.url, fingerprint: teamKnowledgeItemFingerprint(kind, catalogId, created.url) }
+  if (!teamKnowledgeItemUrlMatchesCatalogId(created.url, catalogId)) {
+    return teamKnowledgeItemPartial({ item, stages, failedAt: 'readback', error: 'team_knowledge_item_url_catalog_mismatch' })
+  }
   let readback: Record<string, unknown>
+  let restoreParentAfterLightDocument = true
   try {
     await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
     if (kind === 'light_document') {
@@ -2892,15 +3342,52 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
       if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
       const write = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [frame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!] }))[0]?.result as { ok?: unknown; readbackMatches?: unknown; observedBody?: unknown; error?: unknown } | undefined
       if (write?.ok !== true || write.readbackMatches !== true || typeof write.observedBody !== 'string') throw new Error(typeof write?.error === 'string' ? write.error : 'team_knowledge_document_readback_mismatch')
-      readback = { body: write.observedBody }
-      for (const stage of ['body_written', 'readback_verified']) if (!stages.includes(stage)) stages.push(stage)
+      if (!stages.includes('body_written')) stages.push('body_written')
+      if (request.userConfirmation) {
+        // The in-memory XML readback above is complete, but must not be
+        // mistaken for persistent delivery. Keep the document open while the
+        // user reviews it; only an explicit confirmation permits navigation.
+        restoreParentAfterLightDocument = false
+        let confirmation: { status?: unknown } | undefined
+        try {
+          confirmation = (await chrome.scripting.executeScript({
+            target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: waitForTeamKnowledgeUserConfirmation,
+            args: [{ ...request.userConfirmation, name: request.name! }],
+          }))[0]?.result as { status?: unknown } | undefined
+        } catch {
+          return teamKnowledgeItemPartial({ item, stages, failedAt: 'confirmation', error: 'team_knowledge_user_confirmation_page_unloaded' })
+        }
+        if (confirmation?.status !== 'confirmed') {
+          const error = confirmation?.status === 'stopped'
+            ? 'team_knowledge_user_confirmation_stopped'
+            : confirmation?.status === 'timeout'
+              ? 'team_knowledge_user_confirmation_timeout'
+              : confirmation?.status === 'unloaded'
+                ? 'team_knowledge_user_confirmation_page_unloaded'
+                : 'team_knowledge_user_confirmation_unavailable'
+          return teamKnowledgeItemPartial({ item, stages, failedAt: 'confirmation', error })
+        }
+        restoreParentAfterLightDocument = true
+      }
+      await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url)
+      await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
+      const reopenedFrame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
+      if (!reopenedFrame) throw new Error('team_knowledge_webedit_frame_unavailable')
+      const persistedReadback = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [reopenedFrame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!, true] }))[0]?.result as { ok?: unknown; readbackMatches?: unknown; observedBody?: unknown; error?: unknown } | undefined
+      if (persistedReadback?.ok !== true || persistedReadback.readbackMatches !== true || typeof persistedReadback.observedBody !== 'string') throw new Error(typeof persistedReadback?.error === 'string' ? persistedReadback.error : 'team_knowledge_document_persisted_readback_mismatch')
+      readback = { body: persistedReadback.observedBody }
+      if (!stages.includes('readback_verified')) stages.push('readback_verified')
     } else {
       readback = await readCreatedTeamKnowledgeItem(request, { catalogId, kind, name: request.name!, url: created.url })
       if (!stages.includes('identity_readback_verified')) stages.push('identity_readback_verified')
     }
   } catch (error) {
     return teamKnowledgeItemPartial({ item, stages, failedAt: kind === 'spreadsheet' && error instanceof Error && error.message === 'team_knowledge_spreadsheet_identity_unavailable' ? 'unsupported' : 'readback', error: error instanceof Error ? error.message : 'team_knowledge_item_readback_failed' })
-  } finally { try { await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url) } catch {} }
+  } finally {
+    if (restoreParentAfterLightDocument) {
+      try { await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url) } catch {}
+    }
+  }
   const expected = kind === 'light_document'
     ? ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
     : ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified']
@@ -3015,6 +3502,10 @@ function connectNativePort(): chrome.runtime.Port {
   port.onMessage.addListener((message: NativeMessage) => {
     if (isConnectorRequest(message)) {
       respondToConnector(port, message)
+      return
+    }
+    if (isReadWorkTabRequest(message)) {
+      respondToReadWorkTab(port, message)
       return
     }
     if (isOfficeReadRangeRequest(message)) {
@@ -3238,13 +3729,14 @@ export default defineBackground(() => {
         }
         const record = (await knowledgeScopes())[sessionId]
         const preference = await knowledgeEnabledPreference()
-        const scope = record?.scope
+        const savedScope = record?.scope
         try {
-          const catalog = await loadKnowledgeCatalog(scope?.domainId)
+          const catalog = await loadKnowledgeCatalog()
+          const scope = savedScope === undefined ? savedScope : pruneScope(savedScope, catalog)
           sendResponse({ ok: true, scope, enabled: record?.enabled ?? (preference.remember ? preference.enabled : true), remember: preference.remember, serviceState: 'ready', catalog })
         } catch (error) {
           const text = asError(error)
-          sendResponse({ ok: false, scope, enabled: record?.enabled, remember: preference.remember, serviceState: knowledgeServiceState(error), error: text })
+          sendResponse({ ok: false, scope: savedScope, enabled: record?.enabled, remember: preference.remember, serviceState: knowledgeServiceState(error), error: text })
         }
       })().catch(async (error: unknown) => {
         const record = (await knowledgeScopes())[sessionId]

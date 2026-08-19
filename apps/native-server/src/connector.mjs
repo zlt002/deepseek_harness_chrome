@@ -4,17 +4,20 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { Readable } from 'node:stream'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
-import { PmdDeliveryRecordStore } from './pmd-delivery-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
 import { OfficeSpreadsheetWriteRecordStore } from './office-spreadsheet-write-record-store.mjs'
 
 const REQUEST_TIMEOUT_MS = 15_000
+// A cold WebEdit read first sweeps iframes for up to 8s, then the in-frame
+// runtime itself budgets another 8s. The previous 15s Native cap aborted
+// before the Extension could answer, so the model only saw a peer timeout.
+const OFFICE_REQUEST_TIMEOUT_MS = 30_000
 // A Team Knowledge write includes navigation, editor-frame readiness, write
-// readback, and restoration of the parent page. Those are legitimate browser
-// operations, not a long-running knowledge retrieval. Batch and PMD delivery
-// issue one Extension request per item, so this cap applies per item.
-const TEAM_KNOWLEDGE_WRITE_REQUEST_TIMEOUT_MS = 120_000
+// readback, an optional per-document human confirmation (up to ten minutes),
+// and restoration of the parent page. Batch and PMD delivery issue one
+// Extension request per item, so this cap applies independently to each item.
+const TEAM_KNOWLEDGE_WRITE_REQUEST_TIMEOUT_MS = 12 * 60_000
 const KNOWLEDGE_REQUEST_TIMEOUT_MS = 30 * 60_000
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
 // Node fetch (undici) defaults headersTimeout/bodyTimeout to 300s. A
@@ -28,12 +31,14 @@ const MCP_JSON_KEEPALIVE_INTERVAL_MS = 15_000
 // or changed writes.
 const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 10 * 60_000
 const OFFICE_DOCUMENT_MAX_RECORDS = 256
+const TEAM_KNOWLEDGE_BATCH_MAX_GRANTS = 32
 const MCP_PATH = '/mcp'
 const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
 const MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES = 128 * 1024
 // Operations without a stable public API and operation-specific readback are
 // deliberately absent. Accepting them and failing after a mutation is unsafe.
-const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_blocks_replace']
+const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_content_replace', 'selection_blocks_replace']
+const MODEL_LIGHT_DOCUMENT_OPERATIONS = LIGHT_DOCUMENT_OPERATIONS.filter((operation) => !['selection_replace', 'selection_content_replace', 'selection_blocks_replace'].includes(operation))
 
 function spreadsheetArtifactSummary(result) {
   const artifact = result?.observed?.artifact
@@ -208,9 +213,9 @@ const officeContextSchema = {
 }
 
 const officeGetContextTool = {
-  name: 'office_get_context',
-  title: 'Get Office context',
-  description: 'Read the trusted browser context bound to this Harness Run. In fixed-tab mode it returns every selected available page, marks the primary page, and reports selected pages that closed or changed. When multiple pages are returned, treat all of them as the current context and enumerate or use all of them unless the user explicitly asks only for the primary page. The model cannot select tabs. documentIdentity reports the probed WebEdit editor of each page: kind webedit_spreadsheet means call office_spreadsheet (action=selection reports the selected cells; view is only freeze/zoom), kind webedit_light_document means call office_document. A Team Knowledge light-document page can also preload a blank spreadsheet iframe; a blank spreadsheet next to a ready light document is reported as webedit_light_document, not a spreadsheet. null only means no webedit frame answered the quick probe yet, so retry office_spreadsheet context or selection rather than read as "no document" or "no selected cells".',
+  name: 'list_work_tabs',
+  title: '列出工作标签',
+  description: '列出这次会话绑定的工作标签（花名册），不是读正文。pages 里的每一页都是已勾选、可读的；isPrimary 只表示默认写目标，不是“只有这一页被选中”。返回每页的标题、网址、是轻文档还是表格、哪个已关闭。固定模式跟的是勾选的浏览器标签，同一标签换了文档会返回最新页。需要某一页正文时再调用 read_work_tab，tab 用本列表 pages 的序号。模型不能自己挑选未勾选的标签。documentIdentity 只表示探到的编辑器种类。null 只表示 WebEdit iframe 还没应答快探，不是“没有文档”。',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -229,6 +234,21 @@ const officeGetContextTool = {
       primaryBrowserTarget: browserTargetSchema,
       browserTargets: { type: 'array', minItems: 1, items: browserTargetSchema },
       unavailableBrowserTargets: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['browserTarget', 'reason'], properties: { browserTarget: browserTargetSchema, reason: { const: 'closed_or_changed' } } } },
+    },
+  },
+}
+
+const readWorkTabTool = {
+  name: 'read_work_tab',
+  title: '读取工作标签内容',
+  description: '按需读取 list_work_tabs 花名册里的某一页正文。tab 是该列表 pages 的序号，从 1 开始。pages 里每一页都可读，包括 isPrimary=false 的勾选页。轻文档读 WebEdit iframe 编辑器，表格读已用区域摘要，普通网页读可见文本。不能填写 tabId，也不能读未勾选的标签。本工具不改变主目标，不能写入。先调用 list_work_tabs 再读。',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['tab'],
+    properties: {
+      tab: { type: 'integer', minimum: 1, maximum: 20, description: 'list_work_tabs 返回的 pages 序号，从 1 开始。' },
+      offset: { type: 'integer', minimum: 0, maximum: 100000 },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
     },
   },
 }
@@ -293,15 +313,15 @@ const lightDocumentResourceSchema = {
 
 const officeDocumentTool = {
   name: 'office_document', title: 'Read or edit light document',
-  description: 'Legacy dispatch for a bound WebEdit light document, never a spreadsheet. For selected-content optimization and replacement, prefer light_document_selection_read plus light_document_selection_replace_preview/commit: those flat tools prevent parameter guessing and preserve the approved structured payload. This dispatch remains for insert/delete/format and existing callers. Every write is bound to the Browser Target, resource fingerprint, one-time approval, and same-target readback.',
+  description: 'Legacy dispatch for bounded light-document reads and non-selection edits. Selected-content reads and replacement are intentionally unavailable here: use light_document_selection_read plus light_document_selection_replace_preview/commit. Every write is bound to the Browser Target, resource fingerprint, one-time approval, and same-target readback.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['action'],
     properties: {
-      action: { enum: ['read', 'search', 'selection', 'inspect_write', 'write'] },
+      action: { enum: ['read', 'search', 'inspect_write', 'write'] },
       offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, query: { type: 'string', minLength: 1, maxLength: 500 },
       challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 },
-      operation: { enum: LIGHT_DOCUMENT_OPERATIONS }, payload: { type: 'object', additionalProperties: true },
+      operation: { enum: MODEL_LIGHT_DOCUMENT_OPERATIONS }, payload: { type: 'object', additionalProperties: true },
     },
   },
   outputSchema: {
@@ -335,7 +355,7 @@ const lightDocumentSelectionReadTool = {
 }
 const lightDocumentSelectionReplacePreviewTool = {
   name: 'light_document_selection_replace_preview', title: 'Preview selected-content replacement',
-  description: 'Preview a rich replacement for the current complete multi-block selection. Supply only the desired blocks. This performs one read-only selection snapshot, binds its fingerprint, checks the Browser Target, and returns a one-time approval challenge. It never changes the document; commit revalidates the resource and selection immediately before mutation.',
+  description: 'Preview a rich replacement for any stable non-collapsed selection, including partial text, multiple blocks, and nested lists. Supply only the desired blocks. This performs one read-only selection snapshot, binds its fingerprint, checks the Browser Target, and returns a one-time approval challenge. It never changes the document; commit revalidates the resource and selection immediately before mutation.',
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['blocks'], properties: { blocks: { type: 'array', minItems: 1, maxItems: 50, items: lightDocumentBlockSchema } } },
 }
@@ -348,7 +368,7 @@ const lightDocumentSelectionReplaceCommitTool = {
 
 const officeSpreadsheetTool = {
   name: 'office_spreadsheet', title: 'Read or edit spreadsheet',
-  description: 'Use only for a bound WebEdit spreadsheet. Reads return bounded context, the current selection, the used range, ranges, searches, or sheet lists. action=selection is AccrUI webedit_get_selection: it returns address, rowsCount, columnsCount, value2, and the active cell even when view.supported is false. action=used_range is AccrUI webedit_get_used_range. Do not treat view.supported=false as "no selection". office_get_context documentIdentity=null only means no webedit frame answered the quick probe; retry office_spreadsheet context or selection instead of telling the user the editor is missing. Any mutation first obtains a one-time inspect_write challenge; its operation, payload, Browser Target, and workbook fingerprint are revalidated and the same frame is read back.',
+  description: 'Use only for a bound WebEdit spreadsheet. Reads return bounded context, the current selection, the used range, ranges, searches, or sheet lists. action=selection is AccrUI webedit_get_selection: it returns address, rowsCount, columnsCount, value2, and the active cell even when view.supported is false. action=used_range is AccrUI webedit_get_used_range. Do not treat view.supported=false as "no selection". list_work_tabs documentIdentity=null only means no webedit frame answered the quick probe; retry office_spreadsheet context or selection instead of telling the user the editor is missing. Any mutation first obtains a one-time inspect_write challenge; its operation, payload, Browser Target, and workbook fingerprint are revalidated and the same frame is read back.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
     action: { enum: ['context', 'selection', 'used_range', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, axis: { enum: ['row', 'column'] }, kind: { enum: ['blanks', 'constants', 'formulas', 'lastCell', 'visible'] }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
@@ -409,7 +429,7 @@ const teamKnowledgeBatchTool = {
   inputSchema: { type: 'object', oneOf: [
     { type: 'object', additionalProperties: false, required: ['action'], properties: { action: { const: 'inspect_parent' } } },
     { type: 'object', additionalProperties: false, required: ['action', 'batchId', 'parentFingerprint', 'items'], properties: { action: { const: 'preview' }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
-    { type: 'object', additionalProperties: false, required: ['action', 'batchId', 'challenge', 'items'], properties: { action: { const: 'create' }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
+    { type: 'object', additionalProperties: false, required: ['action', 'batchId', 'challenge'], properties: { action: { const: 'create' }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 } } },
     { type: 'object', additionalProperties: false, required: ['action', 'batchId'], properties: { action: { const: 'status' }, batchId: { type: 'string', minLength: 1, maxLength: 128 } } },
   ] },
 }
@@ -423,9 +443,9 @@ const teamKnowledgeBatchPreviewTool = {
 
 const teamKnowledgeBatchCreateTool = {
   name: 'team_knowledge_batch_create', title: 'Create the approved Team Knowledge light-document batch',
-  description: 'After explicit approval, provide the batchId, preview challenge, and the unchanged ordered items. The parent is rechecked and every item is created only after business success, same-parent catalog rediscovery, WebEdit light-document identity, body write, and readback. The Connector handles missing catalog type metadata internally. Reuse the same batchId to resume unfinished items; never fall back to browser_open_tab or manual per-document writes.',
+  description: 'After explicit approval, provide only the stable batchId and one-time challenge returned by preview. The Connector uses the exact in-memory preview snapshot, so names and bodies must not be sent again. Each item is written separately and the Browser Target shows a confirmation card; wait for the user to inspect and confirm that document before the tool leaves it or starts the next item. Success still requires business success, same-parent catalog rediscovery, persisted body readback, and every per-document confirmation. If the Native Host restarted or the Approval Grant expired, preview and confirm again. Reuse the same batchId to resume unfinished items; never fall back to browser_open_tab or manual per-document writes.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'challenge', 'items'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'challenge'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 } } },
 }
 
 const teamKnowledgeBatchStatusTool = {
@@ -433,28 +453,6 @@ const teamKnowledgeBatchStatusTool = {
   description: 'Read the current status of a previously previewed or created light-document batch. Provide only its batchId.',
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['batchId'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 } } },
-}
-
-const pmdPrdDeliveryTool = {
-  name: 'pmd_prd_delivery', title: 'Deliver the two approved PMD documents',
-  description: 'Fixed two-document delivery for /pmd-prd. Inspect the bound Team Knowledge parent, preview exactly the approved analysis and PRD light documents, obtain explicit user confirmation, then refresh the unchanged preview and immediately create or resume only unfinished items with persistent readback evidence. Preview returns expiresAt for the one-time Approval Grant.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: {
-    type: 'object', additionalProperties: false, required: ['action'],
-    properties: {
-      action: { enum: ['inspect_parent', 'preview', 'create', 'status'], description: 'inspect_parent requires no other fields; preview requires requirementId, deliveryRunId, parentFingerprint, and documents; create requires requirementId, deliveryRunId, challenge, and documents; status requires requirementId and deliveryRunId.' },
-      requirementId: { type: 'string', minLength: 1, maxLength: 64, description: 'Stable internal PMD requirement identity. Required for preview, create, and status.' },
-      deliveryRunId: { type: 'string', minLength: 1, maxLength: 80, description: 'Stable delivery identity generated before the first preview and reused unchanged by preview, create, retries, and status.' },
-      parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 },
-      challenge: { type: 'string', minLength: 1, maxLength: 256, description: 'One-time Approval Grant returned by the fresh preview performed after user confirmation. Required for create.' },
-      documents: {
-        type: 'array', minItems: 2, maxItems: 2,
-        items: { type: 'object', additionalProperties: false, required: ['kind', 'name', 'body'], properties: {
-          kind: { enum: ['analysis', 'prd'] }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', minLength: 1, maxLength: 100000 },
-        } },
-      },
-    },
-  },
 }
 
 const pageIdentitySchema = {
@@ -581,6 +579,25 @@ function validOfficeGetContextOutput(value) {
 function validOfficeGetContextArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   return Object.keys(value).length === 0
+}
+
+function validReadWorkTabArguments(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  return keys.includes('tab') && keys.every((key) => ['tab', 'offset', 'limit'].includes(key))
+    && Number.isInteger(value.tab) && value.tab >= 1 && value.tab <= 20
+    && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000)
+    && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
+}
+
+function validReadWorkTabResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.status !== 'ok') return false
+  if (!Number.isInteger(value.tab) || value.tab < 1 || !validBrowserTarget(value.page)) return false
+  if (!value.pageIdentity || typeof value.pageIdentity !== 'object' || typeof value.pageIdentity.title !== 'string' || value.pageIdentity.url !== value.page.url) return false
+  if (!['webedit_light_document', 'webedit_spreadsheet', 'web_page'].includes(value.kind)) return false
+  if (typeof value.content !== 'string' || value.content.length > 20000) return false
+  if (typeof value.truncated !== 'boolean') return false
+  return value.isPrimary === undefined || typeof value.isPrimary === 'boolean'
 }
 
 function validOfficeReadRangeArguments(value) {
@@ -796,6 +813,27 @@ function lightDocumentStructuredBlockText(item) {
   if (typeof item?.html === 'string') return item.html.replace(/<[^>]*>/g, ' ')
   return ''
 }
+function lightDocumentSelectionMarkdown(blocks) {
+  if (!Array.isArray(blocks) || blocks.length < 1) return null
+  const rendered = blocks.map((item) => {
+    const type = String(item?.type ?? item?.blockType ?? 'p').toLowerCase()
+    if (typeof item?.markdown === 'string' && item.markdown.trim()) return item.markdown.trim()
+    const text = typeof item?.text === 'string' ? item.text.trim() : typeof item?.html === 'string' ? item.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() : ''
+    if (/^h[1-6]$/.test(type)) return `${'#'.repeat(Number(type.slice(1)))} ${text}`
+    if (type === 'blockquote') return text.split('\n').map((line) => `> ${line}`).join('\n')
+    if (type === 'ul') return (item.items ?? []).map((line) => `- ${line}`).join('\n')
+    if (type === 'ol') return (item.items ?? []).map((line, index) => `${index + 1}. ${line}`).join('\n')
+    if (type === 'table') {
+      const rows = item.rows ?? []
+      if (!rows.length) return ''
+      return [`| ${rows[0].join(' | ')} |`, `| ${rows[0].map(() => '---').join(' | ')} |`, ...rows.slice(1).map((row) => `| ${row.join(' | ')} |`)].join('\n')
+    }
+    if (type === 'codeblock') return `\`\`\`${item.language ?? 'plaintext'}\n${text}\n\`\`\``
+    return text
+  })
+  const markdown = rendered.filter(Boolean).join('\n\n')
+  return markdown.trim() && markdown.length <= 20_000 ? markdown : null
+}
 function lightDocumentInsertFragments(operation, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
   const position = payload.position === undefined ? 'end' : payload.position
@@ -830,8 +868,21 @@ function selectionBlocksReplaceFragments(payload) {
   const fragments = distinctiveLightDocumentFragments(payload.blocks.map(lightDocumentStructuredBlockText).join('\n'))
   return fragments.length ? { fragments } : null
 }
+function lightDocumentPayloadHasLiteralEscapedNewline(value, { code = false, markdown = false } = {}) {
+  if (typeof value === 'string') {
+    if (code) return false
+    const visible = markdown ? markdownOutsideFences(value) : value.replace(/<pre\b[\s\S]*?<\/pre>/gi, '').replace(/<code\b[\s\S]*?<\/code>/gi, '')
+    return /\\n/.test(visible)
+  }
+  if (Array.isArray(value)) return value.some((item) => lightDocumentPayloadHasLiteralEscapedNewline(item, { code, markdown }))
+  if (!value || typeof value !== 'object') return false
+  const blockType = String(value.type ?? value.blockType ?? '').toLowerCase()
+  const childCode = code || blockType === 'codeblock' || blockType === 'pre'
+  return Object.entries(value).some(([key, child]) => lightDocumentPayloadHasLiteralEscapedNewline(child, { code: childCode, markdown: key === 'markdown' }))
+}
 function validLightDocumentOperationPayload(operation, payload) {
-  if (operation === 'selection_insert' || operation === 'selection_replace') return selectionInsertFragments(payload) !== null
+  if (lightDocumentPayloadHasLiteralEscapedNewline(payload)) return false
+  if (operation === 'selection_insert' || operation === 'selection_replace' || operation === 'selection_content_replace') return selectionInsertFragments(payload) !== null
   if (operation === 'selection_blocks_replace') return selectionBlocksReplaceFragments(payload) !== null
   if (operation === 'insert_drawing' || operation === 'blocks_insert') return lightDocumentInsertFragments(operation, payload) !== null
   return !['blocks_delete', 'blocks_format'].includes(operation) || lightDocumentBatchItems(operation, payload) !== null
@@ -847,7 +898,7 @@ function verifiedLightDocumentWriteMatches(result, request) {
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
   if (!matchesRequest) return false
-  if (request.operation === 'selection_insert' || request.operation === 'selection_replace') return verifiedFragmentEvidence(request, result, selectionInsertFragments(request.payload))
+  if (request.operation === 'selection_insert' || request.operation === 'selection_replace' || request.operation === 'selection_content_replace') return verifiedFragmentEvidence(request, result, selectionInsertFragments(request.payload))
   if (request.operation === 'selection_blocks_replace') {
     const requested = selectionBlocksReplaceFragments(request.payload)
     return verifiedFragmentEvidence(request, result, requested)
@@ -1270,7 +1321,7 @@ function validTeamKnowledgeItemResult(value) {
   if (value.status === 'verified_write') return validTeamKnowledgeItem(value.item)
     && validTeamKnowledgeStages(value.stages, value.item.kind) && value.stages.length === (value.item.kind === 'light_document' ? 5 : 4)
     && value.readback && typeof value.readback === 'object'
-  if ((value.item !== null && !validTeamKnowledgeItem(value.item)) || !Array.isArray(value.stages) || !['inspect', 'create', 'rediscover', 'write', 'readback', 'unsupported'].includes(value.failedAt)
+  if ((value.item !== null && !validTeamKnowledgeItem(value.item)) || !Array.isArray(value.stages) || !['inspect', 'create', 'rediscover', 'write', 'readback', 'unsupported', 'confirmation'].includes(value.failedAt)
     || typeof value.error !== 'string' || value.error.length === 0) return false
   return value.diagnostic === undefined || (value.diagnostic && typeof value.diagnostic === 'object' && Number.isInteger(value.diagnostic.httpStatus) && (typeof value.diagnostic.errorCode === 'string' || value.diagnostic.errorCode === null))
 }
@@ -1305,11 +1356,71 @@ function validTeamKnowledgeBatchArguments(args) {
   if (args.action === 'status') return keys.length === 2 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
   if (args.action === 'preview') return (keys.length === 3 || keys.length === 4) && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
     && (args.parentFingerprint === undefined || typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256) && validTeamKnowledgeBatchItems(args.items)
-  return args.action === 'create' && keys.length === 4 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
-    && typeof args.challenge === 'string' && args.challenge.length > 0 && args.challenge.length <= 256 && validTeamKnowledgeBatchItems(args.items)
+  return args.action === 'create' && keys.length === 3 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
+    && typeof args.challenge === 'string' && args.challenge.length > 0 && args.challenge.length <= 256
 }
 function teamKnowledgeBatchFingerprint(items) {
   return hash(JSON.stringify(items.map((item) => ({ name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
+}
+const PMD_ANALYSIS_MARKERS = [
+  '# 需求分析与研发交付',
+  '## 1. 需求理解与范围',
+  '## 2. 证据分类',
+  '## 3. 规模评估与拆分',
+  '## 4. 代码影响地图',
+  '## 5. 纵向任务',
+  '## 6. 验收合同',
+  '## 7. 研发交付与风险',
+]
+const PMD_PRD_MARKERS = [
+  '# PRD:',
+  '## 需求基本信息',
+  '## 修订记录 [必填]',
+  '# 一、术语与缩写 [建议填写]',
+  '# 二、背景与目标',
+  '# 三、整体流程',
+  '# 四、功能性需求 [必填]',
+  '# 五、角色权限 [必填]',
+  '# 六、非功能性需求 [必填]',
+  '# 七、配置与开关 【选填】',
+  '# 八、测试关注点 [必填]',
+  '# 九、参考文档 【选填】',
+  '## AccrUI 需求交接附录',
+  '### A. 需求过程与证据分类',
+  '### B. 需求交接索引',
+  '### C. 研发继续工作入口',
+  '### D. 生成完整性规则',
+]
+function markdownOutsideFences(body) {
+  let fence = null
+  return body.split('\n').flatMap((line) => {
+    const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1]?.[0]
+    if (marker) { fence = fence === null ? marker : fence === marker ? null : fence; return [] }
+    return fence === null ? [line] : []
+  }).join('\n')
+}
+function orderedMarkdownMarkersMissing(body, markers) {
+  let offset = 0
+  for (const marker of markers) {
+    const index = body.indexOf(marker, offset)
+    if (index < 0) return marker
+    offset = index + marker.length
+  }
+  return null
+}
+function pmdBatchTemplateFailure(batchId, items) {
+  if (!batchId.startsWith('pmd:')) return null
+  if (items.length !== 2) return 'PMD delivery requires exactly two template documents'
+  const [analysis, prd] = items
+  if (!analysis.name.endsWith('_01_需求分析与研发交付') || !prd.name.endsWith('_02_PRD')) return 'PMD document names or order do not match the two-document contract'
+  for (const document of items) if (/\\n/.test(markdownOutsideFences(document.body))) return `${document.name} contains a literal \\n outside a fenced code block`
+  const missingAnalysis = orderedMarkdownMarkersMissing(analysis.body, PMD_ANALYSIS_MARKERS)
+  if (missingAnalysis) return `analysis document is missing or reorders: ${missingAnalysis}`
+  for (const header of ['| Evidence ID |', '| Impact ID |', '| Task ID |', '| AC ID |']) if (!analysis.body.includes(header)) return `analysis document is missing required table: ${header}`
+  const missingPrd = orderedMarkdownMarkersMissing(prd.body, PMD_PRD_MARKERS)
+  if (missingPrd) return `PRD document is missing or reorders: ${missingPrd}`
+  for (const header of ['| 业务需求名称 |', '| 版本 | 日期 |', '| 角色 | 功能/页面 |', '| 指标项 | 目标值 |']) if (!prd.body.includes(header)) return `PRD document is missing required table: ${header}`
+  return null
 }
 function teamKnowledgeVisibleText(value) {
   return value
@@ -1343,7 +1454,9 @@ function teamKnowledgeLightDocumentReadbackMatches(body, observedBody) {
 function teamKnowledgeBatchFailure(item) {
   if (item.status !== 'failed') return null
   const error = typeof item.error === 'string' ? item.error : ''
-  const stage = error === 'Extension peer verified the wrong Team Knowledge batch item'
+  const stage = /team_knowledge_user_confirmation_/i.test(error)
+    ? '用户确认'
+    : error === 'Extension peer verified the wrong Team Knowledge batch item'
     ? '回读校验'
     : item.stages.includes('body_written') ? '内容回读'
       : item.stages.includes('rediscovered') ? '内容写入'
@@ -1351,6 +1464,15 @@ function teamKnowledgeBatchFailure(item) {
           : item.stages.includes('parent_inspected') ? '创建'
             : '创建前校验'
   if (error === 'Extension peer verified the wrong Team Knowledge batch item') return { stage, reason: '回读文本格式与原始 Markdown 不同，导致旧版校验误判。', retryable: true }
+  if (/persisted_readback_(?:mismatch|failed|unavailable)/i.test(error)) {
+    return { stage, reason: '文档已创建，但重新打开后未读到已持久化的正文。', retryable: true }
+  }
+  if (/team_doc_readback_mismatch/i.test(error) && item.catalogId && item.stages.includes('rediscovered')) {
+    return { stage, reason: '文档目录已创建，但正文未通过编辑器回读校验；将复用同一文档继续写入。', retryable: true }
+  }
+  if (/team_knowledge_user_confirmation_(?:stopped|declined|timeout|page_unloaded|unavailable)/i.test(error)) {
+    return { stage, reason: '该文档尚未获得用户页面确认，已停止后续文档处理。', retryable: true }
+  }
   if (/idempotency identity conflicts|exact_name_conflict|item_type_(?:mismatch|unavailable)|directory_required|parent_fingerprint_mismatch|business_failed|readback_mismatch/i.test(error)) {
     return { stage, reason: '服务端返回的结果无法安全确认，请先检查父级、名称或内容后再发起新的预检。', retryable: false }
   }
@@ -1372,14 +1494,14 @@ function teamKnowledgeBatchUserText(result) {
   const total = items.length
   if (result.action === 'preview') {
     if (result.status === 'already_completed') return `这批 ${total} 个子文档已经全部创建并完成内容回读，无需重复操作。`
-    return `已确认父级和 ${total} 个子文档内容。确认后将按顺序创建、写入并回读；已完成 ${completed} 个，剩余 ${total - completed} 个会自动续传。\n创建凭证：${result.challenge}`
+    return `已确认父级和 ${total} 个子文档内容。确认后将逐份创建和写入；每份写入后都会停留在该页面等待用户确认，确认后才离页并处理下一份。已完成 ${completed} 个，剩余 ${total - completed} 个会续传。\n创建凭证：${result.challenge}`
   }
   if (result.action === 'create') {
     if (result.status === 'verified_write') return `已完成 ${total} 个子文档的创建、内容写入和回读验证。`
     const failures = items.filter((item) => item.status === 'failed' && item.failure)
     const details = failures.map((item) => `- ${item.name}：失败阶段：${item.failure.stage}；原因：${item.failure.reason}；可重试：${item.failure.retryable ? '是' : '否'}`)
     const retryable = failures.filter((item) => item.failure.retryable).length
-    return `本次完成 ${completed}/${total} 个子文档。${details.length ? `\n失败明细：\n${details.join('\n')}\n` : ''}${retryable > 0 ? `其中 ${retryable} 项可使用同一批次重新预览并确认后续传；其余项请先处理原因，避免盲目重试。` : '请先处理失败原因，避免盲目重试。'}`
+    return `未完成：本次仅完成 ${completed}/${total} 个子文档。${details.length ? `\n失败明细：\n${details.join('\n')}\n` : ''}${retryable > 0 ? `其中 ${retryable} 项可使用同一批次重新预览并确认后续传；其余项请先处理原因，避免盲目重试。` : '请先处理失败原因，避免盲目重试。'}`
   }
   if (completed === total) return `这批 ${total} 个子文档已经全部完成。`
   const failures = items.filter((item) => item.status === 'failed' && item.failure)
@@ -1399,35 +1521,6 @@ function validVerifiedTeamKnowledgeBatchItem(result, approved, persisted = false
   return persisted || teamKnowledgeLightDocumentReadbackMatches(approved.body, result.readback?.body)
 }
 
-const PMD_DOCUMENT_KINDS = ['analysis', 'prd']
-function validPmdDocuments(value, requirementId) {
-  if (!Array.isArray(value) || value.length !== 2) return false
-  const byKind = new Map(value.map((item) => [item?.kind, item]))
-  if (byKind.size !== 2 || PMD_DOCUMENT_KINDS.some((kind) => !byKind.has(kind))) return false
-  return PMD_DOCUMENT_KINDS.every((kind) => {
-    const item = byKind.get(kind)
-    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== 3) return false
-    if (typeof item.name !== 'string' || item.name.length === 0 || item.name.length > 120 || typeof item.body !== 'string' || item.body.trim().length === 0 || item.body.length > 100000) return false
-    const suffix = kind === 'analysis' ? '_01_需求分析与研发交付' : '_02_PRD'
-    return item.name.startsWith(`${requirementId}_`) && item.name.endsWith(suffix)
-  })
-}
-function normalizedPmdDocuments(value) {
-  return PMD_DOCUMENT_KINDS.map((kind) => value.find((item) => item.kind === kind))
-}
-function pmdContentFingerprint(documents) {
-  return hash(JSON.stringify(normalizedPmdDocuments(documents).map((item) => ({ kind: item.kind, name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
-}
-function validPmdDeliveryArguments(args) {
-  if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
-  const keys = Object.keys(args)
-  if (args.action === 'inspect_parent') return keys.length === 1
-  const validIdentity = typeof args.requirementId === 'string' && args.requirementId.trim().length > 0 && args.requirementId.length <= 64
-    && typeof args.deliveryRunId === 'string' && args.deliveryRunId.trim().length > 0 && args.deliveryRunId.length <= 80
-  if (args.action === 'status') return keys.length === 3 && validIdentity
-  if (args.action === 'preview') return keys.length === 5 && validIdentity && typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256 && validPmdDocuments(args.documents, args.requirementId)
-  return args.action === 'create' && keys.length === 5 && validIdentity && typeof args.challenge === 'string' && args.challenge.length > 0 && args.challenge.length <= 256 && validPmdDocuments(args.documents, args.requirementId)
-}
 const TEAM_DOC_STAGES = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
 function validTeamDocStages(value) {
   if (!Array.isArray(value)) return false
@@ -1674,14 +1767,15 @@ export function knowledgeHttpsFetch(input, init = {}, timeouts = {}) {
 
 /**
  * Stateless, authenticated MCP endpoint managed by the Native Host. It is
- * deliberately the narrow Issue #2 tracer-bullet: only office_get_context
+ * deliberately the narrow Issue #2 tracer-bullet: list_work_tabs
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, pmdDeliveryStore?: PmdDeliveryRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore, officeSpreadsheetWriteStore?: OfficeSpreadsheetWriteRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, officeRequestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore, officeSpreadsheetWriteStore?: OfficeSpreadsheetWriteRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
+    this.officeRequestTimeoutMs = options.officeRequestTimeoutMs ?? OFFICE_REQUEST_TIMEOUT_MS
     this.teamKnowledgeWriteRequestTimeoutMs = options.teamKnowledgeWriteRequestTimeoutMs ?? TEAM_KNOWLEDGE_WRITE_REQUEST_TIMEOUT_MS
     this.knowledgeRequestTimeoutMs = options.knowledgeRequestTimeoutMs ?? KNOWLEDGE_REQUEST_TIMEOUT_MS
     this.knowledgeCatalogTimeoutMs = options.knowledgeCatalogTimeoutMs ?? KNOWLEDGE_CATALOG_TIMEOUT_MS
@@ -1706,11 +1800,9 @@ export class BrowserConnector {
     this.teamKnowledgeBatchStore = options.teamKnowledgeBatchStore ?? new TeamKnowledgeBatchRecordStore()
     this.teamKnowledgeBatchChallenges = new Map()
     this.teamKnowledgeBatchLocks = new Map()
-    this.pmdDeliveryStore = options.pmdDeliveryStore ?? new PmdDeliveryRecordStore()
-    this.pmdDeliveryChallenges = new Map()
-    this.pmdDeliveryLocks = new Map()
     this.officeDocumentChallenges = new Map()
     this.officeDocumentWrites = new Map()
+    this.uncertainSelectionWrite = undefined
     this.officeDocumentWriteStore = options.officeDocumentWriteStore ?? new OfficeDocumentWriteRecordStore()
     this.officeSpreadsheetChallenges = new Map()
     this.officeSpreadsheetWrites = new Map()
@@ -1756,11 +1848,11 @@ export class BrowserConnector {
     this.pending.clear()
     this.officeDocumentChallenges.clear()
     this.officeDocumentWrites.clear()
+    this.uncertainSelectionWrite = undefined
     this.officeSpreadsheetChallenges.clear()
     this.officeSpreadsheetWrites.clear()
     this.teamKnowledgeItemChallenges.clear()
     this.teamKnowledgeBatchChallenges.clear()
-    this.pmdDeliveryChallenges.clear()
     this.browserTargets.clear()
     this.browserTargetSets.clear()
     this.unavailableBrowserTargets.clear()
@@ -1778,6 +1870,7 @@ export class BrowserConnector {
   registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets) {
     if (typeof runId !== 'string' || runId.length === 0) return false
     if (browserTarget !== undefined && !validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowserTargets)) return false
+    const previousTarget = this.browserTargets.get(runId)
     if (this.currentRunId !== undefined && this.currentRunId !== runId) {
       this.officeDocumentChallenges.clear()
       this.officeDocumentWrites.clear()
@@ -1785,8 +1878,9 @@ export class BrowserConnector {
       this.officeSpreadsheetWrites.clear()
       this.teamKnowledgeItemChallenges.clear()
       this.teamKnowledgeBatchChallenges.clear()
-      this.pmdDeliveryChallenges.clear()
+      this.uncertainSelectionWrite = undefined
     }
+    if (validBrowserTarget(previousTarget) && validBrowserTarget(browserTarget) && !sameBrowserTarget(previousTarget, browserTarget)) this.uncertainSelectionWrite = undefined
     this.currentRunId = runId
     if (validBrowserTarget(browserTarget)) {
       const targets = browserTargets ?? [browserTarget]
@@ -1811,6 +1905,7 @@ export class BrowserConnector {
     const pending = this.pending.get(response.requestId)
     if (!pending) return false
     const isOfficeContextRequest = pending.request.tool === 'office_get_context'
+    const isReadWorkTabRequest = pending.request.tool === 'read_work_tab'
     const isOfficeReadRangeRequest = pending.request.tool === 'office_read_range'
     const isOfficeWriteRangeRequest = pending.request.tool === 'office_write_range'
     const isOfficeDocumentRequest = pending.request.tool === 'office_document'
@@ -1819,7 +1914,7 @@ export class BrowserConnector {
     const isTeamKnowledgeItemRequest = pending.request.tool === 'team_knowledge_item'
     const isKnowledgeRequest = pending.request.tool === 'knowledge_search' || pending.request.tool === 'code_search'
     const isSelectedSourceScopeRequest = pending.request.tool === 'selected_source_scope'
-    const isOfficeRequest = isOfficeContextRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest || isTeamDocRequest || isTeamKnowledgeItemRequest
+    const isOfficeRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest || isTeamDocRequest || isTeamKnowledgeItemRequest
     const sameOpenIdentity = response.runId === pending.request.runId && response.generation === pending.request.generation
     const currentTarget = this.browserTargets.get(pending.request.runId)
     const currentTargets = this.browserTargetSets.get(pending.request.runId) ?? (currentTarget === undefined ? undefined : [currentTarget])
@@ -1837,7 +1932,7 @@ export class BrowserConnector {
       // transparency requires surfacing it verbatim (AGENTS §4) for every
       // office tool, not only the range/document ones. A spreadsheet failure
       // must never collapse into a generic "no Connector result".
-      if ((isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest) && validOfficeReadFailure(response.error)) {
+      if ((isReadWorkTabRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest) && validOfficeReadFailure(response.error)) {
         pending.reject(new Error(JSON.stringify(response.error)))
       } else if (typeof response.error === 'string' && response.error.length > 0) {
         pending.reject(new Error(response.error))
@@ -1879,6 +1974,10 @@ export class BrowserConnector {
       pending.reject(new Error('Extension peer returned an invalid verified Office write schema'))
       return true
     }
+    if (isReadWorkTabRequest && !validReadWorkTabResult(response.result)) {
+      pending.reject(new Error('Extension peer returned an invalid work-tab read'))
+      return true
+    }
     if (isOfficeDocumentRequest && ((pending.request.action === 'write' && !verifiedLightDocumentWriteMatches(response.result, pending.request))
       || (pending.request.action !== 'write' && !validOfficeDocumentReadResult(response.result)))) {
       pending.reject(new Error('Extension peer returned an invalid light-document result'))
@@ -1892,7 +1991,10 @@ export class BrowserConnector {
       pending.resolve({ browserTarget: response.browserTarget, pageIdentity: response.result.pageIdentity })
       return true
     }
-    pending.resolve(isOfficeSpreadsheetRequest ? { browserTarget: response.browserTarget, result: response.result } : isOfficeWriteRangeRequest ? {
+    pending.resolve(isReadWorkTabRequest ? {
+      browserTarget: response.browserTarget,
+      result: response.result,
+    } : isOfficeSpreadsheetRequest ? { browserTarget: response.browserTarget, result: response.result } : isOfficeWriteRangeRequest ? {
       browserTarget: response.browserTarget, resource: response.result.resource, requested: response.result.requested, observed: response.result.observed,
     } : isOfficeReadRangeRequest ? {
       browserTarget: response.browserTarget,
@@ -1963,7 +2065,7 @@ export class BrowserConnector {
     }
     if (message.method === 'tools/list') {
       this.onToolsListed?.()
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, officeReadRangeTool, officeWriteRangeTool, officeDocumentTool, lightDocumentReadTool, lightDocumentSelectionReadTool, lightDocumentSelectionReplacePreviewTool, lightDocumentSelectionReplaceCommitTool, officeSpreadsheetTool, teamKnowledgeSpreadsheetPreviewTool, teamKnowledgeSpreadsheetCreateTool, teamKnowledgeSpreadsheetReadbackTool, teamKnowledgeBatchPreviewTool, teamKnowledgeBatchCreateTool, teamKnowledgeBatchStatusTool, pmdPrdDeliveryTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool] } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, readWorkTabTool, officeReadRangeTool, officeWriteRangeTool, lightDocumentReadTool, lightDocumentSelectionReadTool, lightDocumentSelectionReplacePreviewTool, lightDocumentSelectionReplaceCommitTool, officeDocumentTool, officeSpreadsheetTool, teamKnowledgeSpreadsheetPreviewTool, teamKnowledgeSpreadsheetCreateTool, teamKnowledgeSpreadsheetReadbackTool, teamKnowledgeBatchPreviewTool, teamKnowledgeBatchCreateTool, teamKnowledgeBatchStatusTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool] } })
       return
     }
     if (message.method !== 'tools/call') {
@@ -1983,7 +2085,7 @@ export class BrowserConnector {
       return
     }
     if (message.params?.name === 'office_document') {
-      await this.#officeDocument(message, response)
+      await this.#officeDocument(message, response, { modelFacing: true })
       return
     }
     if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit'].includes(message.params?.name)) {
@@ -2016,10 +2118,6 @@ export class BrowserConnector {
       await this.#teamKnowledgeBatch({ ...message, params: { ...message.params, arguments: { ...(message.params?.arguments ?? {}), action: batchAction } } }, response)
       return
     }
-    if (message.params?.name === 'pmd_prd_delivery') {
-      await this.#pmdPrdDelivery(message, response)
-      return
-    }
     if (message.params?.name === 'knowledge_search' || message.params?.name === 'code_search') {
       await this.#knowledgeSearch(message, response)
       return
@@ -2028,8 +2126,12 @@ export class BrowserConnector {
       await this.#selectedSourceScope(message, response)
       return
     }
-    if (message.params?.name !== 'office_get_context' || !validOfficeGetContextArguments(message.params.arguments ?? {})) {
-      this.#reply(response, errorResponse(message.id, -32602, 'office_get_context accepts no model-controlled target arguments'))
+    if (message.params?.name === 'read_work_tab') {
+      await this.#readWorkTab(message, response)
+      return
+    }
+    if (!['list_work_tabs', 'office_get_context'].includes(message.params?.name) || !validOfficeGetContextArguments(message.params.arguments ?? {})) {
+      this.#reply(response, errorResponse(message.id, -32602, 'list_work_tabs accepts no model-controlled target arguments'))
       return
     }
 
@@ -2054,7 +2156,7 @@ export class BrowserConnector {
       tool: 'office_get_context',
     }
     try {
-      const resolved = await this.#requestExtension(correlation)
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
       const structuredContent = {
         runId: correlation.runId,
         requestId: correlation.requestId,
@@ -2165,7 +2267,7 @@ export class BrowserConnector {
       browserTarget: boundTarget, tool: 'office_read_range', range: message.params.arguments.range.trim(),
     }
     try {
-      const resolved = await this.#requestExtension(correlation)
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
       const structuredContent = {
         runId: correlation.runId, requestId: correlation.requestId, generation: correlation.generation,
         browserTarget: resolved.browserTarget, resource: resolved.resource, range: resolved.range,
@@ -2253,13 +2355,60 @@ export class BrowserConnector {
     const args = message.params.arguments
     const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: boundTarget, tool: 'office_write_range', range: args.range.trim(), values: args.values, resource: args.resource }
     try {
-      const resolved = await this.#requestExtension(correlation)
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
       const structuredContent = { runId: correlation.runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, resource: resolved.resource, requested: resolved.requested, observed: resolved.observed }
       if (!validOfficeWriteRangeOutput(structuredContent)) throw new Error('Browser Connector produced an invalid verified Office write schema')
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } })
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Browser Connector write request failed'
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: failure }], isError: true } })
+    }
+  }
+
+  async #readWorkTab(message, response) {
+    const args = message.params?.arguments ?? {}
+    if (!validReadWorkTabArguments(args)) {
+      this.#reply(response, errorResponse(message.id, -32602, 'read_work_tab requires tab from list_work_tabs pages, starting at 1. Do not pass a tabId.'))
+      return
+    }
+    const runId = this.currentRunId
+    const boundTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
+    if (!validBrowserTarget(boundTarget)) {
+      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
+      return
+    }
+    const browserTargets = this.browserTargetSets.get(runId) ?? [boundTarget]
+    const unavailableBrowserTargets = this.unavailableBrowserTargets.get(runId) ?? []
+    if (args.tab > browserTargets.length) {
+      this.#toolError(response, message.id, `list_work_tabs currently has ${browserTargets.length} available page(s). Call list_work_tabs again, then pass a tab from 1 to ${browserTargets.length}.`)
+      return
+    }
+    const isMultiTarget = browserTargets.length > 1 || unavailableBrowserTargets.length > 0
+    const correlation = {
+      type: 'connector_request',
+      requestId: randomUUID(),
+      runId,
+      generation: this.generation,
+      browserTarget: boundTarget,
+      ...(isMultiTarget ? { browserTargets, unavailableBrowserTargets } : {}),
+      tool: 'read_work_tab',
+      tab: args.tab,
+      ...(args.offset === undefined ? {} : { offset: args.offset }),
+      ...(args.limit === undefined ? {} : { limit: args.limit }),
+    }
+    try {
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
+      if (!validReadWorkTabResult(resolved.result)) throw new Error('Browser Connector produced an invalid work-tab read')
+      const structuredContent = {
+        runId,
+        requestId: correlation.requestId,
+        generation: this.generation,
+        browserTarget: resolved.browserTarget,
+        ...resolved.result,
+      }
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } })
+    } catch (error) {
+      this.#toolError(response, message.id, error instanceof Error ? error.message : 'Work-tab read failed')
     }
   }
 
@@ -2280,40 +2429,61 @@ export class BrowserConnector {
     const runId = this.currentRunId
     const browserTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
     if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    if (this.uncertainSelectionWrite?.runId === runId && this.uncertainSelectionWrite.generation === this.generation
+      && sameBrowserTarget(this.uncertainSelectionWrite.browserTarget, browserTarget)) {
+      this.#toolError(response, message.id, 'Selected-content write is uncertain after failed readback. Stop automatic recovery, report the exact error, and wait for a new Browser Target or Run before another write.')
+      return
+    }
     if (name === 'light_document_selection_replace_commit') {
       const grant = this.officeDocumentChallenges.get(args.challenge)
-      if (!grant || grant.flatSelectionReplace !== true || !grant.payload || typeof grant.idempotencyIdentity !== 'string') { this.#toolError(response, message.id, 'Selected-content approval challenge is missing, stale, or not issued by preview.'); return }
+      if (!grant || grant.flatSelectionReplace !== true || !grant.payload || typeof grant.operation !== 'string' || typeof grant.idempotencyIdentity !== 'string') { this.#toolError(response, message.id, 'Selected-content approval challenge is missing, stale, or not issued by preview.'); return }
       // Do not permit any raw action, operation, target, or body to enter this
       // endpoint.  Commit reconstitutes exactly what preview approved.
-      await this.#officeDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: 'selection_blocks_replace', payload: grant.payload } } }, response)
+      await this.#officeDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: grant.operation, payload: grant.payload } } }, response)
       return
     }
     const selectionCorrelation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'selection' }
     try {
-      const selected = await this.#requestExtension(selectionCorrelation)
+      const selected = await this.#requestExtension(selectionCorrelation, undefined, this.officeRequestTimeoutMs)
       if (!validOfficeDocumentReadResult(selected.result)) throw new Error('Browser Connector produced an invalid light-document selection')
       const selection = selected.result.document?.selection
       const selectionFingerprint = selection?.selectionFingerprint
-      if (!selection?.supported || selection?.truncated || selection?.hasSelection !== true || selection?.isCollapsed || selection?.stable !== true || selection?.wholeBlockReplaceable !== true || typeof selectionFingerprint !== 'string' || !/^selection-v4-[0-9a-f]{32}$/.test(selectionFingerprint)) {
-        throw new Error('The current light-document selection is not a complete contiguous whole-block selection. Select complete document blocks, then read the selection again before preview.')
+      if (!selection?.supported || selection?.truncated || selection?.hasSelection !== true || selection?.isCollapsed || selection?.stable !== true || typeof selectionFingerprint !== 'string' || !/^selection-v4-[0-9a-f]{32}$/.test(selectionFingerprint)) {
+        throw new Error('The current light-document selection is not a stable non-collapsed selection. Select the exact content to replace, then read the selection again before preview.')
       }
-      const payload = { blocks: args.blocks, expectedSelectionFingerprint: selectionFingerprint }
-      if (!validLightDocumentOperationPayload('selection_blocks_replace', payload)) throw new Error('The requested replacement blocks are invalid.')
+      let operation; let payload; let previewAction
+      if (selection.wholeBlockReplaceable === true) {
+        operation = 'selection_blocks_replace'; payload = { blocks: args.blocks, expectedSelectionFingerprint: selectionFingerprint }; previewAction = 'selection_blocks_replace_preview'
+      } else {
+        const markdown = lightDocumentSelectionMarkdown(args.blocks)
+        if (!markdown || !['public_replace_content', 'public_insert_content'].includes(selection.replaceStrategy)) throw new Error('The current WebEdit selection does not expose a public replacement strategy.')
+        operation = 'selection_content_replace'
+        payload = { markdown, expectedSelectionFingerprint: selectionFingerprint }; previewAction = 'selection_content_replace_preview'
+      }
+      if (!validLightDocumentOperationPayload(operation, payload)) throw new Error('The requested replacement blocks are invalid.')
       const challenge = randomBytes(32).toString('base64url')
       for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
       if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
       // Commit enters the normal write path, whose runtime re-reads both the
       // resource and selection fingerprint immediately before mutation.
-      this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: selected.result.resource, operation: 'selection_blocks_replace', payload, payloadHash: lightDocumentWriteHash('selection_blocks_replace', payload), idempotencyIdentity: flatSelectionReplaceIdentity(challenge), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-      const result = { runId, requestId: selectionCorrelation.requestId, generation: this.generation, browserTarget: selected.browserTarget, action: 'selection_blocks_replace_preview', resource: selected.result.resource, selection, blocks: args.blocks, challenge }
+      this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: selected.result.resource, operation, payload, payloadHash: lightDocumentWriteHash(operation, payload), idempotencyIdentity: flatSelectionReplaceIdentity(challenge), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+      const result = { runId, requestId: selectionCorrelation.requestId, generation: this.generation, browserTarget: selected.browserTarget, action: previewAction, resource: selected.result.resource, selection, blocks: args.blocks, challenge }
       this.#reply(response, lightDocumentToolResponse(message.id, result))
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document selection preview failed')
     }
   }
 
-  async #officeDocument(message, response) {
+  async #officeDocument(message, response, { modelFacing = false } = {}) {
     const args = message.params?.arguments ?? {}
+    if (modelFacing && (args.action === 'selection' || ['selection_replace', 'selection_content_replace', 'selection_blocks_replace'].includes(args.operation))) {
+      this.#reply(response, errorResponse(message.id, -32602, 'Selected-content reads and replacement are unavailable through office_document. Use light_document_selection_read and light_document_selection_replace_preview/commit.'))
+      return
+    }
+    if (['inspect_write', 'write'].includes(args.action) && lightDocumentPayloadHasLiteralEscapedNewline(args.payload)) {
+      this.#reply(response, errorResponse(message.id, -32602, 'Light-document payload contains a literal \\n outside a code block. Use real paragraph/list blocks or actual newline characters before requesting a write.'))
+      return
+    }
     if (!validOfficeDocumentArguments(args)) {
       this.#reply(response, errorResponse(message.id, -32602, officeDocumentArgumentsHint(args)))
       return
@@ -2322,6 +2492,12 @@ export class BrowserConnector {
     const browserTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
     if (!validBrowserTarget(browserTarget)) {
       this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
+      return
+    }
+    if (modelFacing && ['inspect_write', 'write'].includes(args.action)
+      && this.uncertainSelectionWrite?.runId === runId && this.uncertainSelectionWrite.generation === this.generation
+      && sameBrowserTarget(this.uncertainSelectionWrite.browserTarget, browserTarget)) {
+      this.#toolError(response, message.id, 'Selected-content write is uncertain after failed readback. Stop automatic recovery, report the exact error, and wait for a new Browser Target or Run before another write.')
       return
     }
 
@@ -2365,7 +2541,7 @@ export class BrowserConnector {
       }
       const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'write', operation: args.operation, payload: args.payload, resource: grant.resource }
       try {
-        const resolved = await this.#requestExtension(correlation)
+        const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
         if (!verifiedLightDocumentWriteMatches(resolved.result, correlation)) throw new Error('Browser Connector produced an invalid verified light-document write')
         await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'verified')
@@ -2374,6 +2550,7 @@ export class BrowserConnector {
         this.#reply(response, lightDocumentToolResponse(message.id, result))
       } catch (error) {
         try { await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'uncertain') } catch {}
+        if (grant.flatSelectionReplace === true) this.uncertainSelectionWrite = { runId, generation: this.generation, browserTarget }
         this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document write failed')
       }
       return
@@ -2384,7 +2561,7 @@ export class BrowserConnector {
       ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.query === undefined ? {} : { query: args.query.trim() }), ...(args.payload === undefined ? {} : { payload: args.payload }), ...(args.operation === undefined ? {} : { operation: args.operation }),
     }
     try {
-      const resolved = await this.#requestExtension(correlation)
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
       if (!validOfficeDocumentReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded light-document read')
       if (args.action === 'inspect_write') {
         const blockCount = Number.isInteger(resolved.result.document?.blockCount) ? resolved.result.document.blockCount : undefined
@@ -2436,7 +2613,7 @@ export class BrowserConnector {
       }
       const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: 'write', resource: grant.resource, operation: args.operation, payload: args.payload, precondition: grant.precondition }
       try {
-        const resolved = await this.#requestExtension(correlation)
+        const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
         if (!verifiedSpreadsheetWriteMatches(resolved.result, args.operation, args.payload, grant.resource, grant.precondition)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
         await this.officeSpreadsheetWriteStore.setState(args.idempotencyIdentity, 'verified')
@@ -2448,7 +2625,7 @@ export class BrowserConnector {
     }
     const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: args.action, ...(args.range === undefined ? {} : { range: args.range }), ...(args.axis === undefined ? {} : { axis: args.axis }), ...(args.kind === undefined ? {} : { kind: args.kind }), ...(args.sheetName === undefined ? {} : { sheetName: args.sheetName }), ...(args.query === undefined ? {} : { query: args.query }), ...(args.matchCase === undefined ? {} : { matchCase: args.matchCase }), ...(args.matchEntireCell === undefined ? {} : { matchEntireCell: args.matchEntireCell }), ...(args.searchBy === undefined ? {} : { searchBy: args.searchBy }), ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.operation === undefined ? {} : { operation: args.operation }), ...(args.payload === undefined ? {} : { payload: args.payload }) }
     try {
-      const resolved = await this.#requestExtension(correlation)
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
       if (!validOfficeSpreadsheetReadResult(resolved.result, args.action, args)) throw new Error('Browser Connector produced an invalid bounded spreadsheet read')
       if (args.action === 'inspect_write') {
         if (!validSpreadsheetPrecondition(resolved.result.precondition) || !validSpreadsheetOperationPrecondition(args.operation, args.payload, resolved.result.precondition)) throw new Error('Browser Connector produced an invalid spreadsheet write precondition')
@@ -2633,8 +2810,10 @@ export class BrowserConnector {
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
         return
       }
-      const contentFingerprint = teamKnowledgeBatchFingerprint(args.items)
       if (args.action === 'preview') {
+        const templateFailure = pmdBatchTemplateFailure(args.batchId, args.items)
+        if (templateFailure) throw new Error(`pmd_prd_template_invalid: ${templateFailure}`)
+        const contentFingerprint = teamKnowledgeBatchFingerprint(args.items)
         const inspected = await inspectParent(); const parent = inspected.result.parent
         if (args.parentFingerprint !== undefined && parent.fingerprint !== args.parentFingerprint) throw new Error('Team Knowledge parent changed; inspect and confirm the directory again.')
         const targetFingerprint = teamKnowledgeTargetFingerprint(inspected.target, parent, 'light_document')
@@ -2648,18 +2827,24 @@ export class BrowserConnector {
           return
         }
         for (const [key, grant] of this.teamKnowledgeBatchChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeBatchChallenges.delete(key)
-        if (this.teamKnowledgeBatchChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.teamKnowledgeBatchChallenges.delete(this.teamKnowledgeBatchChallenges.keys().next().value)
+        if (this.teamKnowledgeBatchChallenges.size >= TEAM_KNOWLEDGE_BATCH_MAX_GRANTS) this.teamKnowledgeBatchChallenges.delete(this.teamKnowledgeBatchChallenges.keys().next().value)
         const challenge = randomBytes(32).toString('base64url')
         const expiresAt = Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS
-        this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, batchId: args.batchId, contentFingerprint, expiresAt })
+        const items = Object.freeze(args.items.map((item) => Object.freeze({ name: item.name, body: item.body })))
+        this.teamKnowledgeBatchChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, batchId: args.batchId, contentFingerprint, items, expiresAt })
         const result = { action: 'preview', status: batch.status, browserTarget: inspected.target, parent, batch: teamKnowledgeBatchView(batch), challenge, expiresAt }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
         return
       }
       const grant = this.teamKnowledgeBatchChallenges.get(args.challenge)
       this.teamKnowledgeBatchChallenges.delete(args.challenge)
-      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)
-        || grant.batchId !== args.batchId || grant.contentFingerprint !== contentFingerprint) throw new Error('创建凭证无效、已过期或内容已变化。请重新预检，并原样使用预检结果中的创建凭证。')
+      if (!grant) throw new Error('team_knowledge_batch_approval_missing_or_already_used')
+      if (grant.expiresAt < Date.now()) throw new Error('team_knowledge_batch_approval_expired')
+      if (grant.runId !== runId || grant.generation !== this.generation) throw new Error('team_knowledge_batch_approval_run_changed')
+      if (!sameBrowserTarget(grant.target, target)) throw new Error('team_knowledge_batch_approval_browser_target_changed')
+      if (grant.batchId !== args.batchId) throw new Error('team_knowledge_batch_approval_batch_changed')
+      const contentFingerprint = grant.contentFingerprint
+      const documents = grant.items
       const inspected = await inspectParent()
       if (!sameBrowserTarget(inspected.target, grant.target)) throw new Error('Team Knowledge Browser Target changed after confirmation.')
       if (inspected.result.parent.fingerprint !== grant.parent.fingerprint) throw new Error('Team Knowledge parent changed after confirmation.')
@@ -2668,7 +2853,7 @@ export class BrowserConnector {
         let batch = await this.teamKnowledgeBatchStore.load(args.batchId)
         if (!batch || batch.targetFingerprint !== targetFingerprint || batch.contentFingerprint !== contentFingerprint) throw new Error('team_knowledge_batch_conflict')
         for (const item of batch.items.filter((candidate) => candidate.status !== 'created' && (candidate.status !== 'failed' || teamKnowledgeBatchFailure(candidate)?.retryable === true))) {
-          const document = args.items[item.index]
+          const document = documents[item.index]
           const existing = await this.teamDocStore.load(item.idempotencyIdentity)
           if (existing && (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== item.contentHash || existing.kind !== 'light_document' || existing.name !== item.name)) {
             await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'failed', error: 'Team Knowledge batch item idempotency identity conflicts with the approved parent or content.' })
@@ -2682,13 +2867,14 @@ export class BrowserConnector {
           await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'creating', error: null })
           await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
           try {
-            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
+            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, userConfirmation: { itemIndex: item.index + 1, totalItems: batch.items.length }, ...(recovery ? { recovery } : {}) }
             const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const itemResult = resolved.teamKnowledgeItem
             if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Knowledge Browser Target changed during batch creation.')
             if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid Team Knowledge batch item result')
             if (itemResult.status === 'verified_write' && !validVerifiedTeamKnowledgeBatchItem(itemResult, document)) throw new Error('Extension peer verified the wrong Team Knowledge batch item')
             await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
             await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: itemResult.status === 'verified_write' ? 'created' : 'failed', catalogId: itemResult.item?.catalogId ?? null, stages: itemResult.stages, error: itemResult.status === 'verified_write' ? null : itemResult.error })
+            if (itemResult.status === 'partial_delivery' && itemResult.failedAt === 'confirmation') break
           } catch (error) {
             await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'failed', error: error instanceof Error ? error.message : 'Team Knowledge batch item creation failed' })
           }
@@ -2696,133 +2882,8 @@ export class BrowserConnector {
         batch = await this.teamKnowledgeBatchStore.load(args.batchId)
         return { action: 'create', status: batch.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: grant.target, parent: grant.parent, batch: teamKnowledgeBatchView(batch) }
       })
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result, ...(result.status === 'partial_delivery' ? { isError: true } : {}) } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch operation failed') }
-  }
-
-  async #withPmdDeliveryLock(key, work) {
-    const previous = this.pmdDeliveryLocks.get(key) ?? Promise.resolve()
-    let release
-    const gate = new Promise((resolve) => { release = resolve })
-    const queued = previous.catch(() => undefined).then(() => gate)
-    this.pmdDeliveryLocks.set(key, queued)
-    await previous.catch(() => undefined)
-    try { return await work() } finally {
-      release()
-      if (this.pmdDeliveryLocks.get(key) === queued) this.pmdDeliveryLocks.delete(key)
-    }
-  }
-
-  async #pmdPrdDelivery(message, response) {
-    const args = message.params?.arguments ?? {}
-    if (!validPmdDeliveryArguments(args)) {
-      this.#reply(response, errorResponse(message.id, -32602, 'pmd_prd_delivery requires a valid fixed two-document action payload'))
-      return
-    }
-    if (args.action === 'status') {
-      try {
-        const record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
-        if (!record) throw new Error('pmd_delivery_run_not_found')
-        const result = { action: 'status', delivery: record }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'PMD delivery status failed') }
-      return
-    }
-    const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
-    if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
-    const inspectParent = async () => {
-      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
-      const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
-      if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
-      if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid PMD delivery parent')
-      if (result.capabilities?.light_document === false) throw new Error('team_knowledge_light_document_unsupported')
-      return { target: resolved.browserTarget, result }
-    }
-    try {
-      if (args.action === 'inspect_parent') {
-        const inspected = await inspectParent()
-        const result = { action: 'inspect_parent', browserTarget: inspected.target, parent: inspected.result.parent, capabilities: inspected.result.capabilities ?? {} }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-        return
-      }
-      const documents = normalizedPmdDocuments(args.documents)
-      const contentFingerprint = pmdContentFingerprint(documents)
-      if (args.action === 'preview') {
-        const inspected = await inspectParent(); const parent = inspected.result.parent
-        if (parent.fingerprint !== args.parentFingerprint) throw new Error('PMD delivery parent changed; inspect and confirm the directory again.')
-        const targetFingerprint = teamKnowledgeTargetFingerprint(inspected.target, parent, 'light_document')
-        const record = await this.pmdDeliveryStore.create({
-          requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, targetFingerprint, contentFingerprint,
-          documents: documents.map((item) => ({ kind: item.kind, name: item.name, idempotencyIdentity: `pmd:${hash(`${args.requirementId}:${args.deliveryRunId}`).slice(0, 48)}:${item.kind}`, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) })),
-        })
-        if (record.status === 'completed') {
-          const result = { action: 'preview', status: 'already_completed', browserTarget: inspected.target, parent, delivery: record }
-          this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-          return
-        }
-        for (const [key, grant] of this.pmdDeliveryChallenges) if (grant.expiresAt < Date.now()) this.pmdDeliveryChallenges.delete(key)
-        const challenge = randomBytes(32).toString('base64url')
-        const expiresAt = Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS
-        this.pmdDeliveryChallenges.set(challenge, { runId, generation: this.generation, target: inspected.target, parent, requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, contentFingerprint, expiresAt })
-        const result = { action: 'preview', status: record.status, browserTarget: inspected.target, parent, delivery: record, challenge, expiresAt }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-        return
-      }
-
-      const grant = this.pmdDeliveryChallenges.get(args.challenge)
-      this.pmdDeliveryChallenges.delete(args.challenge)
-      if (!grant) throw new Error('pmd_delivery_challenge_missing_or_already_used')
-      if (grant.expiresAt < Date.now()) throw new Error('pmd_delivery_challenge_expired')
-      if (grant.runId !== runId || grant.generation !== this.generation) throw new Error('pmd_delivery_challenge_run_changed')
-      if (!sameBrowserTarget(grant.target, target)) throw new Error('pmd_delivery_challenge_browser_target_changed')
-      if (grant.requirementId !== args.requirementId || grant.deliveryRunId !== args.deliveryRunId) throw new Error('pmd_delivery_challenge_delivery_identity_changed')
-      if (grant.contentFingerprint !== contentFingerprint) throw new Error('pmd_delivery_challenge_content_changed')
-      const inspected = await inspectParent()
-      if (!sameBrowserTarget(inspected.target, grant.target)) throw new Error('PMD delivery Browser Target changed after confirmation.')
-      if (inspected.result.parent.fingerprint !== grant.parent.fingerprint) throw new Error('PMD delivery parent changed after confirmation.')
-      const targetFingerprint = teamKnowledgeTargetFingerprint(grant.target, grant.parent, 'light_document')
-      const result = await this.#withPmdDeliveryLock(JSON.stringify([args.requirementId, args.deliveryRunId]), async () => {
-        let record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
-        if (!record || record.targetFingerprint !== targetFingerprint || record.contentFingerprint !== contentFingerprint) throw new Error('pmd_delivery_run_conflict')
-        let failedAt = null; let failure = null
-        for (const item of record.documents.filter((candidate) => candidate.status !== 'created')) {
-          const document = documents.find((candidate) => candidate.kind === item.kind)
-          const existing = await this.teamDocStore.load(item.idempotencyIdentity)
-          if (existing && (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== item.contentHash || existing.kind !== 'light_document' || existing.name !== item.name)) {
-            failedAt = item.kind; failure = 'PMD document idempotency identity conflicts with the approved parent or content.'
-            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'failed', error: failure })
-            break
-          }
-          if (existing?.verified && validTeamKnowledgeItemResult(existing.result) && existing.result.status === 'verified_write') {
-            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'created', catalogId: existing.result.item.catalogId, stages: existing.result.stages, error: null })
-            continue
-          }
-          const recovery = existing ? { catalogId: existing.catalogId ?? null, stages: existing.stages ?? [] } : undefined
-          await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'creating', error: null })
-          await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
-          try {
-            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: item.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
-            const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const itemResult = resolved.teamKnowledgeItem
-            if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('PMD delivery Browser Target changed during creation.')
-            if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid PMD document result')
-            await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
-            if (itemResult.status !== 'verified_write') {
-              failedAt = item.kind; failure = itemResult.error
-              await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'failed', catalogId: itemResult.item?.catalogId ?? null, stages: itemResult.stages, error: itemResult.error })
-              break
-            }
-            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'created', catalogId: itemResult.item.catalogId, stages: itemResult.stages, error: null })
-          } catch (error) {
-            failedAt = item.kind; failure = error instanceof Error ? error.message : 'PMD document creation failed'
-            await this.pmdDeliveryStore.updateItem({ requirementId: args.requirementId, deliveryRunId: args.deliveryRunId, kind: item.kind, status: 'failed', error: failure })
-            break
-          }
-        }
-        record = await this.pmdDeliveryStore.load(args.requirementId, args.deliveryRunId)
-        return { action: 'create', status: record.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: grant.target, parent: grant.parent, delivery: record, ...(failedAt ? { failedAt, error: failure } : {}) }
-      })
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'PMD delivery failed') }
   }
 
   async #openBrowserTab(message, response) {

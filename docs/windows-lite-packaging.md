@@ -34,9 +34,11 @@ accr-ui-windows-lite-x64/
 选择目录、覆盖确认和进度显示。真正的安装、升级、数据保留和回滚都由
 `install.ps1` 完成。`payload.zip` 包含扩展、静态 Harness JavaScript bundle、Native Server、
 产品 UI 插件、产品 skill 根目录和少量 Windows x64 原生文件，不包含
-`runtime/harness/node_modules`。其中 `runtime/skills/pmd-prd` 是内置 `/pmd-prd`；
+`runtime/harness/node_modules`。其中 `runtime/skills/pmd-prd` 是内置 `/pmd-prd`，
+`runtime/skills/{pptx,xlsx,docx,pdf}` 是产品内置 Office skill；
 `run_native_host.bat` 必须设置 `DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills`，
-这样即使用户电脑已有 `%USERPROFILE%\.claude\skills\pmd-prd`，也走产品合同。
+这样即使用户电脑已有 `%USERPROFILE%\.claude\skills` 同名目录，也走产品合同。
+四个 Office skill 由独立 provider 以 rank 1 发布，项目根和用户端同名 skill 不能覆盖它们。
 用户后来安装的插件保存在 `%APPDATA%\accr-ui-harness\profile`，升级主程序不会删除。
 
 ## 方式一：日常快速出包
@@ -92,7 +94,7 @@ gh workflow run build-windows-lite.yml \
 - Chrome、Edge 的 Native Messaging 注册正确。
 - Native Host 能完成 `ping/pong` 并正常停止。
 - Harness Web 能启动并激活全部 10 个产品 UI 插件。
-- 安装树里存在 `runtime/skills/pmd-prd/SKILL.md`，且 launcher 指向该产品 skill 根。
+- 安装树里存在 `runtime/skills/pmd-prd/SKILL.md` 以及 `pptx` / `xlsx` / `docx` / `pdf`，且 launcher 指向该产品 skill 根。
 - Windows 目录选择器能加载 Koffi 并进入 `showing` 状态。
 - 从旧版本升级后，工作区、日志和用户数据仍然存在。
 - 回滚能恢复旧版本，再次回滚能恢复候选版本。
@@ -137,7 +139,7 @@ node release/windows-lite/windows-release.mjs \
 或走 GitHub Actions 出正式包。组装成功后至少确认：
 
 ```sh
-unzip -Z1 release/accr-ui-windows-lite-x64/payload.zip | grep 'runtime/skills/pmd-prd/SKILL.md'
+unzip -Z1 release/accr-ui-windows-lite-x64/payload.zip | grep -E 'runtime/skills/(pmd-prd|pptx|xlsx|docx|pdf)/SKILL.md'
 unzip -p release/accr-ui-windows-lite-x64/payload.zip runtime/run_native_host.bat \
   | grep DSH_PRODUCT_SKILLS_ROOT
 ```
@@ -218,11 +220,12 @@ Get-Content .\accr-ui-windows-lite-x64.zip.sha256
 
 ### `/pmd-prd` 仍在写 `req_*` 或做原型
 
-先确认 ZIP 和安装树里有 `runtime/skills/pmd-prd/SKILL.md`，并且
+先确认 ZIP 和安装树里有 `runtime/skills/pmd-prd/SKILL.md` 以及
+`runtime/skills/{pptx,xlsx,docx,pdf}/SKILL.md`，并且
 `run_native_host.bat` 含 `DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills`。
-缺这两项时，本机 `%USERPROFILE%\.claude\skills\pmd-prd` 会变成唯一命中，
+缺这些项时，本机 `%USERPROFILE%\.claude\skills` 里的同名目录会变成唯一命中，
 跑的是旧 AccrUI skill，不是产品内置合同。有产品根时，同名 Claude skill
-排在后面，不会盖掉内置 `/pmd-prd`。
+排在后面；四个 Office skill 还由独立 provider 以 rank 1 发布，项目根和用户端都不能覆盖。
 
 ### Windows 界面仍然像官方默认界面
 

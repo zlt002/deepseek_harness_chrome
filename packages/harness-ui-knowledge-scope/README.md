@@ -7,6 +7,11 @@ this plugin only renders a snapshot and sends nonce-bound commands.
 Selected source names are preserved in the trigger text. CSS clips the text on
 narrow layouts, while `title` and the accessible name retain the full list.
 
+The repository and knowledge choosers grow upward from the composer. Their
+max height is the live space under the compact workspace/session bar
+(`[data-testid="compact-header"]`), so a taller or shorter sidebar changes
+the list without a 480px design cap.
+
 ## Required generic upstream seam
 
 Clean upstream must provide one **public** slot before loading this plugin:
@@ -15,7 +20,8 @@ Clean upstream must provide one **public** slot before loading this plugin:
    `conversation.composer.above` as a session-scoped list owned by `InputZone`.
    In `packages/client/ui-conversation/src/client/apply.ts`, register that
    slot. In `packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx`,
-   render it as the composer card's preceding sibling.
+   render it as the composer card's preceding sibling. A composer-chain
+   takeover must hide only the input card so this strip stays visible.
 
 The clean upstream already owns and renders the card-wide
 `conversation.input.overlay` list. The picker uses that existing slot; no new

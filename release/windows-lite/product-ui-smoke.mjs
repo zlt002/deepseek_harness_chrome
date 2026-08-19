@@ -16,6 +16,7 @@ export const EXPECTED_PRODUCT_CLIENT_IDS = [
   '@accrui/harness-ui-session-log-copy',
   '@accrui/harness-ui-settings-shell',
   '@accrui/harness-ui-knowledge-scope',
+  '@accrui/harness-ui-document-intake',
   '@accrui/harness-skill-settings',
 ]
 

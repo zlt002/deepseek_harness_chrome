@@ -189,6 +189,11 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.ok(payloadEntries.includes('runtime/native-server/harness-tracking.mjs'))
   assert.ok(payloadEntries.includes('runtime/dsh-plugin.bat'))
   assert.ok(payloadEntries.includes('runtime/skills/pmd-prd/SKILL.md'))
+  assert.ok(payloadEntries.includes('runtime/skills/pptx/SKILL.md'))
+  assert.ok(payloadEntries.includes('runtime/skills/xlsx/SKILL.md'))
+  assert.ok(payloadEntries.includes('runtime/skills/docx/SKILL.md'))
+  assert.ok(payloadEntries.includes('runtime/skills/pdf/SKILL.md'))
+  assert.ok(payloadEntries.includes('runtime/native-server/product-office-skills.mjs'))
   assert.equal(payloadEntries.some((entry) => entry.startsWith('runtime/harness/node_modules/')), false)
   assert.match(launcher, /DSH_ROOT=%PACKAGE_DIR%harness/)
   assert.match(launcher, /DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server\.mjs/)
@@ -202,6 +207,14 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   const packagedSkill = execFileSync('unzip', ['-p', payloadZip, 'runtime/skills/pmd-prd/SKILL.md'], { encoding: 'utf8' })
   assert.match(packagedSkill, /Harness Workspace 是唯一用户界面/)
   assert.doesNotMatch(packagedSkill, /pmd-workspace|clarification\.md/)
+  for (const [entry, expectedName] of [
+    ['runtime/skills/pptx/SKILL.md', 'name: pptx'],
+    ['runtime/skills/xlsx/SKILL.md', 'name: xlsx'],
+    ['runtime/skills/docx/SKILL.md', 'name: docx'],
+    ['runtime/skills/pdf/SKILL.md', 'name: pdf'],
+  ]) {
+    assert.match(execFileSync('unzip', ['-p', payloadZip, entry], { encoding: 'utf8' }), new RegExp(expectedName))
+  }
   assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.ps1`), true)
   assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install-ui.ps1`), true)
   assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/payload/extension/manifest.json`), false)
@@ -311,6 +324,7 @@ test('static Windows runtime uses a bundle, keeps native sidecars, and rejects n
   assert.match(banner, /win32-x64.*\[\^\\\\\/\]\+/s)
   assert.doesNotMatch(banner, /sharp-libvips-win32-x64/)
   const builderSource = await readFile(new URL('../release/windows-lite/build-static-harness-runtime.mjs', import.meta.url), 'utf8')
+  assert.match(builderSource, /product-office-skills\.mjs/)
   assert.match(builderSource, /process\.env\.npm_execpath/)
   assert.match(builderSource, /'pnpm\.cmd'/)
   assert.doesNotMatch(builderSource, /run\('pnpm'/)
@@ -362,8 +376,8 @@ test('Windows product UI smoke requires every activated product client bundle', 
     return { ok: true, status: 200, text: async () => '' }
   }
   const result = await verifyProductUiBoot('http://127.0.0.1:43123/', fetchImpl)
-  assert.equal(result.productClientCount, 10)
-  assert.equal(fetched.length, 11)
+  assert.equal(result.productClientCount, EXPECTED_PRODUCT_CLIENT_IDS.length)
+  assert.equal(fetched.length, EXPECTED_PRODUCT_CLIENT_IDS.length + 1)
 
   await assert.rejects(
     verifyProductUiBoot('http://127.0.0.1:43123/', async input => {
@@ -448,6 +462,9 @@ test('Windows Native Messaging acceptance preserves cmd launcher quoting and fai
   assert.match(acceptanceSource, /VBS installer failed with exit code \$vbsExitCode/)
   assert.match(acceptanceSource, /if \(\$LASTEXITCODE -ne 0\) \{ throw "Native Messaging smoke failed with exit code \$LASTEXITCODE\." \}/)
   assert.match(acceptanceSource, /runtime\\skills\\pmd-prd\\SKILL\.md/)
+  assert.match(acceptanceSource, /runtime\\skills\\' \+ \$officeSkill \+ '\\SKILL\.md/)
+  assert.match(acceptanceSource, /@\('pptx', 'xlsx', 'docx', 'pdf'\)/)
+  assert.match(acceptanceSource, /product-office-skills\.mjs/)
   assert.match(acceptanceSource, /DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills/)
   assert.match(acceptanceSource, /Harness Workspace 是唯一用户界面/)
   assert.equal((acceptanceSource.match(/Invoke-NativeMessageSmoke/g) ?? []).length, 3)

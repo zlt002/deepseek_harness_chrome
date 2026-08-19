@@ -5,7 +5,7 @@ description: "在已绑定的美的 WebEdit / Team Knowledge 电子表格中稳�
 
 # 表格 Verified Write
 
-只用 `mcp__chrome__office_spreadsheet`。`office_get_context` 的 `documentIdentity=null` 只表示快探没回，不是“没有表格”。先重试 `context` 或 `selection`。
+只用 `mcp__chrome__office_spreadsheet`。`list_work_tabs` 的 `documentIdentity=null` 只表示快探没回，不是“没有表格”。先重试 `context` 或 `selection`。
 
 ## 读当前选区
 

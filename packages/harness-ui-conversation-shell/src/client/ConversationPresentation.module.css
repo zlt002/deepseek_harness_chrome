@@ -23,6 +23,12 @@
   overflow-y: auto;
   overscroll-behavior-y: contain;
   scrollbar-gutter: stable;
+  /* Official ChatView / Trajectory still reserve --dsh-composer-height as if
+     the input were a sticky overlay inside this scrollport. AccrUI keeps the
+     composer as a root sibling, so the scrollport already ends above the
+     input; inheriting the live seat height would lift the back-to-bottom
+     control into the middle of the transcript. */
+  --dsh-composer-height: 0px;
 }
 
 .root[data-phase='hero'] .scrollBody { justify-content: flex-end; }
@@ -71,7 +77,7 @@
    public slot and chain wrappers are `display: contents`, so reach the actual
    composer root through those stable attributes and directly give the whole
    scope-strip-plus-card chain active's 8px dock inset. */
-.root[data-phase='hero'] > :global([data-composer-seat]) > :global([data-slot='conversation.composer']) > :global([data-chain-overlay-fallback='conversation.composer']) > * {
+.root[data-phase='hero'] > :global([data-composer-seat]) :global([data-composer-stack]) {
   padding-bottom: var(--dsh-composer-dock-inset);
 }
 

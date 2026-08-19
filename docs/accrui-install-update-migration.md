@@ -84,9 +84,11 @@ accr-ui-windows-lite-x64/
 └── README.zh-CN.md
 ```
 
-`payload.zip` 内的 `runtime/skills/pmd-prd` 是内置 `/pmd-prd`。安装后由
-`runtime/run_native_host.bat` 的 `DSH_PRODUCT_SKILLS_ROOT` 指向它，避免用户
-`%USERPROFILE%\.claude\skills` 里的同名旧 skill 成为唯一来源。
+`payload.zip` 内的 `runtime/skills/pmd-prd` 是内置 `/pmd-prd`，
+`runtime/skills/{pptx,xlsx,docx,pdf}` 是产品内置 Office skill。安装后由
+`runtime/run_native_host.bat` 的 `DSH_PRODUCT_SKILLS_ROOT` 指向它们，避免用户
+`%USERPROFILE%\.claude\skills` 里的同名旧 skill 成为唯一来源。四个 Office
+skill 还会以独立 provider 优先发布，用户端同名目录不能覆盖。
 
 `install-ui.ps1` 已迁入以下体验：
 

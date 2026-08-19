@@ -5,21 +5,21 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 
 # 轻文档 Verified Write
 
-先 `office_get_context` 确认 `documentIdentity.kind` 是 `webedit_light_document`。
+先 `list_work_tabs` 确认工作标签和 `documentIdentity.kind`。要读勾选名单里某一页的正文，用 `mcp__chrome__read_work_tab({ tab })`，`tab` 是该列表 `pages` 的序号（从 1 开始），不能传 tabId。写仍然只写主目标。
 
-先用 `mcp__chrome__light_document_read({})` 了解正文和稳定块；它是只读，不会改文档。
+主目标轻文档也可用 `mcp__chrome__light_document_read({})` 了解正文和稳定块；它是只读，不会改文档。
 
 ## 选区优化
 
 选区改写只走一次清晰序列：
 
-1. `mcp__chrome__light_document_selection_read({})`：检查 `hasSelection`、`hasCaret`、`isCollapsed` 和 `wholeBlockReplaceable`。
-2. 仅当 `hasSelection=true`、`isCollapsed=false` 且 `wholeBlockReplaceable=true` 时，调用 `mcp__chrome__light_document_selection_replace_preview({ blocks })`。
+1. `mcp__chrome__light_document_selection_read({})`：检查 `hasSelection`、`hasCaret`、`isCollapsed` 和 `replaceStrategy`。
+2. 任意稳定的非折叠选区（`hasSelection=true`、`isCollapsed=false`）都调用 `mcp__chrome__light_document_selection_replace_preview({ blocks })`；段落内部分文字、跨段落和任意层级列表均可。
 3. 获得用户确认后，调用 `mcp__chrome__light_document_selection_replace_commit({ challenge })`。
 
-选区必须覆盖完整连续块；局部或歧义选区请用户重新选择完整块。选区未变化时不要重复 `selection_read`；只有 `fingerprint_mismatch` 或用户重新选择后才重新读取。`hasCaret=true` 且 `isCollapsed=true` 是光标，不是选区；只需补写时改用 `office_document` 的 `selection_insert`。其他情况请用户先选中完整文字。
+选区未变化时不要重复 `selection_read`；只有 `fingerprint_mismatch` 或用户重新选择后才重新读取。`hasCaret=true` 且 `isCollapsed=true` 是光标，不是选区；只需补写时改用 `office_document` 的 `selection_insert`。完整块优先使用结构化 CanvasPatch；字符级或跨块局部选区使用 WebEdit 公开 selection API，并要求选区外正文不变的回读证据。
 
-`preview` 只读且不变更文档；`commit` 不传正文、区块、operation 或 idempotency identity。失败时返回实际错误并停止；`fingerprint_mismatch` 后重新读取并再次确认。当前已验证的公开能力是完整 Canvas Patch 及其回读，不宣称局部 XPath Patch。
+`preview` 只读且不变更文档；`commit` 不传正文、区块、operation 或 idempotency identity。失败时返回实际错误并停止；`fingerprint_mismatch` 后重新读取并再次确认。不得把编辑器 range 猜成 XML 偏移；局部替换只走公开 selection API。
 
 ## 契约
 

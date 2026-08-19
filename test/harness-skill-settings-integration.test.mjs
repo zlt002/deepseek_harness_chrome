@@ -25,6 +25,7 @@ test('product profile mounts Claude discovery and the Skill settings plugin exac
   const patch = claudeSkillsPatch({ HOME: '/tmp/accrui-skill-settings-home' })
   assert.match(patch, /customSkillDirs:/)
   assert.match(patch, /\/tmp\/accrui-skill-settings-home\/.claude\/skills/)
+  assert.match(patch, /deepseek-harness-chrome-product-office-skills/)
   assert.doesNotMatch(patch, /@accrui\/harness-skill-settings/)
   const productPatch = productUiPatch({})
   assert.equal(productPatch.match(/name: '@accrui\/harness-skill-settings'/g)?.length, 1)

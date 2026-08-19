@@ -76,6 +76,7 @@ export default defineConfig({
       'https://doc.midea.com/*',
       'https://webedit.midea.com/*',
       '*://*.annto.com/*',
+      '<all_urls>',
     ],
     web_accessible_resources: [{
       resources: [

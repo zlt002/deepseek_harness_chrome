@@ -87,6 +87,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
       onUpdated: { addListener: (listener) => { updatedListener = listener } },
     },
     scripting: { executeScript: async (options) => executeScript?.(options) ?? [] },
+    webNavigation: { getAllFrames: async () => [] },
     sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()
@@ -456,12 +457,173 @@ test('restart waits for an in-flight settings write before resolving its next-Ru
   }
 })
 
-test('pinned restart rejects a tab whose URL no longer matches the saved Browser Target', async () => {
+test('pinned mode follows the same tab after it navigates and refreshes the saved URL', async () => {
+  const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
+  const pinned = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/original' }
+  const live = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/navigated' }
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [pinned], primaryTabId: 52 }, activeTab,
+    tabsById: { 52: { id: 52, windowId: 7, url: live.url, title: 'Navigated' } },
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(response, { ok: true, url: 'http://127.0.0.1:43123' })
+    assert.deepEqual(background.nativeMessages, [{ type: 'start', browserTarget: live }])
+    const restored = await background.sendRuntimeMessage({ type: 'get-browser-target-settings' })
+    assert.deepEqual(restored.settings.pinnedTabs, [live])
+    assert.equal(restored.settings.primaryTabId, 52)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('pinned office_get_context transfers the live URL after a same-tab navigation', async () => {
+  const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
+  const pinned = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/original' }
+  const live = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/child' }
+  const tabsById = { 52: { id: 52, windowId: 7, url: pinned.url, title: 'Original' } }
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [pinned], primaryTabId: 52 }, activeTab, tabsById,
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    tabsById[52] = { id: 52, windowId: 7, url: live.url, title: 'Child doc' }
+    background.emitNative({
+      type: 'connector_request', requestId: 'pin-nav', runId: 'run-follow', generation: 'generation-pin-nav',
+      tool: 'office_get_context', browserTarget: pinned,
+    })
+    let response
+    for (let attempt = 0; attempt < 10 && response === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'pin-nav')
+    }
+    assert.deepEqual(response.browserTarget, live)
+    assert.deepEqual(response.result.pageIdentity, { title: 'Child doc', url: live.url })
+    const transfer = background.nativeMessages.find((message) => message.type === 'transfer-browser-target')
+    assert.deepEqual(transfer.browserTarget, live)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('read_work_tab captures visible text immediately and reports a host-permission miss', async () => {
+  const first = { browser: 'chrome', windowId: 7, tabId: 51, url: 'https://open.bigmodel.cn/coding-plan/personal/usage' }
+  const primary = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/two' }
+  const injections = []
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [first, primary], primaryTabId: 52 },
+    activeTab: { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' },
+    tabsById: {
+      51: { id: 51, windowId: 7, url: first.url, title: '智谱AI开放平台' },
+      52: { id: 52, windowId: 7, url: primary.url, title: 'Pinned two' },
+    },
+    executeScript: async (options) => {
+      injections.push(options)
+      throw new Error('Cannot access contents of url "https://open.bigmodel.cn/coding-plan/personal/usage". Extension manifest must request permission to access this host.')
+    },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.emitNative({
+      type: 'connector_request', requestId: 'read-tab-2', runId: 'run-follow', generation: 'generation-read',
+      tool: 'read_work_tab', tab: 1, browserTarget: primary, browserTargets: [first, primary],
+    })
+    let response
+    for (let attempt = 0; attempt < 20 && response === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'read-tab-2')
+    }
+    assert.equal(injections[0]?.injectImmediately, true)
+    assert.equal(response.error.code, 'unsupported')
+    assert.match(response.error.message, /host permission/i)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('read_work_tab reads a non-primary pinned page without changing the write target', async () => {
+  const first = { browser: 'chrome', windowId: 7, tabId: 51, url: 'https://docs.example.test/one' }
+  const primary = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/two' }
+  const injections = []
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [first, primary], primaryTabId: 52 },
+    activeTab: { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' },
+    tabsById: {
+      51: { id: 51, windowId: 7, url: first.url, title: 'Pinned one' },
+      52: { id: 52, windowId: 7, url: primary.url, title: 'Pinned two' },
+    },
+    executeScript: async (options) => {
+      injections.push(options)
+      return [{ result: 'visible text from first tab' }]
+    },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.emitNative({
+      type: 'connector_request', requestId: 'read-tab-1', runId: 'run-follow', generation: 'generation-read',
+      tool: 'read_work_tab', tab: 1, browserTarget: primary, browserTargets: [first, primary],
+    })
+    let response
+    for (let attempt = 0; attempt < 20 && response === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'read-tab-1')
+    }
+    assert.equal(response.error, undefined)
+    assert.deepEqual(response.browserTarget, primary)
+    assert.equal(response.result.tab, 1)
+    assert.deepEqual(response.result.page, first)
+    assert.equal(response.result.kind, 'web_page')
+    assert.equal(response.result.content, 'visible text from first tab')
+    assert.equal(response.result.isPrimary, false)
+    assert.equal(injections[0]?.injectImmediately, true)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('a hung read_work_tab does not stall a later list_work_tabs roster', async () => {
+  const first = { browser: 'chrome', windowId: 7, tabId: 51, url: 'https://docs.example.test/one' }
+  const primary = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/two' }
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [first, primary], primaryTabId: 52 },
+    activeTab: { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' },
+    tabsById: {
+      51: { id: 51, windowId: 7, url: first.url, title: 'Pinned one' },
+      52: { id: 52, windowId: 7, url: primary.url, title: 'Pinned two' },
+    },
+    executeScript: async () => new Promise(() => {}),
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.emitNative({
+      type: 'connector_request', requestId: 'hung-read', runId: 'run-follow', generation: 'generation-hung',
+      tool: 'read_work_tab', tab: 1, browserTarget: primary, browserTargets: [first, primary],
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    background.emitNative({
+      type: 'connector_request', requestId: 'roster-after-hung', runId: 'run-follow', generation: 'generation-roster',
+      tool: 'office_get_context', browserTarget: primary, browserTargets: [first, primary],
+    })
+    let roster
+    for (let attempt = 0; attempt < 20 && roster === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      roster = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'roster-after-hung')
+    }
+    assert.equal(roster?.error, undefined)
+    assert.deepEqual(roster.result.pages.map((page) => page.pageIdentity), [
+      { title: 'Pinned one', url: first.url }, { title: 'Pinned two', url: primary.url },
+    ])
+    assert.equal(background.nativeMessages.find((message) => message.requestId === 'hung-read'), undefined)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('pinned restart rejects a pinned tab that was closed', async () => {
   const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
   const pinned = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/original' }
   const background = await loadBackground({
-    settings: { mode: 'pinned-tabs', pinnedTabs: [pinned], primaryTabId: 52 }, activeTab,
-    tabsById: { 52: { id: 52, windowId: 7, url: 'https://docs.example.test/navigated', title: 'Navigated' } },
+    settings: { mode: 'pinned-tabs', pinnedTabs: [pinned], primaryTabId: 52 }, activeTab, tabsById: {},
   })
   try {
     const response = await background.sendRuntimeMessage({ type: 'ensure-harness' })

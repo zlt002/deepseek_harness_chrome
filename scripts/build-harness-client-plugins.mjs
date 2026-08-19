@@ -21,6 +21,7 @@ const packageNames = [
   'harness-ui-subagent-compact',
   'harness-ui-session-log-copy',
   'harness-ui-settings-shell',
+  'harness-ui-document-intake',
   'harness-skill-settings',
 ]
 const selected = process.argv.slice(2)

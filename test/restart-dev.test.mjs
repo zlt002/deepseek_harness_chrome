@@ -1,6 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { extensionIdsFromManifest, extensionIdsFromManifests, isGracefulProcessTermination, processTree } from '../scripts/restart-dev.mjs'
+import { extensionIdsFromManifest, extensionIdsFromManifests, harnessBuildSteps, isGracefulProcessTermination, processTree } from '../scripts/restart-dev.mjs'
+
+test('builds the Harness Web app when restart finds its dist missing', () => {
+  assert.deepEqual(harnessBuildSteps({ skipHarnessBuild: false, webDistExists: false }), [
+    'build:lib:host',
+    'build:web',
+  ])
+  assert.deepEqual(harnessBuildSteps({ skipHarnessBuild: false, webDistExists: true }), [
+    'build:lib:host',
+  ])
+  assert.deepEqual(harnessBuildSteps({ skipHarnessBuild: true, webDistExists: false }), [])
+})
 
 test('treats an intentional dev-server signal stop as a successful lifecycle', () => {
   assert.equal(isGracefulProcessTermination(null, 'SIGTERM'), true)

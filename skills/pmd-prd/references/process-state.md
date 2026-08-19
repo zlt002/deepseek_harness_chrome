@@ -22,7 +22,7 @@
 
 | 入口 | 只记录什么 | 完成/恢复用途 |
 |---|---|---|
-| `manifest.json` | `requirementId`、项目/工作流绑定、run/session 列表、`active/paused/partial/failed/aborted/completed` 状态和 artifacts | 判断当前 Run、状态和可恢复范围 |
+| `manifest.json` | `requirementId`、稳定的 `batchId = pmd:${requirementId}`、项目/工作流绑定、run/session 列表、`active/paused/partial/failed/aborted/completed` 状态和 artifacts | 判断当前 Run、状态和可恢复范围 |
 | `process.md` | 需求访谈、规模信号/拆分选择、父子覆盖/依赖、用户确认、查询摘要、决策摘要和交付状态 | 让产品/研发回看过程，不承载机器生命周期明细 |
 | `domain-model.md` | 已确认或明确标注待确认的标准术语、实现无关定义、关系/边界/不变量及 `_Avoid_` | 保持术语单一，避免后续分析漂移 |
 | `knowledge-sources.md` | 本 Run 实际 scope、查询问题、来源标识/链接、关键证据和失败影响 | 区分授权、实际查询、用户事实、知识依据和 `[待确认]` |
@@ -46,6 +46,7 @@
 - 恢复只能从当前 Harness 运行绑定和已校验 manifest 找到原需求。恢复前向用户回显业务需求摘要、当前阶段、两份文档状态和父目录状态；内部标识只供运行状态关联，不要求用户输入。
 - **旧确认在恢复后失效**：旧 Run 的 scope 确认、规模/拆分、阶段 3 分析确认、阶段 4 正文确认、阶段 5 父目录确认和旧 challenge 不能直接复用。恢复必须重新取得当前 Run 所需的确认；scope 变更、正文变化、父节点 fingerprint/Browser Target 变化、权限变化或 challenge 过期也会使相关确认失效。
 - 阶段 4 确认正文快照是唯一交付正文。恢复可读取已冻结快照和它的 content hash；不得用 `process.md`、`domain-model.md`、`knowledge-sources.md`、`trace-events.jsonl` 或其他本地文件重建正文。内容无法完整恢复时回到阶段 4，重新生成、预览和确认。
-- 阶段 5 的父目录确认与线上创建严格分离：`inspect_parent` 和 `preview` 只读取/冻结目标与正文，不产生线上写入；只有当前父目录预览成功、用户在看到目标后明确确认，才进入阶段 6 的 `create`。
-- 部分交付恢复时保留成功项的 catalogId、幂等身份和回读证据，只恢复未完成项。恢复前必须重新 `inspect_parent → preview` 并取得新确认/挑战；旧确认不能授权重试，已成功项不能重复创建。
-- 只有两份文档都在同一父节点下创建成功，并完成名称、父节点、正文的同目标回读，manifest/delivery 状态才可进入 `completed`；否则保留 `paused`、`failed` 或 `partial` 的真实状态和下一步。
+- 阶段 5 的父目录确认与线上创建严格分离：`team_knowledge_batch_preview` 内部只检查父节点并冻结目标与正文，不产生线上写入；只有当前父目录预览成功、用户在看到目标后明确确认，才进入阶段 6 的 `team_knowledge_batch_create`。
+- 部分交付恢复时保留成功项的 catalogId、幂等身份和回读证据，只恢复未完成项。恢复前必须用同一 `batchId` 和两份冻结正文重新 preview 并取得新确认/challenge；旧确认不能授权重试，已成功项不能重复创建。
+- 阶段 6 的页面确认按文档独立记录。每份正文写入后必须停留在该文档，让用户检查正文与保存状态；只有该份页面确认成立，才允许离页执行持久化回读并进入下一份。停止、超时或页面离开使当前项保持未完成，后续项不得启动；页面确认不能替代持久化回读。
+- 只有两份文档都在同一父节点下创建成功，并完成名称、父节点、正文的同目标回读，manifest/batch 状态才可进入 `completed`；否则保留 `paused`、`failed` 或 `partial` 的真实状态和下一步。

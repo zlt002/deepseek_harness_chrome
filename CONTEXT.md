@@ -12,6 +12,10 @@ _Avoid_: AccrUI clone, extension UI
 The specific browser window, tab, and page context assigned to a Harness Run.
 _Avoid_: Active tab, current browser
 
+**Work Tab Roster**:
+The checked tabs for this Run, listed by `list_work_tabs`. It is a live tab list (title, URL, editor kind, primary write target), not page bodies.
+_Avoid_: Office context, current page dump
+
 **Browser Connector**:
 The trusted capability boundary through which a Harness Run reads from and acts on its Browser Target.
 _Avoid_: iframe bridge, browser automation backend

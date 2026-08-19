@@ -14,6 +14,7 @@ product source files.
 | Browser Target controls | `packages/harness-ui-browser-target` | Public composer slots are sufficient; reconnect uses the existing `sidebar.footer.action` seat instead of a compact-shell fork |
 | Knowledge/code scope | `packages/harness-ui-knowledge-scope` | Product plugin and bundle are complete. Clean upstream already provides the card-wide overlay; only the generic composer-above slot remains in `upstream-contributions/0001-*` |
 | Skill three-state settings | `packages/harness-skill-settings` and client plugin | Product plugin mounts by default. Generic Registry, settings/RPC, and catalog-cache seams live in ordered `upstream-contributions` patches; Claude roots use existing `customSkillDirs` |
+| Composer document attach | `packages/harness-ui-document-intake` | Product plugin writes PPTX/XLSX/DOCX/PDF/MD/TXT into the session workspace and asks the model to parse them with the product office skills. Generic paste/drop remainder lives in `upstream-contributions/0015-*` |
 | Agent preset labels | `packages/harness-ui-agent-preset` | Product presentation mounts through the generic Composer and preset presentation seams |
 | Subagent UI | `packages/harness-ui-subagent-compact` plus official `ui-subagent` | Compact child navigation and trajectory actions are externalized; the official package keeps the catalog/header action and read-only child flow |
 | Session export | official `session-log-export` + `packages/harness-ui-session-log-copy` | The official Session Header utility and `/export` flow remain bundled; AccrUI's Settings “复制日志” action is externalized and copies only the current Session raw log |
@@ -33,12 +34,13 @@ The runtime now has one composition path:
 
 1. Clean `upstream/deepseek-harness` at the pinned revision.
 2. Product-neutral extension seams from `upstream-contributions/`.
-3. Ten product UI packages mounted from `packages/`:
+3. Eleven product UI packages mounted from `packages/`:
    `harness-ui-agent-preset`, `harness-ui-browser-target`,
-   `harness-ui-conversation-shell`, `harness-ui-knowledge-scope`,
-   `harness-ui-responsive-sidebar`, `harness-ui-session-log-copy`,
-   `harness-ui-settings-shell`, `harness-ui-subagent-compact`,
-   `harness-ui-workspace-picker`, and `harness-skill-settings`.
+   `harness-ui-conversation-shell`, `harness-ui-document-intake`,
+   `harness-ui-knowledge-scope`, `harness-ui-responsive-sidebar`,
+   `harness-ui-session-log-copy`, `harness-ui-settings-shell`,
+   `harness-ui-subagent-compact`, `harness-ui-workspace-picker`,
+   and `harness-skill-settings`.
 
 The official checkout owns stores, controllers, and default fallbacks. Product
 packages own AccrUI presentation and behavior; they attach only through the

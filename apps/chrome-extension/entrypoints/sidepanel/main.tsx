@@ -195,6 +195,7 @@ function App(): React.JSX.Element {
     const settings = targetSettingsRef.current
     if (command.command === 'set-mode') { await saveTargetSettings({ ...settings, mode: command.mode }); return }
     const tab = availableTabsRef.current.find((item) => item.tabId === command.tabId)
+      ?? (command.command === 'toggle-pinned-tab' && !command.checked ? settings.pinnedTabs.find((item) => item.tabId === command.tabId) : undefined)
     if (tab === undefined) { setTargetError('The selected Chrome tab is no longer available.'); return }
     if (command.command === 'toggle-pinned-tab') {
       const pinnedTabs = command.checked

@@ -53,6 +53,13 @@ export function isGracefulProcessTermination(code, signal, { allowSignalExitCode
   return code === 0 || signal === 'SIGINT' || signal === 'SIGTERM' || (allowSignalExitCode && code === 143)
 }
 
+export function harnessBuildSteps({ skipHarnessBuild, webDistExists }) {
+  if (skipHarnessBuild) return []
+  const steps = ['build:lib:host']
+  if (!webDistExists) steps.push('build:web')
+  return steps
+}
+
 // Harness CLI children spawned by the native host carry a temporary connector
 // patch argument. When the host dies without a graceful stop, those children
 // are orphaned (ppid becomes 1) and escape a pure process-tree walk, so match
@@ -167,7 +174,11 @@ export async function main(args = process.argv.slice(2)) {
   if (!skipHarnessBuild) {
     if (!existsSync(join(harnessRoot, 'package.json'))) throw new Error(`Harness checkout not found: ${harnessRoot}`)
     console.log('1/4 Building the latest Harness host libraries...')
-    await run('pnpm', ['run', 'build:lib:host'], { cwd: harnessRoot })
+    const webDistExists = existsSync(join(harnessRoot, 'apps/web/dist/index.html'))
+    for (const script of harnessBuildSteps({ skipHarnessBuild, webDistExists })) {
+      if (script === 'build:web') console.log('Harness Web dist is missing; building it before starting WXT...')
+      await run('pnpm', ['run', script], { cwd: harnessRoot })
+    }
   } else {
     console.log('1/4 Skipping Harness host build.')
   }

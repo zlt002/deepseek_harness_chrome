@@ -28,6 +28,15 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(presentation, /owner\.renderComposer\(\)/)
   assert.match(css, /:global\(\[data-composer-seat\]\)/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)/)
+  // ChatView's sticky back-to-bottom slot still adds the official composer
+  // height inside `[data-conversation-scroll]`. The product footer is a
+  // sibling of that scrollport, so the scroll body must zero the inherited
+  // seat height or the control sits in the middle of the transcript.
+  assert.match(
+    css,
+    /\.scrollBody\s*\{[\s\S]*--dsh-composer-height:\s*0px/,
+    'the product scrollport must not inherit the root composer height',
+  )
   // The upstream hero stack carries a 32px centering foot while the active
   // InputBar owns the 8px dock inset. The product presentation keeps the hero
   // title/glow centered, but the complete composer chain must directly use the
@@ -42,8 +51,8 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   )
   assert.match(
     css,
-    /\.root\[data-phase='hero'\]\s*>\s*:global\(\[data-composer-seat\]\)\s*>\s*:global\(\[data-slot='conversation\.composer'\]\)\s*>\s*:global\(\[data-chain-overlay-fallback='conversation\.composer'\]\)\s*>\s*\*\s*\{[\s\S]*?padding-bottom:\s*var\(--dsh-composer-dock-inset\)/,
-    'hero must directly override the generated 32px centering foot on the composer root after its display:contents slot and chain wrappers',
+    /\.root\[data-phase='hero'\]\s*>\s*:global\(\[data-composer-seat\]\)\s+:global\(\[data-composer-stack\]\)\s*\{[\s\S]*?padding-bottom:\s*var\(--dsh-composer-dock-inset\)/,
+    'hero must override the generated 32px centering foot on the composer stack after a takeover leaves the stack outside the hidden fallback',
   )
   assert.match(
     css,

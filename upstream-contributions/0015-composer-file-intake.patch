@@ -1,0 +1,106 @@
+# Optional composer file-intake seam. Paste and whole-page drop still enter
+# through addImages. A deployment may provide composerFileIntake to accept the
+# non-image remainder; without that service the composer keeps the image-only
+# refusal. The official image rail is unchanged.
+
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -14,7 +14,7 @@
+ import type {
+   ApprovalWait, ChatNodeTurnDataInjected, ChatScrollPosition, ChatViewInjected, ComposerBarInjected,
+   ComposerChainProps, ConversationInjected, ConversationSessionHeaderInjected, ConversationSessionInjected,
+-  DetailsInjected,
++  ComposerFileIntake, DetailsInjected,
+ } from './contract/slots.ts'
+ import type { InputNotice } from './input/contract.ts'
+ import { createChatStore } from './stores.ts'
+@@ -76,6 +76,20 @@
+   subscribe: () => () => {},
+ }
+ 
++const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
++const IMAGE_NAME_PATTERN = /\.(?:png|jpe?g|webp|gif)$/i
++
++/** True when the browser file is admitted by the official image rail. */
++function isComposerImageFile(file: File): boolean {
++  return IMAGE_MEDIA_TYPES.has(file.type) || IMAGE_NAME_PATTERN.test(file.name)
++}
++
++function composerFileIntakeOf(ctx: Context): ComposerFileIntake | undefined {
++  const intake = ctx.get('composerFileIntake')
++  if (intake === undefined || typeof intake.accept !== 'function') return undefined
++  return intake as ComposerFileIntake
++}
++
+ const CHAT_NODE_INJECT: ChatNodeTurnDataInjected = {
+   hooks: {
+     turnData: ({ useSession }, nodeKey) => function useTurnData(key) {
+@@ -315,10 +329,19 @@
+         keyboard: shell,
+         addImages: (files) => {
+           try {
+-            const images = conversation.createDraftImages(files)
+-            if (!shell.addImages(images.map(image => image.id))) {
+-              conversation.releaseDraftImages(images)
++            const documents = files.filter(file => !isComposerImageFile(file))
++            const images = files.filter(file => isComposerImageFile(file))
++            if (documents.length > 0) {
++              const intake = composerFileIntakeOf(ctx)
++              if (intake === undefined) return t('image.unsupportedType')
++              const rejected = intake.accept(sessionId, documents)
++              if (rejected !== null) return rejected
+             }
++            if (images.length === 0) return null
++            const draftImages = conversation.createDraftImages(images)
++            if (!shell.addImages(draftImages.map(image => image.id))) {
++              conversation.releaseDraftImages(draftImages)
++            }
+             return null
+           } catch (error: unknown) {
+             if (error instanceof UnsupportedImageMediaTypeError) {
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -285,6 +285,21 @@
+ }
+ 
+ /**
++ * Optional paste/drop remainder for files the official image rail will not
++ * admit. The composer calls this synchronously from addImages and keeps the
++ * image-only notice when the service is absent.
++ */
++export interface ComposerFileIntake {
++  /**
++   * Accept non-image files from composer paste or drop.
++   * @param sessionId - current session.
++   * @param files - files that are not admitted as draft images.
++   * @returns null when accepted; a user-visible error string when refused.
++   */
++  accept(sessionId: SessionId, files: readonly File[]): string | null
++}
++
++/**
+  * View-slot owner share: the cross-view inspect handoff (otherwise views need
+  * nothing from the render site — sessionId and the snapshot hook arrive as
+  * framework-standard props; tool rows go through each view's own declared
+diff --git a/packages/client/ui-conversation/src/client/index.ts b/packages/client/ui-conversation/src/client/index.ts
+--- a/packages/client/ui-conversation/src/client/index.ts
++++ b/packages/client/ui-conversation/src/client/index.ts
+@@ -30,7 +30,7 @@
+ } from './contract/chat-nodes.ts'
+ export type {
+   ChatFileMentions, ChatNodeOwnerProps, ChatNodeViewProps,
+-  ChatStore, ChatViewInjected, ChatViewSlotProps, CommandRowOwnerProps, CommandRowProps, ComposerBarInjected,
++  ChatStore, ChatViewInjected, ChatViewSlotProps, CommandRowOwnerProps, CommandRowProps, ComposerBarInjected, ComposerFileIntake,
+   ComposerAttachment, ComposerChainProps, ConversationInjected,
+   ConversationSessionHeaderInjected, ConversationSessionInjected, ConversationSlotProps, ConvViewOwnerProps,
+   ConvViewProps, ConversationPresentationOwnerProps, DetailsInjected, DetailsSlotProps, DetailsToolOwnerProps, EmptyWorkspaceOwnerProps,
+@@ -44,5 +44,7 @@
+     conversation: import('./service.ts').IConversation
+     /** Existing per-session chat view exposed to root-scoped compact controls. */
+     conversationViewState: import('./view-state.ts').ConversationViewState
++    /** Optional non-image remainder of composer paste/drop; absent keeps image-only intake. */
++    composerFileIntake?: import('./contract/slots.ts').ComposerFileIntake
+   }
+ }

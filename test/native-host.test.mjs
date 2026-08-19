@@ -84,7 +84,7 @@ test('starts a pure Harness Run without a Browser Target and leaves browser tool
       },
       body: JSON.stringify({
         jsonrpc: '2.0', id: 1, method: 'tools/call',
-        params: { name: 'office_get_context', arguments: {} },
+        params: { name: 'list_work_tabs', arguments: {} },
       }),
     })
     const body = await response.json()
@@ -153,7 +153,7 @@ test('creates a trusted Run from the explicit Browser Target supplied at Native 
           id: 1,
           method: 'tools/call',
           params: {
-            name: 'office_get_context',
+            name: 'list_work_tabs',
             arguments: {},
           },
         }),
@@ -221,7 +221,7 @@ test('moves a running Run only through an explicit transfer-browser-target messa
     const fetchCall = fetch(harnessOptions.mcpConnector.url, {
       method: 'POST',
       headers: { authorization: `Bearer ${harnessOptions.mcpConnector.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_get_context', arguments: {} } }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_work_tabs', arguments: {} } }),
     })
     await pendingCall
     assert.deepEqual(request.browserTarget, second)

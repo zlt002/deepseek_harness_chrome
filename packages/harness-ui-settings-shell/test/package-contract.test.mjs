@@ -13,7 +13,7 @@ test('Settings shell is product-owned and composes official settings slots', asy
   assert.match(index, /settings\.presentation/)
   assert.match(root, /settings\.section/)
   assert.match(index, /select: presentation => presentation/)
-  assert.match(root, /quickActions\.filter\(action => action\.id !== 'conversation'\)/)
+  assert.match(root, /action\.id !== 'conversation' && !\(blankSession && action\.id === 'trajectory'\)/)
   assert.match(root, /IconEllipsisOutline16/)
   assert.match(root, /compact\s*\?\s*<IconEllipsisOutline16/)
   assert.doesNotMatch(root, /renderSlot\('settings\.trigger',\s*compact/)

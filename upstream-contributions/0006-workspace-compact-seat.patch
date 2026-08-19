@@ -27,10 +27,10 @@ index d0f6835472..10e82d9c02 100644
  import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
  import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
  import { WorkspacePickFlow } from './WorkspacePicker.tsx'
-@@ -38,6 +38,96 @@ const SEARCH_QUERY_MAX_CODE_UNITS = 500
+@@ -38,6 +38,117 @@ const SEARCH_QUERY_MAX_CODE_UNITS = 500
  /** Session rows visible per Workspace before the local overflow control. */
  const COLLAPSED_SESSION_LIMIT = 5
- 
+
 +function compactTime(node: { blank: boolean; updatedAt: number }, now: number, t: WorkspaceBrowserProps['t']): string | undefined {
 +  if (node.blank) return undefined
 +  const { unit, n } = relativeTime(node.updatedAt, now)
@@ -43,10 +43,17 @@ index d0f6835472..10e82d9c02 100644
 +}
 +
 +/** The product owns compact presentation; the official browser remains fallback. */
++function compactCreatedLabel(createdAt: number, t: WorkspaceBrowserProps['t']): string {
++  const d = new Date(createdAt)
++  const pad2 = (v: number): string => String(v).padStart(2, '0')
++  const date = t('date.ymd', { y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate() })
++  return t('hover.created', { time: `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` })
++}
++
 +function CompactWorkspaceBrowser(props: WorkspaceBrowserProps) {
 +  const {
 +    useSessions, useWorkspaces, open, startSession, createWorkspace, useDirectoryFlow,
-+    renderSlot, renderSlotChain, t,
++    renameWorkspace, deleteWorkspace, openPath, renderSlot, renderSlotChain, t,
 +  } = props
 +  const sessions = useSessions(state => state)
 +  const workspaces = useWorkspaces(state => state.items)
@@ -72,6 +79,8 @@ index d0f6835472..10e82d9c02 100644
 +      return {
 +        id: workspace.workspaceId,
 +        title: workspace.title,
++        path: workspace.path,
++        createdAt: Date.parse(workspace.createdAt),
 +        sessionCount: workspace.sessionIds.length,
 +        sessions: visible.filter(session => membership.has(session.id)).map(session => ({
 +          id: session.id,
@@ -112,7 +121,19 @@ index d0f6835472..10e82d9c02 100644
 +    labels: {
 +      workspaces: t('section.workspaces'), sessions: t('section.sessions'),
 +      addWorkspace: t('workspace.add'), newSession: t('session.new'),
++      rename: t('rename'), deleteWorkspace: t('delete.workspace'), deletePending: t('delete.pending'),
++      renameTitle: t('rename.workspace.title'), workspaceName: t('field.workspaceName'),
++      cancel: t('cancel'), close: t('close'), copied: t('hover.copied'), copy: t('copy'),
++      openFolder: t('open.folder'),
 +    },
++    workspaceActionsAria: name => t('actions.workspace.aria', { name }),
++    newSessionAria: name => t('actions.newSession.aria', { name }),
++    createdLabel: createdAt => compactCreatedLabel(createdAt, t),
++    deleteDesc: name => t('delete.desc', { name }),
++    conflictNamed: name => t('conflict.named', { name }),
++    renameWorkspace,
++    deleteWorkspace,
++    openPath,
 +    directoryFlowAvailable,
 +    workspaceAddAnchor,
 +    requestWorkspaceAdd: onWorkspaceAdded => { setWorkspaceAddComplete(() => onWorkspaceAdded) },
@@ -124,7 +145,7 @@ index d0f6835472..10e82d9c02 100644
  /** Keep controlled input and RPC payload inside the session.search wire contract. */
  function sanitizeSearchQuery(value: string): string {
    const withoutNul = value.replaceAll('\0', '')
-@@ -738,7 +828,7 @@ function SearchResults({
+@@ -738,7 +849,7 @@ function SearchResults({
   * @param props - composed slot props (shell owner share + store + injected actions).
   * @returns the region element tree.
   */
@@ -133,7 +154,7 @@ index d0f6835472..10e82d9c02 100644
    wide,
    expandSidebar,
    useSessions,
-@@ -1260,3 +1350,9 @@ export function WorkspaceBrowser({
+@@ -1260,3 +1371,9 @@ export function WorkspaceBrowser({
      </div>
    )
  }
@@ -147,7 +168,7 @@ diff --git a/packages/client/ui-workspace/src/client/contract/slots.ts b/package
 index 8027a3623a..7570f55dec 100644
 --- a/packages/client/ui-workspace/src/client/contract/slots.ts
 +++ b/packages/client/ui-workspace/src/client/contract/slots.ts
-@@ -56,9 +56,40 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+@@ -56,9 +56,65 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      'conversation.hero.workspace.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
      /** Directory-flow hole under the sidebar browsing region (declared by the WorkspaceBrowser entry). */
      'sidebar.workspaces.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
@@ -166,6 +187,8 @@ index 8027a3623a..7570f55dec 100644
 +export interface CompactWorkspacePickerWorkspace {
 +  id: WorkspaceId
 +  title: string
++  path: string
++  createdAt: number
 +  sessionCount: number
 +  sessions: readonly CompactWorkspacePickerSession[]
 +}
@@ -178,7 +201,30 @@ index 8027a3623a..7570f55dec 100644
 +  workspaceTitle: string
 +  sessionTitle: string
 +  workspaces: readonly CompactWorkspacePickerWorkspace[]
-+  labels: { workspaces: string; sessions: string; addWorkspace: string; newSession: string }
++  labels: {
++    workspaces: string
++    sessions: string
++    addWorkspace: string
++    newSession: string
++    rename: string
++    deleteWorkspace: string
++    deletePending: string
++    renameTitle: string
++    workspaceName: string
++    cancel: string
++    close: string
++    copied: string
++    copy: string
++    openFolder: string
++  }
++  workspaceActionsAria: (name: string) => string
++  newSessionAria: (name: string) => string
++  createdLabel: (createdAt: number) => string
++  deleteDesc: (name: string) => string
++  conflictNamed: (name: string) => string
++  renameWorkspace: (workspaceId: WorkspaceId, title: string) => Promise<void>
++  deleteWorkspace: (workspaceId: WorkspaceId) => Promise<void>
++  openPath: (path: string) => Promise<void>
 +  directoryFlowAvailable: boolean
 +  workspaceAddAnchor: import('react').RefObject<HTMLButtonElement | null>
 +  requestWorkspaceAdd: (onWorkspaceAdded: () => void) => void
@@ -188,7 +234,15 @@ index 8027a3623a..7570f55dec 100644
  /** The two directory-flow holes; a flow package's client half registers its one component into both. */
  export type DirectoryFlowSlotName =
    | 'conversation.hero.workspace.directoryFlow'
-@@ -140,7 +171,7 @@ export type WorkspaceBrowserInjected = DirectoryPickingInjected & {
+@@ -117,5 +173,7 @@ export type WorkspaceBrowserInjected = DirectoryPickingInjected & {
+   /** Delete only a Host Workspace registration; directory and Session logs remain. */
+   deleteWorkspace: (workspaceId: WorkspaceId) => Promise<void>
++  /** Open a filesystem path with the Host operating system's default application. */
++  openPath: (path: string) => Promise<void>
+   /**
+    * Reorder a Workspace in the durable registry display order.
+    * Omitted anchor appends to the end.
+@@ -140,7 +198,7 @@ export type WorkspaceBrowserInjected = DirectoryPickingInjected & {
  /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */
  export type WorkspaceBrowserProps =
    PropsRuntime<'sidebar.workspaces'>
@@ -209,7 +263,15 @@ index 6b14243ecf..e6cd84af54 100644
    WorkspaceBrowserInjected, WorkspaceBrowserProps, WorkspacePickerInjected, WorkspacePickerProps,
  } from './contract/slots.ts'
  export type { WorkspaceKey } from './locales.ts'
-@@ -110,7 +111,10 @@ export function apply(ctx: ClientContext): void {
+@@ -91,6 +92,7 @@ export function apply(ctx: ClientContext): void {
+     },
+     renameWorkspace: async (workspaceId, title) => { await ctx.workspaces.rename(workspaceId, title) },
+     deleteWorkspace: async (workspaceId) => { await ctx.workspaces.delete(workspaceId) },
++    openPath: async (path) => { await ctx.workspaces.openPath(path) },
+     insertWorkspaceBefore: async (workspaceId, beforeWorkspaceId) => {
+       await ctx.workspaces.insertBefore(workspaceId, beforeWorkspaceId)
+     },
+@@ -110,7 +112,10 @@ export function apply(ctx: ClientContext): void {
    ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register(
      {
        name: 'sidebar.workspaces',
@@ -221,11 +283,75 @@ index 6b14243ecf..e6cd84af54 100644
        store: createWorkspaceViewStore(),
        inject: browserInjected,
        locale: NS,
+diff --git a/packages/client/ui-workspace/src/client/locales.ts b/packages/client/ui-workspace/src/client/locales.ts
+index c08fd931de..b7e1c4a901 100644
+--- a/packages/client/ui-workspace/src/client/locales.ts
++++ b/packages/client/ui-workspace/src/client/locales.ts
+@@ -43,6 +43,7 @@ export const zh = {
+   'delete.workspace': '删除工作区',
+   'delete.desc': '将把“{name}”从工作区列表中移除。文件夹与会话记录会保留，其会话将显示在“未分组”下。',
+   'delete.pending': '正在删除工作区…',
++  'open.folder': '打开文件夹',
+   'menu.fork': '分叉会话',
+   'menu.archiveSession': '归档会话',
+   'sessions.count.one': '{n} 个会话',
+@@ -112,6 +113,7 @@ export const en = {
+   'delete.workspace': 'Delete workspace',
+   'delete.desc': 'This removes “{name}” from the workspace list. The folder and session logs will be kept. Its sessions will appear under Ungrouped.',
+   'delete.pending': 'Deleting workspace…',
++  'open.folder': 'Open folder',
+   'menu.fork': 'Fork session',
+   'menu.archiveSession': 'Archive session',
+   'sessions.count.one': '{n} session',
+diff --git a/packages/client/ui-workspace/tests/apply.client.spec.ts b/packages/client/ui-workspace/tests/apply.client.spec.ts
+index 016af313f8..c9e4f2a001 100644
+--- a/packages/client/ui-workspace/tests/apply.client.spec.ts
++++ b/packages/client/ui-workspace/tests/apply.client.spec.ts
+@@ -23,6 +23,7 @@ async function bench() {
+   const startSession = vi.fn()
+   const rename = vi.fn(async () => ({}))
+   const insertSessionBefore = vi.fn(async () => ({}))
++  const openPath = vi.fn(async () => {})
+   const open = vi.fn()
+   const clear = vi.fn()
+   const search = vi.fn(async () => ({
+@@ -33,14 +34,14 @@ async function bench() {
+   const binding = vi.fn(() => ({ session: { rename: renameSession } }))
+   const fork = vi.fn(async () => 'forked' as never)
+   ctx.provide('workspaces', {
+-    create, startSession, rename, insertSessionBefore,
++    create, startSession, rename, insertSessionBefore, openPath,
+   } as never)
+   ctx.provide('sessions', { open, clear, search, searchResultLimit: 20, binding, fork } as never)
+   const locale = new LocaleRuntime(ctx)
+   ctx.provide('locale', locale)
+   return {
+     ctx, slots: ctx.get('slots') as SlotRegistry, locale, create, startSession, rename,
+-    insertSessionBefore, open, clear, search, renameSession, binding, fork,
++    insertSessionBefore, openPath, open, clear, search, renameSession, binding, fork,
+   }
+ }
+ 
+@@ -105,6 +106,8 @@ describe('ui-workspace apply', () => {
+     expect(b.fork).toHaveBeenCalledWith({ sessionId: 'session', increaseTitle: true })
+     await browser.renameWorkspace('ws' as never, 'renamed')
+     expect(b.rename).toHaveBeenCalledWith('ws', 'renamed')
++    await browser.openPath('/tmp/project')
++    expect(b.openPath).toHaveBeenCalledWith('/tmp/project')
+     await browser.insertSessionBefore('ws' as never, 's1' as never, 's2' as never)
+     expect(b.insertSessionBefore).toHaveBeenCalledWith('ws', 's1', 's2')
+     await browser.createWorkspace({ path: '/tmp/browser-project' })
 diff --git a/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx b/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx
 index fbe42fc279..0e2b600431 100644
 --- a/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx
 +++ b/packages/client/ui-workspace/tests/workspace-browser.client.spec.tsx
-@@ -81,6 +81,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
+@@ -77,4 +77,5 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
+     deleteWorkspace: vi.fn(async () => {}),
++    openPath: vi.fn(async () => {}),
+     archiveSession: vi.fn(async () => {}),
+     insertWorkspaceBefore: vi.fn(async () => {}),
+     insertSessionBefore: vi.fn(async () => {}),
+@@ -81,6 +82,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
      createWorkspace: vi.fn(async () => workspace('created', [])),
      useDirectoryFlow: bindSnapshotSelector({ getSnapshot: () => true, subscribe: () => () => {} }),
      renderSlot: ((_name: string, owner: { open: boolean }) => (owner.open ? <div data-testid="directory-flow" /> : null)) as never,
@@ -233,7 +359,7 @@ index fbe42fc279..0e2b600431 100644
      t,
      ...overrides,
    }
-@@ -95,6 +96,15 @@ function rerender(b: ReturnType<typeof mount>, overrides: Partial<WorkspaceBrows
+@@ -95,6 +97,23 @@ function rerender(b: ReturnType<typeof mount>, overrides: Partial<WorkspaceBrows
  }
  
  describe('WorkspaceBrowser', () => {
@@ -241,7 +367,15 @@ index fbe42fc279..0e2b600431 100644
 +    const renderSlotChain = vi.fn((_name: string, _owner: unknown, opts?: { fallback?: unknown }) => opts?.fallback ?? null)
 +    mount({ compact: true, renderSlotChain: renderSlotChain as never })
 +    expect(renderSlotChain).toHaveBeenCalledWith(
-+      'sidebar.workspaces.compact', expect.any(Object), expect.objectContaining({ fallback: expect.anything() }),
++      'sidebar.workspaces.compact',
++      expect.objectContaining({
++        renameWorkspace: expect.any(Function),
++        deleteWorkspace: expect.any(Function),
++        openPath: expect.any(Function),
++        startSession: expect.any(Function),
++        workspaceActionsAria: expect.any(Function),
++      }),
++      expect.objectContaining({ fallback: expect.anything() }),
 +    )
 +    expect(screen.getByText('工作区')).toBeTruthy()
 +  })

@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { Catalog, Scope, ScopeOptions, ScopeSnapshot } from './bridge.ts'
+import { scopePanelCeiling, scopePanelMaxHeightPx } from './panel-geometry.js'
+import { selectKnowledgeDomain, selectKnowledgeSystem } from './selection.js'
 import css from './KnowledgeScope.module.css'
 
 export interface KnowledgeScopeInjected { hooks: { knowledgeScope: SnapshotStore<ScopeSnapshot | undefined> }; request: (sessionId: string, scope?: Scope, options?: ScopeOptions) => void }
@@ -86,7 +89,46 @@ export function KnowledgeScopeStrip({ session, useKnowledgeScope, request }: Str
       : <>知识服务暂不可用，请<button className={css.login} type="button" onClick={() => request(sessionId, undefined, { action: 'login' })}>登录知识库</button><button className={css.login} type="button" onClick={() => request(sessionId, undefined, { action: 'retry' })}>重新检测</button></>}</output>}</>
 }
 
+/** Grow the chooser up to the workspace/session bar as the sidebar resizes. */
+function useScopePanelMaxHeight(panelRef: RefObject<HTMLElement>): number | undefined {
+  const [maxHeight, setMaxHeight] = useState<number | undefined>(undefined)
+  useLayoutEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    const fit = () => {
+      const header = document.querySelector<HTMLElement>('[data-testid="compact-header"]')
+      const presentation = panel.closest<HTMLElement>('[data-conversation-presentation]')
+      const ceiling = scopePanelCeiling(
+        header?.getBoundingClientRect().bottom,
+        presentation?.getBoundingClientRect().top,
+      )
+      setMaxHeight(scopePanelMaxHeightPx(panel.getBoundingClientRect().bottom, ceiling))
+    }
+    fit()
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(fit)
+    observer?.observe(panel)
+    observer?.observe(document.documentElement)
+    for (const target of [
+      document.querySelector('[data-testid="compact-header"]'),
+      panel.closest('[data-conversation-presentation]'),
+      panel.closest('[data-composer-seat]'),
+    ]) {
+      if (target instanceof Element) observer?.observe(target)
+    }
+    window.addEventListener('resize', fit)
+    window.addEventListener('scroll', fit, true)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', fit)
+      window.removeEventListener('scroll', fit, true)
+    }
+  }, [panelRef])
+  return maxHeight
+}
+
 function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, section }: PanelProps & { section: 'knowledge' | 'repositories' }) {
+  const panelRef = useRef<HTMLDivElement>(null)
+  const maxHeight = useScopePanelMaxHeight(panelRef)
   const snapshot = useKnowledgeScope(value => value)
   const id = String(sessionId)
   const catalog = snapshot?.catalog ?? emptyCatalog
@@ -100,25 +142,30 @@ function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, sectio
   const [expandedSystems, setExpandedSystems] = useState<Set<string>>(() => new Set())
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(() => new Set())
   const groups = useMemo(() => repositoryGroups(catalog), [catalog])
-  return <div className={css.panel} role="dialog" aria-label={section === 'knowledge' ? '知识范围' : '代码库范围'}>
+  return <div ref={panelRef} className={css.panel} role="dialog" aria-label={section === 'knowledge' ? '知识范围' : '代码库范围'} style={maxHeight === undefined ? undefined : { maxHeight }}>
     <div className={css.panelHeader}><strong>{section === 'knowledge' ? '知识范围' : '选择代码库'}</strong><span>{section === 'knowledge' ? `${draftScope.systemIds.length} 项已选` : `${draftScope.repositoryIds.length} 个已选`}</span></div>
     {section === 'knowledge' ? <div className={css.section} aria-label="知识库范围">
-      <p className={css.sectionHint}>选择一个领域，再勾选需要查询的知识库系统。</p>
+      <p className={css.sectionHint}>勾选需要查询的知识库系统；选中子项会自动选中所属领域。</p>
+      {catalog.domains.length === 0 ? <p className={css.sectionHint}>当前账号暂无可用领域和系统。</p> : null}
       <div className={css.tree}>{catalog.domains.map(domain => {
         const expanded = expandedDomains.has(domain.id)
         const selected = draftScope.domainId === domain.id
-        const systems = catalog.systems.filter(system => system.domainId === undefined || system.domainId === domain.id)
+        const systems = catalog.systems.filter(system => system.domainId === domain.id)
+        const systemIds = systems.map(system => system.id)
+        const selectedCount = selected ? systemIds.filter(systemId => draftScope.systemIds.includes(systemId)).length : 0
+        const allSelected = systemIds.length > 0 && selectedCount === systemIds.length
         return <div key={domain.id} className={css.systemGroup}>
           <div className={css.systemRow}>
-            <input aria-label={domain.name} type="radio" name="knowledge-domain" checked={selected} onChange={() => update({ domainId: domain.id, systemIds: [], repositoryIds: draftScope.repositoryIds })}/>
+            <input aria-label={domain.name} type="checkbox" checked={allSelected} ref={element => { if (element) element.indeterminate = selected && !allSelected && selectedCount > 0 }} onChange={(event) => update(selectKnowledgeDomain(draftScope, domain.id, systemIds, event.target.checked))}/>
             <button type="button" className={css.expand} aria-label={`${expanded ? '收起' : '展开'}${domain.name}`} onClick={() => setExpandedDomains(current => { const next = new Set(current); if (next.has(domain.id)) next.delete(domain.id); else next.add(domain.id); return next })}><span className={css.expandIcon} aria-hidden>{expanded ? '⌄' : '›'}</span></button>
             <span>{domain.name}</span><span className={css.count}>({systems.length})</span>
           </div>
-          {expanded && <div className={css.repositoryList}>{systems.map(system => <label key={system.id} className={css.option}><input aria-label={system.name} type="checkbox" disabled={!selected} checked={selected && draftScope.systemIds.includes(system.id)} onChange={(event) => update({ ...draftScope, systemIds: toggle(draftScope.systemIds, system.id, event.target.checked) })}/><span>{system.name}</span></label>)}</div>}
+          {expanded && <div className={css.repositoryList}>{systems.map(system => <label key={system.id} className={css.option}><input aria-label={system.name} type="checkbox" checked={selected && draftScope.systemIds.includes(system.id)} onChange={(event) => update(selectKnowledgeSystem(draftScope, domain.id, system.id, event.target.checked))}/><span>{system.name}</span></label>)}</div>}
         </div>
       })}</div>
     </div> : <div className={css.section} aria-label="代码库范围">
       <p className={css.sectionHint}>可多选；代码查询仅使用这里勾选的远程仓库。</p>
+      {groups.length === 0 ? <p className={css.sectionHint}>当前账号暂无可用代码库。</p> : null}
       <div className={css.tree}>{groups.map(domain => <div key={domain.domainId} className={css.domainGroup}>
         <div className={css.domainTitle}>{domain.domainName}</div>
         {domain.systems.map(system => {
