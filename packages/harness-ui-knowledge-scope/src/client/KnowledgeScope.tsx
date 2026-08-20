@@ -6,6 +6,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { Catalog, Scope, ScopeOptions, ScopeSnapshot } from './bridge.ts'
 import { scopePanelCeiling, scopePanelMaxHeightPx } from './panel-geometry.js'
 import { selectKnowledgeDomain, selectKnowledgeSystem } from './selection.js'
+import { shouldShowKnowledgeScope } from './session-visibility.js'
 import css from './KnowledgeScope.module.css'
 
 export interface KnowledgeScopeInjected { hooks: { knowledgeScope: SnapshotStore<ScopeSnapshot | undefined> }; request: (sessionId: string, scope?: Scope, options?: ScopeOptions) => void }
@@ -54,13 +55,16 @@ function typeLabel(type: string | undefined): string | undefined {
 }
 
 /** Compact, always-visible scope summary in the card-external composer bar. */
-export function KnowledgeScopeStrip({ session, useKnowledgeScope, request }: StripProps) {
+export function KnowledgeScopeStrip({ session, useSession, useKnowledgeScope, request }: StripProps) {
   const [rememberOpen, setRememberOpen] = useState(false)
+  const subagent = useSession(s => s.subagent)
   const snapshot = useKnowledgeScope(value => value)
   const knowledgeOverlay = useComposerOverlay('knowledge-scope')
   const repositoryOverlay = useComposerOverlay('repository-scope')
   const sessionId = String(session.sessionId)
-  useEffect(() => { request(sessionId) }, [request, sessionId])
+  useEffect(() => {
+    if (shouldShowKnowledgeScope(subagent)) request(sessionId)
+  }, [request, sessionId, subagent])
   const catalog = snapshot?.catalog ?? emptyCatalog
   const scope = scopeFor(snapshot, sessionId)
   const enabled = snapshot?.enabled === true
@@ -69,6 +73,7 @@ export function KnowledgeScopeStrip({ session, useKnowledgeScope, request }: Str
   const selectedRepositories = selectedSourceLabel(scope?.repositoryIds ?? [], catalog.repositories)
   const knowledge = selectedSourceLabel(scope?.systemIds ?? [], catalog.systems)
     ?? catalog.domains.find(item => item.id === scope?.domainId)?.name
+  if (!shouldShowKnowledgeScope(subagent)) return null
   return <><div className={css.strip} aria-label="知识检索范围">
     <span className={css.switchWrap} onMouseEnter={() => setRememberOpen(true)} onMouseLeave={() => setRememberOpen(false)}>
     <button className={css.repositoryToggle} type="button" role="switch" aria-label="启用知识查询" aria-checked={enabled} onFocus={() => setRememberOpen(true)} onClick={() => {
@@ -147,7 +152,7 @@ function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, sectio
     {section === 'knowledge' ? <div className={css.section} aria-label="知识库范围">
       <p className={css.sectionHint}>勾选需要查询的知识库系统；选中子项会自动选中所属领域。</p>
       {catalog.domains.length === 0 ? <p className={css.sectionHint}>当前账号暂无可用领域和系统。</p> : null}
-      <div className={css.tree}>{catalog.domains.map(domain => {
+      <div className={`${css.tree} ${css.knowledgeTree}`}>{catalog.domains.map(domain => {
         const expanded = expandedDomains.has(domain.id)
         const selected = draftScope.domainId === domain.id
         const systems = catalog.systems.filter(system => system.domainId === domain.id)
@@ -189,8 +194,10 @@ function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, sectio
 
 /** Registers the chooser with InputBar's shared upward overlay surface. */
 export function KnowledgeScopePanel(props: PanelProps) {
+  const subagent = props.useSession(s => s.subagent)
   const knowledge = useComposerOverlay('knowledge-scope', <KnowledgeScopePanelBody {...props} section="knowledge" />)
   const repositories = useComposerOverlay('repository-scope', <KnowledgeScopePanelBody {...props} section="repositories" />)
+  if (!shouldShowKnowledgeScope(subagent)) return null
   if (knowledge.available || repositories.available) return null
   return knowledge.open ? <KnowledgeScopePanelBody {...props} section="knowledge" /> : repositories.open ? <KnowledgeScopePanelBody {...props} section="repositories" /> : null
 }

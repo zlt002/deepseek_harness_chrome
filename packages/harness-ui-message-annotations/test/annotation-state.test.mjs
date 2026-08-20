@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { annotationsPrompt } from '../src/client/annotation-format.js'
+import { reviewFeedbackPrompt } from '../src/client/review-feedback-format.js'
 import { addAnnotation, removeAcceptedAnnotations } from '../src/client/annotation-state.js'
-import { assistantMessageIdForRange, popoverPosition } from '../src/client/selection-geometry.js'
+import { assistantMessageIdForRange, popoverPosition, selectionAnchor } from '../src/client/selection-geometry.js'
 
 const first = { id: 'a', selectedText: '原句', comment: '改成更明确的说法' }
 const second = { id: 'b', selectedText: '另一句', comment: '补充来源' }
@@ -24,6 +25,18 @@ test('successful delivery clears only the submitted snapshot and preserves annot
   assert.deepEqual(removeAcceptedAnnotations(pending, ['a']), [second])
 })
 
+test('serializes workspace Markdown evidence through the shared review transform without embedding the document', () => {
+  const prompt = reviewFeedbackPrompt('请继续优化', [{
+    id: 'workspace-1', source: 'workspace-markdown', reviewId: 'review-1', resourceId: 'resource-1',
+    displayPath: 'docs/guide.md', revision: 'revision-1', fingerprint: 'fingerprint-1', comment: '这里需要补充依据',
+    anchor: { version: 1, startUtf16: 4, endUtf16: 8, quote: '原文', prefix: '# ', suffix: '\n下一段', sourceFingerprint: 'fingerprint-1' },
+  }])
+  assert.match(prompt, /<workspace_markdown_annotations>/)
+  assert.match(prompt, /docs\/guide\.md/)
+  assert.match(prompt, /先按相对路径重读真实文件/)
+  assert.doesNotMatch(prompt, /完整文档内容/)
+})
+
 test('accepts a range only when both boundaries are inside the same assistant message marker', () => {
   const marker = (id) => {
     const element = { dataset: { assistantMessageId: id }, closest: () => element }
@@ -39,5 +52,15 @@ test('keeps the selection popover inside a narrow sidebar and flips above when b
   assert.deepEqual(
     popoverPosition({ left: 2, top: 170, width: 20, height: 14, bottom: 184 }, { width: 240, height: 96 }, { width: 260, height: 200 }),
     { left: 8, top: 66, placement: 'above' },
+  )
+})
+
+test('uses the final visible selection line and places a compact entry beside it before covering later text', () => {
+  const first = { left: 16, top: 20, right: 200, bottom: 36, width: 184, height: 16 }
+  const last = { left: 24, top: 44, right: 110, bottom: 60, width: 86, height: 16 }
+  assert.equal(selectionAnchor({ getClientRects: () => [first, { width: 0, height: 0 }, last] }), last)
+  assert.deepEqual(
+    popoverPosition(last, { width: 112, height: 34 }, { width: 320, height: 240 }, { preferInline: true }),
+    { left: 118, top: 26, placement: 'right' },
   )
 })

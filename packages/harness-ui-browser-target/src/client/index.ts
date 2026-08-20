@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BrowserTargetControl, BrowserTargetPanel, type BrowserTargetInjected } from './BrowserTargetControl.tsx'
 import { HarnessReconnectAction, type HarnessReconnectActionInjected } from './HarnessReconnectAction.tsx'
 import { activeTabBridgeConfig, createBrowserTargetBridge } from './active-tab-bridge.ts'
+import { restoreHandoffSession } from './session-handoff.ts'
 
 export const inject = ['slots', 'sessions', 'settingsQuickActions']
 
@@ -38,18 +39,12 @@ export function apply(ctx: ClientContext): void {
     }, 'accrui-browser-target: report full-screen session')
   }
   if (config.sessionId !== undefined) {
-    ctx.effect(() => {
-      const select = (): boolean => {
-        if (ctx.sessions.list.getSnapshot().byId[config.sessionId!] === undefined) return false
-        ctx.sessions.open(config.sessionId! as SessionId)
-        if (ctx.sessions.list.getSnapshot().current !== config.sessionId) return false
-        window.parent.postMessage({ type: 'session-handoff-applied/v1', nonce: config.nonce, sessionId: config.sessionId }, config.parentOrigin)
-        return true
-      }
-      if (select()) return
-      const stop = ctx.sessions.list.subscribe(() => { if (select()) stop() })
-      return stop
-    }, 'accrui-browser-target: restore handed-off session')
+    ctx.effect(() => restoreHandoffSession({
+      sessionId: config.sessionId! as SessionId,
+      list: ctx.sessions.list,
+      open: id => ctx.sessions.open(id),
+      reportApplied: () => window.parent.postMessage({ type: 'session-handoff-applied/v1', nonce: config.nonce, sessionId: config.sessionId }, config.parentOrigin),
+    }), 'accrui-browser-target: restore handed-off session')
   }
   const bridge = createBrowserTargetBridge(config.nonce, config.parentOrigin)
   const panel = createSnapshotStore(false)

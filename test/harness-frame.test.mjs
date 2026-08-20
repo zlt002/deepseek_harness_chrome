@@ -12,7 +12,7 @@ test('adds the Browser Target bridge marker only to loopback Harness URLs', () =
     HarnessFrameSource('http://127.0.0.1:62070/?fixture', {
       nonce: 'frame-nonce', parentOrigin: 'chrome-extension://abcdefghijklmnop', surface: 'sidepanel',
     }),
-    'http://127.0.0.1:62070/?fixture=&dshBrowserTargetBridge=1&dshBrowserTargetNonce=frame-nonce&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabcdefghijklmnop&dshBrowserTargetSurface=sidepanel',
+    'http://127.0.0.1:62070/?fixture=&dshBrowserTargetBridge=1&dshBrowserTargetNonce=frame-nonce&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabcdefghijklmnop&dshBrowserTargetSurface=sidepanel&dshWorkspaceReviewNonce=frame-nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Fabcdefghijklmnop',
   )
   assert.throws(() => HarnessFrameSource('https://example.com/', {
     nonce: 'frame-nonce', parentOrigin: 'chrome-extension://abcdefghijklmnop', surface: 'sidepanel',
@@ -30,7 +30,7 @@ test('marks only the extension Tab as full-screen and projects that surface into
     HarnessFrameSource('http://127.0.0.1:62070/', {
       nonce: 'frame-nonce', parentOrigin: 'chrome-extension://abcdefghijklmnop', surface: 'fullscreen-tab',
     }),
-    'http://127.0.0.1:62070/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=frame-nonce&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabcdefghijklmnop&dshBrowserTargetSurface=fullscreen-tab',
+    'http://127.0.0.1:62070/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=frame-nonce&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabcdefghijklmnop&dshBrowserTargetSurface=fullscreen-tab&dshWorkspaceReviewNonce=frame-nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Fabcdefghijklmnop',
   )
 })
 

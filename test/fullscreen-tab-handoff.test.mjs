@@ -19,7 +19,7 @@ async function loadHarnessFrame() {
   return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
 }
 
-test('a side-panel-local handoff asks the persistent background to switch surfaces before the panel closes', async () => {
+test('a full-screen Tab opens the Side Panel synchronously in its click context while background prepares the handoff', async () => {
   const { openFullscreenTab, returnToSidePanel } = await loadHandoff()
   const requests = []
   await openFullscreenTab({
@@ -28,10 +28,32 @@ test('a side-panel-local handoff asks the persistent background to switch surfac
 
   assert.deepEqual(requests, [{ type: 'switch-harness-surface/v1', surface: 'fullscreen-tab', windowId: 7, sessionId: 'session-current' }])
 
-  await returnToSidePanel({
-    runtime: { sendMessage: async (request) => { requests.push(request); return { ok: true } } },
+  let userGesture = true
+  let resolvePreparation
+  const opened = []
+  const closed = []
+  const paths = []
+  const returned = returnToSidePanel({
+    runtime: { sendMessage: (request) => {
+      requests.push(request)
+      return new Promise((resolve) => { resolvePreparation = resolve })
+    } },
+    sidePanel: {
+      setOptions: async (options) => { paths.push(options) },
+      close: async (options) => { closed.push(options) },
+      open: async (options) => {
+        assert.equal(userGesture, true, 'sidePanel.open must be invoked by the full-screen Tab click, not a background message handler')
+        opened.push(options)
+      },
+    },
   }, 7, 42, 'session-current')
-  assert.deepEqual(requests.at(-1), { type: 'switch-harness-surface/v1', surface: 'sidepanel', windowId: 7, tabId: 42, sessionId: 'session-current' })
+  userGesture = false
+  assert.deepEqual(opened, [{ windowId: 7 }], 'the user-activation protected API is called before any await')
+  assert.deepEqual(closed, [{ windowId: 7 }], 'an already-open Side Panel is replaced before the new instance starts')
+  assert.deepEqual(paths, [{ path: 'sidepanel.html?dshHarnessHandoffTabId=42&dshHarnessSessionId=session-current' }], 'the replacement panel gets the session identity without waiting for a background map')
+  assert.deepEqual(requests.at(-1), { type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 42, sessionId: 'session-current' })
+  resolvePreparation({ ok: true })
+  await returned
 })
 
 test('the Tab URL and its loopback iframe bridge retain the selected Harness session identity', async () => {

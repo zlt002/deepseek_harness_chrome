@@ -10,14 +10,124 @@ const KNOWLEDGE_SCOPE_STORAGE_KEY = 'harnessKnowledgeScopesV1'
 const KNOWLEDGE_SESSION_STORAGE_KEY = 'harnessKnowledgeSessionsV1'
 const KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY = 'harnessKnowledgeEnabledPreferenceV1'
 const KNOWLEDGE_LOGIN_URL = 'https://wb-uat.annto.com/'
+const ACCOUNT_LOCAL_SIGN_OUT_STORAGE_KEY = 'harnessAccountLocalSignOutV1'
+const ACCOUNT_AUTH_COOKIE_NAMES = new Set(['MAS_TGC_UAT', 'midea_auth_uat'])
+const ACCOUNT_AUTH_COOKIE_URLS = [KNOWLEDGE_LOGIN_URL, `${KNOWLEDGE_API_ORIGIN}/`] as const
+const COMPANY_GATEWAY_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-anthropic/v1`
+const COMPANY_GATEWAY_METADATA_STORAGE_KEY = 'harnessCompanyGatewayMetadataV1'
+const COMPANY_GATEWAY_TIMEOUT_MS = 15_000
 interface KnowledgeProxyConfig { url: string; token: string }
 let knowledgeProxyConfig: KnowledgeProxyConfig | undefined
 type KnowledgeKind = 'knowledge' | 'code'
 interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
+interface AccountAccessSnapshot {
+  status: 'guest' | 'authenticated' | 'unavailable'
+  displayName?: string
+  knowledgeAccess: boolean
+  codeAccess: boolean
+  modelMode: 'manual' | 'company-pending'
+  gateway?: CompanyGatewayMetadata
+  message?: string
+}
+interface CompanyGatewayModel { id: string; name: string; description?: string }
+interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; checkedAt: string }
 
 function validSessionIdentity(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value) }
 const SIDE_PANEL_HANDOFF_TTL_MS = 60_000
 const pendingSidePanelHandoffs = new Map<number, { sessionId: string; tabId: number; expiresAt: number }>()
+const MARKDOWN_REVIEW_PORT = 'markdown-review/v1'
+const WORKSPACE_REVIEW_SNAPSHOT_PATH = '/api/workspace-review/snapshot'
+const MARKDOWN_REVIEW_STORAGE_KEY = 'harnessMarkdownReviewIdentitiesV1'
+
+interface OpenMarkdownReview {
+  v: 1
+  reviewId: string
+  harnessSessionId: string
+  resourceId: string
+  displayPath: string
+  revision: string
+  fingerprint: string
+  capability: string
+}
+
+interface MarkdownReviewRecord extends OpenMarkdownReview {
+  tabId: number
+  windowId: number
+}
+type PersistedMarkdownReview = Omit<MarkdownReviewRecord, 'capability' | 'v'>
+
+interface MarkdownReviewAnchor {
+  version: 1
+  startUtf16: number
+  endUtf16: number
+  quote: string
+  prefix: string
+  suffix: string
+  sourceFingerprint: string
+}
+
+interface MarkdownReviewAnnotation { id: string; anchor: MarkdownReviewAnchor; comment: string }
+interface MarkdownReviewPortRequest {
+  v: 1
+  type: 'markdown-review-snapshot-request' | 'markdown-review-deliver-request'
+  requestId: string
+  reviewId: string
+  harnessSessionId?: string
+  deliveryId?: string
+  annotation?: MarkdownReviewAnnotation
+}
+
+const markdownReviews = new Map<string, MarkdownReviewRecord>()
+const markdownReviewKeys = new Map<string, string>()
+const markdownReviewPorts = new Map<number, chrome.runtime.Port>()
+
+function boundedReviewText(value: unknown, maximum: number, allowEmpty = false): value is string {
+  return typeof value === 'string' && value.length <= maximum && (allowEmpty || value.trim() !== '')
+}
+
+function reviewId(value: unknown): value is string {
+  return boundedReviewText(value, 160) && /^[A-Za-z0-9._:-]+$/.test(value)
+}
+
+function isOpenMarkdownReview(value: unknown): value is OpenMarkdownReview {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const review = value as Record<string, unknown>
+  return review.v === 1
+    && ['reviewId', 'harnessSessionId', 'resourceId', 'revision', 'fingerprint'].every(key => reviewId(review[key]))
+    && boundedReviewText(review.displayPath, 2_048)
+    && boundedReviewText(review.capability, 512)
+}
+
+function isMarkdownReviewAnchor(value: unknown): value is MarkdownReviewAnchor {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const anchor = value as Record<string, unknown>
+  return anchor.version === 1
+    && Number.isSafeInteger(anchor.startUtf16) && (anchor.startUtf16 as number) >= 0
+    && Number.isSafeInteger(anchor.endUtf16) && (anchor.endUtf16 as number) > (anchor.startUtf16 as number)
+    && boundedReviewText(anchor.quote, 8_000)
+    && boundedReviewText(anchor.prefix, 512, true)
+    && boundedReviewText(anchor.suffix, 512, true)
+    && reviewId(anchor.sourceFingerprint)
+}
+
+function isMarkdownReviewPortRequest(value: unknown): value is MarkdownReviewPortRequest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const request = value as Record<string, unknown>
+  if (request.v !== 1 || !reviewId(request.requestId) || !reviewId(request.reviewId)) return false
+  if (request.type === 'markdown-review-snapshot-request') {
+    return Object.keys(request).every(key => ['v', 'type', 'requestId', 'reviewId'].includes(key))
+  }
+  if (request.type !== 'markdown-review-deliver-request'
+    || !reviewId(request.harnessSessionId) || !reviewId(request.deliveryId)
+    || typeof request.annotation !== 'object' || request.annotation === null) return false
+  const annotation = request.annotation as Record<string, unknown>
+  return Object.keys(request).every(key => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'deliveryId', 'annotation'].includes(key))
+    && Object.keys(annotation).every(key => ['id', 'anchor', 'comment'].includes(key))
+    && reviewId(annotation.id) && annotation.id === request.deliveryId
+    && isMarkdownReviewAnchor(annotation.anchor)
+    && boundedReviewText(annotation.comment, 8_000)
+}
 function validScope(value: unknown): value is KnowledgeScope {
   return typeof value === 'object' && value !== null && ((value as KnowledgeScope).domainId === '' || validSessionIdentity((value as KnowledgeScope).domainId))
     && Array.isArray((value as KnowledgeScope).systemIds) && (value as KnowledgeScope).systemIds.every(validSessionIdentity)
@@ -860,18 +970,28 @@ function samePinnedTab(left: BrowserTarget, right: BrowserTarget): boolean {
   return left.browser === right.browser && left.tabId === right.tabId
 }
 
+function isInternalHarnessPage(url: string): boolean {
+  try {
+    return new URL(url).origin === new URL(chrome.runtime.getURL('/')).origin
+  } catch {
+    return false
+  }
+}
+
 function targetFromActionTab(tab: chrome.tabs.Tab): BrowserTarget | undefined {
   if (tab.id === undefined || tab.windowId === undefined || typeof tab.url !== 'string' || tab.url.length === 0) return undefined
+  if (isInternalHarnessPage(tab.url)) return undefined
   return { browser: 'chrome', windowId: tab.windowId, tabId: tab.id, url: tab.url }
 }
 
 function snapshotFromActiveTab(tab: chrome.tabs.Tab): ActiveTabSnapshot | undefined {
-  if (tab.id === undefined || tab.windowId === undefined || typeof tab.url !== 'string' || tab.url.length === 0) return undefined
+  const target = targetFromActionTab(tab)
+  if (target === undefined) return undefined
   return {
-    windowId: tab.windowId,
-    tabId: tab.id,
+    windowId: target.windowId,
+    tabId: target.tabId,
     title: tab.title ?? '',
-    url: tab.url,
+    url: target.url,
     ...(typeof tab.favIconUrl === 'string' && tab.favIconUrl.length > 0 ? { favIconUrl: tab.favIconUrl } : {}),
   }
 }
@@ -1014,6 +1134,147 @@ async function knowledgeSessions(): Promise<Record<string, KnowledgeSessionRecor
   }))
 }
 
+async function accountLocallySignedOut(): Promise<boolean> {
+  const value = (await chrome.storage.local.get(ACCOUNT_LOCAL_SIGN_OUT_STORAGE_KEY))?.[ACCOUNT_LOCAL_SIGN_OUT_STORAGE_KEY]
+  return value === true
+}
+
+async function setAccountLocallySignedOut(value: boolean): Promise<void> {
+  await chrome.storage.local.set({ [ACCOUNT_LOCAL_SIGN_OUT_STORAGE_KEY]: value })
+}
+
+function companyGatewayQuota(value: unknown): CompanyGatewayQuota | undefined {
+  if (!isKnowledgeRecord(value)) return undefined
+  const usagePercent = value.usagePercent
+  const nextResetTime = value.nextResetTime
+  const resetCycle = value.resetCycle
+  if ((usagePercent !== null && (typeof usagePercent !== 'number' || !Number.isFinite(usagePercent) || usagePercent < 0 || usagePercent > 100))
+    || (nextResetTime !== null && typeof nextResetTime !== 'string')
+    || (resetCycle !== 'daily' && resetCycle !== 'weekly' && resetCycle !== 'monthly' && resetCycle !== 'unlimited')) return undefined
+  return { usagePercent, nextResetTime, resetCycle }
+}
+
+function companyGatewayModels(value: unknown): CompanyGatewayModel[] | undefined {
+  if (!isKnowledgeRecord(value) || !Array.isArray(value.data)) return undefined
+  const models = value.data.slice(0, 200).flatMap((item): CompanyGatewayModel[] => {
+    if (!isKnowledgeRecord(item) || typeof item.id !== 'string') return []
+    const id = item.id.trim()
+    if (id.length === 0 || id.length > 160) return []
+    const description = typeof item.description === 'string' && item.description.trim().length > 0
+      ? item.description.trim().slice(0, 500)
+      : typeof item.owned_by === 'string' && item.owned_by.trim().length > 0
+        ? item.owned_by.trim().slice(0, 500)
+        : undefined
+    return [{ id, name: id, ...(description === undefined ? {} : { description }) }]
+  })
+  return [...new Map(models.map((model) => [model.id, model])).values()]
+}
+
+function validCompanyGatewayMetadata(value: unknown): value is CompanyGatewayMetadata {
+  if (!isKnowledgeRecord(value) || !Array.isArray(value.models) || typeof value.checkedAt !== 'string') return false
+  return companyGatewayQuota(value.quota) !== undefined && value.models.every((model) => isKnowledgeRecord(model)
+    && typeof model.id === 'string' && typeof model.name === 'string'
+    && (model.description === undefined || typeof model.description === 'string'))
+}
+
+async function companyGatewayMetadata(): Promise<CompanyGatewayMetadata | undefined> {
+  const value = (await chrome.storage.local.get(COMPANY_GATEWAY_METADATA_STORAGE_KEY))?.[COMPANY_GATEWAY_METADATA_STORAGE_KEY]
+  return validCompanyGatewayMetadata(value) ? value : undefined
+}
+
+function usableCompanyGatewayKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 && /^[\x21-\x7E]+$/.test(value)
+}
+
+async function companyGatewayJson(path: '/models' | '/key/quota', apiKey: string): Promise<unknown> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), COMPANY_GATEWAY_TIMEOUT_MS)
+  try {
+    const response = await fetch(`${COMPANY_GATEWAY_BASE_URL}${path}`, {
+      headers: path === '/models' ? { 'x-api-key': apiKey } : { authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(`公司网关${path === '/models' ? '模型列表' : '用量'}请求失败 (${String(response.status)})`)
+    return await response.json()
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('公司网关请求超时，请稍后重试。')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function probeCompanyGateway(apiKey: string): Promise<CompanyGatewayMetadata> {
+  const [rawModels, rawQuota] = await Promise.all([
+    companyGatewayJson('/models', apiKey),
+    companyGatewayJson('/key/quota', apiKey),
+  ])
+  const models = companyGatewayModels(rawModels)
+  const quota = companyGatewayQuota(rawQuota)
+  if (models === undefined || models.length === 0) throw new Error('公司网关没有返回可用模型。')
+  if (quota === undefined) throw new Error('公司网关返回了无法识别的用量信息。')
+  const metadata = { models, quota, checkedAt: new Date().toISOString() }
+  await chrome.storage.local.set({ [COMPANY_GATEWAY_METADATA_STORAGE_KEY]: metadata })
+  return metadata
+}
+
+async function companyBrowserAuthentication(): Promise<boolean> {
+  const now = Date.now() / 1000
+  const groups = await Promise.all(ACCOUNT_AUTH_COOKIE_URLS.map((url) => chrome.cookies.getAll({ url })))
+  return groups.some((cookies) => cookies.some((cookie) => ACCOUNT_AUTH_COOKIE_NAMES.has(cookie.name)
+    && (cookie.expirationDate === undefined || cookie.expirationDate > now)))
+}
+
+async function accountAccessSnapshot(): Promise<AccountAccessSnapshot> {
+  const gateway = await companyGatewayMetadata()
+  if (await accountLocallySignedOut()) {
+    return { status: 'guest', knowledgeAccess: false, codeAccess: false, modelMode: 'manual', ...(gateway === undefined ? {} : { gateway }) }
+  }
+  try {
+    if (!await companyBrowserAuthentication()) {
+      return { status: 'guest', knowledgeAccess: false, codeAccess: false, modelMode: 'manual', ...(gateway === undefined ? {} : { gateway }) }
+    }
+    return {
+      status: 'authenticated',
+      knowledgeAccess: true,
+      codeAccess: true,
+      modelMode: 'company-pending',
+      ...(gateway === undefined ? {} : { gateway }),
+      message: '公司账号已登录；可使用个人 Key 配置公司网关模型。',
+    }
+  } catch (error) {
+    if (knowledgeServiceState(error) === 'unauthenticated') {
+      return { status: 'guest', knowledgeAccess: false, codeAccess: false, modelMode: 'manual' }
+    }
+    return {
+      status: 'unavailable',
+      knowledgeAccess: false,
+      codeAccess: false,
+      modelMode: 'manual',
+      ...(gateway === undefined ? {} : { gateway }),
+      message: asError(error),
+    }
+  }
+}
+
+async function assertAccountAccessForProtectedSource(): Promise<void> {
+  const snapshot = await accountAccessSnapshot()
+  if (snapshot.status === 'authenticated') return
+  if (snapshot.status === 'unavailable') throw new Error('公司账号状态暂时无法验证，请稍后重试。')
+  // Reuse the existing end-to-end Connector error code so the knowledge/code
+  // tool row presents its established “重新登录” guidance instead of a raw
+  // implementation detail.
+  throw new Error('knowledge_login_required')
+}
+
+async function locallySignOutAccount(): Promise<AccountAccessSnapshot> {
+  await setAccountLocallySignedOut(true)
+  knowledgeCatalogCache = undefined
+  for (const controller of activeKnowledgeQueries.values()) controller.abort()
+  await knowledgeSessionStorage()?.remove(KNOWLEDGE_SESSION_STORAGE_KEY)
+  return accountAccessSnapshot()
+}
+
 async function resolveKnowledgeScopeRecord(request: KnowledgeQueryRequest | SelectedSourceScopeRequest): Promise<KnowledgeScopeRecord | undefined> {
   const scopes = await knowledgeScopes()
   return scopes[request.harnessSessionId] ?? (request.harnessParentSessionId === undefined ? undefined : scopes[request.harnessParentSessionId])
@@ -1021,6 +1282,7 @@ async function resolveKnowledgeScopeRecord(request: KnowledgeQueryRequest | Sele
 
 async function respondToSelectedSourceScope(port: chrome.runtime.Port, request: SelectedSourceScopeRequest): Promise<void> {
   try {
+    await assertAccountAccessForProtectedSource()
     const record = await resolveKnowledgeScopeRecord(request)
     const empty = { domainId: '', systemIds: [], repositoryIds: [] }
     const preference = await knowledgeEnabledPreference()
@@ -1059,6 +1321,7 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     : undefined
   let lastProcess = ''
   try {
+    await assertAccountAccessForProtectedSource()
     const record = await resolveKnowledgeScopeRecord(request)
     if (record === undefined) throw new Error('当前会话还没有知识/代码范围记录。请先在输入框上方选择知识范围或代码库，再发起检索。')
     if (!record.enabled) throw new Error('知识查询开关已关闭。请打开输入框上方的知识查询开关后再试。')
@@ -1119,8 +1382,21 @@ async function activeBrowserTarget(windowId?: number): Promise<BrowserTarget> {
   if (window.id === undefined) throw new Error('No Chrome window is available for the next Harness Run.')
   const [tab] = await chrome.tabs.query({ active: true, windowId: window.id })
   const target = tab === undefined ? undefined : targetFromActionTab(tab)
-  if (target === undefined) throw new Error('The active Chrome tab cannot be used as a Browser Target.')
-  return target
+  if (target !== undefined) return target
+
+  // Product-owned extension Tabs (the Harness full-screen surface and the
+  // Markdown Review surface) must be transparent to follow-active-tab. Re-read
+  // the last eligible candidate so a foreground review UI never becomes the
+  // Run's Browser Target and never makes an otherwise valid Run fail.
+  await settingsMutation
+  const candidate = (await readBrowserTargetSettings()).candidate
+  if (candidate !== undefined && candidate.windowId === window.id) {
+    try {
+      const live = targetFromActionTab(await chrome.tabs.get(candidate.tabId))
+      if (live !== undefined && samePinnedTab(live, candidate) && live.windowId === window.id) return live
+    } catch { /* candidate closed while the product Tab was active */ }
+  }
+  throw new Error('The active Chrome tab cannot be used as a Browser Target. Return to an ordinary page or select one again.')
 }
 
 function bindingForTarget(browserTarget: BrowserTarget): BrowserTargetBinding {
@@ -3130,8 +3406,230 @@ function startHarness(binding?: BrowserTargetBinding): Promise<string> {
   return startPromise
 }
 
+function markdownReviewKey(sessionId: string, resourceId: string): string {
+  return `${sessionId}\u0000${resourceId}`
+}
+
+function isMarkdownReviewTabUrl(value: unknown, expectedReviewId?: string): boolean {
+  if (typeof value !== 'string') return false
+  try {
+    const actual = new URL(value)
+    const expected = new URL(chrome.runtime.getURL('markdown-review.html'))
+    return actual.origin === expected.origin && actual.pathname === expected.pathname
+      && (expectedReviewId === undefined || actual.searchParams.get('reviewId') === expectedReviewId)
+  } catch { return false }
+}
+
+function isMarkdownReviewSender(sender: chrome.runtime.MessageSender): boolean {
+  return sender.tab?.id !== undefined && isMarkdownReviewTabUrl(sender.url)
+}
+
+function isSidePanelSender(sender: chrome.runtime.MessageSender): boolean {
+  if (typeof sender.url !== 'string') return false
+  try {
+    const actual = new URL(sender.url)
+    const expected = new URL(chrome.runtime.getURL('sidepanel.html'))
+    return actual.origin === expected.origin && actual.pathname === expected.pathname
+  } catch { return false }
+}
+
+async function persistedMarkdownReviews(): Promise<Record<string, PersistedMarkdownReview>> {
+  const storage = chrome.storage?.session
+  if (storage === undefined) return {}
+  const value = (await storage.get(MARKDOWN_REVIEW_STORAGE_KEY))[MARKDOWN_REVIEW_STORAGE_KEY]
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, PersistedMarkdownReview> : {}
+}
+
+async function persistMarkdownReview(record: MarkdownReviewRecord): Promise<void> {
+  const storage = chrome.storage?.session
+  if (storage === undefined) return
+  const reviews = await persistedMarkdownReviews()
+  reviews[record.reviewId] = {
+    reviewId: record.reviewId,
+    harnessSessionId: record.harnessSessionId,
+    resourceId: record.resourceId,
+    displayPath: record.displayPath,
+    revision: record.revision,
+    fingerprint: record.fingerprint,
+    tabId: record.tabId,
+    windowId: record.windowId,
+  }
+  await storage.set({ [MARKDOWN_REVIEW_STORAGE_KEY]: reviews })
+}
+
+async function forgetPersistedMarkdownReview(reviewIdValue: string): Promise<void> {
+  const storage = chrome.storage?.session
+  if (storage === undefined) return
+  const reviews = await persistedMarkdownReviews()
+  if (reviews[reviewIdValue] === undefined) return
+  delete reviews[reviewIdValue]
+  await storage.set({ [MARKDOWN_REVIEW_STORAGE_KEY]: reviews })
+}
+
+async function recoverMarkdownReview(reviewIdValue: string, tabId: number): Promise<MarkdownReviewRecord | undefined> {
+  const persisted = (await persistedMarkdownReviews())[reviewIdValue]
+  if (persisted === undefined || persisted.reviewId !== reviewIdValue || persisted.tabId !== tabId
+    || !reviewId(persisted.harnessSessionId) || !reviewId(persisted.resourceId)) return undefined
+  const requestId = crypto.randomUUID()
+  const response = await chrome.runtime.sendMessage({
+    type: 'markdown-review-rehydrate-forward/v1',
+    requestId,
+    review: { reviewId: persisted.reviewId, harnessSessionId: persisted.harnessSessionId, resourceId: persisted.resourceId },
+  }) as { ok?: boolean; review?: unknown; error?: string } | undefined
+  if (response?.ok !== true || !isOpenMarkdownReview(response.review)) return undefined
+  const review = response.review
+  if (review.reviewId !== persisted.reviewId || review.harnessSessionId !== persisted.harnessSessionId || review.resourceId !== persisted.resourceId) return undefined
+  const tab = await chrome.tabs.get(tabId)
+  if (tab.id !== tabId || tab.windowId !== persisted.windowId) return undefined
+  const record = { ...review, tabId, windowId: tab.windowId } satisfies MarkdownReviewRecord
+  markdownReviews.set(record.reviewId, record)
+  markdownReviewKeys.set(markdownReviewKey(record.harnessSessionId, record.resourceId), record.reviewId)
+  await persistMarkdownReview(record)
+  return record
+}
+
+async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<MarkdownReviewRecord> {
+  const key = markdownReviewKey(review.harnessSessionId, review.resourceId)
+  const existingId = markdownReviewKeys.get(key)
+  const existing = existingId === undefined ? undefined : markdownReviews.get(existingId)
+  if (existing !== undefined) {
+    try {
+      const tab = await chrome.tabs.get(existing.tabId)
+      if (tab.id === existing.tabId && review.reviewId === existing.reviewId && isMarkdownReviewTabUrl(tab.url, existing.reviewId)) {
+        const updated = { ...existing, ...review, tabId: existing.tabId, windowId: tab.windowId } satisfies MarkdownReviewRecord
+        markdownReviews.delete(existing.reviewId)
+        markdownReviews.set(review.reviewId, updated)
+        markdownReviewKeys.set(key, review.reviewId)
+        await chrome.tabs.update?.(existing.tabId, { active: true })
+        markdownReviewPorts.get(existing.tabId)?.postMessage({ v: 1, type: 'markdown-review-target-updated', requestId: crypto.randomUUID(), reviewId: review.reviewId })
+        await persistMarkdownReview(updated)
+        return updated
+      }
+    } catch { /* stale registry entry; create a replacement below */ }
+  }
+
+  const window = await chrome.windows.getLastFocused()
+  if (window.id === undefined || window.id < 0) throw new Error('Chrome could not identify the window for Markdown review.')
+  try {
+    const target = await activeBrowserTarget(window.id)
+    await updateBrowserTargetSettings(settings => ({ ...settings, candidate: target }))
+  } catch { /* opening review remains allowed when Browser Target mode is none */ }
+  const url = new URL(chrome.runtime.getURL('markdown-review.html'))
+  url.searchParams.set('reviewId', review.reviewId)
+  const tab = await chrome.tabs.create({ windowId: window.id, active: true, url: url.toString() })
+  if (tab.id === undefined) throw new Error('Chrome did not return the Markdown Review Tab identity.')
+  const record = { ...review, tabId: tab.id, windowId: tab.windowId } satisfies MarkdownReviewRecord
+  markdownReviews.set(record.reviewId, record)
+  markdownReviewKeys.set(key, record.reviewId)
+  await persistMarkdownReview(record)
+  return record
+}
+
+async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ v: 1; type: 'markdown-review-snapshot'; reviewId: string; harnessSessionId: string; resource: { resourceId: string; displayPath: string; revision: string; fingerprint: string }; content: string; truncated: boolean; readOnly: true }> {
+  const base = nativeUrl ?? await startHarnessForSettings()
+  const endpoint = new URL(WORKSPACE_REVIEW_SNAPSHOT_PATH, base)
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${record.capability}` },
+    body: JSON.stringify({ reviewId: record.reviewId }),
+  })
+  const payload = await response.json() as Record<string, unknown>
+  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `workspace review snapshot failed: HTTP ${String(response.status)}`)
+  const resource = payload.resource as Record<string, unknown> | undefined
+  if (payload.v !== 1 || payload.type !== 'markdown-review-snapshot' || payload.reviewId !== record.reviewId
+    || resource === undefined || resource.resourceId !== record.resourceId || resource.displayPath !== record.displayPath
+    || !reviewId(resource.revision) || !reviewId(resource.fingerprint)
+    || !boundedReviewText(payload.content, 2_000_000, true) || typeof payload.truncated !== 'boolean' || payload.readOnly !== true) {
+    throw new Error('Harness returned an invalid Markdown review snapshot.')
+  }
+  record.revision = resource.revision
+  record.fingerprint = resource.fingerprint
+  return {
+    v: 1,
+    type: 'markdown-review-snapshot',
+    reviewId: record.reviewId,
+    harnessSessionId: record.harnessSessionId,
+    resource: { resourceId: record.resourceId, displayPath: record.displayPath, revision: record.revision, fingerprint: record.fingerprint },
+    content: payload.content,
+    truncated: payload.truncated,
+    readOnly: true,
+  }
+}
+
+function markdownReviewError(error: unknown, code: 'snapshot_unavailable' | 'delivery_rejected'): { code: string; message: string; reopenRequired?: boolean } {
+  const message = asError(error)
+  const reopenRequired = /capability|authorization|reopen|not found|unavailable/i.test(message)
+  return { code, message, ...(reopenRequired ? { reopenRequired: true } : {}) }
+}
+
+async function deliverMarkdownReview(record: MarkdownReviewRecord, request: MarkdownReviewPortRequest): Promise<string> {
+  if (request.type !== 'markdown-review-deliver-request' || request.harnessSessionId !== record.harnessSessionId
+    || request.deliveryId === undefined || request.annotation === undefined || request.annotation.id !== request.deliveryId) {
+    throw new Error('Markdown review delivery does not match its bound Harness session.')
+  }
+  const snapshot = await workspaceReviewSnapshot(record)
+  const anchor = request.annotation.anchor
+  if (anchor.sourceFingerprint !== snapshot.resource.fingerprint
+    || anchor.endUtf16 > snapshot.content.length
+    || snapshot.content.slice(anchor.startUtf16, anchor.endUtf16) !== anchor.quote) {
+    throw new Error('Markdown selection is stale. Re-read the file and select the text again.')
+  }
+  const feedback = {
+    id: request.annotation.id,
+    harnessSessionId: record.harnessSessionId,
+    reviewId: record.reviewId,
+    resourceId: record.resourceId,
+    displayPath: record.displayPath,
+    revision: snapshot.resource.revision,
+    fingerprint: snapshot.resource.fingerprint,
+    startUtf16: anchor.startUtf16,
+    endUtf16: anchor.endUtf16,
+    quote: anchor.quote,
+    prefix: anchor.prefix,
+    suffix: anchor.suffix,
+    comment: request.annotation.comment,
+  }
+  const response = await chrome.runtime.sendMessage({ type: 'markdown-review-feedback-forward/v1', feedback }) as { ok?: boolean; error?: string } | undefined
+  if (response?.ok !== true) throw new Error(response?.error ?? 'The bound Harness Side Panel is unavailable. Reopen it and resend the annotation.')
+  return request.annotation.id
+}
+
 export default defineBackground(() => {
   const sidePanel = chrome.sidePanel
+  chrome.runtime.onConnect?.addListener((port) => {
+    if (port.name !== MARKDOWN_REVIEW_PORT || !isMarkdownReviewSender(port.sender ?? {})) {
+      port.disconnect()
+      return
+    }
+    const tabId = port.sender?.tab?.id
+    if (tabId === undefined) { port.disconnect(); return }
+    markdownReviewPorts.set(tabId, port)
+    port.onMessage.addListener((message: unknown) => {
+      if (!isMarkdownReviewPortRequest(message)) return
+      void (async () => {
+        const current = markdownReviews.get(message.reviewId)
+        const record = current?.tabId === tabId ? current : await recoverMarkdownReview(message.reviewId, tabId)
+        if (record === undefined) {
+          port.postMessage({ v: 1, type: message.type === 'markdown-review-snapshot-request' ? 'markdown-review-snapshot-response' : 'markdown-review-deliver-response', requestId: message.requestId, ok: false, error: { code: 'review_not_found', message: '审阅授权已失效。请从文件树重新打开。', reopenRequired: true } })
+          return
+        }
+        if (message.type === 'markdown-review-snapshot-request') {
+          const snapshot = await workspaceReviewSnapshot(record)
+          port.postMessage({ v: 1, type: 'markdown-review-snapshot-response', requestId: message.requestId, ok: true, snapshot })
+          return
+        }
+        const deliveryId = await deliverMarkdownReview(record, message)
+        port.postMessage({ v: 1, type: 'markdown-review-deliver-response', requestId: message.requestId, ok: true, deliveryId })
+      })().catch(error => port.postMessage({
+        v: 1,
+        type: message.type === 'markdown-review-snapshot-request' ? 'markdown-review-snapshot-response' : 'markdown-review-deliver-response',
+        requestId: message.requestId,
+        ok: false,
+        error: markdownReviewError(error, message.type === 'markdown-review-snapshot-request' ? 'snapshot_unavailable' : 'delivery_rejected'),
+      }))
+    })
+    port.onDisconnect.addListener(() => { if (markdownReviewPorts.get(tabId) === port) markdownReviewPorts.delete(tabId) })
+  })
   chrome.action?.onClicked.addListener((tab) => {
     const browserTarget = targetFromActionTab(tab)
     if (browserTarget === undefined) {
@@ -3152,11 +3650,21 @@ export default defineBackground(() => {
     })
   })
 
-  chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown }
+    if (request.type === 'open-markdown-review/v1') {
+      if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
+        sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
+        return false
+      }
+      void openMarkdownReviewTab(request.review)
+        .then(record => sendResponse({ ok: true, reviewId: record.reviewId, tabId: record.tabId }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
     if (request.type === 'ensure-harness') {
       void startHarnessForSettings()
         .then((url) => sendResponse({ ok: true, url }))
@@ -3190,27 +3698,35 @@ export default defineBackground(() => {
           .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
         return true
       }
-      if (request.surface === 'sidepanel' && Number.isInteger(request.tabId) && (request.tabId as number) >= 0 && typeof request.sessionId === 'string' && chrome.tabs?.get !== undefined && chrome.sidePanel?.close !== undefined && chrome.sidePanel?.open !== undefined) {
-        const tabId = request.tabId as number
-        const sessionId = request.sessionId
-        void (async () => {
-          const tab = await chrome.tabs.get(tabId)
-          if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
-          await chrome.sidePanel.close({ windowId })
-          try {
-            pendingSidePanelHandoffs.set(windowId, { sessionId, tabId, expiresAt: Date.now() + SIDE_PANEL_HANDOFF_TTL_MS })
-            await chrome.sidePanel.open({ windowId })
-          } catch (error) {
-            pendingSidePanelHandoffs.delete(windowId)
-            throw error
-          }
-        })()
-          .then(() => sendResponse({ ok: true }))
-          .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
-        return true
+      if (request.surface === 'sidepanel') {
+        sendResponse({ ok: false, error: 'The full-screen Harness Tab must open the side panel from its user click.' })
+        return false
       }
       sendResponse({ ok: false, error: 'Chrome could not switch the Harness Workspace to the side panel.' })
       return false
+    }
+    if (request.type === 'prepare-sidepanel-handoff/v1') {
+      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || !Number.isInteger(request.tabId) || (request.tabId as number) < 0 || !validSessionIdentity(request.sessionId) || chrome.tabs?.get === undefined) {
+        sendResponse({ ok: false, error: 'Chrome could not prepare the Harness side-panel handoff.' })
+        return false
+      }
+      const windowId = request.windowId as number
+      const tabId = request.tabId as number
+      const sessionId = request.sessionId
+      pendingSidePanelHandoffs.set(windowId, { sessionId, tabId, expiresAt: Date.now() + SIDE_PANEL_HANDOFF_TTL_MS })
+      void (async () => {
+        try {
+          const tab = await chrome.tabs.get(tabId)
+          if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
+        } catch (error) {
+          const handoff = pendingSidePanelHandoffs.get(windowId)
+          if (handoff?.tabId === tabId && handoff.sessionId === sessionId) pendingSidePanelHandoffs.delete(windowId)
+          throw error
+        }
+      })()
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
     }
     if (request.type === 'get-sidepanel-handoff/v1') {
       if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0) {
@@ -3235,20 +3751,30 @@ export default defineBackground(() => {
       const windowId = request.windowId as number
       const tabId = request.tabId as number
       const handoff = pendingSidePanelHandoffs.get(windowId)
-      if (handoff === undefined || handoff.expiresAt <= Date.now()) {
+      if (handoff !== undefined && handoff.expiresAt <= Date.now()) {
         pendingSidePanelHandoffs.delete(windowId)
-        sendResponse({ ok: false, error: 'The Harness side-panel handoff is no longer current.' })
-        return false
       }
-      if (handoff.tabId !== tabId || handoff.sessionId !== request.sessionId) {
+      const activeHandoff = pendingSidePanelHandoffs.get(windowId)
+      if (activeHandoff !== undefined && (activeHandoff.tabId !== tabId || activeHandoff.sessionId !== request.sessionId)) {
         sendResponse({ ok: false, error: 'The Harness side-panel handoff does not match the restored session.' })
         return false
       }
       void (async () => {
         const tab = await chrome.tabs.get(tabId)
         if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
+        // The full-screen Tab configures the replacement Side Panel's local
+        // path in its click task. That URL is an exact fallback if the panel
+        // starts before this worker has recorded its advisory pending entry.
+        if (activeHandoff === undefined) {
+          const url = new URL(tab.url ?? '')
+          if (url.origin !== new URL(chrome.runtime.getURL('/')).origin
+            || url.searchParams.get('dshHarnessSurface') !== 'fullscreen-tab') {
+            throw new Error('The Harness side-panel handoff is no longer current.')
+          }
+        }
         await chrome.tabs.remove(tabId)
         pendingSidePanelHandoffs.delete(windowId)
+        await chrome.sidePanel?.setOptions({ path: 'sidepanel.html' })
       })()
         .then(() => sendResponse({ ok: true }))
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
@@ -3266,6 +3792,37 @@ export default defineBackground(() => {
       sendResponse({ ok: true, progress: [...searchProgressSnapshots.values()] })
       return false
     }
+    if (request.type === 'company-gateway-probe/v1') {
+      if (!isSidePanelSender(sender) || typeof request.requestId !== 'string' || request.requestId.length === 0 || request.requestId.length > 160 || !usableCompanyGatewayKey(request.apiKey)) {
+        sendResponse({ ok: false, error: 'Invalid company gateway probe.' })
+        return false
+      }
+      const requestId = request.requestId
+      const apiKey = request.apiKey
+      void probeCompanyGateway(apiKey)
+        .then((gateway) => sendResponse({ ok: true, requestId, gateway }))
+        .catch((error: unknown) => sendResponse({ ok: false, requestId, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'account-access/v1') {
+      if (request.command !== 'refresh' && request.command !== 'login' && request.command !== 'logout') {
+        sendResponse({ ok: false, error: 'Invalid account command.' })
+        return false
+      }
+      const command = request.command
+      void (async () => {
+        if (command === 'logout') return locallySignOutAccount()
+        if (command === 'login') {
+          await setAccountLocallySignedOut(false)
+          knowledgeCatalogCache = undefined
+          await chrome.tabs.create({ url: KNOWLEDGE_LOGIN_URL, active: true })
+        }
+        return accountAccessSnapshot()
+      })()
+        .then((snapshot) => sendResponse({ ok: true, snapshot }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
     if (request.type === 'knowledge-scope/v1') {
       if (!validSessionIdentity(request.sessionId)) {
         sendResponse({ ok: false, error: 'Invalid Harness session identity.' })
@@ -3278,6 +3835,7 @@ export default defineBackground(() => {
           knowledgeCatalogCache = undefined
         }
         if (request.action === 'login') {
+          await setAccountLocallySignedOut(false)
           await chrome.tabs.create({ url: KNOWLEDGE_LOGIN_URL, active: true })
         }
         if (request.scope !== undefined || typeof request.enabled === 'boolean' || typeof request.remember === 'boolean') {
@@ -3361,6 +3919,13 @@ export default defineBackground(() => {
     }
   })
   chrome.tabs?.onRemoved?.addListener((tabId, _removeInfo) => {
+    markdownReviewPorts.delete(tabId)
+    for (const [id, record] of markdownReviews) {
+      if (record.tabId !== tabId) continue
+      markdownReviews.delete(id)
+      markdownReviewKeys.delete(markdownReviewKey(record.harnessSessionId, record.resourceId))
+      void forgetPersistedMarkdownReview(id).catch(() => {})
+    }
     if (activeTabSnapshot?.tabId !== tabId) return
     void refreshCurrentActiveTab().catch(() => {})
   })

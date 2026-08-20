@@ -10,13 +10,16 @@ export const EXPECTED_PRODUCT_CLIENT_IDS = [
   '@accrui/harness-ui-agent-preset',
   '@accrui/harness-ui-browser-target',
   '@accrui/harness-ui-conversation-shell',
+  '@accrui/harness-ui-message-annotations',
   '@accrui/harness-ui-responsive-sidebar',
   '@accrui/harness-ui-workspace-picker',
+  '@accrui/harness-ui-account-access',
   '@accrui/harness-ui-subagent-compact',
   '@accrui/harness-ui-session-log-copy',
   '@accrui/harness-ui-settings-shell',
   '@accrui/harness-ui-knowledge-scope',
   '@accrui/harness-ui-document-intake',
+  '@accrui/harness-ui-workspace-review',
   '@accrui/harness-skill-settings',
 ]
 

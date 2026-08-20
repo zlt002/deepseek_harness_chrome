@@ -22,6 +22,14 @@ test('WXT development config rejects a busy port instead of falling back to a CS
   assert.match(wxtConfig, /strictPort:\s*true/)
 })
 
+test('WXT development config prebundles Markdown Review entry dependencies', async () => {
+  const wxtConfig = await readFile(wxtConfigUrl, 'utf8')
+
+  for (const dependency of ['react-markdown', 'rehype-sanitize', 'remark-gfm', 'mermaid']) {
+    assert.match(wxtConfig, new RegExp(`include:\\s*\\[[\\s\\S]*['"]${dependency}['"][\\s\\S]*\\]`))
+  }
+})
+
 test('Chrome extension uses ACCRUI consistently for user-visible branding', async () => {
   const [wxtConfig, sidepanelHtml, sidepanelSource] = await Promise.all([
     readFile(wxtConfigUrl, 'utf8'),

@@ -1,0 +1,12 @@
+.root { position: relative; }
+.trigger { width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-fg-primary); cursor: pointer; font-size: 17px; }
+.trigger:hover { background: var(--dsw-interactive-bg-hover); }
+.drawer { position: fixed; z-index: 120; top: 8px; right: 8px; bottom: 8px; width: min(340px, calc(100vw - 16px)); display: flex; flex-direction: column; border: 1px solid var(--dsw-border-secondary); border-radius: 12px; background: var(--dsw-bg-primary); box-shadow: var(--dsw-shadow-lv3); color: var(--dsw-fg-primary); }
+.header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; border-bottom: 1px solid var(--dsw-border-secondary); }
+.header button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 18px; }
+.headerActions { display: inline-flex; align-items: center; gap: 4px; }
+.tree { min-height: 0; flex: 1; overflow: auto; padding: 6px; }
+.entry { display: flex; width: 100%; align-items: center; gap: 7px; border: 0; border-radius: 7px; padding: 7px 8px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.entry:hover { background: var(--dsw-interactive-bg-hover); }
+.nested { margin-left: 14px; border-left: 1px solid var(--dsw-border-secondary); padding-left: 5px; }
+.status { padding: 9px; color: var(--dsw-fg-secondary); font-size: 12px; white-space: pre-wrap; }

@@ -18,11 +18,13 @@ const packageNames = [
   'harness-ui-message-annotations',
   'harness-ui-responsive-sidebar',
   'harness-ui-workspace-picker',
+  'harness-ui-account-access',
   'harness-ui-knowledge-scope',
   'harness-ui-subagent-compact',
   'harness-ui-session-log-copy',
   'harness-ui-settings-shell',
   'harness-ui-document-intake',
+  'harness-ui-workspace-review',
   'harness-skill-settings',
 ]
 const selected = process.argv.slice(2)

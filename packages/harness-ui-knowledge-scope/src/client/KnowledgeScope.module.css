@@ -26,10 +26,11 @@
 .group { margin-top: 12px; }
 .groupTitle { display: block; margin-bottom: 6px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .optionList { display: grid; gap: 4px; }
-.option { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 2px 6px; border-radius: 7px; cursor: pointer; }
+.option { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 2px 6px; border-radius: 7px; font-size: 13px; cursor: pointer; }
 .option:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .option input { accent-color: var(--dsw-alias-state-business-primary); }
 .tree { display: grid; gap: 8px; }
+.knowledgeTree { gap: 0; }
 .domainGroup { border-top: 1px solid var(--dsw-alias-border-l2); }
 .domainTitle { padding: 8px 6px 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; }
 .systemGroup { border-top: 1px solid var(--dsw-alias-border-l2); }

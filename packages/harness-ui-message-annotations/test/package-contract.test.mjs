@@ -17,6 +17,8 @@ test('keeps message annotation UI and prompt enrichment in an out-of-tree produc
   assert.match(client, /conversation\.composer\.above/)
   assert.match(client, /conversation\.input\.overlay/)
   assert.match(client, /composerSubmissionTransforms/)
+  assert.match(client, /provide\('reviewFeedback'/)
+  assert.match(client, /id: 'review-feedback'/)
   assert.match(client, /accept: \(\) => annotations\.accept/)
   assert.match(view, /添加批注/)
   assert.match(view, /selectionchange/)

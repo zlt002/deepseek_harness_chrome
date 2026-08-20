@@ -41,7 +41,15 @@ export default defineConfig({
       config.optimizeDeps = {
         ...config.optimizeDeps,
         noDiscovery: true,
-        include: ['react', 'react-dom', 'react-dom/client'],
+        include: [
+          'react',
+          'react-dom',
+          'react-dom/client',
+          'react-markdown',
+          'rehype-sanitize',
+          'remark-gfm',
+          'mermaid',
+        ],
       }
       config.server ??= {}
       config.server.watch = {

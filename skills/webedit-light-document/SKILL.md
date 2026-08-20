@@ -17,6 +17,8 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 2. 任意稳定的非折叠选区（`hasSelection=true`、`isCollapsed=false`）都调用 `mcp__chrome__light_document_selection_replace_preview({ blocks })`；段落内部分文字、跨段落和任意层级列表均可。
 3. 获得用户确认后，调用 `mcp__chrome__light_document_selection_replace_commit({ challenge })`。
 
+表格多单元格选区可能定位到所属整张表。若 preview 返回 `action=selection_table_replace_preview` 或 `replacementScope.kind=containing_table`，明确告诉用户“将替换所属整张表（行数 × 列数）”后再等待确认；commit 会原子替换该表，不会在原表下方追加新表。`replaceStrategy=unavailable` 时不发起 preview，请用户选中更完整或更容易唯一定位的表格范围。
+
 选区未变化时不要重复 `selection_read`；只有 `fingerprint_mismatch` 或用户重新选择后才重新读取。`hasCaret=true` 且 `isCollapsed=true` 是光标，不是选区。完整块优先使用结构化 CanvasPatch；字符级或跨块局部选区使用 WebEdit 公开 selection API，并要求选区外正文不变的回读证据。
 
 `preview` 只读且不变更文档；`commit` 不传正文、区块、operation 或 idempotency identity。失败时返回实际错误并停止；`fingerprint_mismatch` 后重新读取并再次确认。不得把编辑器 range 猜成 XML 偏移；局部替换只走公开 selection API。

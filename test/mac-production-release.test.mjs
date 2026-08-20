@@ -15,11 +15,13 @@ const PRODUCT_CLIENT_IDS = [
   '@accrui/harness-ui-message-annotations',
   '@accrui/harness-ui-responsive-sidebar',
   '@accrui/harness-ui-workspace-picker',
+  '@accrui/harness-ui-account-access',
   '@accrui/harness-ui-knowledge-scope',
   '@accrui/harness-ui-subagent-compact',
   '@accrui/harness-ui-session-log-copy',
   '@accrui/harness-ui-settings-shell',
   '@accrui/harness-ui-document-intake',
+  '@accrui/harness-ui-workspace-review',
   '@accrui/harness-skill-settings',
 ]
 
@@ -48,6 +50,7 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.match(entries, /runtime\/skills\/pdf\/SKILL\.md/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-conversation-shell\/package\.json/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-message-annotations\/lib\/client\.js/m)
+  assert.match(entries, /runtime\/product-plugins\/harness-ui-workspace-review\/lib\/client\.js/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-responsive-sidebar\/package\.json/m)
   assert.match(entries, /runtime\/product-plugins\/harness-ui-subagent-compact\/lib\/client\.js/m)
 

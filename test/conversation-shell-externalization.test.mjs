@@ -15,7 +15,12 @@ test('conversation shell seam keeps product quick actions outside the official p
   assert.match(generic, /conversation\.presentation/)
   assert.match(generic, /ConversationPresentationOwnerProps/)
   assert.match(generic, /DefaultConversationPresentation/)
-  assert.doesNotMatch(generic, /diff --git a\/packages\/client\/(?:ui-conversation\/src\/client\/skeleton\/(?:ConversationRoot|InputBar|PermissionSelect)\.module\.css|ui-model-selection\/src\/client\/ModelSelect\.module\.css)/)
+  // The owner seam may adapt official conversation/model components and their
+  // CSS to keep the complete composer chain at the root footer. Product quick
+  // actions must still be registered only by the out-of-tree presentation
+  // plugin, never by the generic patch.
+  assert.doesNotMatch(generic, /settingsQuickActions/)
+  assert.doesNotMatch(generic, /id:\s*'(?:trajectory|conversation)'/)
   assert.doesNotMatch(generic, /compact trajectory action|compact conversation action/)
   assert.match(product, /id: 'trajectory'/)
   assert.match(product, /id: 'conversation'/)

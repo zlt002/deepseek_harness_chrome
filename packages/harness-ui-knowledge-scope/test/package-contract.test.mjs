@@ -1,9 +1,24 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { access, readFile } from 'node:fs/promises'
+import { isChildConversation, shouldShowKnowledgeScope } from '../src/client/session-visibility.js'
 
 const root = new URL('../', import.meta.url)
 const source = (path) => readFile(new URL(path, root), 'utf8')
+
+test('knowledge scope is visible only for the parent conversation', () => {
+  assert.equal(shouldShowKnowledgeScope(null), true)
+  assert.equal(isChildConversation(null), false)
+  for (const subagent of [
+    { address: { mode: 'one-shot' }, parentAvailable: true },
+    { address: { mode: 'continuable' }, parentAvailable: true },
+    { address: { mode: 'one-shot' }, parentAvailable: false },
+    { address: { mode: 'continuable' }, parentAvailable: false },
+  ]) {
+    assert.equal(isChildConversation(subagent), true)
+    assert.equal(shouldShowKnowledgeScope(subagent), false)
+  }
+})
 
 test('declares an out-of-tree scope plugin against public composer contracts only', async () => {
   await access(new URL('package.json', root))
@@ -32,6 +47,9 @@ test('scope pickers use the shared upward overlay and preserve the accepted e327
     readFile(new URL('../src/client/KnowledgeScope.module.css', import.meta.url), 'utf8'),
   ])
 
+  assert.equal(control.match(/useSession\(s => s\.subagent\)/g)?.length, 2)
+  assert.match(control, /KnowledgeScopeStrip\(\{ session, useSession, useKnowledgeScope, request \}/)
+  assert.match(control, /if \(shouldShowKnowledgeScope\(subagent\)\) request\(sessionId\)/)
   assert.match(control, /useComposerOverlay\('repository-scope'/)
   assert.match(control, /useComposerOverlay\('knowledge-scope'/)
   assert.match(control, /catalog\.systems\.filter\(system => system\.domainId === domain\.id\)/)
@@ -46,6 +64,9 @@ test('scope pickers use the shared upward overlay and preserve the accepted e327
   assert.match(styles, /\.panelHeader\s*\{[^}]*flex:\s*none[^}]*margin-bottom:\s*4px/s)
   assert.match(styles, /\.section\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto[^}]*padding-top:\s*4px/s)
   assert.match(styles, /\.sectionHint\s*\{[^}]*margin:\s*0 0 6px/s)
+  assert.match(control, /className=\{`\$\{css\.tree\} \$\{css\.knowledgeTree\}`\}/)
+  assert.match(styles, /\.knowledgeTree\s*\{[^}]*gap:\s*0/s)
+  assert.match(styles, /\.option\s*\{[^}]*font-size:\s*13px/s)
   assert.doesNotMatch(styles, /max-height:\s*min\(480px/)
   assert.match(control, /useScopePanelMaxHeight/)
   assert.match(control, /data-testid="compact-header"/)

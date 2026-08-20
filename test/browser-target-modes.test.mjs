@@ -155,22 +155,16 @@ test('background creates the selected-session full-screen Harness Tab before clo
   }
 })
 
-test('background replaces an already-open Side Panel before closing the full-screen Tab and restores the selected session', async () => {
+test('background prepares the Side Panel handoff but never calls the user-gesture-only open API', async () => {
   const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab', title: 'ACCRUI' }
-  const steps = []
   const background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab: fullScreenTab,
-    closeSidePanel: async (options) => { steps.push(['close', options]) },
-    openSidePanel: async (options) => { steps.push(['open', options]) },
+    openSidePanel: async () => { throw new Error('sidePanel.open() may only be called in response to a user gesture') },
   })
   try {
-    const response = await background.sendRuntimeMessage({ type: 'switch-harness-surface/v1', surface: 'sidepanel', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    const response = await background.sendRuntimeMessage({ type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 91, sessionId: 'session-current' })
     assert.deepEqual(response, { ok: true })
-    assert.deepEqual(steps, [
-      ['close', { windowId: 7 }],
-      ['open', { windowId: 7 }],
-    ])
     assert.deepEqual(background.removedTabs, [], 'the full-screen Tab stays open until the side panel applies the session')
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 }), { ok: true, sessionId: 'session-current', tabId: 91 })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, sessionId: 'session-other' }), { ok: false, error: 'The Harness side-panel handoff does not match the restored session.' })
@@ -182,18 +176,33 @@ test('background replaces an already-open Side Panel before closing the full-scr
   }
 })
 
-test('background leaves the full-screen Tab open when the replacement Side Panel cannot open', async () => {
+test('background preserves the full-screen Tab when handoff preparation identifies a Tab from another window', async () => {
   const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab', title: 'ACCRUI' }
   const background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab: fullScreenTab,
-    openSidePanel: async () => { throw new Error('side-panel-open-failed') },
+    tabsById: { 91: { ...fullScreenTab, windowId: 8 } },
   })
   try {
-    const response = await background.sendRuntimeMessage({ type: 'switch-harness-surface/v1', surface: 'sidepanel', windowId: 7, tabId: 91, sessionId: 'session-current' })
-    assert.deepEqual(response, { ok: false, error: 'side-panel-open-failed' })
+    const response = await background.sendRuntimeMessage({ type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    assert.deepEqual(response, { ok: false, error: 'The full-screen Harness Tab is no longer in this browser window.' })
     assert.deepEqual(background.removedTabs, [])
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 }), { ok: true })
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('the URL-defined Side Panel handoff closes the full-screen Tab even if background preparation arrives late', async () => {
+  const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab&dshHarnessSessionId=session-current', title: 'ACCRUI' }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] },
+    activeTab: fullScreenTab,
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    assert.deepEqual(response, { ok: true })
+    assert.deepEqual(background.removedTabs, [91])
   } finally {
     background.cleanup()
   }
@@ -212,6 +221,77 @@ test('sidepanel ensure-harness resolves the last-focused active tab for the defa
       type: 'start',
       browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://docs.example.test/follow' },
     }])
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('product-owned extension Tabs are absent from the Browser Target roster', async () => {
+  const reviewTab = { id: 91, windowId: 7, url: 'chrome-extension://test/markdown-review.html?reviewId=review-1', title: 'Markdown Review' }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] },
+    activeTab: reviewTab,
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'get-browser-target-settings' })
+    assert.deepEqual(response.tabs, [])
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('follow-active-tab keeps the last revalidated Browser Target while a product Tab is foreground', async () => {
+  const page = { id: 42, windowId: 7, url: 'https://docs.example.test/review-source', title: 'Review source' }
+  const candidate = { browser: 'chrome', windowId: 7, tabId: 42, url: page.url }
+  const reviewTab = { id: 91, windowId: 7, url: 'chrome-extension://test/markdown-review.html?reviewId=review-1', title: 'Markdown Review' }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [], candidate },
+    activeTab: reviewTab,
+    tabsById: { 42: page },
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(response, { ok: true, url: 'http://127.0.0.1:43123' })
+    assert.deepEqual(background.nativeMessages, [{ type: 'start', browserTarget: candidate }])
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('pinned mode treats a product-owned extension Tab as unavailable', async () => {
+  const reviewTab = { id: 91, windowId: 7, url: 'chrome-extension://test/markdown-review.html?reviewId=review-1', title: 'Markdown Review' }
+  const pinned = { browser: 'chrome', windowId: 7, tabId: 91, url: reviewTab.url }
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [pinned], primaryTabId: 91 },
+    activeTab: reviewTab,
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.equal(response.ok, false)
+    assert.match(response.error, /Select it again/i)
+    assert.deepEqual(background.nativeMessages, [])
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('transfer revalidation rejects a product-owned extension Tab', async () => {
+  const page = { id: 42, windowId: 7, url: 'https://docs.example.test/source', title: 'Source' }
+  const reviewTab = { id: 91, windowId: 7, url: 'chrome-extension://test/markdown-review.html?reviewId=review-1', title: 'Markdown Review' }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] },
+    activeTab: page,
+    tabsById: { 91: reviewTab },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    const response = await background.sendRuntimeMessage({
+      type: 'transfer-browser-target',
+      runId: 'run-follow',
+      browserTarget: { browser: 'chrome', windowId: 7, tabId: 91, url: reviewTab.url },
+    })
+    assert.equal(response.ok, false)
+    assert.match(response.error, /changed before transfer/i)
   } finally {
     background.cleanup()
   }

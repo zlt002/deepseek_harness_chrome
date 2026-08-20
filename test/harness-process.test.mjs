@@ -126,6 +126,7 @@ test('mounts every product UI package outside upstream by default', () => {
   assert.equal(patch.match(/@accrui\/harness-ui-settings-shell/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-knowledge-scope/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-document-intake/g)?.length, 1)
+  assert.equal(patch.match(/@accrui\/harness-ui-workspace-review/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-skill-settings/g)?.length, 1)
 })
 

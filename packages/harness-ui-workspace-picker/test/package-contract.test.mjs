@@ -11,7 +11,7 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.match(client, /sidebar\.workspaces\.compact/)
   assert.match(
     client,
-    /name:\s*'sidebar\.workspaces\.compact'[\s\S]*?select:\s*owner\s*=>\s*owner[\s\S]*?CompactWorkspacePicker/,
+    /name:\s*'sidebar\.workspaces\.compact'[\s\S]*?select:\s*_owner\s*=>\s*claudeImport[\s\S]*?CompactWorkspacePicker/,
     'chain workspace registration must select the matched owner',
   )
   assert.match(picker, /requestWorkspaceAdd/)
@@ -22,6 +22,10 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.doesNotMatch(picker, /from 'clsx'/)
   assert.match(picker, /IconEllipsisOutline16/)
   assert.match(picker, /owner\.startSession\(workspace\.id\)/)
+  assert.match(picker, /从 Claude Code 导入/)
+  assert.match(picker, /ClaudeImportModal/)
+  assert.match(picker, /claudeImportControllerOf\(owner\)/)
+  assert.match(picker, /disabled=\{importController === undefined\}/)
   assert.match(picker, /owner\.renameWorkspace/)
   assert.match(picker, /owner\.deleteWorkspace/)
   assert.match(picker, /id: 'open'/)
@@ -47,6 +51,47 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.match(css, /\.row:hover \.count,\s*\.rowMenuOpen \.count\s*\{[^}]*display:\s*none;/s, 'hover and an open menu must hide the session count')
   assert.match(css, /\.row:hover \.rowActions,\s*\.rowMenuOpen \.rowActions\s*\{[^}]*display:\s*inline-flex;/s, 'hover and an open menu must reveal new-session plus the actions menu')
   assert.match(css, /@media \(max-width: 360px\)/)
+})
+
+test('Claude Code import stays bounded, on-demand, cancellable, and uses public session verbs', async () => {
+  const [host, directory, client, modal] = await Promise.all([
+    read('src/index.ts'), read('src/claude-import.mjs'), read('src/client/index.ts'), read('src/client/ClaudeImportModal.tsx'),
+  ])
+  assert.match(host, /loopback same-origin/)
+  assert.match(directory, /MAX_PROJECTS = 500/)
+  assert.match(directory, /MAX_SOURCE_BYTES = 8 \* 1024 \* 1024/)
+  assert.match(directory, /MAX_SESSION_PAGE_SIZE = 64/)
+  assert.match(directory, /readPrefix\(file, MAX_PREVIEW_BYTES\)/)
+  assert.match(directory, /kind: 'existing'/)
+  assert.match(directory, /await realpath\(requested\)/)
+  assert.match(directory, /this\.registryMutation = operation/)
+  assert.match(directory, /randomUUID\(\)/)
+  assert.match(client, /ctx\.workspaces\.connectWorkspace/)
+  assert.match(client, /session\.prompt/)
+  assert.match(client, /session\.rename/)
+  assert.match(client, /ctx\.sessions\.open/)
+  assert.match(modal, /AbortController/)
+  assert.match(modal, /已读取 \{sessions\.length\} \/ \{sessionsTotal/)
+  assert.match(modal, /<progress/)
+  assert.match(modal, /Claude projects 来源目录/)
+  assert.match(modal, /恢复默认/)
+  assert.match(modal, /创建会话并提交上下文，此阶段不能撤回/)
+  assert.match(modal, /重新导入为副本/)
+  assert.match(client, /input\.signal\?\.aborted/)
+  assert.match(host, /req\.once\('aborted'/)
+  assert.match(host, /signal: controller\.signal/)
+  assert.doesNotMatch(modal, /<Modal\b/, 'Claude import must own a full-content shell instead of the centered primitive card')
+  assert.match(modal, /createPortal/)
+  assert.match(modal, /data-testid="claude-import-overlay"/)
+  assert.match(modal, /className=\{css\.importPanel\}[\s\S]*role="dialog"[\s\S]*aria-modal="true"/)
+  const css = await read('src/client/CompactWorkspacePicker.module.css')
+  assert.match(css, /\.importOverlay\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;/s)
+  assert.match(css, /\.importPanel\s*\{[^}]*width:\s*100%;[^}]*height:\s*100%;[^}]*min-height:\s*0;/s)
+  assert.match(css, /\.importMain\s*\{[^}]*flex:\s*1;[^}]*min-height:\s*0;/s)
+  assert.match(css, /\.importGrid\s*\{[^}]*flex:\s*1;[^}]*min-height:\s*0;/s)
+  assert.match(css, /@media \(max-width:\s*440px\)/)
+  assert.doesNotMatch(css, /\.importGrid\s*\{[^}]*height:\s*min\(360px/s)
+  assert.doesNotMatch(`${host}\n${directory}\n${client}`, /upstream\/deepseek-harness\/packages\/.*\/src/)
 })
 
 test('the compact seat owner exposes workspace rename, delete, and new-session actions', async () => {

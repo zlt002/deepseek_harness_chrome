@@ -246,6 +246,13 @@ export function effectiveSessionTrackingPatch(env = process.env) {
 `
 }
 
+/** Retire the official DeepSeek route; verified gateway settings mount through dormant pi-ai. */
+export function companyGatewayModelPatch() {
+  return `- id: llm-deepseek
+  disabled: true
+`
+}
+
 /** Product UI packages stay outside the official Harness checkout. */
 export function productUiPatch() {
   const packages = productUiPackages()
@@ -263,11 +270,13 @@ function productUiPackages() {
     '@accrui/harness-ui-message-annotations',
     '@accrui/harness-ui-responsive-sidebar',
     '@accrui/harness-ui-workspace-picker',
+    '@accrui/harness-ui-account-access',
     '@accrui/harness-ui-subagent-compact',
     '@accrui/harness-ui-session-log-copy',
     '@accrui/harness-ui-settings-shell',
     '@accrui/harness-ui-knowledge-scope',
     '@accrui/harness-ui-document-intake',
+    '@accrui/harness-ui-workspace-review',
     '@accrui/harness-skill-settings',
   ]
 }
@@ -440,7 +449,7 @@ export class HarnessWebProcess {
     const directory = await mkdtemp(`${tmpdir()}/deepseek-harness-connector-`)
     const patchPath = resolve(directory, 'connector.cordis.yml')
     const connector = this.mcpConnector === undefined ? '' : connectorPatch(this.mcpConnector.url, this.mcpConnector.token, this.runtimePluginPath)
-    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${productUiPatch(this.env)}${effectiveSessionTrackingPatch(this.env)}${connector}`, { mode: 0o600 })
+    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${companyGatewayModelPatch()}${productUiPatch(this.env)}${effectiveSessionTrackingPatch(this.env)}${connector}`, { mode: 0o600 })
     this.connectorPatchDir = directory
     this.connectorPatchPath = patchPath
     return patchPath

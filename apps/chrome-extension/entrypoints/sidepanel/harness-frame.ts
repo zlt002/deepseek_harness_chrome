@@ -14,6 +14,7 @@ export type HarnessSurface = 'sidepanel' | 'fullscreen-tab'
 
 const SURFACE_QUERY_KEY = 'dshHarnessSurface'
 const SESSION_QUERY_KEY = 'dshHarnessSessionId'
+const HANDOFF_TAB_QUERY_KEY = 'dshHarnessHandoffTabId'
 
 /** Treat unmarked extension pages as the normal side panel for compatibility. */
 export function HarnessSurfaceFromLocation(location: Pick<Location, 'search'> = window.location): HarnessSurface {
@@ -40,6 +41,14 @@ export function FullscreenHarnessTabUrlForSession(extensionUrl: string, sessionI
 export function HarnessHandoffSessionFromLocation(location: Pick<Location, 'search'> = window.location): string | undefined {
   const sessionId = new URLSearchParams(location.search).get(SESSION_QUERY_KEY)
   return sessionId === null || sessionId.trim() === '' ? undefined : sessionId
+}
+
+/** The source Tab is carried only by a side-panel handoff URL. */
+export function HarnessHandoffTabFromLocation(location: Pick<Location, 'search'> = window.location): number | undefined {
+  const raw = new URLSearchParams(location.search).get(HANDOFF_TAB_QUERY_KEY)
+  if (raw === null || !/^\d+$/.test(raw)) return undefined
+  const tabId = Number(raw)
+  return Number.isSafeInteger(tabId) ? tabId : undefined
 }
 
 /** Read-only tab fields supplied by the extension's active-tab notification. */
@@ -75,6 +84,10 @@ export function HarnessFrameSource(nativeUrl: string, bridge?: HarnessFrameBridg
   source.searchParams.set('dshBrowserTargetNonce', bridge.nonce)
   source.searchParams.set('dshBrowserTargetParentOrigin', bridge.parentOrigin)
   source.searchParams.set('dshBrowserTargetSurface', bridge.surface)
+  // Workspace review shares the already verified iframe boundary, but keeps a
+  // distinct protocol namespace from Browser Target commands.
+  source.searchParams.set('dshWorkspaceReviewNonce', bridge.nonce)
+  source.searchParams.set('dshWorkspaceReviewParentOrigin', bridge.parentOrigin)
   if (bridge.sessionId !== undefined) source.searchParams.set(SESSION_QUERY_KEY, bridge.sessionId)
   return source.toString()
 }

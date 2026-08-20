@@ -8,6 +8,8 @@ import type {
   CompactWorkspacePickerOwnerProps, CompactWorkspacePickerWorkspace,
 } from '@deepseek-ai/dsh-client-ui-workspace/client'
 import css from './CompactWorkspacePicker.module.css'
+import { ClaudeImportModal, type ClaudeImportController } from './ClaudeImportModal.tsx'
+import { claudeImportControllerOf } from './claude-import-controller.mjs'
 
 /** Avoid a runtime dependency for the small conditional class lists in this bundle. */
 function classes(...values: Array<string | false | null | undefined>): string {
@@ -120,7 +122,11 @@ function WorkspaceRow({
 }
 
 /** The e327 compact header and two-column picker, rendered through the public owner contract. */
-export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps) {
+export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps & {
+  matched?: ClaudeImportController | { claudeImport?: ClaudeImportController }
+  claudeImport?: ClaudeImportController
+}) {
+  const importController = claudeImportControllerOf(owner) as ClaudeImportController | undefined
   const [open, setOpen] = useState(false)
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(owner.workspaces[0]?.id)
   const [menuWorkspaceId, setMenuWorkspaceId] = useState<string | undefined>()
@@ -132,6 +138,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps) 
   const [deleting, setDeleting] = useState(false)
   const [deleteCommittedId, setDeleteCommittedId] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
   const composingRef = useRef(false)
   const root = useRef<HTMLDivElement>(null)
   const defaultWorkspace = useMemo(
@@ -280,6 +287,9 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps) 
           <section className={classes(css.pane, css.sessionsPane)}>
             <div className={css.paneHeader}>
               <div className={css.paneTitle}>{owner.labels.sessions}</div>
+              <Tooltip label={importController === undefined ? 'Claude Code 导入正在重新连接，请刷新侧边栏' : '从 Claude Code 导入'} side="bottom" delayMs={500}>
+                <button type="button" className={css.addWorkspace} aria-label="从 Claude Code 导入" disabled={importController === undefined} onClick={() => setImportOpen(true)}><IconPlusOutline16 size={16} /></button>
+              </Tooltip>
             </div>
             <div className={css.list}>{selectedWorkspace?.sessions.map(session => (
               <button key={session.id} type="button" className={classes(css.row, session.id === owner.currentSessionId && css.rowActive)} onClick={() => { owner.openSession(session.id); setOpen(false) }}>
@@ -291,6 +301,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps) 
         </div>
       )}
       {owner.directoryFlow}
+      <ClaudeImportModal open={importOpen} onClose={() => setImportOpen(false)} workspace={selectedWorkspace} controller={importController} />
       <Modal
         open={renameTarget !== null}
         onClose={closeRename}

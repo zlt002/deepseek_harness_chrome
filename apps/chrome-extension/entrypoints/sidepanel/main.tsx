@@ -3,7 +3,7 @@
 import '@vitejs/plugin-react/preamble'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
-import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from './harness-frame'
+import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessHandoffTabFromLocation, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from './harness-frame'
 import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
 import './style.css'
 
@@ -22,6 +22,40 @@ interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds:
 type KnowledgeServiceState = 'checking' | 'ready' | 'unauthenticated' | 'unavailable'
 type KnowledgeScopeOptions = { enabled?: boolean; remember?: boolean; action?: 'login' | 'retry' }
 interface KnowledgeScopeResponse { ok: boolean; scope?: KnowledgeScope; enabled?: boolean; remember?: boolean; serviceState?: KnowledgeServiceState; catalog?: unknown; error?: string }
+type AccountAccessStatus = 'guest' | 'authenticated' | 'unavailable'
+interface CompanyGatewayModel { id: string; name: string; description?: string }
+interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; checkedAt: string }
+interface AccountAccessSnapshot { status: AccountAccessStatus; displayName?: string; knowledgeAccess: boolean; codeAccess: boolean; modelMode: 'manual' | 'company-pending'; gateway?: CompanyGatewayMetadata; message?: string }
+interface AccountAccessResponse { ok: boolean; snapshot?: AccountAccessSnapshot; error?: string }
+interface CompanyGatewayProbeResponse { ok: boolean; requestId?: string; gateway?: CompanyGatewayMetadata; error?: string }
+interface OpenMarkdownReview {
+  v: 1
+  reviewId: string
+  harnessSessionId: string
+  resourceId: string
+  displayPath: string
+  revision: string
+  fingerprint: string
+  capability: string
+}
+
+interface WorkspaceMarkdownFeedback {
+  id: string
+  harnessSessionId: string
+  reviewId: string
+  resourceId: string
+  displayPath: string
+  revision: string
+  fingerprint: string
+  startUtf16: number
+  endUtf16: number
+  quote: string
+  prefix: string
+  suffix: string
+  comment: string
+}
+interface MarkdownReviewIdentity { reviewId: string; harnessSessionId: string; resourceId: string }
 
 type BrowserTargetCommand =
   | { command: 'refresh' }
@@ -52,6 +86,38 @@ function isKnowledgeScope(value: unknown): value is KnowledgeScope {
     && typeof (value as KnowledgeScope).domainId === 'string'
     && Array.isArray((value as KnowledgeScope).systemIds) && (value as KnowledgeScope).systemIds.every((item) => typeof item === 'string')
     && Array.isArray((value as KnowledgeScope).repositoryIds) && (value as KnowledgeScope).repositoryIds.every((item) => typeof item === 'string')
+}
+
+function boundedString(value: unknown, maximum: number, allowEmpty = false): value is string {
+  return typeof value === 'string' && value.length <= maximum && (allowEmpty || value.trim() !== '')
+}
+
+function isOpenMarkdownReview(value: unknown): value is OpenMarkdownReview {
+  if (typeof value !== 'object' || value === null) return false
+  const review = value as Record<string, unknown>
+  return review.v === 1
+    && ['reviewId', 'harnessSessionId', 'resourceId', 'revision', 'fingerprint'].every(key => boundedString(review[key], 160))
+    && boundedString(review.displayPath, 2_048)
+    && boundedString(review.capability, 512)
+}
+
+function isMarkdownReviewIdentity(value: unknown): value is MarkdownReviewIdentity {
+  if (typeof value !== 'object' || value === null) return false
+  const review = value as Record<string, unknown>
+  return ['reviewId', 'harnessSessionId', 'resourceId'].every(key => boundedString(review[key], 160))
+}
+
+function isWorkspaceMarkdownFeedback(value: unknown): value is WorkspaceMarkdownFeedback {
+  if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  return ['id', 'harnessSessionId', 'reviewId', 'resourceId', 'revision', 'fingerprint'].every(key => boundedString(item[key], 160))
+    && boundedString(item.displayPath, 2_048)
+    && boundedString(item.quote, 8_000)
+    && boundedString(item.prefix, 512, true)
+    && boundedString(item.suffix, 512, true)
+    && boundedString(item.comment, 8_000)
+    && Number.isSafeInteger(item.startUtf16) && (item.startUtf16 as number) >= 0
+    && Number.isSafeInteger(item.endUtf16) && (item.endUtf16 as number) > (item.startUtf16 as number)
 }
 
 function requestHarness(message: unknown = { type: 'ensure-harness' }): Promise<HarnessResponse> {
@@ -86,6 +152,24 @@ function requestKnowledgeScope(message: unknown): Promise<KnowledgeScopeResponse
     chrome.runtime.sendMessage(message, (response: KnowledgeScopeResponse | undefined) => {
       const runtimeError = chrome.runtime.lastError
       resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return Knowledge scope.' } : { ok: false, error: runtimeError.message })
+    })
+  })
+}
+
+function requestAccountAccess(command: 'refresh' | 'login' | 'logout'): Promise<AccountAccessResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'account-access/v1', command }, (response: AccountAccessResponse | undefined) => {
+      const runtimeError = chrome.runtime.lastError
+      resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return account access.' } : { ok: false, error: runtimeError.message })
+    })
+  })
+}
+
+function requestCompanyGatewayProbe(requestId: string, apiKey: string): Promise<CompanyGatewayProbeResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'company-gateway-probe/v1', requestId, apiKey }, (response: CompanyGatewayProbeResponse | undefined) => {
+      const runtimeError = chrome.runtime.lastError
+      resolve(runtimeError === undefined ? response ?? { ok: false, requestId, error: 'Background did not return company gateway data.' } : { ok: false, requestId, error: runtimeError.message })
     })
   })
 }
@@ -155,14 +239,25 @@ function App(): React.JSX.Element {
   const commandSequenceRef = useRef(0)
   const knowledgeCommandSequenceRef = useRef(0)
   const knowledgeSnapshotSequenceRef = useRef(0)
+  const accountCommandSequenceRef = useRef(0)
+  const accountSnapshotSequenceRef = useRef(0)
+  const gatewayCommandSequenceRef = useRef(0)
+  const gatewaySnapshotSequenceRef = useRef(0)
+  const accountLoginAttemptsRef = useRef(0)
+  const accountLoginTimerRef = useRef<number | undefined>(undefined)
   const searchProgressSequenceRef = useRef(0)
+  const reviewRehydrateRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
+  const reviewFeedbackRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
   const knowledgeLoginTimerRef = useRef<number | undefined>(undefined)
   const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => Promise<void>>(async () => {})
+  const accountCommandHandlerRef = useRef<(command: 'refresh' | 'login' | 'logout') => Promise<void>>(async () => {})
   const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
   const handoffSessionId = useMemo(() => HarnessHandoffSessionFromLocation(), [])
-  const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number }>({ ready: surface === 'fullscreen-tab', ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }) })
+  const handoffTabId = useMemo(() => HarnessHandoffTabFromLocation(), [])
+  const hasLocationHandoff = surface === 'sidepanel' && handoffSessionId !== undefined && handoffTabId !== undefined
+  const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number }>({ ready: surface === 'fullscreen-tab' || hasLocationHandoff, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }), ...(handoffTabId === undefined ? {} : { tabId: handoffTabId }) })
   const activeHarnessSessionId = sidePanelHandoff.sessionId
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
   const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, ...(activeHarnessSessionId === undefined ? {} : { sessionId: activeHarnessSessionId }) }), [activeHarnessSessionId, frameNonce, surface, url])
@@ -170,6 +265,7 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (surface !== 'sidepanel') return
+    if (hasLocationHandoff) return
     void currentBrowserWindowId().then((windowId) => {
       if (windowId === undefined) { setSidePanelHandoff({ ready: true }); return }
       void requestSidePanelHandoff(windowId).then((response) => setSidePanelHandoff({
@@ -178,7 +274,7 @@ function App(): React.JSX.Element {
         ...(response.ok && Number.isInteger(response.tabId) ? { tabId: response.tabId } : {}),
       }))
     })
-  }, [surface])
+  }, [hasLocationHandoff, surface])
 
   useEffect(() => { targetSettingsRef.current = targetSettings }, [targetSettings])
   useEffect(() => { availableTabsRef.current = availableTabs }, [availableTabs])
@@ -227,9 +323,43 @@ function App(): React.JSX.Element {
       setActiveTab((previous) => previous !== undefined && previous.epoch === epoch && sequence <= previous.sequence ? previous : { epoch, sequence, tab: targetTab })
     }
     void requestActiveTab().then((response) => { if (response.ok) accept(response.epoch, response.sequence, response.tab) })
-    const onMessage = (message: unknown): void => {
+    const onMessage = (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void): boolean | void => {
       if (!message || typeof message !== 'object') return
-      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown }
+      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown; feedback?: unknown; review?: unknown }
+      if (value.type === 'markdown-review-rehydrate-forward/v1') {
+        const target = frameRef.current?.contentWindow
+        if (!boundedString(value.requestId, 160) || !isMarkdownReviewIdentity(value.review) || frameOrigin === undefined || target === null || target === undefined) {
+          sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' })
+          return false
+        }
+        const requestId = value.requestId
+        const timeout = window.setTimeout(() => {
+          const pending = reviewRehydrateRef.current.get(requestId)
+          if (pending === undefined) return
+          reviewRehydrateRef.current.delete(requestId)
+          pending.sendResponse({ ok: false, error: 'Timed out restoring Markdown review authorization.' })
+        }, 5_000)
+        reviewRehydrateRef.current.set(requestId, { sendResponse, timeout })
+        target.postMessage({ type: 'markdown-review-rehydrate/v1', nonce: frameNonce, requestId, ...value.review }, frameOrigin)
+        return true
+      }
+      if (value.type === 'markdown-review-feedback-forward/v1') {
+        const target = frameRef.current?.contentWindow
+        if (frameOrigin === undefined || target === null || target === undefined || !isWorkspaceMarkdownFeedback(value.feedback)) {
+          sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' })
+          return false
+        }
+        const deliveryId = value.feedback.id
+        const timeout = window.setTimeout(() => {
+          const pending = reviewFeedbackRef.current.get(deliveryId)
+          if (pending === undefined) return
+          reviewFeedbackRef.current.delete(deliveryId)
+          pending.sendResponse({ ok: false, error: 'Timed out inserting the annotation into the Harness composer.' })
+        }, 5_000)
+        reviewFeedbackRef.current.set(deliveryId, { sendResponse, timeout })
+        target.postMessage({ type: 'markdown-review-feedback/v1', nonce: frameNonce, feedback: value.feedback }, frameOrigin)
+        return true
+      }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
       if (value.type === 'harness-ready' && typeof value.url === 'string') { setUrl(value.url); setStatus('ready'); setError(undefined) }
       if (value.type === 'harness-disconnected') { void connect() }
@@ -279,6 +409,52 @@ function App(): React.JSX.Element {
     await saveTargetSettings({ ...settings, primaryTabId: tab.tabId })
   }, [loadTargetSettings, saveTargetSettings])
 
+  const handleAccountAccessCommand = useCallback(async (command: 'refresh' | 'login' | 'logout') => {
+    if (command === 'login') {
+      if (accountLoginTimerRef.current !== undefined) window.clearTimeout(accountLoginTimerRef.current)
+      accountLoginAttemptsRef.current = 0
+    }
+    if (command === 'logout' && accountLoginTimerRef.current !== undefined) {
+      window.clearTimeout(accountLoginTimerRef.current)
+      accountLoginTimerRef.current = undefined
+      accountLoginAttemptsRef.current = 0
+    }
+    const response = await requestAccountAccess(command)
+    if (frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
+    const snapshot = response.snapshot ?? { status: 'unavailable' as const, knowledgeAccess: false, codeAccess: false, modelMode: 'manual' as const, message: response.error ?? '无法读取账号状态。' }
+    accountSnapshotSequenceRef.current += 1
+    frameRef.current.contentWindow.postMessage({
+      type: 'account-access-snapshot/v1', nonce: frameNonce, sequence: accountSnapshotSequenceRef.current, snapshot,
+    }, frameOrigin)
+    if (snapshot.status === 'authenticated' || command === 'logout') {
+      if (accountLoginTimerRef.current !== undefined) window.clearTimeout(accountLoginTimerRef.current)
+      accountLoginTimerRef.current = undefined
+      accountLoginAttemptsRef.current = 0
+      return
+    }
+    if (accountLoginAttemptsRef.current < 15 && command !== 'refresh') {
+      accountLoginAttemptsRef.current += 1
+      accountLoginTimerRef.current = window.setTimeout(() => { void accountCommandHandlerRef.current('refresh') }, 2_000)
+    } else if (command === 'refresh' && accountLoginAttemptsRef.current > 0 && accountLoginAttemptsRef.current < 15) {
+      accountLoginAttemptsRef.current += 1
+      accountLoginTimerRef.current = window.setTimeout(() => { void accountCommandHandlerRef.current('refresh') }, 2_000)
+    }
+  }, [frameNonce, frameOrigin])
+
+  useEffect(() => { accountCommandHandlerRef.current = handleAccountAccessCommand }, [handleAccountAccessCommand])
+
+  const handleCompanyGatewayProbe = useCallback(async (requestId: string, apiKey: string) => {
+    const response = await requestCompanyGatewayProbe(requestId, apiKey)
+    if (frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
+    gatewaySnapshotSequenceRef.current += 1
+    frameRef.current.contentWindow.postMessage({
+      type: 'company-gateway-probe-snapshot/v1', nonce: frameNonce, sequence: gatewaySnapshotSequenceRef.current,
+      snapshot: response.ok && response.gateway !== undefined
+        ? { requestId, status: 'ready', gateway: response.gateway }
+        : { requestId, status: 'error', error: response.error ?? '公司网关探测失败。' },
+    }, frameOrigin)
+  }, [frameNonce, frameOrigin])
+
   const handleKnowledgeScopeCommand = useCallback(async (sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => {
     if (options.action === 'login') {
       if (knowledgeLoginTimerRef.current !== undefined) window.clearTimeout(knowledgeLoginTimerRef.current)
@@ -322,6 +498,11 @@ function App(): React.JSX.Element {
 
   useEffect(() => () => {
     if (knowledgeLoginTimerRef.current !== undefined) window.clearTimeout(knowledgeLoginTimerRef.current)
+    if (accountLoginTimerRef.current !== undefined) window.clearTimeout(accountLoginTimerRef.current)
+    for (const pending of reviewRehydrateRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed during Markdown review recovery.' }) }
+    reviewRehydrateRef.current.clear()
+    for (const pending of reviewFeedbackRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed before accepting Markdown feedback.' }) }
+    reviewFeedbackRef.current.clear()
   }, [])
 
   // This listener must exist before the iframe can finish booting: its ready
@@ -329,8 +510,32 @@ function App(): React.JSX.Element {
   useLayoutEffect(() => {
     const onFrameMessage = (event: MessageEvent<unknown>): void => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
-      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown }
+      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; apiKey?: unknown }
       if (value.nonce !== frameNonce) return
+      if (value.type === 'markdown-review-feedback-accepted/v1' && boundedString(value.deliveryId, 160)) {
+        const pending = reviewFeedbackRef.current.get(value.deliveryId)
+        if (pending === undefined) return
+        reviewFeedbackRef.current.delete(value.deliveryId)
+        window.clearTimeout(pending.timeout)
+        pending.sendResponse(value.accepted === true ? { ok: true } : { ok: false, error: 'Harness rejected the Markdown annotation.' })
+        return
+      }
+      if (value.type === 'markdown-review-rehydrate-response/v1' && boundedString(value.requestId, 160)) {
+        const pending = reviewRehydrateRef.current.get(value.requestId)
+        if (pending === undefined) return
+        reviewRehydrateRef.current.delete(value.requestId)
+        window.clearTimeout(pending.timeout)
+        if (isOpenMarkdownReview(value.review)) pending.sendResponse({ ok: true, review: value.review })
+        else pending.sendResponse({ ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness could not restore Markdown review authorization.' })
+        return
+      }
+      if (value.type === 'markdown-review-open/v1' && isOpenMarkdownReview(value.review)) {
+        chrome.runtime.sendMessage({ type: 'open-markdown-review/v1', review: value.review }, (response: { ok?: boolean; error?: string } | undefined) => {
+          const runtimeError = chrome.runtime.lastError
+          if (runtimeError !== undefined || response?.ok !== true) console.error('[deepseek-harness] Failed to open Markdown Review Tab:', runtimeError?.message ?? response?.error)
+        })
+        return
+      }
       if (value.type === 'harness-reconnect/v1' && value.nonce === frameNonce) { void connect(); return }
       if (value.type === 'open-fullscreen-tab/v1' && value.nonce === frameNonce) {
         void openFullscreenTab(typeof value.sessionId === 'string' && value.sessionId.trim() !== '' ? value.sessionId : undefined).catch((error: unknown) => console.error('[deepseek-harness] Failed to open full-screen Tab:', error))
@@ -349,6 +554,21 @@ function App(): React.JSX.Element {
         return
       }
       if (value.type === 'browser-target-ready/v1') { commandSequenceRef.current = 0; sendBrowserTargetSnapshot(); return }
+      if (value.type === 'account-access-ready/v1') { accountCommandSequenceRef.current = 0; void handleAccountAccessCommand('refresh'); return }
+      if (value.type === 'account-access-command/v1') {
+        if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= accountCommandSequenceRef.current || (value.command !== 'refresh' && value.command !== 'login' && value.command !== 'logout')) return
+        accountCommandSequenceRef.current = value.sequence
+        void handleAccountAccessCommand(value.command)
+        return
+      }
+      if (value.type === 'company-gateway-probe-command/v1') {
+        if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= gatewayCommandSequenceRef.current
+          || typeof value.requestId !== 'string' || value.requestId.length === 0 || value.requestId.length > 160
+          || typeof value.apiKey !== 'string' || value.apiKey.length === 0 || value.apiKey.length > 512 || !/^[\x21-\x7E]+$/.test(value.apiKey)) return
+        gatewayCommandSequenceRef.current = value.sequence
+        void handleCompanyGatewayProbe(value.requestId, value.apiKey)
+        return
+      }
       if (value.type === 'knowledge-scope-command/v1') {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= knowledgeCommandSequenceRef.current || typeof value.sessionId !== 'string' || value.sessionId.length === 0 || (value.scope !== undefined && !isKnowledgeScope(value.scope))) return
         knowledgeCommandSequenceRef.current = value.sequence
@@ -362,7 +582,7 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleFrameCommand, handleKnowledgeScopeCommand, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
+  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (

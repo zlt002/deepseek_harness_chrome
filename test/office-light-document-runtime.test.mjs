@@ -380,6 +380,30 @@ test('light-document atomically replaces the uniquely selected containing table 
   assert.equal(after.result.document.blocks.at(-1).text, '表格后正文')
 })
 
+test('light-document rejects an ambiguous selected table before any insert or patch', async () => {
+  const state = {}
+  const table = (id) => `<table id="${id}"><tr><td><p id="">类型</p></td><td><p id="">来源</p></td></tr><tr><td><p id="">用户事实</p></td><td><p id="">用户沟通</p></td></tr></table>`
+  const call = await runtime({
+    state,
+    initialXml: `<apcanvas><outlineTitle id="title">重复表格</outlineTitle>${table('one')}${table('two')}</apcanvas>`,
+    otlSelection: { from: 10, to: 20, anchor: 10, head: 20, empty: false },
+    selectionInfo: { selected_tag_ids: ["table[@id='one']/td"] },
+    selection: { async getSelectionContent() { return { html: '<table><tr><td>类型</td><td>来源</td></tr><tr><td>用户事实</td><td>用户沟通</td></tr></table>', text: '类型 来源 用户事实 用户沟通' } } },
+  })
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.result.document.selection.replaceStrategy, 'unavailable')
+  const result = await call({ action: 'write', operation: 'selection_content_replace', resource: selected.result.resource, payload: {
+    markdown: '| 类型 | 来源 |\n| --- | --- |\n| 代码依据 | H5_前端 |',
+    expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint,
+  } })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'unsupported')
+  assert.equal(state.selectionCalls ?? 0, 0)
+  assert.equal(state.patchCalls ?? 0, 0)
+  const after = await call({ action: 'read' })
+  assert.equal(after.result.document.blocks.filter((block) => block.type === 'table').length, 2)
+})
+
 test('light-document runtime inserts mermaid drawings, structured blocks, and selection replace with XML evidence', async () => {
   const emptyXml = '<apcanvas><outlineTitle id="title">未命名文档</outlineTitle></apcanvas>'
   const insert = await runtime({ initialXml: emptyXml })

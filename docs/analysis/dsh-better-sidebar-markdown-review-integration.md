@@ -11,6 +11,23 @@
 
 下文用 **事实**、**推断**、**建议** 明确区分；“当前仓库”结论是本次工作区快照，且扩展/Native Host 文件已有并行未提交修改，不能视为冻结接口。
 
+## 2026-08-20 实施状态与下载源码二次审计
+
+M0 与 M1 已经落地，不再只是设计：`harness-ui-workspace-review` Host+Client 插件、Side Panel 懒加载 Markdown 树、独立 `markdown-review.html`、CodeMirror 源码选区锚点、安全预览、固定会话投递、统一 `ReviewFeedbackStore`、background capability/rehydrate 以及 Browser Target 隔离均已实现。M2 手工写盘仍明确不做。
+
+对用户下载的 `/Users/zhanglt21/Downloads/DSH-better-sidebar-main` 再做源码级对照后，新增价值主要在体验层，而不是改变现有架构：
+
+| 优先级 | 外部源码事实 | 当前 M1 对照 | 决策 |
+| --- | --- | --- | --- |
+| P0 | 文件树按目录缓存、refresh tick 清缓存，并把目录错误限制在当前层（[FileTree.tsx L67-L99](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/FileTree.tsx#L67-L99)）。 | 已有按目录懒加载、会话切换清缓存和旧请求隔离；缺少显式刷新按钮。 | 保留现有安全模型；增加“刷新树”属于低风险体验项。 |
+| P1 | `TreePanel` 提供 300ms debounce、下一次输入 abort 上一次搜索，Host 搜索有 200 个结果/100000 个访问项上限且不跟随目录 symlink（[TreePanel.tsx L35-L62](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/TreePanel.tsx#L35-L62)，[fs-search.ts L46-L85](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/fs-search.ts#L46-L85)）。 | 当前只有懒加载树，没有全局 Markdown 文件名搜索。 | 值得作为下一步 P1，但必须复用 workspace root fence，只搜索 Markdown，并设更小预算；不能复制其任意文件搜索面。 |
+| P1 | 文件行支持“引用到对话”、复制相对路径、打开新 Tab/侧边分屏（[FileTree.tsx L101-L147](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/FileTree.tsx#L101-L147)，[L256-L280](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/FileTree.tsx#L256-L280)）。 | 当前点击 Markdown 会按 `(sessionId, resourceId)` 复用独立 Review Tab；批注通过统一待发区进入对话。 | 不再增加第二种“直接塞路径到 composer”通道；可借鉴复制相对路径与刷新，继续保持单一 Review Tab 打开语义。 |
+| P1 | CodeMirror 精确源码选区后把路径、行号与小于 500 UTF-16 单元的 quote 加入对话；预览选区仅在反向搜索唯一命中时给行号（[selection-payload.ts L23-L56](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/selection-payload.ts#L23-L56)，[L68-L85](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/selection-payload.ts#L68-L85)）。 | 当前锚点更强：UTF-16 range + quote/prefix/suffix + fingerprint，并在投递前重新 snapshot 核对；编辑草稿后禁用权威锚点。 | 现有实现优于外部项目，不能退化成纯文本插入或预览 DOM 反向猜测。 |
+| P2 | EditorHost 支持树/编辑器合并、分屏、拖动宽度和 tab meta 持久化（[EditorHost.tsx L49-L84](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/EditorHost.tsx#L49-L84)，[L113-L149](https://github.com/omdsh-dev/DSH-better-sidebar/blob/6c891514b544b6e2da51fdab2eb3436cc02da246/src/client/EditorHost.tsx#L113-L149)）。 | 产品约束是窄 Side Panel + 独立浏览器 Tab。 | 不引入其 pane/split 布局状态机；会与浏览器 Tab 生命周期和现有 sidepanel UX 重复。 |
+| 不采用 | TextEditor 带 Ctrl/Cmd+S 并直接走其 Host `fs.write`，同时支持 HTML iframe/终端/Git 等本机能力。 | M1 不写盘；文件能力只由 Workspace Review Host 授权，UI 不持有通用本机路径权限。 | 不复制。未来 M2 必须单独做 prepare/commit/readback、冲突与 uncertain 状态。 |
+
+结论：下载源码**有用**，最值得吸收的是“有预算、可取消的文件名搜索”“显式刷新”“路径复制”和局部错误/加载状态；现有 capability、精确锚点、固定会话投递与 Browser Target 隔离应保持，因为它们比外部实现更适合 Chrome sidepanel 的安全边界。源码可按 MIT 参考，但当前没有必要复制其组件或把它作为 runtime 依赖。
+
 ## 1. 目标用户流程（建议）
 
 1. 用户在当前 Harness Workspace 的紧凑顶栏点“文件”图标；窄 Side Panel 打开一个覆盖式/抽屉式的 Markdown 文件树，不再挤出第二列。树只按需展开目录，点击 `.md`/`.markdown` 后自动收起。

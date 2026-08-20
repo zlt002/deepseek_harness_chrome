@@ -11,13 +11,17 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     readFile(new URL('../../../upstream-contributions/0013-composer-overlay-host-marker.patch', import.meta.url), 'utf8'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-conversation-shell/)
+  assert.match(manifest, /@deepseek-ai\/dsh-client-ui-model-selection/)
   // Cordis only exposes a property when it was declared in `inject`. The
   // adapter registers a presentation slot before reading its own services.
-  assert.match(source, /export const inject = \['slots', 'settingsQuickActions', 'conversationViewState'\]/)
+  assert.match(source, /export const inject = \['slots', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions'\]/)
   assert.match(source, /ctx\.slots\.inject\('conversation\.presentation'/)
   assert.match(source, /select: owner => owner/)
   assert.match(source, /conversationViewState/)
   assert.match(source, /settingsQuickActions/)
+  assert.match(source, /modelDirectories/)
+  assert.match(source, /companyGatewayFirst/)
+  assert.match(source, /directory\.store\.update/)
   assert.match(source, /id: 'trajectory'/)
   assert.match(source, /id: 'conversation'/)
   assert.match(source, /conversation\.presentation/)

@@ -23,11 +23,12 @@ type PanelProps = {
   renderSlot: SettingsPresentationOwnerProps['renderSlot']
   sidePanel: boolean
   activeId: string | undefined
+  mergeModels: boolean
   onSelect: (id: string) => void
   onClose: () => void
 }
 
-function SettingsPanel({ rows, renderSlot, sidePanel, activeId, onSelect, onClose }: PanelProps) {
+function SettingsPanel({ rows, renderSlot, sidePanel, activeId, mergeModels, onSelect, onClose }: PanelProps) {
   const active = rows.find(row => row.id === activeId)?.id ?? rows[0]?.id
   const titleId = useId()
   const closeButton = useRef<HTMLButtonElement | null>(null)
@@ -79,7 +80,14 @@ function SettingsPanel({ rows, renderSlot, sidePanel, activeId, onSelect, onClos
             </button>
           </div>
           <div className={css.options} data-testid="settings-options">
-            {active !== undefined && renderSlot('settings.section', { close: onClose }, { only: active })}
+            {active === 'accrui-account' && mergeModels
+              ? <>
+                  {renderSlot('settings.section', { close: onClose }, { only: active })}
+                  <div className={css.mergedModels} data-testid="merged-model-settings">
+                    {renderSlot('settings.section', { close: onClose }, { only: 'models' })}
+                  </div>
+                </>
+              : active !== undefined && renderSlot('settings.section', { close: onClose }, { only: active })}
           </div>
         </div>
       </div>
@@ -104,7 +112,9 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
     setOpen(true)
   }, [])
 
-  const rows = useSections(state => state)
+  const allRows = useSections(state => state)
+  const hasAccount = allRows.some(row => row.id === 'accrui-account')
+  const rows = hasAccount ? allRows.filter(row => row.id !== 'models') : allRows
   const onboardingSteps = useOnboardingSteps(state => state)
   const onboardingActive = useSessions(state =>
     state.phase === 'ready'
@@ -196,6 +206,7 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
         renderSlot={renderSlot}
         sidePanel={compact || !wide}
         activeId={activeId}
+        mergeModels={hasAccount && allRows.some(row => row.id === 'models')}
         onSelect={setActiveId}
         onClose={close}
       />}

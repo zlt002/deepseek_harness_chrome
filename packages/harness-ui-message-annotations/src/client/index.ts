@@ -1,24 +1,25 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { annotationsPrompt } from './annotation-format.js'
-import { AnnotationStore } from './AnnotationStore.ts'
+import { reviewFeedbackPrompt } from './review-feedback-format.js'
+import { ReviewFeedbackStore } from './AnnotationStore.ts'
 import { AnnotationComposer, AnnotationStrip } from './MessageAnnotations.tsx'
 
 export const inject = ['slots', 'composerSubmissionTransforms']
 
-/** Register the complete browser-local annotation loop through public slots and the submit seam. */
+/** Register one browser-local review loop for assistant messages and workspace Markdown. */
 export function apply(ctx: ClientContext): void {
-  const annotations = new AnnotationStore()
+  const annotations = new ReviewFeedbackStore()
   const transforms = ctx.get('composerSubmissionTransforms')!
+  ctx.provide('reviewFeedback', annotations)
   const injected = () => ({ hooks: { annotations: annotations.snapshot }, annotations })
   ctx.effect(() => transforms.register({
-    id: 'message-annotations',
+    id: 'review-feedback',
     prepare: (sessionId, text) => {
-      const items = annotations.annotations(String(sessionId))
+      const items = annotations.feedback(String(sessionId))
       if (items.length === 0) return { text }
       const ids = items.map(item => item.id)
       return {
-        text: annotationsPrompt(text, items),
+        text: reviewFeedbackPrompt(text, items),
         accept: () => annotations.accept(String(sessionId), ids),
       }
     },
@@ -31,5 +32,7 @@ export function apply(ctx: ClientContext): void {
   }, AnnotationComposer))
 }
 
-export { AnnotationStore } from './AnnotationStore.ts'
+export { AnnotationStore, ReviewFeedbackStore } from './AnnotationStore.ts'
+export type { MarkdownSelectionAnchor, MessageAnnotation, ReviewFeedback, ReviewFeedbackSnapshot, WorkspaceMarkdownFeedback, WorkspaceMarkdownFeedbackInput } from './AnnotationStore.ts'
 export { annotationsPrompt } from './annotation-format.js'
+export { reviewFeedbackPrompt } from './review-feedback-format.js'

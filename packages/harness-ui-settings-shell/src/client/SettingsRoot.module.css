@@ -189,6 +189,11 @@
   background: var(--dsw-alias-bg-layer-2);
 }
 .panel[data-surface='sidepanel'] .options { grid-column: 1 / -1; grid-row: 2; padding-right: 16px; padding-bottom: 16px; padding-left: 16px; }
+.mergedModels { max-width: 760px; margin-top: 4px; padding-top: 20px; border-top: 1px solid var(--dsw-alias-border-subtle); }
+/* Company Gateway is managed by the account card above. Keep the generic
+   provider editor for every other guest-configured provider without exposing
+   a second, conflicting editor for the same credential and model catalog. */
+.mergedModels :global(li:has(button[aria-label*='annto-company-gateway'])) { display: none; }
 
 @media (max-width: 999px) {
   .panel {

@@ -7,7 +7,7 @@ const source = (path) => readFile(new URL(path, root), 'utf8')
 
 test('keeps the accepted e327 composer and compact-header interactions in an out-of-tree plugin', async () => {
   await access(new URL('package.json', root))
-  const [manifest, client] = await Promise.all([source('package.json'), source('src/client/index.ts')])
+  const [manifest, client, handoff] = await Promise.all([source('package.json'), source('src/client/index.ts'), source('src/client/session-handoff.ts')])
   assert.match(manifest, /"name": "@accrui\/harness-ui-browser-target"/)
   assert.match(client, /conversation\.input\.left/)
   assert.match(client, /conversation\.input\.overlay/)
@@ -22,7 +22,8 @@ test('keeps the accepted e327 composer and compact-header interactions in an out
   assert.match(client, /config\?\.surface === 'fullscreen-tab'/)
   assert.match(client, /sessionId: String\(sessionId\)/)
   assert.match(client, /restore handed-off session/)
-  assert.match(client, /ctx\.sessions\.open\(config\.sessionId! as SessionId\)/)
+  assert.match(client, /restoreHandoffSession/)
+  assert.match(handoff, /if \(snapshot\.current !== sessionId\) open\(sessionId\)/)
   assert.match(client, /session-handoff-applied\/v1/)
   assert.doesNotMatch(client, /deepseek-harness\/packages\/.*\/src/)
 })
