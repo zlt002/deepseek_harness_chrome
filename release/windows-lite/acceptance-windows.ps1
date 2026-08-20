@@ -97,6 +97,16 @@ try {
   return $process
 }
 
+function Stop-ExtensionLockHolder([System.Diagnostics.Process]$Process) {
+  $Process.Refresh()
+  if ($Process.HasExited) { return }
+  & taskkill.exe /PID $Process.Id /T /F | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Failed to terminate unpacked extension lock holder PID=$($Process.Id)." }
+  if (-not $Process.WaitForExit(10000)) { throw "Timed out waiting for unpacked extension lock holder PID=$($Process.Id) to release manifest.json." }
+  $Process.Refresh()
+  if (-not $Process.HasExited) { throw "Unpacked extension lock holder PID=$($Process.Id) did not exit." }
+}
+
 function Assert-LockedExtensionUpgradeFailsSafely {
   $lockHolder = Start-ExtensionLockHolder
   try {
@@ -105,6 +115,7 @@ function Assert-LockedExtensionUpgradeFailsSafely {
     if ($LASTEXITCODE -eq 0) { throw 'Locked unpacked extension upgrade unexpectedly succeeded.' }
     $lockHolder.Refresh()
     if ($lockHolder.HasExited) { throw 'Locked unpacked extension process was terminated by the installer.' }
+    Stop-ExtensionLockHolder $lockHolder
     $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
     if (-not (Test-Path -LiteralPath $installLog -PathType Leaf)) { throw 'Locked unpacked extension upgrade did not produce an installer error log.' }
     $errorText = Get-Content -LiteralPath $installLog -Raw
@@ -125,8 +136,11 @@ function Assert-LockedExtensionUpgradeFailsSafely {
       }
     }
   } finally {
-    $lockHolder.Refresh()
-    if (-not $lockHolder.HasExited) { & taskkill.exe /PID $lockHolder.Id /T /F | Out-Null }
+    try {
+      Stop-ExtensionLockHolder $lockHolder
+    } catch {
+      Write-Host "Failed to clean up unpacked extension lock holder: $($_.Exception.Message)"
+    }
   }
 }
 
