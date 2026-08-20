@@ -70,6 +70,66 @@ function Invoke-InstallerUiSmoke {
   }
 }
 
+function Start-ExtensionLockHolder {
+  $readyPath = Join-Path $env:RUNNER_TEMP 'accrui-harness-extension-lock-ready.txt'
+  $lockScriptPath = Join-Path $acceptanceRoot 'extension-lock-holder.ps1'
+  $targetPath = Join-Path $installRoot 'extension\manifest.json'
+  Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
+  $lockSource = @'
+param([string]$TargetPath, [string]$ReadyPath)
+$handle = [System.IO.File]::Open($TargetPath, 'Open', 'Read', 'None')
+try {
+  [System.IO.File]::WriteAllText($ReadyPath, 'ready', [System.Text.UTF8Encoding]::new($false))
+  Start-Sleep -Seconds 120
+} finally {
+  $handle.Dispose()
+}
+'@
+  [System.IO.File]::WriteAllText($lockScriptPath, $lockSource, [System.Text.UTF8Encoding]::new($true))
+  $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $lockScriptPath + '"'), '-TargetPath', ('"' + $targetPath + '"'), '-ReadyPath', ('"' + $readyPath + '"'))
+  $process = Start-Process -FilePath powershell.exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
+  $deadline = [DateTime]::UtcNow.AddSeconds(10)
+  while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf) -and -not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 100
+    $process.Refresh()
+  }
+  if (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) { throw 'Failed to start the unpacked extension lock holder.' }
+  return $process
+}
+
+function Assert-LockedExtensionUpgradeFailsSafely {
+  $lockHolder = Start-ExtensionLockHolder
+  try {
+    $env:DSH_INSTALL_NONINTERACTIVE = '1'
+    & cscript.exe //NoLogo $installLauncher 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -eq 0) { throw 'Locked unpacked extension upgrade unexpectedly succeeded.' }
+    $lockHolder.Refresh()
+    if ($lockHolder.HasExited) { throw 'Locked unpacked extension process was terminated by the installer.' }
+    $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+    if (-not (Test-Path -LiteralPath $installLog -PathType Leaf)) { throw 'Locked unpacked extension upgrade did not produce an installer error log.' }
+    $errorText = Get-Content -LiteralPath $installLog -Raw
+    if ($errorText -notmatch 'Chrome 或 Edge 正在加载这个 unpacked 扩展' -or $errorText -notmatch '无需关闭整个浏览器') {
+      throw "Locked unpacked extension upgrade did not explain how to recover: $errorText"
+    }
+    Assert-Equal (Read-Version $installRoot) '1.1.62' 'Locked unpacked extension upgrade replaced the old version.'
+    if (-not (Test-Path -LiteralPath (Join-Path $installRoot 'runtime\harness\apps\cli\lib\server.mjs') -PathType Leaf)) {
+      throw 'Locked unpacked extension upgrade did not retain the old runnable runtime.'
+    }
+    foreach ($registryRoot in $registryRoots) {
+      foreach ($nativeHostName in $nativeHostNames) {
+        $registryKey = Join-Path $registryRoot $nativeHostName
+        if (-not (Test-Path -LiteralPath $registryKey)) { throw "Locked unpacked extension upgrade did not restore Native Messaging registration: $registryKey" }
+        $manifestPath = (Get-Item -LiteralPath $registryKey).GetValue('')
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        Assert-Equal $manifest.path (Join-Path $installRoot 'runtime\run_native_host.bat') 'Locked unpacked extension upgrade left Native Messaging pointed away from the old release.'
+      }
+    }
+  } finally {
+    $lockHolder.Refresh()
+    if (-not $lockHolder.HasExited) { & taskkill.exe /PID $lockHolder.Id /T /F | Out-Null }
+  }
+}
+
 function Start-NativeHostRespawnSupervisor {
   $readyPath = Join-Path $env:RUNNER_TEMP 'accrui-harness-runtime-lock-ready.txt'
   $suspendedPath = Join-Path $env:RUNNER_TEMP 'accrui-harness-native-registration-suspended.txt'
@@ -161,6 +221,7 @@ try {
   & (Join-Path $installRoot 'runtime\register-native-host.ps1') -InstallRoot $installRoot
 
   Invoke-InstallerUiSmoke
+  Assert-LockedExtensionUpgradeFailsSafely
   $respawnSupervisor = Start-NativeHostRespawnSupervisor
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
   $vbsOutput = & cscript.exe //NoLogo $installLauncher 2>&1

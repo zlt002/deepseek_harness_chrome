@@ -145,7 +145,15 @@ function Stop-InstalledProductProcesses([string]$Root) {
   Write-Host "已停止 $($processes.Count) 个旧 Harness UI 进程。"
 }
 
-function Move-ManagedPathWithRetry([string]$SourcePath, [string]$DestinationPath) {
+function New-ExtensionInUseError([string]$ExtensionPath, [object]$Cause) {
+  $causeText = if ($null -eq $Cause) { '未知系统错误。' } else { $Cause.Exception.Message }
+  return [System.IO.IOException]::new(
+    "无法替换扩展目录：$ExtensionPath。Chrome 或 Edge 正在加载这个 unpacked 扩展。请在 chrome://extensions 或 edge://extensions 中暂时停用从此目录加载的 ACCRUI 扩展，然后重新运行安装；无需关闭整个浏览器。旧版本未被替换，仍可继续使用。原始系统错误：$causeText",
+    $Cause.Exception
+  )
+}
+
+function Move-ManagedPathWithRetry([string]$SourcePath, [string]$DestinationPath, [string]$ExtensionLockMessage = '') {
   $lastError = $null
   foreach ($delayMs in @(0, 200, 400, 800, 1200, 2000)) {
     if ($delayMs -gt 0) { Start-Sleep -Milliseconds $delayMs }
@@ -157,16 +165,21 @@ function Move-ManagedPathWithRetry([string]$SourcePath, [string]$DestinationPath
       $lastError = $_
     }
   }
+  if (-not [string]::IsNullOrWhiteSpace($ExtensionLockMessage)) {
+    throw (New-ExtensionInUseError $SourcePath $lastError)
+  }
   throw $lastError
 }
 
-function Move-ManagedTree([string]$Source, [string]$Destination) {
+function Move-ManagedTree([string]$Source, [string]$Destination, [switch]$ExplainLockedExtension) {
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  # Extension is deliberately first: a browser-held unpacked-extension lock fails before any old runtime is moved.
   foreach ($name in $managedNames) {
     $sourcePath = Join-Path $Source $name
     if (-not (Test-Path -LiteralPath $sourcePath)) { continue }
     $destinationPath = Join-Path $Destination $name
-    Move-ManagedPathWithRetry $sourcePath $destinationPath
+    $extensionLockMessage = if ($ExplainLockedExtension -and $name -eq 'extension') { 'extension lock' } else { '' }
+    Move-ManagedPathWithRetry $sourcePath $destinationPath $extensionLockMessage
   }
 }
 
@@ -240,7 +253,7 @@ try {
   Suspend-NativeHostRegistration
   Stop-InstalledProductProcesses $installRoot
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
-  Move-ManagedTree $installRoot $previousRoot
+  Move-ManagedTree $installRoot $previousRoot -ExplainLockedExtension
   try {
     Move-ManagedTree $stagingRoot $installRoot
     foreach ($name in @('workspace', 'logs', '.webmcp', 'guide-state.json')) {
