@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { PropsRuntime, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import type { InputZone } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { AnnotationSnapshot } from './AnnotationStore.ts'
 import { AnnotationStore } from './AnnotationStore.ts'
 import { shouldClosePopover } from './popover-close.js'
+import { popoverPortalHost } from './popover-portal.js'
 import { assistantMessageIdForRange, popoverPosition } from './selection-geometry.js'
 import css from './MessageAnnotations.module.css'
 
@@ -89,7 +91,7 @@ export function AnnotationComposer({ sessionId, annotations }: OverlayProps) {
     annotations.add(sessionId, draft.messageId, draft.quote, comment)
     close()
   }
-  return <div ref={panelRef} className={css.panel} role="dialog" aria-label="添加批注" data-placement={position.placement} style={{ left: position.left, top: position.top }}>
+  const panel = <div ref={panelRef} className={css.panel} role="dialog" aria-label="添加批注" data-placement={position.placement} style={{ left: position.left, top: position.top }}>
     {editing ? <>
       <header><strong>添加批注</strong><button type="button" onClick={close} aria-label="关闭批注">×</button></header>
       <blockquote>{draft.quote}</blockquote>
@@ -97,4 +99,5 @@ export function AnnotationComposer({ sessionId, annotations }: OverlayProps) {
       <footer><button type="button" onClick={close}>取消</button><button type="button" disabled={comment.trim() === ''} onClick={save}>保存批注</button></footer>
     </> : <button type="button" className={css.entry} onMouseDown={event => event.preventDefault()} onClick={() => setEditing(true)}>添加批注</button>}
   </div>
+  return createPortal(panel, popoverPortalHost(document))
 }

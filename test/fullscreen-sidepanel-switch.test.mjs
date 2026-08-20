@@ -10,7 +10,10 @@ test('the extension shell shows an exclusive full-screen return control and dele
   assert.match(source, /surface === 'fullscreen-tab' && <button/)
   assert.match(source, /aria-label="收起全屏"/)
   assert.match(source, /title="收起全屏"/)
-  assert.match(source, /consume-sidepanel-handoff\/v1/)
+  assert.match(source, /get-sidepanel-handoff\/v1/)
+  assert.match(source, /session-handoff-applied\/v1/)
+  assert.match(source, /if \(!sidePanelHandoff\.ready\) return/)
+  assert.match(source, /HarnessFrameSource\(url, \{ nonce: frameNonce, parentOrigin: window\.location\.origin, surface, \.\.\.\(activeHarnessSessionId === undefined \? \{\} : \{ sessionId: activeHarnessSessionId \}\) \}\)/)
 })
 
 test('only the nonce-bound Harness iframe can request either surface handoff', async () => {

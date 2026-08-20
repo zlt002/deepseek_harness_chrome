@@ -462,6 +462,44 @@ test('flat selected-content preview approves any stable non-collapsed selection 
   } finally { await connector.stop() }
 })
 
+test('selected table preview binds approval to one containing table and never routes through a generic insert', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 40, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/120?id=120' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '表格文档', fingerprint: 'before' }
+  const requests = []
+  const connector = new BrowserConnector({ requestExtension: (request) => {
+    requests.push(request)
+    if (request.action === 'write') {
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+        result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: {
+          verified: true, replacementScope: 'containing_table', verifiedFragments: ['E-001'], fragmentEvidence: [{ fragment: 'E-001', blockIds: ['evidence'] }], observedBlocks: [{ id: 'evidence', type: 'table', text: 'E-001' }],
+        } },
+      }))
+      return
+    }
+    queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+      result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [], selection: {
+        supported: true, stable: true, truncated: false, hasSelection: true, isCollapsed: false, wholeBlockReplaceable: false,
+        replaceStrategy: 'full_canvas_patch_selected_table', selectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', selectedTagIds: [], selectionIdsValid: false,
+        containingTable: { id: 'evidence', index: 0, rowCount: 4, columnCount: 5, selectedRowCount: 4, selectedColumnCount: 3 }, content: { text: '类型 事实或结论 来源' },
+      } } },
+    }))
+  } })
+  connector.bindBrowserTarget('selected-table-run', target)
+  const endpoint = await connector.start()
+  try {
+    const blocks = [{ type: 'table', rows: [['Evidence ID', '类型', '状态'], ['E-001', '用户事实', '已确认']] }]
+    const preview = await call(endpoint, 'light_document_selection_replace_preview', { blocks })
+    assert.equal(preview.result.structuredContent.action, 'selection_table_replace_preview')
+    assert.equal(preview.result.structuredContent.replacementScope.kind, 'containing_table')
+    assert.equal(preview.result.structuredContent.replacementScope.id, 'evidence')
+    const grant = connector.officeDocumentChallenges.get(preview.result.structuredContent.challenge)
+    assert.equal(grant.operation, 'selection_content_replace')
+    assert.deepEqual(requests.map((request) => request.action), ['selection'])
+  } finally { await connector.stop() }
+})
+
 test('WebEdit light-document Skill prescribes one selection read and supports arbitrary stable selections', async () => {
   const skill = await readFile(new URL('../skills/webedit-light-document/SKILL.md', import.meta.url), 'utf8')
   assert.equal((skill.match(/mcp__chrome__light_document_selection_read/g) ?? []).length, 1)

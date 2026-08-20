@@ -162,7 +162,6 @@ test('background replaces an already-open Side Panel before closing the full-scr
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab: fullScreenTab,
     closeSidePanel: async (options) => { steps.push(['close', options]) },
-    setSidePanelOptions: async (options) => { steps.push(['setOptions', options]) },
     openSidePanel: async (options) => { steps.push(['open', options]) },
   })
   try {
@@ -170,9 +169,13 @@ test('background replaces an already-open Side Panel before closing the full-scr
     assert.deepEqual(response, { ok: true })
     assert.deepEqual(steps, [
       ['close', { windowId: 7 }],
-      ['setOptions', { path: 'sidepanel.html?dshHarnessSessionId=session-current', enabled: true }],
       ['open', { windowId: 7 }],
     ])
+    assert.deepEqual(background.removedTabs, [], 'the full-screen Tab stays open until the side panel applies the session')
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 }), { ok: true, sessionId: 'session-current', tabId: 91 })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, sessionId: 'session-other' }), { ok: false, error: 'The Harness side-panel handoff does not match the restored session.' })
+    assert.deepEqual(background.removedTabs, [], 'an invalid session ACK must not close the full-screen Tab')
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, sessionId: 'session-current' }), { ok: true })
     assert.deepEqual(background.removedTabs, [91])
   } finally {
     background.cleanup()
@@ -181,21 +184,16 @@ test('background replaces an already-open Side Panel before closing the full-scr
 
 test('background leaves the full-screen Tab open when the replacement Side Panel cannot open', async () => {
   const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab', title: 'ACCRUI' }
-  const options = []
   const background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab: fullScreenTab,
-    setSidePanelOptions: async (value) => { options.push(value) },
     openSidePanel: async () => { throw new Error('side-panel-open-failed') },
   })
   try {
     const response = await background.sendRuntimeMessage({ type: 'switch-harness-surface/v1', surface: 'sidepanel', windowId: 7, tabId: 91, sessionId: 'session-current' })
     assert.deepEqual(response, { ok: false, error: 'side-panel-open-failed' })
     assert.deepEqual(background.removedTabs, [])
-    assert.deepEqual(options, [
-      { path: 'sidepanel.html?dshHarnessSessionId=session-current', enabled: true },
-      { path: 'sidepanel.html', enabled: true },
-    ])
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 }), { ok: true })
   } finally {
     background.cleanup()
   }

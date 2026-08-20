@@ -130,6 +130,48 @@
   const selectionApi = (current) => documentApi(current)?.selection
   const editorApi = (current) => current?.openApi?.editor
   const normalizedSelectionText = (value) => String(value ?? '').replace(/\r\n?/g, '\n').replace(/\s+/g, ' ').trim()
+  const singleTableMatrix = (value) => {
+    const source = String(value ?? '')
+    if ((source.match(/<table\b/gi) ?? []).length !== 1) return null
+    const table = /<table\b[^>]*>([\s\S]*?)<\/table>/i.exec(source)
+    if (!table) return null
+    const rows = []; const rowPattern = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi; let row
+    while ((row = rowPattern.exec(table[1]))) {
+      const cells = []; const cellPattern = /<(td|th)\b([^>]*)>([\s\S]*?)<\/\1>/gi; let cell
+      while ((cell = cellPattern.exec(row[1]))) {
+        const colspan = Number(/\bcolspan=["']?(\d+)/i.exec(cell[2])?.[1] ?? 1)
+        const rowspan = Number(/\browspan=["']?(\d+)/i.exec(cell[2])?.[1] ?? 1)
+        if (colspan !== 1 || rowspan !== 1) return null
+        cells.push(normalizedSelectionText(decode(cell[3])))
+      }
+      if (!cells.length) return null
+      rows.push(cells)
+    }
+    if (!rows.length || rows.some((cells) => cells.length !== rows[0].length)) return null
+    return rows
+  }
+  const selectedContainingTable = (xml, snapshot) => {
+    const selected = singleTableMatrix(snapshot?.content?.html)
+    const parsed = editableBlocks(xml)
+    if (!selected || !parsed) return null
+    const selectedColumns = selected[0].length
+    const nonEmptyCells = selected.flat().filter(Boolean).length
+    if (selected.length * selectedColumns < 4 || nonEmptyCells < 3) return null
+    const matches = []
+    for (let blockIndex = 0; blockIndex < parsed.list.length; blockIndex += 1) {
+      const target = parsed.list[blockIndex]
+      if (target.tag.toLowerCase() !== 'table' || !target.id) continue
+      const matrix = singleTableMatrix(target.xml)
+      if (!matrix || matrix.length < selected.length || matrix[0].length < selectedColumns) continue
+      for (let rowOffset = 0; rowOffset <= matrix.length - selected.length; rowOffset += 1) {
+        for (let columnOffset = 0; columnOffset <= matrix[0].length - selectedColumns; columnOffset += 1) {
+          const exact = selected.every((rowCells, rowIndex) => rowCells.every((text, columnIndex) => matrix[rowOffset + rowIndex][columnOffset + columnIndex] === text))
+          if (exact) matches.push({ parsed, target, blockIndex, matrix, selected, rowOffset, columnOffset })
+        }
+      }
+    }
+    return matches.length === 1 ? matches[0] : null
+  }
   const selectionFingerprint = async (value) => {
     const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
     // v4 retains 128 bits of SHA-256. The version prefix makes old short FNV
@@ -643,11 +685,22 @@
     if (input.action === 'selection') {
       const selection = await readSelection(current, Math.max(1, bounded(input.payload?.maxChars, 20_000, 20_000)))
       const whole = wholeBlockReplaceable(xml, selection)
+      const containingTable = selectedContainingTable(xml, selection)
+      const selectedTable = singleTableMatrix(selection?.content?.html) !== null
       const api = selectionApi(current)
       const replaceStrategy = whole && typeof current?.openApi?.editor?.canvas?.patch === 'function' ? 'full_canvas_patch'
+        : containingTable && typeof current?.openApi?.editor?.canvas?.patch === 'function' ? 'full_canvas_patch_selected_table'
         : typeof api?.replaceContent === 'function' ? 'public_replace_content'
-          : typeof api?.insertContent === 'function' ? 'public_insert_content' : 'unavailable'
-      return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, selection: { ...selection, wholeBlockReplaceable: whole, replaceStrategy } } } }
+          : !selectedTable && typeof api?.insertContent === 'function' ? 'public_insert_content' : 'unavailable'
+      const containingTableScope = containingTable ? {
+        id: containingTable.target.id,
+        index: containingTable.blockIndex,
+        rowCount: containingTable.matrix.length,
+        columnCount: containingTable.matrix[0].length,
+        selectedRowCount: containingTable.selected.length,
+        selectedColumnCount: containingTable.selected[0].length,
+      } : null
+      return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, selection: { ...selection, wholeBlockReplaceable: whole, replaceStrategy, containingTable: containingTableScope } } } }
     }
     return { ok: true, result: { status: 'ok', resource, document: documentResult } }
   }
@@ -702,6 +755,26 @@
       if (!snapshot.supported || snapshot.truncated || !snapshot.stable || !snapshot.anchor) return fail('invalid_range', `Light-document ${input.operation} requires a complete, stable selection or cursor snapshot`)
       if ((input.operation === 'selection_replace' || input.operation === 'selection_content_replace' || input.operation === 'selection_blocks_replace') && snapshot.isCollapsed) return fail('invalid_range', `${input.operation} requires a non-collapsed selection; use selection_insert at a caret`)
       if (snapshot.selectionFingerprint !== requested.expectedSelectionFingerprint) return fail('fingerprint_mismatch', 'The light-document selection changed since inspect_write')
+      if (input.operation === 'selection_content_replace' && singleTableMatrix(snapshot?.content?.html) !== null) {
+        const scope = selectedContainingTable(beforeXml, snapshot)
+        const replacementBlocks = requested.kind === 'markdown' ? markdownBlocks(requested.value) : null
+        if (!scope || !replacementBlocks || replacementBlocks.length !== 1 || String(replacementBlocks[0]?.type).toLowerCase() !== 'table') {
+          return fail('unsupported', 'Selected table cells require one uniquely matched containing table and one table replacement; no insert fallback is allowed')
+        }
+        const replacement = blockXml({ blocks: replacementBlocks }, scope.target.id)
+        if (!replacement) return fail('invalid_range', 'Selected table replacement requires one bounded table')
+        const invariant = selectionReplaceInvariant(scope.parsed, [scope.target])
+        const inner = `${scope.parsed.inner.slice(0, scope.target.start)}${replacement}${scope.parsed.inner.slice(scope.target.end)}`
+        const patched = await patchXml(current, beforeXml, inner)
+        if (!patched.ok) return patched
+        const fragments = distinctiveFragments(replacementBlocks[0].rows.flat().join('\n'))
+        const observed = verifySelectionBlocksReplace(patched.xml, invariant, selectionReplacementExpectations(replacementBlocks), fragments)
+        if (!observed) return fail('readback_mismatch', 'WebEdit selected-table replacement did not return one matching table and unchanged surrounding blocks')
+        return { ok: true, result: {
+          status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload },
+          observed: { ...observed, replacementScope: 'containing_table', verified: true },
+        } }
+      }
       if (input.operation === 'selection_blocks_replace') {
         const parsed = editableBlocks(beforeXml)
         const selectedIds = Array.isArray(snapshot.selectedTagIds) ? snapshot.selectedTagIds : []

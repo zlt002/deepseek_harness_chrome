@@ -30,3 +30,9 @@ test('keeps message annotation UI and prompt enrichment in an out-of-tree produc
   assert.match(selectionSeam, /data-assistant-message-id/)
   assert.doesNotMatch(`${client}\n${view}`, /deepseek-harness\/packages\/.*\/src/)
 })
+
+test('renders the selection popover through a page-level portal instead of the composer overlay stacking context', async () => {
+  const view = await source('../src/client/MessageAnnotations.tsx')
+  assert.match(view, /createPortal\(/)
+  assert.match(view, /popoverPortalHost\(document\)/)
+})

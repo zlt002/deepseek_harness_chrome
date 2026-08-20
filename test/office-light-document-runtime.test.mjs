@@ -343,6 +343,43 @@ test('light-document selection_insert replaces an arbitrary stable selection and
   }
 })
 
+test('light-document atomically replaces the uniquely selected containing table instead of appending a duplicate', async () => {
+  const state = {}
+  const initialXml = '<apcanvas><outlineTitle id="title">研发交付</outlineTitle><table id="evidence"><tr><td><p id="">Evidence ID</p></td><td><p id="">类型</p></td><td><p id="">事实或结论</p></td><td><p id="">来源</p></td><td><p id="">状态</p></td></tr><tr><td><p id="">E-001</p></td><td><p id="">用户事实</p></td><td><p id="">拒绝大面积改动首页架构</p></td><td><p id="">用户对话交互</p></td><td><p id="">已确认</p></td></tr><tr><td><p id="">E-002</p></td><td><p id="">知识依据</p></td><td><p id="">首页组件采用 van-tabs</p></td><td><p id="">远程代码库 H5_前端</p></td><td><p id="">已确认</p></td></tr></table><p id="after">表格后正文</p></apcanvas>'
+  const call = await runtime({
+    state,
+    initialXml,
+    otlSelection: { from: 506, to: 539, anchor: 506, head: 877, empty: false },
+    selectionInfo: { selected_tag_ids: ["table[@id='evidence']/td"] },
+    selection: {
+      async getSelectionContent() {
+        return {
+          html: '<html><head><meta charset="utf-8"></meta></head><body><div><table><tr><td>类型</td><td>事实或结论</td><td>来源</td></tr><tr><td>用户事实</td><td>拒绝大面积改动首页架构</td><td>用户对话交互</td></tr><tr><td>知识依据</td><td>首页组件采用 van-tabs</td><td>远程代码库 H5_前端</td></tr></table></div></body></html>',
+          text: '类型\n事实或结论\n来源\n用户事实\n拒绝大面积改动首页架构\n用户对话交互\n知识依据\n首页组件采用 van-tabs\n远程代码库 H5_前端',
+        }
+      },
+    },
+  })
+  const selected = await call({ action: 'selection' })
+  assert.equal(selected.result.document.selection.wholeBlockReplaceable, false)
+  assert.equal(selected.result.document.selection.selectionIdsValid, false)
+  assert.equal(selected.result.document.selection.replaceStrategy, 'full_canvas_patch_selected_table')
+  const result = await call({
+    action: 'write', operation: 'selection_content_replace', resource: selected.result.resource,
+    payload: {
+      markdown: '| Evidence ID | 类型 | 事实或结论 | 来源 | 状态 |\n| --- | --- | --- | --- | --- |\n| E-001 | 用户事实 | 轻量交互增强 | 用户需求沟通 | 已确认 |\n| E-002 | 代码依据 | 首页采用 van-tabs 与虚拟滚动 | H5_前端 | 已确认 |\n| E-003 | 架构推断 | 派生计算状态单量 | 前端架构评估 | 已确认 |',
+      expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint,
+    },
+  })
+  assert.equal(state.selectionCalls ?? 0, 0)
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(state.patchCalls, 1)
+  const after = await call({ action: 'read' })
+  assert.equal(after.result.document.blocks.filter((block) => block.type === 'table').length, 1)
+  assert.match(after.result.document.blocks.find((block) => block.type === 'table').text, /E-003/)
+  assert.equal(after.result.document.blocks.at(-1).text, '表格后正文')
+})
+
 test('light-document runtime inserts mermaid drawings, structured blocks, and selection replace with XML evidence', async () => {
   const emptyXml = '<apcanvas><outlineTitle id="title">未命名文档</outlineTitle></apcanvas>'
   const insert = await runtime({ initialXml: emptyXml })

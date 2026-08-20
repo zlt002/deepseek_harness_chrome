@@ -11,6 +11,7 @@ type HarnessStatus = 'starting' | 'ready' | 'error'
 type BrowserTargetMode = 'follow-active-tab' | 'pinned-tabs' | 'none'
 
 interface HarnessResponse { ok: boolean; url?: string; error?: string }
+interface SidePanelHandoffResponse { ok: boolean; sessionId?: string; tabId?: number; error?: string }
 interface BrowserTarget { browser: 'chrome'; windowId: number; tabId: number; url: string }
 interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: string }
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
@@ -89,8 +90,13 @@ function requestKnowledgeScope(message: unknown): Promise<KnowledgeScopeResponse
   })
 }
 
-function consumeSidePanelHandoff(windowId: number): void {
-  chrome.runtime.sendMessage({ type: 'consume-sidepanel-handoff/v1', windowId }, () => undefined)
+function requestSidePanelHandoff(windowId: number): Promise<SidePanelHandoffResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'get-sidepanel-handoff/v1', windowId }, (response: SidePanelHandoffResponse | undefined) => {
+      const runtimeError = chrome.runtime.lastError
+      resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return the side-panel handoff.' } : { ok: false, error: runtimeError.message })
+    })
+  })
 }
 
 function currentExtensionTab(): Promise<chrome.tabs.Tab | undefined> {
@@ -156,17 +162,23 @@ function App(): React.JSX.Element {
   const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => Promise<void>>(async () => {})
   const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
   const handoffSessionId = useMemo(() => HarnessHandoffSessionFromLocation(), [])
-  const [activeHarnessSessionId, setActiveHarnessSessionId] = useState<string | undefined>(handoffSessionId)
+  const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number }>({ ready: surface === 'fullscreen-tab', ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }) })
+  const activeHarnessSessionId = sidePanelHandoff.sessionId
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
-  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }) }), [frameNonce, handoffSessionId, surface, url])
+  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, ...(activeHarnessSessionId === undefined ? {} : { sessionId: activeHarnessSessionId }) }), [activeHarnessSessionId, frameNonce, surface, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
 
   useEffect(() => {
-    if (surface !== 'sidepanel' || handoffSessionId === undefined) return
+    if (surface !== 'sidepanel') return
     void currentBrowserWindowId().then((windowId) => {
-      if (windowId !== undefined) consumeSidePanelHandoff(windowId)
+      if (windowId === undefined) { setSidePanelHandoff({ ready: true }); return }
+      void requestSidePanelHandoff(windowId).then((response) => setSidePanelHandoff({
+        ready: true,
+        ...(response.ok && isHarnessSessionIdentity(response.sessionId) ? { sessionId: response.sessionId } : {}),
+        ...(response.ok && Number.isInteger(response.tabId) ? { tabId: response.tabId } : {}),
+      }))
     })
-  }, [handoffSessionId, surface])
+  }, [surface])
 
   useEffect(() => { targetSettingsRef.current = targetSettings }, [targetSettings])
   useEffect(() => { availableTabsRef.current = availableTabs }, [availableTabs])
@@ -190,7 +202,10 @@ function App(): React.JSX.Element {
     setTargetSettings(response.settings); setTargetError(undefined)
   }, [])
 
-  useEffect(() => { void connect(); void loadTargetSettings() }, [connect, loadTargetSettings])
+  useEffect(() => {
+    if (!sidePanelHandoff.ready) return
+    void connect(); void loadTargetSettings()
+  }, [connect, loadTargetSettings, sidePanelHandoff.ready])
 
   const replaySearchProgress = useCallback(() => {
     if (frameOrigin === undefined) return
@@ -325,7 +340,14 @@ function App(): React.JSX.Element {
         void returnToSidePanel(isHarnessSessionIdentity(value.sessionId) ? value.sessionId : activeHarnessSessionId).catch((error: unknown) => console.error('[deepseek-harness] Failed to return to the side panel:', error))
         return
       }
-      if (value.type === 'harness-session-selected/v1' && isHarnessSessionIdentity(value.sessionId)) { setActiveHarnessSessionId(value.sessionId); return }
+      const selectedSessionId = value.sessionId
+      if (value.type === 'harness-session-selected/v1' && isHarnessSessionIdentity(selectedSessionId)) { setSidePanelHandoff((previous) => ({ ...previous, sessionId: selectedSessionId })); return }
+      if (value.type === 'session-handoff-applied/v1' && value.sessionId === activeHarnessSessionId && surface === 'sidepanel' && sidePanelHandoff.tabId !== undefined) {
+        void currentBrowserWindowId().then((windowId) => {
+          if (windowId !== undefined) chrome.runtime.sendMessage({ type: 'session-handoff-applied/v1', windowId, tabId: sidePanelHandoff.tabId, sessionId: value.sessionId })
+        })
+        return
+      }
       if (value.type === 'browser-target-ready/v1') { commandSequenceRef.current = 0; sendBrowserTargetSnapshot(); return }
       if (value.type === 'knowledge-scope-command/v1') {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= knowledgeCommandSequenceRef.current || typeof value.sessionId !== 'string' || value.sessionId.length === 0 || (value.scope !== undefined && !isKnowledgeScope(value.scope))) return
@@ -340,7 +362,7 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleFrameCommand, handleKnowledgeScopeCommand, sendBrowserTargetSnapshot])
+  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleFrameCommand, handleKnowledgeScopeCommand, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (

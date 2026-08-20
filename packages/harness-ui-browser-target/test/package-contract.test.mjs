@@ -23,7 +23,23 @@ test('keeps the accepted e327 composer and compact-header interactions in an out
   assert.match(client, /sessionId: String\(sessionId\)/)
   assert.match(client, /restore handed-off session/)
   assert.match(client, /ctx\.sessions\.open\(config\.sessionId! as SessionId\)/)
+  assert.match(client, /session-handoff-applied\/v1/)
   assert.doesNotMatch(client, /deepseek-harness\/packages\/.*\/src/)
+})
+
+test('declares every client context service it reads', async () => {
+  const [manifest, client] = await Promise.all([source('package.json'), source('src/client/index.ts')])
+  const declared = [...client.matchAll(/export const inject\s*=\s*\[([\s\S]*?)\]/g)][0]?.[1]
+  assert.ok(declared, 'client must declare its Cordis injections')
+  const inject = [...declared.matchAll(/['"]([^'"]+)['"]/g)].map(match => match[1])
+  const directServices = [...client.matchAll(/\bctx\.([A-Za-z_$][\w$]*)/g)]
+    .map(match => match[1])
+    .filter(name => !['effect', 'get'].includes(name))
+  const getServices = [...client.matchAll(/\bctx\.get\(['"]([^'"]+)['"]\)/g)].map(match => match[1])
+  for (const service of new Set([...directServices, ...getServices])) {
+    assert.ok(inject.includes(service), `ctx.${service} is read but missing from export const inject`)
+  }
+  assert.match(manifest, /"inject"\s*:/)
 })
 
 test('Browser Target DOM and surface geometry match the e327 reference', async () => {

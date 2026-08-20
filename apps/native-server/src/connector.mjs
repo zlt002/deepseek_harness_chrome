@@ -230,7 +230,7 @@ const lightDocumentSelectionReadTool = {
 }
 const lightDocumentSelectionReplacePreviewTool = {
   name: 'light_document_selection_replace_preview', title: 'Preview selected-content replacement',
-  description: 'Preview a rich replacement for any stable non-collapsed selection, including partial text, multiple blocks, and nested lists. Supply only the desired blocks. This performs one read-only selection snapshot, binds its fingerprint, checks the Browser Target, and returns a one-time approval challenge. It never changes the document; commit revalidates the resource and selection immediately before mutation.',
+  description: 'Preview a rich replacement for a stable non-collapsed selection. Supply only the desired blocks. If the selection is a uniquely matched range inside a table and the replacement is one table, the preview explicitly scopes approval to that containing table so commit can replace it atomically instead of appending a duplicate. This performs one read-only selection snapshot, binds its fingerprint, checks the Browser Target, and returns a one-time approval challenge. It never changes the document; commit revalidates the resource and selection immediately before mutation.',
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['blocks'], properties: { blocks: { type: 'array', minItems: 1, maxItems: 50, items: lightDocumentBlockSchema } } },
 }
@@ -1632,9 +1632,12 @@ export class BrowserConnector {
         operation = 'selection_blocks_replace'; payload = { blocks: args.blocks, expectedSelectionFingerprint: selectionFingerprint }; previewAction = 'selection_blocks_replace_preview'
       } else {
         const markdown = lightDocumentSelectionMarkdown(args.blocks)
-        if (!markdown || !['public_replace_content', 'public_insert_content'].includes(selection.replaceStrategy)) throw new Error('The current WebEdit selection does not expose a public replacement strategy.')
+        const containingTableReplacement = selection.replaceStrategy === 'full_canvas_patch_selected_table'
+          && args.blocks.length === 1 && String(args.blocks[0]?.type).toLowerCase() === 'table'
+          && selection.containingTable && typeof selection.containingTable.id === 'string'
+        if (!markdown || (!containingTableReplacement && !['public_replace_content', 'public_insert_content'].includes(selection.replaceStrategy))) throw new Error('The current WebEdit selection does not expose a safe replacement strategy for these blocks.')
         operation = 'selection_content_replace'
-        payload = { markdown, expectedSelectionFingerprint: selectionFingerprint }; previewAction = 'selection_content_replace_preview'
+        payload = { markdown, expectedSelectionFingerprint: selectionFingerprint }; previewAction = containingTableReplacement ? 'selection_table_replace_preview' : 'selection_content_replace_preview'
       }
       if (!validLightDocumentOperationPayload(operation, payload)) throw new Error('The requested replacement blocks are invalid.')
       const challenge = randomBytes(32).toString('base64url')
@@ -1643,7 +1646,8 @@ export class BrowserConnector {
       // Commit enters the normal write path, whose runtime re-reads both the
       // resource and selection fingerprint immediately before mutation.
       this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: selected.result.resource, operation, payload, payloadHash: lightDocumentWriteHash(operation, payload), idempotencyIdentity: flatSelectionReplaceIdentity(challenge), flatSelectionReplace: true, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-      const result = { runId, requestId: selectionCorrelation.requestId, generation: this.generation, browserTarget: selected.browserTarget, action: previewAction, resource: selected.result.resource, selection, blocks: args.blocks, challenge }
+      const replacementScope = previewAction === 'selection_table_replace_preview' ? { kind: 'containing_table', ...selection.containingTable } : { kind: 'selection' }
+      const result = { runId, requestId: selectionCorrelation.requestId, generation: this.generation, browserTarget: selected.browserTarget, action: previewAction, replacementScope, resource: selected.result.resource, selection, blocks: args.blocks, challenge }
       this.#reply(response, lightDocumentToolResponse(message.id, result))
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document selection preview failed')

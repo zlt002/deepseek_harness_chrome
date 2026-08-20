@@ -16,6 +16,8 @@ type KnowledgeKind = 'knowledge' | 'code'
 interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
 
 function validSessionIdentity(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value) }
+const SIDE_PANEL_HANDOFF_TTL_MS = 60_000
+const pendingSidePanelHandoffs = new Map<number, { sessionId: string; tabId: number; expiresAt: number }>()
 function validScope(value: unknown): value is KnowledgeScope {
   return typeof value === 'object' && value !== null && ((value as KnowledgeScope).domainId === '' || validSessionIdentity((value as KnowledgeScope).domainId))
     && Array.isArray((value as KnowledgeScope).systemIds) && (value as KnowledgeScope).systemIds.every(validSessionIdentity)
@@ -3188,21 +3190,20 @@ export default defineBackground(() => {
           .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
         return true
       }
-      if (request.surface === 'sidepanel' && Number.isInteger(request.tabId) && (request.tabId as number) >= 0 && typeof request.sessionId === 'string' && chrome.tabs?.get !== undefined && chrome.tabs?.remove !== undefined && chrome.sidePanel?.close !== undefined && chrome.sidePanel?.setOptions !== undefined && chrome.sidePanel?.open !== undefined) {
+      if (request.surface === 'sidepanel' && Number.isInteger(request.tabId) && (request.tabId as number) >= 0 && typeof request.sessionId === 'string' && chrome.tabs?.get !== undefined && chrome.sidePanel?.close !== undefined && chrome.sidePanel?.open !== undefined) {
         const tabId = request.tabId as number
+        const sessionId = request.sessionId
         void (async () => {
           const tab = await chrome.tabs.get(tabId)
           if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
-          const path = `sidepanel.html?dshHarnessSessionId=${encodeURIComponent(request.sessionId)}`
           await chrome.sidePanel.close({ windowId })
           try {
-            await chrome.sidePanel.setOptions({ path, enabled: true })
+            pendingSidePanelHandoffs.set(windowId, { sessionId, tabId, expiresAt: Date.now() + SIDE_PANEL_HANDOFF_TTL_MS })
             await chrome.sidePanel.open({ windowId })
           } catch (error) {
-            await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true }).catch(() => {})
+            pendingSidePanelHandoffs.delete(windowId)
             throw error
           }
-          await chrome.tabs.remove(tabId)
         })()
           .then(() => sendResponse({ ok: true }))
           .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
@@ -3211,12 +3212,44 @@ export default defineBackground(() => {
       sendResponse({ ok: false, error: 'Chrome could not switch the Harness Workspace to the side panel.' })
       return false
     }
-    if (request.type === 'consume-sidepanel-handoff/v1') {
-      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || chrome.sidePanel?.setOptions === undefined) {
-        sendResponse({ ok: false, error: 'Chrome could not finalize the Harness side-panel handoff.' })
+    if (request.type === 'get-sidepanel-handoff/v1') {
+      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0) {
+        sendResponse({ ok: false, error: 'Chrome could not identify the side-panel window.' })
         return false
       }
-      void chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true })
+      const windowId = request.windowId as number
+      const handoff = pendingSidePanelHandoffs.get(windowId)
+      if (handoff === undefined || handoff.expiresAt <= Date.now()) {
+        pendingSidePanelHandoffs.delete(windowId)
+        sendResponse({ ok: true })
+        return false
+      }
+      sendResponse({ ok: true, sessionId: handoff.sessionId, tabId: handoff.tabId })
+      return false
+    }
+    if (request.type === 'session-handoff-applied/v1') {
+      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || !Number.isInteger(request.tabId) || (request.tabId as number) < 0 || !validSessionIdentity(request.sessionId) || chrome.tabs?.get === undefined || chrome.tabs?.remove === undefined) {
+        sendResponse({ ok: false, error: 'Chrome could not complete the Harness side-panel handoff.' })
+        return false
+      }
+      const windowId = request.windowId as number
+      const tabId = request.tabId as number
+      const handoff = pendingSidePanelHandoffs.get(windowId)
+      if (handoff === undefined || handoff.expiresAt <= Date.now()) {
+        pendingSidePanelHandoffs.delete(windowId)
+        sendResponse({ ok: false, error: 'The Harness side-panel handoff is no longer current.' })
+        return false
+      }
+      if (handoff.tabId !== tabId || handoff.sessionId !== request.sessionId) {
+        sendResponse({ ok: false, error: 'The Harness side-panel handoff does not match the restored session.' })
+        return false
+      }
+      void (async () => {
+        const tab = await chrome.tabs.get(tabId)
+        if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
+        await chrome.tabs.remove(tabId)
+        pendingSidePanelHandoffs.delete(windowId)
+      })()
         .then(() => sendResponse({ ok: true }))
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true

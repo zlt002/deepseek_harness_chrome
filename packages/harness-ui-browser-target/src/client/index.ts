@@ -6,7 +6,7 @@ import { BrowserTargetControl, BrowserTargetPanel, type BrowserTargetInjected } 
 import { HarnessReconnectAction, type HarnessReconnectActionInjected } from './HarnessReconnectAction.tsx'
 import { activeTabBridgeConfig, createBrowserTargetBridge } from './active-tab-bridge.ts'
 
-export const inject = ['slots', 'settingsQuickActions']
+export const inject = ['slots', 'sessions', 'settingsQuickActions']
 
 /** Mount the accepted e327 Browser Target UI through public slots. */
 export function apply(ctx: ClientContext): void {
@@ -42,6 +42,8 @@ export function apply(ctx: ClientContext): void {
       const select = (): boolean => {
         if (ctx.sessions.list.getSnapshot().byId[config.sessionId!] === undefined) return false
         ctx.sessions.open(config.sessionId! as SessionId)
+        if (ctx.sessions.list.getSnapshot().current !== config.sessionId) return false
+        window.parent.postMessage({ type: 'session-handoff-applied/v1', nonce: config.nonce, sessionId: config.sessionId }, config.parentOrigin)
         return true
       }
       if (select()) return
