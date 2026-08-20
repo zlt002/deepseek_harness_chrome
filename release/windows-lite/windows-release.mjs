@@ -210,7 +210,9 @@ Else
 End If
 logPath = fso.BuildPath(scriptDir, "install-launch.log")
 If Not fso.FileExists(scriptPath) Then
-  MsgBox "Harness UI 安装器文件缺失：" & vbCrLf & scriptPath, vbCritical, "Harness UI 安装失败"
+  If Not nonInteractive Then
+    MsgBox "Harness UI 安装器文件缺失：" & vbCrLf & scriptPath, vbCritical, "Harness UI 安装失败"
+  End If
   WScript.Quit 1
 End If
 Set stream = fso.OpenTextFile(logPath, 8, True)
@@ -218,7 +220,7 @@ stream.WriteLine Now & " launch " & scriptPath
 stream.Close
 command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File """ & scriptPath & """"
 exitCode = shell.Run(command, windowStyle, True)
-If nonInteractive And exitCode <> 0 Then
+If (Not nonInteractive) And exitCode <> 0 Then
   MsgBox "Harness UI 安装失败（退出码 " & exitCode & "）。请查看错误日志。", vbCritical, "Harness UI 安装失败"
 End If
 WScript.Quit exitCode
