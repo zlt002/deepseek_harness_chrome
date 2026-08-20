@@ -17,13 +17,13 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 2. 任意稳定的非折叠选区（`hasSelection=true`、`isCollapsed=false`）都调用 `mcp__chrome__light_document_selection_replace_preview({ blocks })`；段落内部分文字、跨段落和任意层级列表均可。
 3. 获得用户确认后，调用 `mcp__chrome__light_document_selection_replace_commit({ challenge })`。
 
-选区未变化时不要重复 `selection_read`；只有 `fingerprint_mismatch` 或用户重新选择后才重新读取。`hasCaret=true` 且 `isCollapsed=true` 是光标，不是选区；只需补写时改用 `office_document` 的 `selection_insert`。完整块优先使用结构化 CanvasPatch；字符级或跨块局部选区使用 WebEdit 公开 selection API，并要求选区外正文不变的回读证据。
+选区未变化时不要重复 `selection_read`；只有 `fingerprint_mismatch` 或用户重新选择后才重新读取。`hasCaret=true` 且 `isCollapsed=true` 是光标，不是选区。完整块优先使用结构化 CanvasPatch；字符级或跨块局部选区使用 WebEdit 公开 selection API，并要求选区外正文不变的回读证据。
 
 `preview` 只读且不变更文档；`commit` 不传正文、区块、operation 或 idempotency identity。失败时返回实际错误并停止；`fingerprint_mismatch` 后重新读取并再次确认。不得把编辑器 range 猜成 XML 偏移；局部替换只走公开 selection API。
 
 ## 契约
 
-非选区变更使用 `mcp__chrome__office_document`：`inspect_write` 带最终 `operation` + `payload`，随后 `write` 复用同一 payload、一次性 `challenge` 和新的 `idempotencyIdentity`。空文档 `blockCount=0` 时禁止 `replace` / `blocks_replace` / `blocks_batch_edit`。
+非选区变更走 `mcp__chrome__light_document_write_preview({ operation, payload })`，用户确认后再把 challenge 交给 `mcp__chrome__light_document_write_commit({ challenge })`。空文档 `blockCount=0` 时禁止 `replace` / `blocks_replace` / `blocks_batch_edit`。
 
 ## 空文档写正文
 
@@ -51,6 +51,6 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 - 不要把流程图写成普通段落或静态图。
 - 不要对空文档猜隐藏段落 id。
 - 不要复用 challenge，也不要 inspect 一份 payload、write 另一份。
-- 不要在选区优化失败后改走旧选区 payload、`office_document` 或 `blocks_batch_edit`。
-- 不要把批量子文档创建的暂态失败改成逐个 `browser_open_tab`、手工写正文或反复选区替换；保留同一批次和幂等标识，等待 Connector 返回可恢复结果。
+- 不要在选区优化失败后改走旧选区 payload 或 `blocks_batch_edit`。
+- 不要把批量子文档创建的暂态失败改成手工写正文或反复选区替换；保留同一批次和幂等标识，等待 Connector 返回可恢复结果。
 - 不要调用未开放的图片/导出/高亮操作。

@@ -26,20 +26,11 @@ function assignedArrayOnFirstMatchingLine(source, predicate, label) {
   return match[1].split(',').map((item) => item.trim().replace(/['"]/g, '')).filter(Boolean)
 }
 
-test('the content script accepts every spreadsheet action the MCP surface advertises', async () => {
-  const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
-  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+test('the content script still accepts used_range for read_work_tab spreadsheet previews', async () => {
   const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
-
-  const advertised = [
-    ...arrayOnFirstMatchingLine(connectorSource, (line) => line.includes('action: { enum:') && line.includes("'special_cells'"), 'the connector office_spreadsheet action enum'),
-    ...arrayOnFirstMatchingLine(backgroundSource, (line) => line.includes("['context', 'selection', 'used_range', 'range', 'range_features'") && line.includes("'special_cells'"), 'the background office_spreadsheet action list'),
-  ]
   const allowlist = arrayOnFirstMatchingLine(contentSource, (line) => line.includes("'special_cells', 'inspect_write', 'write', 'probe'"), 'the content-script spreadsheet allowlist')
-
-  for (const action of new Set(advertised)) {
-    assert.ok(allowlist.includes(action), `advertised spreadsheet action '${action}' must be accepted by the content script allowlist`)
-  }
+  assert.ok(allowlist.includes('used_range'), 'read_work_tab still previews spreadsheets through used_range')
+  assert.ok(allowlist.includes('probe'))
 })
 
 test('the content script accepts every light-document action the MCP surface advertises', async () => {
@@ -48,8 +39,7 @@ test('the content script accepts every light-document action the MCP surface adv
   const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
 
   const advertised = [
-    ...arrayOnFirstMatchingLine(connectorSource, (line) => line.includes("action: { enum: ['read', 'search', 'inspect_write', 'write']"), 'the connector office_document action enum'),
-    ...arrayOnFirstMatchingLine(backgroundSource, (line) => line.includes("'read', 'search', 'selection'"), 'the background office_document action list'),
+    ...arrayOnFirstMatchingLine(backgroundSource, (line) => line.includes("'read', 'search', 'selection'"), 'the background light_document action list'),
   ]
   const allowlist = arrayOnFirstMatchingLine(contentSource, (line) => line.includes("'read', 'search', 'selection', 'inspect_write'"), 'the content-script light-document allowlist')
 

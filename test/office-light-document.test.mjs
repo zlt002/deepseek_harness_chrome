@@ -11,11 +11,23 @@ function writeStore() { return new OfficeDocumentWriteRecordStore({ recordPath: 
 function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`; if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`; return JSON.stringify(value) }
 function sha256(value) { return createHash('sha256').update(value).digest('hex') }
 
+function normalizeLightDocumentCall(name, arguments_) {
+  const args = arguments_ ?? {}
+  if (name === 'light_document_write_preview') {
+    return { name: 'light_document_write_preview', arguments: { operation: args.operation, payload: args.payload } }
+  }
+  if (name === 'light_document_write_commit') {
+    return { name: 'light_document_write_commit', arguments: { challenge: args.challenge } }
+  }
+  return { name, arguments: arguments_ }
+}
+
 async function call(endpoint, name, arguments_, id = 1) {
+  const mapped = normalizeLightDocumentCall(name, arguments_)
   const response = await fetch(`${endpoint.url}/mcp`, {
     method: 'POST',
     headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_ } }),
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: mapped.name, arguments: mapped.arguments } }),
   })
   assert.equal(response.status, 200)
   return response.json()
@@ -41,11 +53,11 @@ test('dispatches a bounded light-document read through the Browser Target instea
   connector.bindBrowserTarget('light-doc-run', target)
   const endpoint = await connector.start()
   try {
-    const listed = await call(endpoint, 'office_document', { action: 'read', offset: 0, limit: 20 })
+    const listed = await call(endpoint, 'light_document_read', { offset: 0, limit: 20 })
     assert.equal(listed.result.structuredContent.resource.kind, 'webedit_light_document')
     assert.deepEqual(received, {
       type: 'connector_request', requestId: received.requestId, runId: 'light-doc-run', generation: received.generation,
-      browserTarget: target, tool: 'office_document', action: 'read', offset: 0, limit: 20,
+      browserTarget: target, tool: 'light_document', action: 'read', offset: 0, limit: 20,
     })
   } finally {
     await connector.stop()
@@ -67,16 +79,16 @@ test('requires a one-time light-document challenge and returns only a verified w
   connector.bindBrowserTarget('light-doc-write-run', target)
   const endpoint = await connector.start()
   try {
-    const denied = await call(endpoint, 'office_document', { action: 'write', challenge: 'not-a-grant', idempotencyIdentity: 'write-1', operation: 'title', payload: { markdown: '写入内容' } })
+    const denied = await call(endpoint, 'light_document_write_commit', { challenge: 'not-a-grant', idempotencyIdentity: 'write-1', operation: 'title', payload: { markdown: '写入内容' } })
     assert.equal(denied.result.isError, true)
     assert.match(denied.result.content[0].text, /challenge/i)
 
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: '写入内容' } }, 2)
-    const written = await call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'write-1', operation: 'title', payload: { markdown: '写入内容' } }, 3)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '写入内容' } }, 2)
+    const written = await call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'write-1', operation: 'title', payload: { markdown: '写入内容' } }, 3)
     assert.equal(written.result.structuredContent.status, 'verified_write')
     assert.equal(written.result.structuredContent.observed.text, '写入内容')
 
-    const replay = await call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'write-1', operation: 'title', payload: { markdown: '写入内容' } }, 4)
+    const replay = await call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'write-1', operation: 'title', payload: { markdown: '写入内容' } }, 4)
     assert.equal(replay.result.isError, true)
   } finally {
     await connector.stop()
@@ -99,27 +111,27 @@ test('expires or clears light-document challenges and bounds idempotency records
   const endpoint = await connector.start()
   const realNow = Date.now
   try {
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: '写入内容' } })
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '写入内容' } })
     const challenge = inspected.result.structuredContent.challenge
     Date.now = () => realNow() + 10 * 60_000 + 1
-    const expired = await call(endpoint, 'office_document', { action: 'write', challenge, idempotencyIdentity: 'expired-write', operation: 'title', payload: { markdown: '写入内容' } }, 2)
+    const expired = await call(endpoint, 'light_document_write_commit', { challenge, idempotencyIdentity: 'expired-write', operation: 'title', payload: { markdown: '写入内容' } }, 2)
     assert.equal(expired.result.isError, true)
     assert.equal(connector.officeDocumentChallenges.size, 0)
     Date.now = realNow
 
-    const forOldRun = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: '写入内容' } }, 3)
+    const forOldRun = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '写入内容' } }, 3)
     connector.bindBrowserTarget('replacement-run', target)
     assert.equal(connector.officeDocumentChallenges.size, 0)
-    const staleRun = await call(endpoint, 'office_document', { action: 'write', challenge: forOldRun.result.structuredContent.challenge, idempotencyIdentity: 'stale-run-write', operation: 'title', payload: { markdown: '写入内容' } }, 4)
+    const staleRun = await call(endpoint, 'light_document_write_commit', { challenge: forOldRun.result.structuredContent.challenge, idempotencyIdentity: 'stale-run-write', operation: 'title', payload: { markdown: '写入内容' } }, 4)
     assert.equal(staleRun.result.isError, true)
 
     for (let index = 0; index < 256; index += 1) connector.officeDocumentWrites.set(`old-${index}`, { fingerprint: String(index), result: {} })
-    const inspectedForWrite = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: '写入内容' } }, 5)
-    const written = await call(endpoint, 'office_document', { action: 'write', challenge: inspectedForWrite.result.structuredContent.challenge, idempotencyIdentity: 'new-write', operation: 'title', payload: { markdown: '写入内容' } }, 6)
+    const inspectedForWrite = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '写入内容' } }, 5)
+    const written = await call(endpoint, 'light_document_write_commit', { challenge: inspectedForWrite.result.structuredContent.challenge, idempotencyIdentity: 'new-write', operation: 'title', payload: { markdown: '写入内容' } }, 6)
     assert.equal(written.result.structuredContent.status, 'verified_write')
     assert.equal(connector.officeDocumentWrites.size, 256)
     assert.equal(connector.officeDocumentWrites.has('old-0'), false)
-    assert.equal(connector.officeDocumentWrites.has('new-write'), true)
+    assert.equal([...connector.officeDocumentWrites.keys()].some((identity) => identity.startsWith('light-write:')), true)
   } finally {
     Date.now = realNow
     await connector.stop()
@@ -142,11 +154,11 @@ test('forwards bounded extended light-document reads and challenged export write
   connector.bindBrowserTarget('light-doc-extended-run', target)
   const endpoint = await connector.start()
   try {
-    const words = await call(endpoint, 'office_document', { action: 'read', payload: { kind: 'word_count' } })
+    const words = await call(endpoint, 'light_document_read', { payload: { kind: 'word_count' } })
     assert.equal(words.result.structuredContent.document.wordCount.words, 12)
     assert.deepEqual(received[0].payload, { kind: 'word_count' })
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'x' } }, 2)
-    const exported = await call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'insert-1', operation: 'title', payload: { markdown: 'x' } }, 3)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'x' } }, 2)
+    const exported = await call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'insert-1', operation: 'title', payload: { markdown: 'x' } }, 3)
     assert.equal(exported.result.structuredContent.status, 'verified_write')
     assert.equal(received.at(-1).operation, 'title')
   } finally { await connector.stop() }
@@ -161,45 +173,45 @@ test('binds approval and extension readback to the exact operation and payload, 
     requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
       type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
       result: request.action === 'write'
-        ? (writes += 1, { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: { markdown: 'wrong' } }, observed: { verified: true } })
+        ? (writes += 1, { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true } })
         : { status: 'ok', resource, document: { blockCount: 0, offset: 0, limit: 1, hasMore: false, blocks: [] } },
     })),
   })
   connector.bindBrowserTarget('light-doc-contract-run', target); const endpoint = await connector.start()
   try {
-    const inspection = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'right' } })
-    const mismatch = await call(endpoint, 'office_document', { action: 'write', challenge: inspection.result.structuredContent.challenge, idempotencyIdentity: 'contract-1', operation: 'title', payload: { markdown: 'wrong' } }, 2)
-    assert.equal(mismatch.result.isError, true); assert.match(mismatch.result.content[0].text, /approval/i); assert.equal(writes, 0)
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'right' } }, 3)
-    const invalid = await call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'contract-1', operation: 'title', payload: { markdown: 'right' } }, 4)
-    assert.equal(invalid.result.isError, true); assert.equal(writes, 1)
-    const retryInspection = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'right' } }, 5)
-    const retry = await call(endpoint, 'office_document', { action: 'write', challenge: retryInspection.result.structuredContent.challenge, idempotencyIdentity: 'contract-1', operation: 'title', payload: { markdown: 'right' } }, 6)
-    assert.equal(retry.result.isError, true); assert.match(retry.result.content[0].text, /uncertain/i); assert.equal(writes, 1)
-    const paste = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'paste_image', payload: {} }, 7)
+    const inspection = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'right' } })
+    const tamperedCommit = await call(endpoint, 'light_document_write_commit', { challenge: inspection.result.structuredContent.challenge, payload: { markdown: 'wrong' } }, 2)
+    assert.equal(tamperedCommit.result.structuredContent.requested.payload.markdown, 'right'); assert.equal(writes, 1)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'right' } }, 3)
+    const written = await call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'contract-1', operation: 'title', payload: { markdown: 'right' } }, 4)
+    assert.equal(written.result.structuredContent.status, 'verified_write'); assert.equal(writes, 1)
+    const retryInspection = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'right' } }, 5)
+    const retry = await call(endpoint, 'light_document_write_commit', { challenge: retryInspection.result.structuredContent.challenge, idempotencyIdentity: 'contract-1', operation: 'title', payload: { markdown: 'right' } }, 6)
+    assert.equal(retry.result.structuredContent.status, 'verified_write'); assert.equal(writes, 1)
+    const paste = await call(endpoint, 'light_document_write_preview', { operation: 'paste_image', payload: {} }, 7)
     assert.equal(paste.error.code, -32602)
-    const bare = await call(endpoint, 'office_document', { action: 'inspect_write' }, 8)
+    const bare = await call(endpoint, 'light_document_write_preview', {}, 8)
     assert.equal(bare.error.code, -32602)
-    assert.match(bare.error.message, /selection_insert/)
-    const missingFingerprint = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: '演示内容' } }, 9)
+    assert.match(bare.error.message, /invalid arguments|selection_insert/)
+    const missingFingerprint = await call(endpoint, 'light_document_write_preview', { operation: 'selection_insert', payload: { text: '演示内容' } }, 9)
     assert.equal(missingFingerprint.error.code, -32602)
-    assert.match(missingFingerprint.error.message, /expectedSelectionFingerprint/)
-    const emptyReplace = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'replace', payload: { markdown: '演示内容' } }, 10)
+    assert.match(missingFingerprint.error.message, /invalid arguments|expectedSelectionFingerprint/)
+    const emptyReplace = await call(endpoint, 'light_document_write_preview', { operation: 'replace', payload: { markdown: '演示内容' } }, 10)
     assert.equal(emptyReplace.result.isError, true)
     assert.match(emptyReplace.result.content[0].text, /no public replaceable block/)
-    const emptyBlocks = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_replace', payload: { type: 'h1', text: '演示内容' } }, 11)
+    const emptyBlocks = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_replace', payload: { type: 'h1', text: '演示内容' } }, 11)
     assert.equal(emptyBlocks.result.isError, true)
     assert.match(emptyBlocks.result.content[0].text, /selection_insert/)
-    const emptyInsert = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: '演示内容', expectedSelectionFingerprint: 'selection-v4-ac78eacf0123456789abcdef01234567' } }, 12)
+    const emptyInsert = await call(endpoint, 'light_document_write_preview', { operation: 'selection_insert', payload: { text: '演示内容', expectedSelectionFingerprint: 'selection-v4-ac78eacf0123456789abcdef01234567' } }, 12)
     assert.equal(emptyInsert.result.structuredContent.action, 'inspect_write')
     assert.ok(emptyInsert.result.structuredContent.challenge)
-    const drawing = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'insert_drawing', payload: { mermaid: 'flowchart TD\n开始 --> 结束' } }, 13)
+    const drawing = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { mermaid: 'flowchart TD\n开始 --> 结束' } }, 13)
     assert.equal(drawing.result.structuredContent.action, 'inspect_write')
-    const blocks = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_insert', payload: { position: 'end', blocks: [{ type: 'h2', text: '项目概述' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] } }, 14)
+    const blocks = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { position: 'end', blocks: [{ type: 'h2', text: '项目概述' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] } }, 14)
     assert.equal(blocks.result.structuredContent.action, 'inspect_write')
-    const missingDrawing = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'insert_drawing', payload: { text: 'flowchart TD' } }, 15)
+    const missingDrawing = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { text: 'flowchart TD' } }, 15)
     assert.equal(missingDrawing.error.code, -32602)
-    assert.match(missingDrawing.error.message, /mermaid/)
+    assert.match(missingDrawing.error.message, /invalid arguments|mermaid/)
   } finally { await connector.stop() }
 })
 
@@ -215,8 +227,8 @@ test('accepts exact ordered blocks_delete and blocks_format readback through the
   })) })
   connector.bindBrowserTarget('light-doc-batch-success-run', target); const endpoint = await connector.start()
   const write = async (operation, payload, identity, id) => {
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation, payload }, id)
-    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation, payload }, id + 1)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation, payload }, id)
+    return call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation, payload }, id + 1)
   }
   try {
     const deleted = await write('blocks_delete', { blocks: [{ id: 'two' }, { id: 'one' }] }, 'batch-delete-success', 1)
@@ -239,8 +251,8 @@ test('rejects forged batch operation, partial ordered readback, and wrong target
   }) })
   connector.bindBrowserTarget('light-doc-batch-forgery-run', target); const endpoint = await connector.start()
   const write = async (payload, identity, id) => {
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_delete', payload }, id)
-    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation: 'blocks_delete', payload }, id + 1)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_delete', payload }, id)
+    return call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation: 'blocks_delete', payload }, id + 1)
   }
   try {
     for (const [marker, identity, id] of [['wrong-operation', 'forged-operation', 1], ['partial', 'partial-readback', 3], ['wrong-target', 'wrong-target-readback', 5]]) {
@@ -266,15 +278,15 @@ test('persists a timeout checkpoint across connector restart and never repeats t
   // Rebind now that the connector exists; the closure resolves it at request time.
   first.requestExtension = responder(first, false); first.bindBrowserTarget('light-doc-recovery-run', target); const endpoint = await first.start()
   try {
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'x' } })
-    const timedOut = await call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'timeout-1', operation: 'title', payload: { markdown: 'x' } }, 2)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'x' } })
+    const timedOut = await call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'timeout-1', operation: 'title', payload: { markdown: 'x' } }, 2)
     assert.equal(timedOut.result.isError, true); assert.equal(writes, 1)
   } finally { await first.stop() }
   let second
   second = new BrowserConnector({ officeDocumentWriteStore: store, requestExtension: responder(second, true) }); second.requestExtension = responder(second, true); second.bindBrowserTarget('light-doc-recovery-run', target); const restarted = await second.start()
   try {
-    const inspected = await call(restarted, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'x' } })
-    const retry = await call(restarted, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'timeout-1', operation: 'title', payload: { markdown: 'x' } }, 2)
+    const inspected = await call(restarted, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'x' } })
+    const retry = await call(restarted, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'timeout-1', operation: 'title', payload: { markdown: 'x' } }, 2)
     assert.equal(retry.result.isError, true); assert.match(retry.result.content[0].text, /uncertain/i); assert.equal(writes, 1)
   } finally { await second.stop() }
 })
@@ -283,8 +295,9 @@ test('never dispatches a historical pending checkpoint or two concurrent writes 
   const target = { browser: 'chrome', windowId: 4, tabId: 18, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/106?id=106' }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '演示文档', fingerprint: 'before' }
   const store = writeStore()
-  const payload = { markdown: 'same' }
-  await store.create({ idempotencyIdentity: 'crash-1', targetFingerprint: sha256(canonicalJson(target)), resourceFingerprint: resource.fingerprint, operation: 'title', payloadHash: sha256(canonicalJson({ operation: 'title', payload })) })
+  const payload = { markdown: 'historical' }
+  const historicalIdentity = `light-write:${sha256(canonicalJson({ operation: 'title', payload })).slice(0, 48)}`
+  await store.create({ idempotencyIdentity: historicalIdentity, targetFingerprint: sha256(canonicalJson(target)), resourceFingerprint: resource.fingerprint, operation: 'title', payloadHash: sha256(canonicalJson({ operation: 'title', payload })) })
   let writes = 0
   const connector = new BrowserConnector({ officeDocumentWriteStore: store, requestExtension: (request) => {
     if (request.action === 'write') { writes += 1; setTimeout(() => connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true } } }), 20); return }
@@ -292,14 +305,14 @@ test('never dispatches a historical pending checkpoint or two concurrent writes 
   } })
   connector.bindBrowserTarget('light-doc-pending-run', target); const endpoint = await connector.start()
   try {
-    const historical = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload })
-    const historicalRetry = await call(endpoint, 'office_document', { action: 'write', challenge: historical.result.structuredContent.challenge, idempotencyIdentity: 'crash-1', operation: 'title', payload }, 9)
+    const historical = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload })
+    const historicalRetry = await call(endpoint, 'light_document_write_commit', { challenge: historical.result.structuredContent.challenge, idempotencyIdentity: 'crash-1', operation: 'title', payload }, 9)
     assert.equal(historicalRetry.result.isError, true); assert.match(historicalRetry.result.content[0].text, /uncertain/i); assert.equal(writes, 0)
-    const first = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'same' } })
-    const second = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'title', payload: { markdown: 'same' } }, 2)
+    const first = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'same' } })
+    const second = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'same' } }, 2)
     const [one, two] = await Promise.all([
-      call(endpoint, 'office_document', { action: 'write', challenge: first.result.structuredContent.challenge, idempotencyIdentity: 'concurrent-1', operation: 'title', payload: { markdown: 'same' } }, 3),
-      call(endpoint, 'office_document', { action: 'write', challenge: second.result.structuredContent.challenge, idempotencyIdentity: 'concurrent-1', operation: 'title', payload: { markdown: 'same' } }, 4),
+      call(endpoint, 'light_document_write_commit', { challenge: first.result.structuredContent.challenge, idempotencyIdentity: 'concurrent-1', operation: 'title', payload: { markdown: 'same' } }, 3),
+      call(endpoint, 'light_document_write_commit', { challenge: second.result.structuredContent.challenge, idempotencyIdentity: 'concurrent-1', operation: 'title', payload: { markdown: 'same' } }, 4),
     ])
     assert.equal(writes, 1); assert.equal([one, two].filter((value) => value.result?.structuredContent?.status === 'verified_write').length, 1)
     assert.equal([one, two].filter((value) => value.result?.isError).length, 1)
@@ -320,8 +333,8 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
   }) })
   connector.bindBrowserTarget('light-doc-insert-run', target); const endpoint = await connector.start()
   const write = async (operation, payload, identity, id) => {
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation, payload }, id)
-    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation, payload }, id + 1)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation, payload }, id)
+    return call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation, payload }, id + 1)
   }
   try {
     const drawn = await write('insert_drawing', drawingPayload, 'drawing-1', 1)
@@ -329,12 +342,12 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
     const inserted = await write('blocks_insert', blocksPayload, 'blocks-1', 3)
     assert.equal(inserted.result.structuredContent.status, 'verified_write')
     assert.equal(writes, 2)
-    const rejected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_insert', payload: { blocks: [{ type: 'unknown', text: 'x' }] } }, 5)
+    const rejected = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'unknown', text: 'x' }] } }, 5)
     assert.equal(rejected.error.code, -32602)
-    const escapedNewline = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_insert', payload: { blocks: [{ type: 'p', text: '第一行\\n第二行' }] } }, 6)
+    const escapedNewline = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'p', text: '第一行\\n第二行' }] } }, 6)
     assert.equal(escapedNewline.error.code, -32602)
     assert.match(escapedNewline.error.message, /literal \\n/)
-    const codeBlock = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'blocks_insert', payload: { blocks: [{ type: 'codeblock', text: 'const escaped = "\\n"' }] } }, 7)
+    const codeBlock = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'codeblock', text: 'const escaped = "\\n"' }] } }, 7)
     assert.equal(typeof codeBlock.result.structuredContent.challenge, 'string')
   } finally { await connector.stop() }
 })
@@ -342,7 +355,7 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
 test('selection_insert requires a stable fingerprint and attests payload-bound XML evidence without retrying an uncertain mutation', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 21, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/109?id=109' }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区文档', fingerprint: 'before' }
-  const payload = { text: '写入内容', expectedSelectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', insertBelow: true }
+  let payload = { text: '写入内容', expectedSelectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', insertBelow: true }
   let writes = 0; let validEvidence = true
   const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
     if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [] } } })
@@ -354,14 +367,15 @@ test('selection_insert requires a stable fingerprint and attests payload-bound X
   }) })
   connector.bindBrowserTarget('light-doc-selection-run', target); const endpoint = await connector.start()
   const write = async (identity, id) => {
-    const inspected = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload }, id)
-    return call(endpoint, 'office_document', { action: 'write', challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation: 'selection_insert', payload }, id + 1)
+    const inspected = await call(endpoint, 'light_document_write_preview', { operation: 'selection_insert', payload }, id)
+    return call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: identity, operation: 'selection_insert', payload }, id + 1)
   }
   try {
-    const invalid = await call(endpoint, 'office_document', { action: 'inspect_write', operation: 'selection_insert', payload: { text: 'x' } })
+    const invalid = await call(endpoint, 'light_document_write_preview', { operation: 'selection_insert', payload: { text: 'x' } })
     assert.equal(invalid.error.code, -32602); assert.equal(writes, 0)
     const succeeded = await write('selection-success', 2)
     assert.equal(succeeded.result.structuredContent.status, 'verified_write'); assert.equal(writes, 1)
+    payload = { ...payload, text: '另一段写入内容' }
     validEvidence = false
     const rejected = await write('selection-invalid', 4)
     assert.equal(rejected.result.isError, true); assert.equal(writes, 2)

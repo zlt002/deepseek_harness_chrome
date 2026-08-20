@@ -80,6 +80,8 @@ importers:
 
   packages/harness-ui-knowledge-scope: {}
 
+  packages/harness-ui-message-annotations: {}
+
   packages/harness-ui-responsive-sidebar: {}
 
   packages/harness-ui-session-log-copy: {}

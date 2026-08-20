@@ -6,7 +6,6 @@ import { Readable } from 'node:stream'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
-import { OfficeSpreadsheetWriteRecordStore } from './office-spreadsheet-write-record-store.mjs'
 
 const REQUEST_TIMEOUT_MS = 15_000
 // A cold WebEdit read first sweeps iframes for up to 8s, then the in-frame
@@ -33,54 +32,11 @@ const OFFICE_DOCUMENT_CHALLENGE_TTL_MS = 10 * 60_000
 const OFFICE_DOCUMENT_MAX_RECORDS = 256
 const TEAM_KNOWLEDGE_BATCH_MAX_GRANTS = 32
 const MCP_PATH = '/mcp'
-const MAX_SPREADSHEET_TOOL_RESPONSE_BYTES = 128 * 1024
 const MAX_LIGHT_DOCUMENT_TOOL_RESPONSE_BYTES = 128 * 1024
 // Operations without a stable public API and operation-specific readback are
 // deliberately absent. Accepting them and failing after a mutation is unsafe.
 const LIGHT_DOCUMENT_OPERATIONS = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_content_replace', 'selection_blocks_replace']
 const MODEL_LIGHT_DOCUMENT_OPERATIONS = LIGHT_DOCUMENT_OPERATIONS.filter((operation) => !['selection_replace', 'selection_content_replace', 'selection_blocks_replace'].includes(operation))
-
-function spreadsheetArtifactSummary(result) {
-  const artifact = result?.observed?.artifact
-  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) return result
-  const { dataUrl: _dataUrl, ...artifactMetadata } = artifact
-  return {
-    status: result.status,
-    operation: result.operation,
-    requested: result.requested,
-    observed: { range: result.observed?.range, verified: result.observed?.verified, artifact: artifactMetadata },
-  }
-}
-
-function spreadsheetResponseSummary(result) {
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return result
-  const requested = result.requested && typeof result.requested === 'object' && !Array.isArray(result.requested)
-    ? Object.fromEntries(Object.entries(result.requested).filter(([key]) => !['values', 'formulas'].includes(key))) : undefined
-  const observed = result.observed && typeof result.observed === 'object' && !Array.isArray(result.observed)
-    ? Object.fromEntries(Object.entries(result.observed).filter(([key]) => !['values', 'formulas', 'text', 'rows'].includes(key)).map(([key, value]) => key === 'artifact' && value && typeof value === 'object' ? [key, Object.fromEntries(Object.entries(value).filter(([artifactKey]) => artifactKey !== 'dataUrl'))] : [key, value])) : undefined
-  return {
-    ...(typeof result.runId === 'string' ? { runId: result.runId } : {}),
-    ...(typeof result.requestId === 'string' ? { requestId: result.requestId } : {}),
-    ...(typeof result.generation === 'string' ? { generation: result.generation } : {}),
-    ...(result.browserTarget && typeof result.browserTarget === 'object' ? { browserTarget: result.browserTarget } : {}),
-    ...(typeof result.status === 'string' ? { status: result.status } : {}),
-    ...(result.resource && typeof result.resource === 'object' ? { resource: result.resource } : {}),
-    ...(typeof result.operation === 'string' ? { operation: result.operation } : {}),
-    ...(requested ? { requested } : {}),
-    ...(observed ? { observed } : {}),
-  }
-}
-
-function spreadsheetToolResponse(id, structuredContent) {
-  const content = spreadsheetArtifactSummary(structuredContent)
-  const body = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent } }
-  if (Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_SPREADSHEET_TOOL_RESPONSE_BYTES) return body
-  const compact = spreadsheetResponseSummary(structuredContent)
-  const compactBody = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(compact) }], structuredContent: compact } }
-  if (Buffer.byteLength(JSON.stringify(compactBody), 'utf8') <= MAX_SPREADSHEET_TOOL_RESPONSE_BYTES) return compactBody
-  const minimal = { status: structuredContent?.status, operation: structuredContent?.operation, observed: { verified: structuredContent?.observed?.verified === true } }
-  return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(minimal) }], structuredContent: minimal } }
-}
 
 function lightDocumentToolResponse(id, structuredContent) {
   const body = { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } }
@@ -181,7 +137,7 @@ const officeContextSchema = {
     },
     // The extension probes every webedit frame on both editor channels and
     // reports the best ready frame's kind and identity so the model can route
-    // to office_spreadsheet / office_document without guessing from the title.
+    // to read_work_tab / light_document_read without guessing from the title.
     // null means no webedit frame answered ready — not "no document exists".
     documentIdentity: {
       oneOf: [
@@ -253,87 +209,6 @@ const readWorkTabTool = {
   },
 }
 
-const cellSchema = {
-  type: 'object', additionalProperties: false,
-  required: ['address', 'row', 'column', 'text', 'value', 'formula'],
-  properties: {
-    address: { type: 'string', minLength: 1 }, row: { type: 'integer', minimum: 1 }, column: { type: 'integer', minimum: 1 },
-    text: { type: 'string' }, value: { type: ['string', 'number', 'boolean', 'null'] }, formula: { type: ['string', 'null'] },
-  },
-}
-
-const officeReadRangeTool = {
-  name: 'office_read_range',
-  title: 'Read spreadsheet range',
-  description: 'Read a small A1 range from the WebEdit spreadsheet in the Browser Target explicitly bound to this Harness Run. This tool never changes the document and cannot select a tab or a frame.',
-  inputSchema: {
-    type: 'object', additionalProperties: false, required: ['range'],
-    properties: { range: { type: 'string', minLength: 1, maxLength: 128, description: 'A bounded A1 range, for example Summary!A1:C10.' } },
-  },
-  outputSchema: {
-    type: 'object', additionalProperties: false,
-    required: ['runId', 'requestId', 'generation', 'browserTarget', 'resource', 'range'],
-    properties: {
-      runId: { type: 'string', minLength: 1 }, requestId: { type: 'string', minLength: 1 }, generation: { type: 'string', minLength: 1 }, browserTarget: browserTargetSchema,
-      resource: { type: 'object', additionalProperties: false, required: ['kind', 'origin', 'workbookName', 'sheetName', 'fingerprint'], properties: { kind: { const: 'webedit_spreadsheet' }, origin: { const: 'https://webedit.midea.com' }, workbookName: { type: ['string', 'null'] }, sheetName: { type: ['string', 'null'] }, fingerprint: { type: 'string', minLength: 1, maxLength: 128 } } },
-      range: { type: 'object', additionalProperties: false, required: ['address', 'rowCount', 'columnCount', 'rows'], properties: { address: { type: 'string', minLength: 1 }, rowCount: { type: 'integer', minimum: 1, maximum: 100 }, columnCount: { type: 'integer', minimum: 1, maximum: 50 }, rows: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'object', additionalProperties: false, required: ['index', 'cells'], properties: { index: { type: 'integer', minimum: 1 }, cells: { type: 'array', minItems: 1, maxItems: 50, items: cellSchema } } } } } },
-    },
-  },
-}
-
-const officeResourceSchema = {
-  type: 'object', additionalProperties: false, required: ['kind', 'origin', 'workbookName', 'sheetName', 'fingerprint'],
-  properties: { kind: { const: 'webedit_spreadsheet' }, origin: { const: 'https://webedit.midea.com' }, workbookName: { type: ['string', 'null'] }, sheetName: { type: ['string', 'null'] }, fingerprint: { type: 'string', minLength: 1, maxLength: 128 } },
-}
-
-const officeWriteRangeTool = {
-  name: 'office_write_range', title: 'Write spreadsheet range',
-  description: 'Write one bounded rectangular A1 range in the exact WebEdit spreadsheet previously read from this Browser Target. Requires user approval in clients that honor MCP destructive tool annotations; it never selects a tab or frame.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: {
-    type: 'object', additionalProperties: false, required: ['range', 'values', 'resource'],
-    properties: { range: { type: 'string', minLength: 1, maxLength: 128 }, values: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'array', minItems: 1, maxItems: 50, items: { type: ['string', 'number', 'boolean', 'null'] } } }, resource: officeResourceSchema },
-  },
-  outputSchema: {
-    type: 'object', additionalProperties: false, required: ['runId', 'requestId', 'generation', 'browserTarget', 'resource', 'requested', 'observed'],
-    properties: { runId: { type: 'string', minLength: 1 }, requestId: { type: 'string', minLength: 1 }, generation: { type: 'string', minLength: 1 }, browserTarget: browserTargetSchema, resource: officeResourceSchema, requested: { type: 'object' }, observed: { type: 'object' } },
-  },
-}
-
-// A single dispatch tool keeps light-document operations out of the spreadsheet
-// A1 surface.  The extension owns the document-specific adapter; the model can
-// neither pick a tab/frame nor provide a browser identity.
-const lightDocumentResourceSchema = {
-  type: 'object', additionalProperties: false, required: ['kind', 'origin', 'documentName', 'fingerprint'],
-  properties: {
-    kind: { const: 'webedit_light_document' }, origin: { const: 'https://webedit.midea.com' },
-    documentName: { type: ['string', 'null'] }, fingerprint: { type: 'string', minLength: 1, maxLength: 128 },
-  },
-}
-
-const officeDocumentTool = {
-  name: 'office_document', title: 'Read or edit light document',
-  description: 'Legacy dispatch for bounded light-document reads and non-selection edits. Selected-content reads and replacement are intentionally unavailable here: use light_document_selection_read plus light_document_selection_replace_preview/commit. Every write is bound to the Browser Target, resource fingerprint, one-time approval, and same-target readback.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: {
-    type: 'object', additionalProperties: false, required: ['action'],
-    properties: {
-      action: { enum: ['read', 'search', 'inspect_write', 'write'] },
-      offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, query: { type: 'string', minLength: 1, maxLength: 500 },
-      challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 },
-      operation: { enum: MODEL_LIGHT_DOCUMENT_OPERATIONS }, payload: { type: 'object', additionalProperties: true },
-    },
-  },
-  outputSchema: {
-    type: 'object', additionalProperties: true,
-    required: ['runId', 'requestId', 'generation', 'browserTarget', 'resource'],
-    properties: {
-      runId: { type: 'string', minLength: 1 }, requestId: { type: 'string', minLength: 1 }, generation: { type: 'string', minLength: 1 }, browserTarget: browserTargetSchema,
-      resource: lightDocumentResourceSchema, status: { enum: ['ok', 'verified_write'] }, document: { type: 'object' }, requested: { type: 'object' }, observed: { type: 'object' }, challenge: { type: 'string' },
-    },
-  },
-}
-
 const lightDocumentBlockSchema = { type: 'object', additionalProperties: false, properties: {
   type: { enum: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'blockquote', 'ul', 'ol', 'table', 'codeblock'] },
   text: { type: 'string', maxLength: 20000 }, markdown: { type: 'string', maxLength: 20000 }, html: { type: 'string', maxLength: 20000 },
@@ -345,7 +220,7 @@ const lightDocumentReadTool = {
   name: 'light_document_read', title: 'Read light document',
   description: 'Read a bounded page of the light document on this Browser Target. No target, tab, frame, or resource is model-controlled.',
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, properties: { offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } } },
+  inputSchema: { type: 'object', additionalProperties: false, properties: { offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, payload: { type: 'object', additionalProperties: true } } },
 }
 const lightDocumentSelectionReadTool = {
   name: 'light_document_selection_read', title: 'Read selected light-document content',
@@ -361,78 +236,31 @@ const lightDocumentSelectionReplacePreviewTool = {
 }
 const lightDocumentSelectionReplaceCommitTool = {
   name: 'light_document_selection_replace_commit', title: 'Commit approved selected-content replacement',
-  description: 'After user approval, commit exactly the structured replacement captured by preview. This tool intentionally accepts only the one-time challenge: the approved body and internal write identity are not model-controlled. On any failure, stop and report the exact error; do not retry through office_document or blocks_batch_edit. Success requires an atomic write and same-target structural readback.',
+  description: 'After user approval, commit exactly the structured replacement captured by preview. This tool intentionally accepts only the one-time challenge: the approved body and internal write identity are not model-controlled. On any failure, stop and report the exact error; do not retry through a different write tool or blocks_batch_edit. Success requires an atomic write and same-target structural readback.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['challenge'], properties: { challenge: { type: 'string', minLength: 1, maxLength: 256 } } },
 }
 
-const officeSpreadsheetTool = {
-  name: 'office_spreadsheet', title: 'Read or edit spreadsheet',
-  description: 'Use only for a bound WebEdit spreadsheet. Reads return bounded context, the current selection, the used range, ranges, searches, or sheet lists. action=selection is AccrUI webedit_get_selection: it returns address, rowsCount, columnsCount, value2, and the active cell even when view.supported is false. action=used_range is AccrUI webedit_get_used_range. Do not treat view.supported=false as "no selection". list_work_tabs documentIdentity=null only means no webedit frame answered the quick probe; retry office_spreadsheet context or selection instead of telling the user the editor is missing. Any mutation first obtains a one-time inspect_write challenge; its operation, payload, Browser Target, and workbook fingerprint are revalidated and the same frame is read back.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
-    action: { enum: ['context', 'selection', 'used_range', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write'] }, range: { type: 'string', minLength: 1, maxLength: 128 }, axis: { enum: ['row', 'column'] }, kind: { enum: ['blanks', 'constants', 'formulas', 'lastCell', 'visible'] }, sheetName: { type: 'string', minLength: 1, maxLength: 120 }, query: { type: 'string', minLength: 1, maxLength: 500 }, matchCase: { type: 'boolean' }, matchEntireCell: { type: 'boolean' }, searchBy: { enum: ['value', 'text', 'formula'] }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
-    challenge: { type: 'string', minLength: 1 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, resource: officeResourceSchema,
-    operation: { enum: ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'fill_range', 'batch_write', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'set_zoom', 'set_freeze_panes', 'set_print_settings', 'set_outline_group', 'set_rows_hidden', 'set_columns_hidden', 'auto_fit', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility'] }, payload: { type: 'object', additionalProperties: true },
-  } },
-}
-
-const teamDocCreateTool = {
-  name: 'team_doc_create', title: 'Create Team Knowledge light document',
-  description: 'Browser-authenticated and self-contained: inspect the bound Chrome Team Knowledge parent, then create exactly one approved light document with readback verification. Do not call local midea-knowledge auth.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['phase'], properties: { phase: { enum: ['inspect', 'create'] }, challenge: { type: 'string' }, idempotencyIdentity: { type: 'string' }, name: { type: 'string' }, body: { type: 'string' } } },
-}
-
-const teamKnowledgeItemTool = {
-  name: 'team_knowledge_item', title: 'Create or verify one Team Knowledge spreadsheet',
-  description: 'Legacy compatibility endpoint retained for existing callers. It is not model-facing; models use the flat team_knowledge_spreadsheet_* tools for a spreadsheet or team_knowledge_batch_* tools for light documents.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: { type: 'object', oneOf: [
-    { type: 'object', additionalProperties: false, required: ['action'], properties: { action: { const: 'inspect_parent' } } },
-    { type: 'object', additionalProperties: false, required: ['action', 'parentFingerprint', 'kind', 'name', 'body'], properties: { action: { const: 'preview' }, parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 }, kind: { const: 'spreadsheet' }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
-    { type: 'object', additionalProperties: false, required: ['action', 'challenge', 'idempotencyIdentity', 'kind', 'name', 'body'], properties: { action: { const: 'create' }, challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, kind: { const: 'spreadsheet' }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
-    { type: 'object', additionalProperties: false, required: ['action', 'kind', 'catalogId'], properties: { action: { const: 'readback' }, kind: { const: 'spreadsheet' }, catalogId: { type: 'string', pattern: '^\\d+$' } } },
-  ] },
-}
-
-const teamKnowledgeSpreadsheetPreviewTool = {
-  name: 'team_knowledge_spreadsheet_preview', title: 'Preview one Team Knowledge spreadsheet',
-  description: 'Preview one named Team Knowledge spreadsheet in the current bound parent. This checks the parent and returns a one-time approval challenge plus the matching idempotency identity. Copy both values into team_knowledge_spreadsheet_create after explicit user confirmation. Do not create it in this step.',
+const lightDocumentSearchTool = {
+  name: 'light_document_search', title: 'Search light document',
+  description: 'Search the bound light document for a query. This is read-only and does not change the page.',
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['name', 'body'], properties: { name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['query'], properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } } },
 }
-
-const teamKnowledgeSpreadsheetCreateTool = {
-  name: 'team_knowledge_spreadsheet_create', title: 'Create the approved Team Knowledge spreadsheet',
-  description: 'After explicit approval, create exactly the previewed Team Knowledge spreadsheet using the challenge and idempotency identity returned by preview, plus the unchanged name and body. The body is used to bind the approval/idempotency contract; this tool creates the spreadsheet and verifies its identity but does not populate cells. Use office_spreadsheet after creation for cell writes. Success requires business success, same-parent catalog rediscovery, and spreadsheet identity readback.',
+const lightDocumentWritePreviewTool = {
+  name: 'light_document_write_preview', title: 'Preview light-document write',
+  description: 'Preview a non-selection light-document change on the current write target and return a one-time challenge. It does not change the document. After the user confirms, call light_document_write_commit with only that challenge.',
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['operation', 'payload'], properties: { operation: { enum: MODEL_LIGHT_DOCUMENT_OPERATIONS }, payload: { type: 'object', additionalProperties: true } } },
+}
+const lightDocumentWriteCommitTool = {
+  name: 'light_document_write_commit', title: 'Commit approved light-document write',
+  description: 'After user approval, commit exactly the non-selection change captured by light_document_write_preview. Supply only the one-time challenge. On any failure, stop and report the exact error; do not retry through a different write tool.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['challenge', 'idempotencyIdentity', 'name', 'body'], properties: { challenge: { type: 'string', minLength: 1, maxLength: 256 }, idempotencyIdentity: { type: 'string', minLength: 1, maxLength: 128 }, name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', maxLength: 100000 } } },
-}
-
-const teamKnowledgeSpreadsheetReadbackTool = {
-  name: 'team_knowledge_spreadsheet_readback', title: 'Read a created Team Knowledge spreadsheet identity',
-  description: 'Read back the verified identity of one Team Knowledge spreadsheet by catalog ID.',
-  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['catalogId'], properties: { catalogId: { type: 'string', pattern: '^\\d+$' } } },
+  inputSchema: { type: 'object', additionalProperties: false, required: ['challenge'], properties: { challenge: { type: 'string', minLength: 1, maxLength: 256 } } },
 }
 
 const teamKnowledgeBatchItemSchema = { type: 'object', additionalProperties: false, required: ['name', 'body'], properties: { name: { type: 'string', minLength: 1, maxLength: 120 }, body: { type: 'string', minLength: 1, maxLength: 100000 } } }
-
-// Kept callable for existing integrations. It is deliberately not returned by
-// tools/list because Harness currently ignores oneOf branches when forming the
-// model-visible argument surface.
-const teamKnowledgeBatchTool = {
-  name: 'team_knowledge_batch', title: 'Create a batch of Team Knowledge light documents',
-  description: 'Legacy compatibility endpoint retained for existing callers. It is not model-facing; models use team_knowledge_batch_preview, team_knowledge_batch_create, and team_knowledge_batch_status.',
-  annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
-  inputSchema: { type: 'object', oneOf: [
-    { type: 'object', additionalProperties: false, required: ['action'], properties: { action: { const: 'inspect_parent' } } },
-    { type: 'object', additionalProperties: false, required: ['action', 'batchId', 'parentFingerprint', 'items'], properties: { action: { const: 'preview' }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, parentFingerprint: { type: 'string', minLength: 1, maxLength: 256 }, items: { type: 'array', minItems: 1, maxItems: 10, items: teamKnowledgeBatchItemSchema } } },
-    { type: 'object', additionalProperties: false, required: ['action', 'batchId', 'challenge'], properties: { action: { const: 'create' }, batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 } } },
-    { type: 'object', additionalProperties: false, required: ['action', 'batchId'], properties: { action: { const: 'status' }, batchId: { type: 'string', minLength: 1, maxLength: 128 } } },
-  ] },
-}
 
 const teamKnowledgeBatchPreviewTool = {
   name: 'team_knowledge_batch_preview', title: 'Preview one to ten Team Knowledge light documents',
@@ -443,39 +271,9 @@ const teamKnowledgeBatchPreviewTool = {
 
 const teamKnowledgeBatchCreateTool = {
   name: 'team_knowledge_batch_create', title: 'Create the approved Team Knowledge light-document batch',
-  description: 'After explicit approval, provide only the stable batchId and one-time challenge returned by preview. The Connector uses the exact in-memory preview snapshot, so names and bodies must not be sent again. Each item is written separately and the Browser Target shows a confirmation card; wait for the user to inspect and confirm that document before the tool leaves it or starts the next item. Success still requires business success, same-parent catalog rediscovery, persisted body readback, and every per-document confirmation. If the Native Host restarted or the Approval Grant expired, preview and confirm again. Reuse the same batchId to resume unfinished items; never fall back to browser_open_tab or manual per-document writes.',
+  description: 'After explicit approval, provide only the stable batchId and one-time challenge returned by preview. The Connector uses the exact in-memory preview snapshot, so names and bodies must not be sent again. Each item is written separately and the Browser Target shows a confirmation card; wait for the user to inspect and confirm that document before the tool leaves it or starts the next item. Success still requires business success, same-parent catalog rediscovery, persisted body readback, and every per-document confirmation. If the Native Host restarted or the Approval Grant expired, preview and confirm again. Reuse the same batchId to resume unfinished items; never fall back to opening a new tab or manual per-document writes.',
   annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: { type: 'object', additionalProperties: false, required: ['batchId', 'challenge'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 }, challenge: { type: 'string', minLength: 1, maxLength: 256 } } },
-}
-
-const teamKnowledgeBatchStatusTool = {
-  name: 'team_knowledge_batch_status', title: 'Read Team Knowledge batch delivery status',
-  description: 'Read the current status of a previously previewed or created light-document batch. Provide only its batchId.',
-  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  inputSchema: { type: 'object', additionalProperties: false, required: ['batchId'], properties: { batchId: { type: 'string', minLength: 1, maxLength: 128 } } },
-}
-
-const pageIdentitySchema = {
-  type: 'object', additionalProperties: false, required: ['title', 'url'],
-  properties: { title: { type: 'string' }, url: { type: 'string', format: 'uri' } },
-}
-
-const browserOpenTabTool = {
-  name: 'browser_open_tab',
-  title: 'Open Browser tab',
-  description: 'Open a URL in Chrome and explicitly transfer the trusted Browser Target to this Harness Run.',
-  inputSchema: {
-    type: 'object', additionalProperties: false, required: ['url'],
-    properties: { url: { type: 'string', format: 'uri', minLength: 1 } },
-  },
-  outputSchema: {
-    type: 'object', additionalProperties: false,
-    required: ['runId', 'requestId', 'generation', 'browserTarget', 'pageIdentity'],
-    properties: {
-      runId: { type: 'string', minLength: 1 }, requestId: { type: 'string', minLength: 1 }, generation: { type: 'string', minLength: 1 },
-      browserTarget: browserTargetSchema, pageIdentity: pageIdentitySchema,
-    },
-  },
 }
 
 function errorResponse(id, code, message) {
@@ -600,78 +398,6 @@ function validReadWorkTabResult(value) {
   return value.isPrimary === undefined || typeof value.isPrimary === 'boolean'
 }
 
-function validOfficeReadRangeArguments(value) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).length === 1 && typeof value.range === 'string'
-    && value.range.trim().length > 0 && value.range.length <= 128
-}
-
-function validOfficeReadRangeResult(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 || value.status !== 'ok') return false
-  const resource = value.resource
-  const range = value.range
-  if (!resource || typeof resource !== 'object' || Array.isArray(resource) || Object.keys(resource).length !== 5
-    || resource.kind !== 'webedit_spreadsheet' || resource.origin !== 'https://webedit.midea.com'
-    || !(typeof resource.workbookName === 'string' || resource.workbookName === null)
-    || !(typeof resource.sheetName === 'string' || resource.sheetName === null)
-    || typeof resource.fingerprint !== 'string' || resource.fingerprint.length === 0 || resource.fingerprint.length > 128) return false
-  if (!range || typeof range !== 'object' || Array.isArray(range) || Object.keys(range).length !== 4
-    || typeof range.address !== 'string' || range.address.length === 0
-    || !Number.isInteger(range.rowCount) || range.rowCount < 1 || range.rowCount > 100
-    || !Number.isInteger(range.columnCount) || range.columnCount < 1 || range.columnCount > 50
-    || !Array.isArray(range.rows) || range.rows.length !== range.rowCount) return false
-  return range.rows.every((row, rowOffset) => row && typeof row === 'object' && !Array.isArray(row)
-    && Object.keys(row).length === 2 && row.index === rowOffset + 1 && Array.isArray(row.cells) && row.cells.length === range.columnCount
-    && row.cells.every((cell, columnOffset) => cell && typeof cell === 'object' && !Array.isArray(cell)
-      && Object.keys(cell).length === 6 && typeof cell.address === 'string' && cell.address.length > 0
-      && cell.row === row.index && cell.column === columnOffset + 1 && typeof cell.text === 'string'
-      && (typeof cell.value === 'string' || typeof cell.value === 'number' || typeof cell.value === 'boolean' || cell.value === null)
-      && (typeof cell.formula === 'string' || cell.formula === null)))
-}
-
-function validOfficeReadRangeOutput(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 6
-    && typeof value.runId === 'string' && value.runId.length > 0 && typeof value.requestId === 'string' && value.requestId.length > 0
-    && typeof value.generation === 'string' && value.generation.length > 0 && validBrowserTarget(value.browserTarget)
-    && validOfficeReadRangeResult({ status: 'ok', resource: value.resource, range: value.range })
-}
-
-function validOfficeResource(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 5
-    && value.kind === 'webedit_spreadsheet' && value.origin === 'https://webedit.midea.com'
-    && (typeof value.workbookName === 'string' || value.workbookName === null)
-    && (typeof value.sheetName === 'string' || value.sheetName === null)
-    && typeof value.fingerprint === 'string' && value.fingerprint.length > 0 && value.fingerprint.length <= 128
-}
-function sameOfficeResource(left, right) {
-  return validOfficeResource(left) && validOfficeResource(right)
-    && left.kind === right.kind && left.origin === right.origin && left.workbookName === right.workbookName && left.sheetName === right.sheetName && left.fingerprint === right.fingerprint
-}
-
-function validOfficeWriteRangeArguments(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 || typeof value.range !== 'string' || value.range.trim().length === 0 || value.range.length > 128 || !validOfficeResource(value.resource)) return false
-  if (!Array.isArray(value.values) || value.values.length === 0 || value.values.length > 100) return false
-  const width = Array.isArray(value.values[0]) ? value.values[0].length : 0
-  return width > 0 && width <= 50 && value.values.every((row) => Array.isArray(row) && row.length === width
-    && row.every((cell) => typeof cell === 'string' || typeof cell === 'number' || typeof cell === 'boolean' || cell === null))
-}
-
-function validOfficeWriteRangeResult(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 4 || value.status !== 'verified_write' || !validOfficeResource(value.resource)) return false
-  const requested = value.requested; const observed = value.observed
-  return requested && observed && typeof requested === 'object' && typeof observed === 'object' && !Array.isArray(requested) && !Array.isArray(observed)
-    && Object.keys(requested).length === 2 && Object.keys(observed).length === 2 && typeof requested.range === 'string' && requested.range.length > 0
-    && observed.range === requested.range && Array.isArray(requested.values) && Array.isArray(observed.values)
-    && JSON.stringify(requested.values) === JSON.stringify(observed.values)
-}
-
-function validOfficeWriteRangeOutput(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 7
-    && typeof value.runId === 'string' && value.runId.length > 0 && typeof value.requestId === 'string' && value.requestId.length > 0
-    && typeof value.generation === 'string' && value.generation.length > 0 && validBrowserTarget(value.browserTarget)
-    && validOfficeWriteRangeResult({ status: 'verified_write', resource: value.resource, requested: value.requested, observed: value.observed })
-}
-
 function validLightDocumentResource(value) {
   return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 4
     && value.kind === 'webedit_light_document' && value.origin === 'https://webedit.midea.com'
@@ -679,29 +405,29 @@ function validLightDocumentResource(value) {
     && typeof value.fingerprint === 'string' && value.fingerprint.length > 0 && value.fingerprint.length <= 128
 }
 
-function officeDocumentArgumentsHint(args) {
+function lightDocumentArgumentsHint(args) {
   const action = args && typeof args === 'object' && !Array.isArray(args) ? args.action : undefined
   if (action === 'inspect_write') {
     if (typeof args.operation !== 'string' || !args.payload || typeof args.payload !== 'object' || Array.isArray(args.payload)) {
-      return 'office_document inspect_write requires the final operation and payload. For an empty document, first call selection, then inspect_write with operation=selection_insert and payload {text|markdown|html, expectedSelectionFingerprint} from that selection read.'
+      return 'light_document_write_preview requires the final operation and payload. For an empty document, first read the selection, then preview selection_insert with the selection fingerprint.'
     }
     if ((args.operation === 'selection_insert' || args.operation === 'selection_replace') && selectionInsertFragments(args.payload) === null) {
-      return `office_document ${args.operation} requires exactly one of text/markdown/html plus expectedSelectionFingerprint from a prior selection read; inspect_write and write must reuse that exact payload.`
+      return `light_document_write_preview ${args.operation} requires exactly one of text/markdown/html plus expectedSelectionFingerprint from a prior selection read.`
     }
     if (args.operation === 'insert_drawing' && lightDocumentInsertFragments('insert_drawing', args.payload) === null) {
-      return 'office_document insert_drawing requires mermaid source (flowchart, sequenceDiagram, or pie) and optional position start/end/before/after; before/after also need id or index.'
+      return 'light_document_write_preview insert_drawing requires Mermaid source and an optional insertion position.'
     }
     if (args.operation === 'blocks_insert' && lightDocumentInsertFragments('blocks_insert', args.payload) === null) {
-      return 'office_document blocks_insert requires payload.blocks of h1-h6/p/blockquote/ul/ol/table/codeblock items and optional position start/end/before/after; before/after also need id or index.'
+      return 'light_document_write_preview blocks_insert requires supported blocks and an optional insertion position.'
     }
-    return 'office_document inspect_write requires a supported operation and the exact final payload that write will reuse; extra keys and preview payloads are rejected.'
+    return 'light_document_write_preview requires a supported operation and the exact final payload.'
   }
-  if (action === 'write') return 'office_document write requires challenge, idempotencyIdentity, operation, and the same payload approved by inspect_write.'
-  if (action === 'search') return 'office_document search requires a non-empty query'
-  return 'office_document requires a bounded read/search/selection action, or a challenged verified write'
+  if (action === 'write') return 'light_document_write_commit requires the one-time challenge returned by preview.'
+  if (action === 'search') return 'light_document_search requires a non-empty query'
+  return 'Invalid light-document operation.'
 }
 
-function validOfficeDocumentArguments(value) {
+function validLightDocumentArguments(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
   const keys = Object.keys(value)
   const validPayload = value.payload === undefined || (value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000)
@@ -727,21 +453,31 @@ function validOfficeDocumentArguments(value) {
 function validFlatLightDocumentArguments(name, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const keys = Object.keys(value)
-  if (name === 'light_document_read') return keys.every((key) => ['offset', 'limit'].includes(key))
+  if (name === 'light_document_read') return keys.every((key) => ['offset', 'limit', 'payload'].includes(key))
+    && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000)
+    && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
+    && (value.payload === undefined || (value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload)))
+  if (name === 'light_document_search') return keys.every((key) => ['query', 'offset', 'limit'].includes(key))
+    && typeof value.query === 'string' && value.query.trim().length > 0 && value.query.length <= 500
     && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000)
     && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
   if (name === 'light_document_selection_read') return keys.length === 0
   if (name === 'light_document_selection_replace_preview') return keys.length === 1 && selectionBlocksReplaceFragments({ blocks: value.blocks, expectedSelectionFingerprint: 'selection-v4-00000000000000000000000000000000' }) !== null
-  return name === 'light_document_selection_replace_commit' && keys.length === 1
+  if (name === 'light_document_write_preview') {
+    return keys.length === 2 && typeof value.operation === 'string' && MODEL_LIGHT_DOCUMENT_OPERATIONS.includes(value.operation)
+      && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload)
+      && JSON.stringify(value.payload).length <= 100000 && validLightDocumentOperationPayload(value.operation, value.payload)
+  }
+  return (name === 'light_document_selection_replace_commit' || name === 'light_document_write_commit') && keys.length === 1
     && typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256
 }
 
-function validOfficeDocumentReadResult(value) {
+function validLightDocumentReadResult(value) {
   return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'ok'
     && validLightDocumentResource(value.resource) && value.document && typeof value.document === 'object' && !Array.isArray(value.document)
 }
 
-function validOfficeDocumentWriteResult(value) {
+function validLightDocumentWriteResult(value) {
   return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write'
     && validLightDocumentResource(value.resource) && value.requested && typeof value.requested === 'object'
     && value.observed && typeof value.observed === 'object'
@@ -894,7 +630,7 @@ function verifiedFragmentEvidence(request, result, requested) {
   return observed.fragmentEvidence.every((evidence, index) => evidence && evidence.fragment === requested.fragments[index] && Array.isArray(evidence.blockIds) && evidence.blockIds.length > 0)
 }
 function verifiedLightDocumentWriteMatches(result, request) {
-  const matchesRequest = validOfficeDocumentWriteResult(result) && result.requested?.operation === request.operation
+  const matchesRequest = validLightDocumentWriteResult(result) && result.requested?.operation === request.operation
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
     && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
   if (!matchesRequest) return false
@@ -914,382 +650,6 @@ function verifiedLightDocumentWriteMatches(result, request) {
     : observed[index]?.id === item.id && canonicalJson(observed[index]?.style) === canonicalJson(item.style) && typeof observed[index]?.text === 'string' && typeof observed[index]?.type === 'string'
       && (item.style.blockType === undefined || observed[index].type === item.style.blockType))
 }
-const SPREADSHEET_OPERATIONS = ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'fill_range', 'batch_write', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'set_zoom', 'set_freeze_panes', 'set_print_settings', 'set_outline_group', 'set_rows_hidden', 'set_columns_hidden', 'auto_fit', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility']
-const SPREADSHEET_VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
-const SPREADSHEET_VALIDATION_ALERT_STYLES = { stop: 1, warning: 2, information: 3 }
-const SPREADSHEET_VALIDATION_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
-function spreadsheetRequestedValidation(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['range', 'sheetName', 'validationType', 'alertStyle', 'operator', 'formula1', 'formula2', 'ignoreBlank', 'showError', 'errorTitle', 'errorMessage'].includes(key))) return null
-  const type = SPREADSHEET_VALIDATION_TYPES[payload.validationType]; const alertStyle = SPREADSHEET_VALIDATION_ALERT_STYLES[payload.alertStyle ?? 'stop']; const operator = SPREADSHEET_VALIDATION_OPERATORS[payload.operator ?? 'between']; const formula1 = payload.formula1; const formula2 = payload.formula2 ?? ''
-  if (!type || !alertStyle || !operator || typeof formula1 !== 'string' || formula1.length > 1024 || typeof formula2 !== 'string' || formula2.length > 1024 || ((operator === 1 || operator === 2) && payload.formula2 === undefined) || (payload.ignoreBlank !== undefined && typeof payload.ignoreBlank !== 'boolean') || (payload.showError !== undefined && typeof payload.showError !== 'boolean') || (payload.errorTitle !== undefined && (typeof payload.errorTitle !== 'string' || payload.errorTitle.length > 255)) || (payload.errorMessage !== undefined && (typeof payload.errorMessage !== 'string' || payload.errorMessage.length > 1024))) return null
-  return { type, alertStyle, operator, formula1, formula2, ignoreBlank: payload.ignoreBlank ?? true, showError: payload.showError ?? true, errorTitle: payload.errorTitle ?? '', errorMessage: payload.errorMessage ?? '' }
-}
-function validSpreadsheetValidation(value) { return value === null || value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 8 && Number.isInteger(value.type) && value.type >= 1 && value.type <= 7 && Number.isInteger(value.alertStyle) && Number.isInteger(value.operator) && typeof value.formula1 === 'string' && value.formula1.length <= 1024 && typeof value.formula2 === 'string' && value.formula2.length <= 1024 && typeof value.ignoreBlank === 'boolean' && typeof value.showError === 'boolean' && typeof value.errorTitle === 'string' && value.errorTitle.length <= 255 && typeof value.errorMessage === 'string' && value.errorMessage.length <= 1024 }
-function validSpreadsheetHyperlink(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every((key) => ['address', 'subAddress', 'textToDisplay', 'name', 'type', 'screenTip'].includes(key)) && ['address', 'subAddress', 'textToDisplay', 'name', 'type'].every((key) => Object.hasOwn(value, key)) && typeof value.address === 'string' && value.address.length <= 2048 && typeof value.subAddress === 'string' && value.subAddress.length <= 256 && typeof value.textToDisplay === 'string' && value.textToDisplay.length <= 500 && typeof value.name === 'string' && value.name.length <= 500 && (typeof value.type === 'string' || typeof value.type === 'number') && (value.screenTip === undefined || typeof value.screenTip === 'string' && value.screenTip.length <= 500) }
-function validSpreadsheetHyperlinks(value) { return Array.isArray(value) && value.length <= 200 && value.every(validSpreadsheetHyperlink) }
-function isSafeInternalHyperlinkReference(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f\[\]]/.test(value)) return false
-  const a1 = '\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6}(?::\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6})?'
-  const sheet = "(?:[A-Za-z_][A-Za-z0-9_.]{0,30}|'(?:[^'\\[\\]\\u0000-\\u001f\\u007f]|''){1,62}')!"
-  return new RegExp(`^(?:${sheet})?${a1}$`).test(value) || /^[A-Za-z_][A-Za-z0-9_.]{0,254}$/.test(value)
-}
-function spreadsheetRequestedHyperlink(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['range', 'sheetName', 'url', 'subAddress', 'screenTip', 'textToDisplay'].includes(key))) return null
-  const url = payload.url ?? ''; const subAddress = payload.subAddress ?? ''; const screenTip = payload.screenTip; const textToDisplay = payload.textToDisplay
-  if (typeof url !== 'string' || url.length > 2048 || typeof subAddress !== 'string' || subAddress.length > 256 || typeof textToDisplay !== 'string' || textToDisplay.length > 500 || (screenTip !== undefined && (typeof screenTip !== 'string' || screenTip.length > 500)) || /[\u0000-\u001f\u007f]/.test(url) || /[\u0000-\u001f\u007f]/.test(subAddress)) return null
-  if (subAddress && !isSafeInternalHyperlinkReference(subAddress)) return null
-  if (url) { try { const parsed = new URL(url); if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password || parsed.href !== url) return null } catch { return null } } else if (!isSafeInternalHyperlinkReference(subAddress)) return null
-  return { url, subAddress, textToDisplay, ...(screenTip === undefined ? {} : { screenTip }) }
-}
-const SPREADSHEET_CONDITIONAL_FORMAT_TYPES = { cellValue: 1, expression: 2 }
-const SPREADSHEET_CONDITIONAL_FORMAT_OPERATORS = { between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 }
-function spreadsheetCanonicalColor(value) { if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) return value.toUpperCase(); if (Number.isInteger(value) && value >= 0 && value <= 0xFFFFFF) return `#${value.toString(16).padStart(6, '0').toUpperCase()}`; return null }
-function validSpreadsheetConditionalFormat(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 9 && ['type', 'operator', 'formula1', 'formula2', 'priority', 'fillColor', 'fontColor', 'bold', 'italic'].every((key) => Object.hasOwn(value, key)) && Object.values(SPREADSHEET_CONDITIONAL_FORMAT_TYPES).includes(value.type) && Object.values(SPREADSHEET_CONDITIONAL_FORMAT_OPERATORS).includes(value.operator) && typeof value.formula1 === 'string' && value.formula1.length > 0 && value.formula1.length <= 1024 && typeof value.formula2 === 'string' && value.formula2.length <= 1024 && (!([1, 2].includes(value.operator)) || value.formula2.length > 0) && Number.isInteger(value.priority) && value.priority >= 1 && value.priority <= 200 && spreadsheetCanonicalColor(value.fillColor) === value.fillColor && spreadsheetCanonicalColor(value.fontColor) === value.fontColor && typeof value.bold === 'boolean' && typeof value.italic === 'boolean' }
-function validSpreadsheetConditionalFormats(value) { return Array.isArray(value) && value.length <= 200 && value.every(validSpreadsheetConditionalFormat) }
-function spreadsheetRequestedConditionalFormat(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['range', 'sheetName', 'conditionType', 'operator', 'formula1', 'formula2', 'fillColor', 'fontColor', 'bold', 'italic'].includes(key))) return null
-  const type = SPREADSHEET_CONDITIONAL_FORMAT_TYPES[payload.conditionType]; const operator = SPREADSHEET_CONDITIONAL_FORMAT_OPERATORS[payload.operator ?? 'equal']; const formula1 = payload.formula1; const formula2 = payload.formula2 ?? ''; const fillColor = payload.fillColor === undefined ? undefined : spreadsheetCanonicalColor(payload.fillColor); const fontColor = payload.fontColor === undefined ? undefined : spreadsheetCanonicalColor(payload.fontColor)
-  if (!type || !operator || typeof formula1 !== 'string' || formula1.length === 0 || formula1.length > 1024 || typeof formula2 !== 'string' || formula2.length > 1024 || ((operator === 1 || operator === 2) && (payload.formula2 === undefined || formula2.length === 0)) || (payload.fillColor !== undefined && !fillColor) || (payload.fontColor !== undefined && !fontColor) || (payload.bold !== undefined && typeof payload.bold !== 'boolean') || (payload.italic !== undefined && typeof payload.italic !== 'boolean')) return null
-  return { type, operator, formula1, formula2, ...(fillColor === undefined ? {} : { fillColor }), ...(fontColor === undefined ? {} : { fontColor }), ...(payload.bold === undefined ? {} : { bold: payload.bold }), ...(payload.italic === undefined ? {} : { italic: payload.italic }) }
-}
-function validSpreadsheetMatrix(value) { return Array.isArray(value) && value.every((row) => Array.isArray(row)) }
-function spreadsheetMatrixMatchesAddress(value, address) { const parsed = parseSpreadsheetAddress(address); const rows = parsed ? parsed.rowTo - parsed.rowFrom + 1 : 0; const columns = parsed ? parsed.colTo - parsed.colFrom + 1 : 0; return rows > 0 && columns > 0 && validSpreadsheetMatrix(value) && value.length === rows && value.every((row) => row.length === columns) }
-function validWorkbookSheet(value) { return value && typeof value === 'object' && Number.isInteger(value.index) && value.index >= 1 && value.index <= 200 && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 31 && (value.visible === null || typeof value.visible === 'boolean') && (value.active === null || typeof value.active === 'boolean') }
-function validWorkbookSheets(value) { return Array.isArray(value) && value.length >= 1 && value.length <= 200 && value.every(validWorkbookSheet) && value.every((item, index) => item.index === index + 1) && new Set(value.map((item) => item.name)).size === value.length }
-function hasSingleReadableActiveSheet(value) { return validWorkbookSheets(value) && value.every((item) => typeof item.active === 'boolean') && value.filter((item) => item.active === true).length === 1 }
-function validDefinedName(value) { return value && typeof value === 'object' && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 255 && typeof value.refersTo === 'string' && value.refersTo.length > 0 && value.refersTo.length <= 1024 && (value.visible === null || typeof value.visible === 'boolean') && (value.scope === null || typeof value.scope === 'string' || typeof value.scope === 'number') }
-const SPREADSHEET_PRINT_KEYS = ['printArea', 'printTitleRows', 'printTitleColumns', 'orientation', 'zoom', 'fitToPagesWide', 'fitToPagesTall', 'centerHorizontally', 'centerVertically', 'leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'headerMargin', 'footerMargin']
-function parseSpreadsheetOutlineRange(range, axis) {
-  const row = typeof range === 'string' && /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(range); const column = typeof range === 'string' && /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(range)
-  if (axis === 'row' && row) { const from = Number(row[1]); const to = Number(row[2]); return from <= to && to <= 1048576 && to - from < 1000 ? { range: `${from}:${to}`, from, to } : null }
-  if (axis === 'column' && column) { const from = spreadsheetColumnNumber(column[1]); const to = spreadsheetColumnNumber(column[2]); return from <= to && to <= 16384 && to - from < 1000 ? { range: `${column[1].toUpperCase()}:${column[2].toUpperCase()}`, from, to } : null }
-  return null
-}
-function validSpreadsheetDimensions(value) {
-  const target = parseSpreadsheetOutlineRange(value?.range, value?.axis)
-  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 4 && typeof value.sheetName === 'string' && value.sheetName.length > 0 && !!target && Array.isArray(value.items) && value.items.length === target.to - target.from + 1 && value.items.every((item, offset) => item && typeof item === 'object' && Object.keys(item).length === 3 && item.index === target.from + offset && typeof item.hidden === 'boolean' && typeof item.size === 'number' && Number.isFinite(item.size) && item.size >= 0 && item.size <= 10000)
-}
-function spreadsheetDimensionOperation(operation, payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
-  const axis = operation === 'set_rows_hidden' ? 'row' : operation === 'set_columns_hidden' ? 'column' : payload.axis
-  if ((axis !== 'row' && axis !== 'column') || !Object.keys(payload).every((key) => ['sheetName', 'range', 'hidden', 'axis'].includes(key))) return null
-  if ((operation === 'set_rows_hidden' || operation === 'set_columns_hidden') && (Object.hasOwn(payload, 'axis') || typeof payload.hidden !== 'boolean')) return null
-  if (operation === 'auto_fit' && (!Object.hasOwn(payload, 'axis') || payload.hidden !== undefined)) return null
-  const target = parseSpreadsheetOutlineRange(payload.range, axis)
-  return target ? { ...target, axis, ...(operation === 'auto_fit' ? {} : { hidden: payload.hidden }) } : null
-}
-function validSpreadsheetPrintValue(key, value) {
-  if (key === 'printArea') return typeof value === 'string' && value.length <= 128 && (value === '' || !!parseSpreadsheetAddress(value))
-  if (key === 'printTitleRows') { const match = typeof value === 'string' && value.length <= 64 && /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(value); return value === '' || !!match && Number(match[1]) <= Number(match[2]) && Number(match[2]) <= 1048576 }
-  if (key === 'printTitleColumns') { const match = typeof value === 'string' && value.length <= 32 && /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(value); return value === '' || !!match && spreadsheetColumnNumber(match[1]) <= spreadsheetColumnNumber(match[2]) && spreadsheetColumnNumber(match[2]) <= 16384 }
-  if (key === 'orientation') return value === 'portrait' || value === 'landscape'
-  if (key === 'zoom') return value === false || Number.isInteger(value) && value >= 10 && value <= 400
-  if (key === 'fitToPagesWide' || key === 'fitToPagesTall') return Number.isInteger(value) && value >= 1 && value <= 100
-  if (key === 'centerHorizontally' || key === 'centerVertically') return typeof value === 'boolean'
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 720
-}
-function validSpreadsheetPrintSettings(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 16 && typeof value.sheetName === 'string' && value.sheetName.length > 0 && SPREADSHEET_PRINT_KEYS.every((key) => validSpreadsheetPrintValue(key, value[key])) }
-function validSpreadsheetOutline(value) { const target = parseSpreadsheetOutlineRange(value?.range, value?.axis); return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 4 && typeof value.sheetName === 'string' && value.sheetName.length > 0 && !!target && Array.isArray(value.levels) && value.levels.length === target.to - target.from + 1 && value.levels.every((level) => Number.isInteger(level) && level >= 0 && level <= 8) }
-function validSpreadsheetPrecondition(value) {
-  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 7 && validSpreadsheetDimensions(value.dimensions)) return JSON.stringify(value).length <= 100_000
-  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 6 && validSpreadsheetOutline(value.outline)) return JSON.stringify(value).length <= 100_000
-  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 5 && validSpreadsheetPrintSettings(value.printSettings)) return JSON.stringify(value).length <= 100_000
-  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 4 && value.view && typeof value.view === 'object' && Object.keys(value.view).length === 8 && typeof value.view.sheetName === 'string' && value.view.sheetName.length > 0 && typeof value.view.activeCell === 'string' && !!parseSpreadsheetAddress(value.view.activeCell) && typeof value.view.freezePanes === 'boolean' && Number.isInteger(value.view.splitRow) && value.view.splitRow >= 0 && Number.isInteger(value.view.splitColumn) && value.view.splitColumn >= 0 && Number.isInteger(value.view.zoom) && value.view.zoom >= 10 && value.view.zoom <= 400 && Number.isInteger(value.view.scrollRow) && value.view.scrollRow >= 1 && Number.isInteger(value.view.scrollColumn) && value.view.scrollColumn >= 1) return JSON.stringify(value).length <= 100_000
-  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 3 && validWorkbookSheets(value.sheets) && (value.definedNames === undefined || Array.isArray(value.definedNames) && value.definedNames.length <= 200 && value.definedNames.every(validDefinedName))) return JSON.stringify(value).length <= 100_000
-  if (value && typeof value === 'object' && !Array.isArray(value) && value.version === 2 && Array.isArray(value.targets) && value.targets.length >= 1 && value.targets.length <= 2) return value.targets.every((target) => validSpreadsheetPrecondition({ version: 1, range: target?.range, state: target?.state })) && JSON.stringify(value).length <= 100_000
-  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !value.state || typeof value.state !== 'object' || Array.isArray(value.state)) return false
-  const state = value.state
-  if (!['values', 'formulas', 'merged', 'filter', 'rowHeight', 'columnWidth', 'format'].every((key) => Object.hasOwn(state, key)) || !spreadsheetMatrixMatchesAddress(state.values, value.range) || !spreadsheetMatrixMatchesAddress(state.formulas, value.range)) return false
-  if (!(state.merged === null || typeof state.merged === 'boolean') || !(state.rowHeight === null || typeof state.rowHeight === 'number') || !(state.columnWidth === null || typeof state.columnWidth === 'number')) return false
-  if (!(state.filter === null || typeof state.filter === 'object' && !Array.isArray(state.filter) && typeof state.filter.operator === 'string' && state.filter.operator.length <= 64)) return false
-  if (!state.format || typeof state.format !== 'object' || Array.isArray(state.format) || (state.validation !== undefined && !validSpreadsheetValidation(state.validation)) || (state.hyperlinks !== undefined && !validSpreadsheetHyperlinks(state.hyperlinks)) || (state.conditionalFormats !== undefined && !validSpreadsheetConditionalFormats(state.conditionalFormats))) return false
-  return JSON.stringify(value).length <= 100_000
-}
-function validSpreadsheetOperationPayload(operation, payload) {
-  if (operation === 'fill_range') return !!payload && typeof payload === 'object' && !Array.isArray(payload) && Object.keys(payload).every((key) => ['range', 'sheetName', 'direction'].includes(key)) && !!parseSpreadsheetAddress(payload.range) && ['down', 'up', 'left', 'right'].includes(payload.direction)
-  if (operation === 'batch_write') return spreadsheetBatchWrite(payload) !== null
-  if (['set_rows_hidden', 'set_columns_hidden', 'auto_fit'].includes(operation)) return spreadsheetDimensionOperation(operation, payload) !== null
-  if (operation === 'set_print_settings') return !!payload && typeof payload === 'object' && !Array.isArray(payload) && Object.keys(payload).every((key) => key === 'sheetName' || SPREADSHEET_PRINT_KEYS.includes(key)) && SPREADSHEET_PRINT_KEYS.some((key) => Object.hasOwn(payload, key)) && SPREADSHEET_PRINT_KEYS.filter((key) => Object.hasOwn(payload, key)).every((key) => key === 'zoom' ? Number.isInteger(payload[key]) && payload[key] >= 10 && payload[key] <= 400 : validSpreadsheetPrintValue(key, payload[key])) && !(Object.hasOwn(payload, 'zoom') && (Object.hasOwn(payload, 'fitToPagesWide') || Object.hasOwn(payload, 'fitToPagesTall')))
-  if (operation === 'set_outline_group') { const target = parseSpreadsheetOutlineRange(payload?.range, payload?.axis); return !!payload && typeof payload === 'object' && !Array.isArray(payload) && Object.keys(payload).every((key) => ['sheetName', 'range', 'axis', 'grouped'].includes(key)) && !!target && typeof payload.grouped === 'boolean' }
-  if (operation === 'set_zoom') return !!payload && Object.keys(payload).every((key) => ['sheetName', 'zoom'].includes(key)) && Number.isInteger(payload.zoom) && payload.zoom >= 10 && payload.zoom <= 400
-  if (operation === 'set_freeze_panes') { const parsed = parseSpreadsheetAddress(payload?.target); return !!payload && Object.keys(payload).every((key) => ['sheetName', 'freeze', 'target'].includes(key)) && typeof payload.freeze === 'boolean' && (payload.freeze ? typeof payload.target === 'string' && !!parsed && parsed.rowFrom === parsed.rowTo && parsed.colFrom === parsed.colTo : payload.target === undefined) }
-  if (operation === 'add_hyperlink') return spreadsheetRequestedHyperlink(payload) !== null && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128
-  if (operation === 'delete_hyperlinks') return !!payload && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128 && Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))
-  if (operation === 'add_conditional_format') return spreadsheetRequestedConditionalFormat(payload) !== null && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128
-  if (operation === 'clear_conditional_formats') return !!payload && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128 && Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))
-  if (!['set_data_validation', 'clear_data_validation'].includes(operation)) return true
-  return !!payload && typeof payload.range === 'string' && payload.range.length > 0 && payload.range.length <= 128
-    && (operation === 'clear_data_validation' ? Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key)) : spreadsheetRequestedValidation(payload) !== null)
-}
-function completeSpreadsheetDataValidationState(state) {
-  const format = state?.format
-  return !!state && typeof state === 'object' && typeof state.merged === 'boolean' && !!state.filter && typeof state.filter.operator === 'string' && typeof state.rowHeight === 'number' && Number.isFinite(state.rowHeight) && typeof state.columnWidth === 'number' && Number.isFinite(state.columnWidth)
-    && !!format && typeof format === 'object' && ['bold', 'italic', 'underline', 'size', 'name', 'color', 'fill', 'numberFormat', 'alignment', 'wrap'].every((key) => Object.hasOwn(format, key) && format[key] !== null)
-}
-function spreadsheetSheetPrefix(address) {
-  const match = typeof address === 'string' ? /^\s*(?:'((?:[^']|'')+)'|([^'!:\s]+))!\s*(.+?)\s*$/.exec(address) : null
-  return match ? { sheetName: (match[1] ?? match[2]).replace(/''/g, "'"), range: match[3] } : null
-}
-function normalizeOfficeSpreadsheetArguments(args) {
-  if (!args || typeof args !== 'object' || Array.isArray(args)) return args
-  const output = { ...args }
-  const prefix = spreadsheetSheetPrefix(output.range)
-  if (prefix) {
-    output.range = prefix.range
-    if (output.sheetName === undefined) output.sheetName = prefix.sheetName
-  }
-  if (output.payload && typeof output.payload === 'object' && !Array.isArray(output.payload)) {
-    const rangePrefix = spreadsheetSheetPrefix(output.payload.range)
-    const targetPrefix = rangePrefix ? null : spreadsheetSheetPrefix(output.payload.target)
-    const hit = rangePrefix ?? targetPrefix
-    if (hit) {
-      output.payload = { ...output.payload }
-      if (rangePrefix) output.payload.range = hit.range; else output.payload.target = hit.range
-      if (output.payload.sheetName === undefined) output.payload.sheetName = hit.sheetName
-    }
-  }
-  return output
-}
-function spreadsheetArgumentsHint(args) {
-  const action = args && typeof args === 'object' && !Array.isArray(args) ? args.action : undefined
-  if (action === 'special_cells') return 'office_spreadsheet special_cells requires a bounded bare range (for example A1:C10), a supported kind, and optional offset/limit'
-  if (action === 'dimensions' || action === 'outline') return `office_spreadsheet ${action} requires a bounded whole-row or whole-column range and a matching axis`
-  if (action === 'range') return 'office_spreadsheet range requires a bounded bare range (for example A1:C10); qualify the sheet through sheetName'
-  if (action === 'search') return 'office_spreadsheet search requires a bounded bare range and a non-empty query'
-  if (action === 'selection') return 'office_spreadsheet selection takes no range; it reads the current selected cells and active cell'
-  if (action === 'used_range') return 'office_spreadsheet used_range takes no range; it reads the active sheet used rectangle'
-  return 'office_spreadsheet requires a bounded read action, inspect_write, or challenged verified write'
-}
-function validOfficeSpreadsheetArguments(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.action !== 'string') return false
-  const keys = Object.keys(value)
-  if (['context', 'sheets', 'defined_names'].includes(value.action)) return keys.length === 1
-  if (value.action === 'selection') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
-  if (value.action === 'used_range') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
-  if (value.action === 'view') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
-  if (value.action === 'print_settings') return keys.every((key) => ['action', 'sheetName'].includes(key)) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
-  if (value.action === 'outline') return keys.every((key) => ['action', 'range', 'axis', 'sheetName'].includes(key)) && !!parseSpreadsheetOutlineRange(value.range, value.axis) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
-  if (value.action === 'dimensions') return keys.every((key) => ['action', 'range', 'axis', 'sheetName'].includes(key)) && !!parseSpreadsheetOutlineRange(value.range, value.axis) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120)
-  if (value.action === 'special_cells') { const target = parseSpreadsheetAddress(value.range); return keys.every((key) => ['action', 'range', 'kind', 'sheetName', 'offset', 'limit'].includes(key)) && !!target && (target.rowTo - target.rowFrom + 1) * (target.colTo - target.colFrom + 1) <= 100000 && ['blanks', 'constants', 'formulas', 'lastCell', 'visible'].includes(value.kind) && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000) && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200) && (value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.length > 0 && value.sheetName.length <= 120) }
-  if (value.action === 'inspect_write') return keys.length === 3 && SPREADSHEET_OPERATIONS.includes(value.operation)
-    && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000 && validSpreadsheetOperationPayload(value.operation, value.payload)
-  if (value.action === 'capabilities' || value.action === 'range_features') return keys.every((key) => ['action', 'range', 'sheetName'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && (value.sheetName === undefined || typeof value.sheetName === 'string')
-  if (value.action === 'range') return keys.every((key) => ['action', 'range', 'sheetName'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && (value.sheetName === undefined || typeof value.sheetName === 'string')
-  if (value.action === 'search') return keys.every((key) => ['action', 'range', 'sheetName', 'query', 'matchCase', 'matchEntireCell', 'searchBy', 'offset', 'limit'].includes(key)) && typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && typeof value.query === 'string' && value.query.trim().length > 0 && value.query.length <= 500 && (value.searchBy === undefined || ['value', 'text', 'formula'].includes(value.searchBy)) && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000) && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
-  return value.action === 'write' && keys.length === 6 && typeof value.challenge === 'string' && value.challenge.length > 0 && typeof value.idempotencyIdentity === 'string' && value.idempotencyIdentity.length > 0 && value.idempotencyIdentity.length <= 128 && validOfficeResource(value.resource) && SPREADSHEET_OPERATIONS.includes(value.operation) && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000 && validSpreadsheetOperationPayload(value.operation, value.payload)
-}
-function validSpreadsheetSpecialCells(value, resource, request) { if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 12 || value.range !== request?.range || value.kind !== request?.kind || value.offset !== (request?.offset ?? 0) || value.limit !== (request?.limit ?? 200) || (request?.sheetName !== undefined && value.sheetName !== request.sheetName) || typeof value.range !== 'string' || !parseSpreadsheetAddress(value.range) || value.sheetName !== resource.sheetName || !['blanks', 'constants', 'formulas', 'lastCell', 'visible'].includes(value.kind) || !Number.isInteger(value.count) || value.count < 0 || value.count > 100000 || !Number.isInteger(value.areaCount) || value.areaCount < 0 || value.areaCount > 100000 || value.areaCount > value.count || !Number.isInteger(value.offset) || value.offset < 0 || !Number.isInteger(value.limit) || value.limit < 1 || value.limit > 200 || !Number.isInteger(value.returned) || value.returned < 0 || typeof value.hasMore !== 'boolean' || typeof value.truncated !== 'boolean' || value.truncated !== value.hasMore || !(value.nextOffset === null || Number.isInteger(value.nextOffset)) || !Array.isArray(value.areas) || value.areas.length !== value.returned) return false; const target = parseSpreadsheetAddress(value.range); const ranges = []; let cells = 0; for (let index = 0; index < value.areas.length; index += 1) { const area = value.areas[index]; const parsed = parseSpreadsheetAddress(area?.address); if (!area || typeof area !== 'object' || Object.keys(area).length !== 7 || area.index !== value.offset + index + 1 || !parsed || ranges.some((candidate) => spreadsheetRangesOverlap(candidate, parsed)) || parsed.rowFrom !== area.row || parsed.colFrom !== area.column || parsed.rowTo - parsed.rowFrom + 1 !== area.rowsCount || parsed.colTo - parsed.colFrom + 1 !== area.columnsCount || area.count !== area.rowsCount * area.columnsCount || !Number.isInteger(area.count) || !Number.isInteger(area.row) || !Number.isInteger(area.column) || !Number.isInteger(area.rowsCount) || !Number.isInteger(area.columnsCount) || parsed.rowFrom < target.rowFrom || parsed.rowTo > target.rowTo || parsed.colFrom < target.colFrom || parsed.colTo > target.colTo) return false; ranges.push(parsed); cells += area.count; if (cells > value.count) return false } return value.returned === Math.min(value.limit, Math.max(0, value.areaCount - value.offset)) && value.hasMore === (value.offset + value.returned < value.areaCount) && value.nextOffset === (value.hasMore ? value.offset + value.returned : null) && (value.offset !== 0 || value.hasMore || cells === value.count) }
-function validOfficeSpreadsheetReadResult(value, action, request) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'ok' && validOfficeResource(value.resource) && (action !== 'special_cells' || validSpreadsheetSpecialCells(value.specialCells, value.resource, request)) }
-function validOfficeSpreadsheetWriteResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write' && validOfficeResource(value.resource) && SPREADSHEET_OPERATIONS.includes(value.operation) && value.requested && typeof value.requested === 'object' && value.observed && typeof value.observed === 'object' }
-function spreadsheetWriteHash(operation, payload) { return hash(canonicalJson({ operation, payload })) }
-function jsonMatches(left, right) { return JSON.stringify(left) === JSON.stringify(right) }
-function hasVerifiedSpreadsheetRange(result, payload) { return result.requested.range === payload.range && result.observed.range === payload.range && result.observed.verified === true }
-function requestedFormatMatches(requested, payload) {
-  return requested && jsonMatches(requested.format, payload)
-}
-function observedFormatMatches(observed, payload) {
-  if (!observed || typeof observed !== 'object') return false
-  if (payload.font !== undefined && (!observed.font || typeof observed.font !== 'object' || !Object.entries(payload.font).every(([key, value]) => jsonMatches(observed.font[key], value)))) return false
-  return (payload.fill === undefined || jsonMatches(observed.fill, payload.fill))
-    && (payload.numberFormat === undefined || jsonMatches(observed.numberFormat, payload.numberFormat))
-    && (payload.alignment === undefined || jsonMatches(observed.alignment, payload.alignment))
-    && (payload.wrap === undefined || jsonMatches(observed.wrap, payload.wrap))
-}
-function spreadsheetColumnNumber(name) { return name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0) }
-function spreadsheetColumnName(value) { let output = ''; for (let current = value; current > 0; current = Math.floor((current - 1) / 26)) output = String.fromCharCode(65 + ((current - 1) % 26)) + output; return output }
-function parseSpreadsheetAddress(address) {
-  const match = typeof address === 'string' && address.match(/^([A-Z]{1,3})(\d+)(?::([A-Z]{1,3})(\d+))?$/i)
-  if (!match) return null
-  const rowFrom = Number(match[2]); const colFrom = spreadsheetColumnNumber(match[1]); const rowTo = Number(match[4] ?? match[2]); const colTo = spreadsheetColumnNumber(match[3] ?? match[1])
-  return rowFrom > 0 && rowTo >= rowFrom && rowTo <= 1048576 && colFrom > 0 && colTo >= colFrom && colTo <= 16384 ? { rowFrom, rowTo, colFrom, colTo } : null
-}
-function spreadsheetBatchWrite(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['sheetName', 'cells'].includes(key)) || !Array.isArray(payload.cells) || payload.cells.length < 1 || payload.cells.length > 500) return null
-  const cells = []; const seen = new Set()
-  for (const item of payload.cells) { const parsed = parseSpreadsheetAddress(item?.cell); if (!parsed || parsed.rowFrom !== parsed.rowTo || parsed.colFrom !== parsed.colTo || seen.has(item.cell.toUpperCase()) || !(typeof item.value === 'string' || typeof item.value === 'number' || typeof item.value === 'boolean' || item.value === null) || !item || typeof item !== 'object' || Array.isArray(item) || !Object.keys(item).every((key) => ['cell', 'value'].includes(key))) return null; seen.add(item.cell.toUpperCase()); cells.push({ cell: item.cell.toUpperCase(), value: item.value, ...parsed }) }
-  const rowFrom = Math.min(...cells.map((item) => item.rowFrom)); const rowTo = Math.max(...cells.map((item) => item.rowTo)); const colFrom = Math.min(...cells.map((item) => item.colFrom)); const colTo = Math.max(...cells.map((item) => item.colTo)); const count = (rowTo - rowFrom + 1) * (colTo - colFrom + 1)
-  if (count !== cells.length || count > 500) return null
-  const values = Array.from({ length: rowTo - rowFrom + 1 }, () => Array(colTo - colFrom + 1).fill(null)); for (const item of cells) values[item.rowFrom - rowFrom][item.colFrom - colFrom] = item.value
-  return { range: spreadsheetAddressFor({ rowFrom, rowTo, colFrom, colTo }), cells: cells.map(({ cell, value }) => ({ cell, value })), values }
-}
-function spreadsheetAddressFor(parsed) { return `${spreadsheetColumnName(parsed.colFrom)}${parsed.rowFrom}:${spreadsheetColumnName(parsed.colTo)}${parsed.rowTo}` }
-function spreadsheetRangesOverlap(left, right) { return left.rowFrom <= right.rowTo && left.rowTo >= right.rowFrom && left.colFrom <= right.colTo && left.colTo >= right.colFrom }
-function spreadsheetCanonicalTarget(address, expected) { const parsed = parseSpreadsheetAddress(address); return !!parsed && address === address.toUpperCase() && parsed.rowFrom === expected.rowFrom && parsed.rowTo === expected.rowTo && parsed.colFrom === expected.colFrom && parsed.colTo === expected.colTo }
-function spreadsheetBlank(value) { return value === null || value === undefined || value === '' }
-function spreadsheetBlankMatrix(value) { return Array.isArray(value) && value.every((row) => Array.isArray(row) && row.every(spreadsheetBlank)) }
-function spreadsheetSameShape(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((row, index) => Array.isArray(row) && Array.isArray(right[index]) && row.length === right[index].length) }
-const SPREADSHEET_MOVE_DEFAULT_FORMATS = {
-  bold: [false, 0], italic: [false, 0], underline: [false, 0, 'none'], size: [10, 11, 12],
-  name: ['Arial', 'Calibri', '宋体', '等线'], color: ['#000000', '#FF000000', 0, -16777216, 'rgb(0,0,0)'],
-  fill: ['#FFFFFF', '#FFFFFFFF', 16777215, -1, 'rgb(255,255,255)'], numberFormat: ['General', '通用格式', '常规'],
-  alignment: ['general', 'General', 0, -4105], wrap: [false, 0],
-}
-function spreadsheetSplitDelimited(value, delimiter, consecutive) {
-  if (typeof value !== 'string') return [value]
-  const output = []; let current = ''; let quoted = false
-  for (let index = 0; index < value.length; index += 1) { const character = value[index]; if (character === '"') { if (quoted && value[index + 1] === '"') { current += '"'; index += 1 } else quoted = !quoted; continue }; if (!quoted && character === delimiter) { output.push(current); current = ''; if (consecutive) while (value[index + 1] === delimiter) index += 1; continue }; current += character }
-  output.push(current); return output
-}
-function spreadsheetHasUnclosedQuote(value) { let quoted = false; for (let index = 0; index < String(value).length; index += 1) { if (value[index] !== '"') continue; if (quoted && value[index + 1] === '"') { index += 1; continue }; quoted = !quoted }; return quoted }
-function spreadsheetTypeAmbiguous(value) { return typeof value === 'string' && /^(?:[+-]?\d+(?:\.\d+)?|\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4})$/.test(value.trim()) }
-function spreadsheetReplacement(value, what, replacement, whole, matchCase) {
-  if (typeof value !== 'string') return { value, count: 0 }
-  if (whole) { const matched = matchCase ? value === what : value.toLocaleLowerCase() === what.toLocaleLowerCase(); return { value: matched ? replacement : value, count: matched ? 1 : 0 } }
-  const expression = new RegExp(what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), matchCase ? 'g' : 'gi'); let count = 0
-  return { value: value.replace(expression, () => { count += 1; return replacement }), count }
-}
-function spreadsheetDuplicateKey(value) { return spreadsheetBlank(value) ? 'blank:' : typeof value === 'string' ? `string:${value.toLocaleLowerCase()}` : `${typeof value}:${String(value)}` }
-function spreadsheetDefaultMoveState(state) { return state?.merged === false && state?.format && typeof state.format === 'object' && !Array.isArray(state.format) && Object.entries(SPREADSHEET_MOVE_DEFAULT_FORMATS).every(([key, allowed]) => Object.hasOwn(state.format, key) && allowed.some((value) => jsonMatches(value, state.format[key]))) }
-function spreadsheetP0Plan(operation, payload, precondition) {
-  if (!precondition || precondition.version !== 2 || !Array.isArray(precondition.targets)) return null
-  const source = parseSpreadsheetAddress(payload?.range); if (!source || !precondition.targets[0] || precondition.targets[0].range !== payload.range) return null
-  if (operation === 'replace_range_text' || operation === 'remove_duplicates') return precondition.targets.length === 1 ? { source, sourceState: precondition.targets[0].state, targets: [payload.range] } : null
-  if (operation === 'text_to_columns') {
-    const delimiter = ({ comma: ',', tab: '\t', semicolon: ';', space: ' ', other: payload.otherDelimiter })[payload.delimiter ?? 'comma']
-    const sourceState = precondition.targets[0].state
-    if (source.colFrom !== source.colTo || typeof delimiter !== 'string' || delimiter.length !== 1 || !Array.isArray(sourceState.values) || !Array.isArray(sourceState.formulas) || sourceState.values.some((row) => !Array.isArray(row) || row.length !== 1) || sourceState.formulas.some((row) => !Array.isArray(row) || row.length !== 1 || !spreadsheetBlank(row[0])) || sourceState.values.some((row) => spreadsheetHasUnclosedQuote(row[0]) || spreadsheetSplitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true).some(spreadsheetTypeAmbiguous))) return null
-    const split = sourceState.values.map((row) => spreadsheetSplitDelimited(row[0], delimiter, payload.consecutiveDelimiter === true)); const width = split.reduce((maximum, row) => Math.max(maximum, row.length), 1)
-    if (width > 50 || split.length * width > 20_000) return null
-    const output = spreadsheetAddressFor({ ...source, colTo: source.colFrom + width - 1 }); const outputState = precondition.targets[1]?.state
-    if (precondition.targets.length !== 2 || precondition.targets[1]?.range !== output || !validSpreadsheetMatrix(outputState?.values) || !validSpreadsheetMatrix(outputState?.formulas) || outputState.values.length !== sourceState.values.length) return null
-    const outputMatchesSource = outputState.values.every((row, index) => row.length === width && outputState.formulas[index]?.length === width && row[0] === sourceState.values[index][0] && spreadsheetBlank(outputState.formulas[index][0]))
-    const outputIsSafe = payload.overwrite === true || outputState.values.every((row, index) => row.slice(1).every(spreadsheetBlank) && outputState.formulas[index].slice(1).every(spreadsheetBlank))
-    if (!outputMatchesSource || !outputIsSafe) return null
-    return { source, sourceState, delimiter, split, width, output, targets: [payload.range, output] }
-  }
-  if (operation === 'move_range') {
-    const requested = parseSpreadsheetAddress(payload.destination); if (!requested) return null
-    const rows = source.rowTo - source.rowFrom + 1; const columns = source.colTo - source.colFrom + 1
-    if (!((requested.rowTo === requested.rowFrom && requested.colTo === requested.colFrom) || (requested.rowTo - requested.rowFrom + 1 === rows && requested.colTo - requested.colFrom + 1 === columns))) return null
-    const outputRange = { rowFrom: requested.rowFrom, colFrom: requested.colFrom, rowTo: requested.rowFrom + rows - 1, colTo: requested.colFrom + columns - 1 }
-    const output = spreadsheetAddressFor(outputRange)
-    const sourceState = precondition.targets[0].state; const destinationState = precondition.targets[1]?.state
-    if (precondition.targets.length !== 2 || !spreadsheetCanonicalTarget(precondition.targets[0]?.range, source) || !spreadsheetCanonicalTarget(precondition.targets[1]?.range, outputRange) || precondition.targets[0].range === precondition.targets[1].range || spreadsheetRangesOverlap(source, outputRange) || !spreadsheetDefaultMoveState(sourceState) || !spreadsheetDefaultMoveState(destinationState) || (payload.overwrite !== true && (!spreadsheetBlankMatrix(destinationState.values) || !spreadsheetBlankMatrix(destinationState.formulas)))) return null
-    return { source, sourceState, destinationState, output, targets: [payload.range, output] }
-  }
-  return null
-}
-function validSpreadsheetOperationPrecondition(operation, payload, precondition) {
-  if (operation === 'batch_write') { const batch = spreadsheetBatchWrite(payload); return !!batch && precondition?.version === 1 && precondition.range === batch.range && validSpreadsheetMatrix(precondition.state?.values) && validSpreadsheetMatrix(precondition.state?.formulas) && precondition.state.formulas.every((row) => row.every(spreadsheetBlank)) }
-  if (operation === 'fill_range') return precondition?.version === 1 && precondition.range === payload?.range && validSpreadsheetOperationPayload(operation, payload) && validSpreadsheetMatrix(precondition.state?.formulas) && precondition.state.formulas.every((row) => row.every(spreadsheetBlank))
-  if (['set_rows_hidden', 'set_columns_hidden', 'auto_fit'].includes(operation)) { const target = spreadsheetDimensionOperation(operation, payload); return precondition?.version === 7 && validSpreadsheetDimensions(precondition.dimensions) && !!target && precondition.dimensions.range === target.range && precondition.dimensions.axis === target.axis && precondition.dimensions.sheetName === (payload.sheetName ?? precondition.dimensions.sheetName) }
-  if (operation === 'set_print_settings') return precondition?.version === 5 && validSpreadsheetPrintSettings(precondition.printSettings) && validSpreadsheetOperationPayload(operation, payload) && precondition.printSettings.sheetName === (payload.sheetName ?? precondition.printSettings.sheetName)
-  if (operation === 'set_outline_group') { const target = parseSpreadsheetOutlineRange(payload?.range, payload?.axis); return precondition?.version === 6 && validSpreadsheetOutline(precondition.outline) && !!target && precondition.outline.range === target.range && precondition.outline.axis === payload.axis && precondition.outline.sheetName === (payload.sheetName ?? precondition.outline.sheetName) }
-  if (['set_zoom', 'set_freeze_panes'].includes(operation)) return precondition?.version === 4 && validSpreadsheetOperationPayload(operation, payload) && precondition.view?.sheetName === (payload.sheetName ?? precondition.view.sheetName)
-  if (['set_data_validation', 'clear_data_validation'].includes(operation)) return precondition?.version === 1 && precondition.range === payload?.range && validSpreadsheetOperationPayload(operation, payload) && Object.hasOwn(precondition.state ?? {}, 'validation') && validSpreadsheetValidation(precondition.state?.validation) && completeSpreadsheetDataValidationState(precondition.state)
-  if (['add_hyperlink', 'delete_hyperlinks'].includes(operation)) return precondition?.version === 1 && precondition.range === payload?.range && validSpreadsheetOperationPayload(operation, payload) && Object.hasOwn(precondition.state ?? {}, 'validation') && validSpreadsheetValidation(precondition.state?.validation) && Object.hasOwn(precondition.state ?? {}, 'hyperlinks') && validSpreadsheetHyperlinks(precondition.state?.hyperlinks) && completeSpreadsheetDataValidationState(precondition.state) && (operation !== 'add_hyperlink' || payload.screenTip === undefined || precondition.state.hyperlinks.length > 0 && precondition.state.hyperlinks.every((item) => typeof item.screenTip === 'string'))
-  if (['add_conditional_format', 'clear_conditional_formats'].includes(operation)) return precondition?.version === 1 && precondition.range === payload?.range && validSpreadsheetOperationPayload(operation, payload) && Object.hasOwn(precondition.state ?? {}, 'conditionalFormats') && validSpreadsheetConditionalFormats(precondition.state?.conditionalFormats) && completeSpreadsheetDataValidationState(precondition.state)
-  if (['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) return spreadsheetP0Plan(operation, payload, precondition) !== null
-  if (!['create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(operation)) return true
-  if (precondition?.version !== 3 || !Array.isArray(precondition.sheets)) return false
-  const name = typeof payload?.name === 'string' ? payload.name.trim() : typeof payload?.sourceName === 'string' ? payload.sourceName : typeof payload?.sheetName === 'string' ? payload.sheetName : ''
-  if (operation === 'create_defined_name') return Array.isArray(precondition.definedNames) && typeof payload.refersTo === 'string' && (payload.scope === undefined || payload.scope === 'workbook') && !precondition.definedNames.some((item) => item.name === name)
-  if (operation === 'delete_defined_name') return Array.isArray(precondition.definedNames) && precondition.definedNames.some((item) => item.name === name)
-  if (operation === 'activate_worksheet') return Object.keys(payload ?? {}).length === 1 && typeof payload.sheetName === 'string' && hasSingleReadableActiveSheet(precondition.sheets) && precondition.sheets.some((item) => item.name === payload.sheetName)
-  if (operation === 'move_worksheet') return precondition.sheets.some((item) => item.name === name) && Number.isInteger(payload.index) && payload.index >= 1 && payload.index <= precondition.sheets.length
-  return precondition.sheets.some((item) => item.name === name) && typeof payload.visible === 'boolean' && (payload.visible || precondition.sheets.filter((item) => item.visible === true).length > 1)
-}
-function verifiedSpreadsheetWriteMatches(result, operation, payload, approvedResource, precondition) {
-  if (!validOfficeSpreadsheetWriteResult(result) || result.operation !== operation || !sameOfficeResource(result.resource, approvedResource)) return false
-  if (operation === 'set_values') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.values, payload.values) && jsonMatches(result.observed.values, payload.values)
-  if (operation === 'set_formula') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.formulas, payload.formulas) && jsonMatches(result.observed.formulas, payload.formulas)
-  if (operation === 'clear') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.isBlank === true && Array.isArray(result.observed.values) && Array.isArray(result.observed.formulas)
-  if (operation === 'fill_range') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.direction === payload.direction && result.requested.strategy === 'atomic_set_values' && Array.isArray(result.observed.values) && Array.isArray(result.observed.formulas) && result.observed.verified === true && !!precondition?.state && jsonMatches({ ...result.observed.state, values: precondition.state.values, formulas: precondition.state.formulas }, precondition.state)
-  if (operation === 'batch_write') { const batch = spreadsheetBatchWrite(payload); return !!batch && result.requested?.range === batch.range && jsonMatches(result.requested?.cells, batch.cells) && result.observed?.range === batch.range && jsonMatches(result.observed?.values, batch.values) && Array.isArray(result.observed?.formulas) && result.observed.verified === true && !!precondition?.state && jsonMatches(result.observed?.state, { ...precondition.state, values: batch.values, formulas: precondition.state.formulas }) }
-  if (operation === 'format') return hasVerifiedSpreadsheetRange(result, payload) && requestedFormatMatches(result.requested, payload) && observedFormatMatches(result.observed.format, payload)
-  if (operation === 'merge' || operation === 'unmerge') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.merged === (operation === 'merge') && result.observed.merged === (operation === 'merge')
-  if (operation === 'row_height') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.RowHeight === payload.value && result.observed.RowHeight === payload.value
-  if (operation === 'column_width') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.ColumnWidth === payload.value && result.observed.ColumnWidth === payload.value
-  if (operation === 'sort') return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.sorts, payload.sorts) && result.requested.hasHeader === (payload.hasHeader !== false) && Array.isArray(result.observed.values)
-  if (operation === 'set_auto_filter') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.enabled === payload.enabled && result.observed.enabled === payload.enabled
-  if (operation === 'clear_filters') return hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.observed.after?.operator === 'none'
-  if (['set_rows_hidden', 'set_columns_hidden', 'auto_fit'].includes(operation)) {
-    const target = spreadsheetDimensionOperation(operation, payload); const before = precondition?.dimensions; const after = result.observed?.dimensions
-    if (!target || !before || !validSpreadsheetDimensions(after) || result.observed?.verified !== true || after.sheetName !== before.sheetName || after.range !== target.range || after.axis !== target.axis) return false
-    if (operation === 'auto_fit') return result.requested?.range === target.range && result.requested?.axis === target.axis && result.observed?.invocationObserved === true && after.items.every((item, index) => item.hidden === before.items[index]?.hidden)
-    return result.requested?.range === target.range && result.requested?.axis === target.axis && result.requested?.hidden === target.hidden && after.items.every((item, index) => item.hidden === target.hidden && item.size === before.items[index]?.size)
-  }
-  if (operation === 'set_print_settings') { const before = precondition?.printSettings; const after = result.observed?.printSettings; if (!before || !validSpreadsheetPrintSettings(after) || result.observed.verified !== true) return false; const expected = { ...before, ...Object.fromEntries(SPREADSHEET_PRINT_KEYS.filter((key) => Object.hasOwn(payload, key)).map((key) => [key, payload[key]])), ...((Object.hasOwn(payload, 'fitToPagesWide') || Object.hasOwn(payload, 'fitToPagesTall')) ? { zoom: false } : {}) }; return jsonMatches(after, expected) && SPREADSHEET_PRINT_KEYS.filter((key) => Object.hasOwn(payload, key)).every((key) => jsonMatches(result.requested?.[key], expected[key])) && (expected.zoom === false ? result.requested?.zoom === false : true) }
-  if (operation === 'set_outline_group') { const before = precondition?.outline; const after = result.observed?.outline; const target = parseSpreadsheetOutlineRange(payload?.range, payload?.axis); const expectedLevels = before?.levels?.map((level) => payload.grouped ? level + 1 : level - 1); return !!before && !!target && validSpreadsheetOutline(after) && result.observed.verified === true && result.requested?.range === target.range && result.requested?.axis === payload.axis && result.requested?.grouped === payload.grouped && after.sheetName === before.sheetName && after.range === target.range && after.axis === payload.axis && jsonMatches(after.levels, expectedLevels) }
-  if (operation === 'set_zoom') { const before = precondition?.view; const after = result.observed?.view; return !!before && !!after && result.requested?.zoom === payload.zoom && after.zoom === payload.zoom && jsonMatches({ ...after, zoom: before.zoom }, before) && result.observed.verified === true }
-  if (operation === 'set_freeze_panes') { const before = precondition?.view; const after = result.observed?.view; const parsed = parseSpreadsheetAddress(payload.target); if (!before || !after || result.observed.verified !== true) return false; if (payload.freeze !== true) return result.requested?.freeze === false && after.freezePanes === false && after.zoom === before.zoom && after.scrollRow === before.scrollRow && after.scrollColumn === before.scrollColumn && after.sheetName === before.sheetName && after.activeCell === before.activeCell; return result.requested?.freeze === true && result.requested?.target === payload.target && !!parsed && after.freezePanes === true && after.activeCell === payload.target && after.splitRow === parsed.rowFrom - 1 && after.splitColumn === parsed.colFrom - 1 && after.zoom === before.zoom && after.scrollRow === before.scrollRow && after.scrollColumn === before.scrollColumn && after.sheetName === before.sheetName }
-  if (operation === 'set_data_validation') {
-    const expected = spreadsheetRequestedValidation(payload); const expectedState = expected && precondition?.state ? { ...precondition.state, validation: expected } : null
-    return !!expected && !!expectedState && hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.validation, expected) && jsonMatches(result.observed.validation, expected) && jsonMatches(result.observed.state, expectedState)
-  }
-  if (operation === 'clear_data_validation') {
-    const expectedState = precondition?.state ? { ...precondition.state, validation: null } : null
-    return !!expectedState && hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && result.requested.validation === null && result.observed.validation === null && jsonMatches(result.observed.state, expectedState)
-  }
-  if (operation === 'add_hyperlink') {
-    const expected = spreadsheetRequestedHyperlink(payload); const before = precondition?.state?.hyperlinks
-    if (!expected || !validSpreadsheetHyperlinks(before) || !validSpreadsheetHyperlinks(result.observed.hyperlinks) || !validSpreadsheetHyperlink(result.observed.newItem)) return false
-    const added = result.observed.hyperlinks.filter((item) => !before.some((prior) => jsonMatches(prior, item))); const expectedState = { ...precondition.state, hyperlinks: result.observed.hyperlinks }
-    return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.hyperlink, expected) && result.observed.hyperlinks.length === before.length + 1 && added.length === 1 && jsonMatches(result.observed.newItem, added[0]) && added[0].address === expected.url && added[0].subAddress === expected.subAddress && added[0].textToDisplay === expected.textToDisplay && (expected.screenTip === undefined || added[0].screenTip === expected.screenTip) && jsonMatches(result.observed.state, expectedState)
-  }
-  if (operation === 'delete_hyperlinks') {
-    const before = precondition?.state?.hyperlinks; const expectedState = precondition?.state ? { ...precondition.state, hyperlinks: [] } : null
-    return validSpreadsheetHyperlinks(before) && !!expectedState && hasVerifiedSpreadsheetRange(result, payload) && result.requested.delete === true && validSpreadsheetHyperlinks(result.observed.hyperlinks) && result.observed.hyperlinks.length === 0 && jsonMatches(result.observed.state, expectedState)
-  }
-  if (operation === 'add_conditional_format') {
-    const expected = spreadsheetRequestedConditionalFormat(payload); const before = precondition?.state?.conditionalFormats
-    if (!expected || !validSpreadsheetConditionalFormats(before) || !validSpreadsheetConditionalFormats(result.observed.conditionalFormats) || !validSpreadsheetConditionalFormat(result.observed.newItem)) return false
-    const added = result.observed.conditionalFormats.filter((item) => !before.some((prior) => jsonMatches(prior, item))); const expectedState = { ...precondition.state, conditionalFormats: result.observed.conditionalFormats }
-    const matches = (item) => item.type === expected.type && item.operator === expected.operator && item.formula1 === expected.formula1 && item.formula2 === expected.formula2 && (expected.fillColor === undefined || item.fillColor === expected.fillColor) && (expected.fontColor === undefined || item.fontColor === expected.fontColor) && (expected.bold === undefined || item.bold === expected.bold) && (expected.italic === undefined || item.italic === expected.italic)
-    return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.conditionalFormat, expected) && result.observed.conditionalFormats.length === before.length + 1 && added.length === 1 && jsonMatches(result.observed.newItem, added[0]) && matches(added[0]) && jsonMatches(result.observed.state, expectedState)
-  }
-  if (operation === 'clear_conditional_formats') {
-    const before = precondition?.state?.conditionalFormats; const expectedState = precondition?.state ? { ...precondition.state, conditionalFormats: [] } : null
-    return validSpreadsheetConditionalFormats(before) && !!expectedState && hasVerifiedSpreadsheetRange(result, payload) && result.requested.clear === true && validSpreadsheetConditionalFormats(result.observed.conditionalFormats) && result.observed.conditionalFormats.length === 0 && jsonMatches(result.observed.state, expectedState)
-  }
-  if (operation === 'create_defined_name') {
-    const expected = precondition?.definedNames?.find((item) => item.name === payload.name?.trim()); return precondition?.version === 3 && !expected && result.requested.name === payload.name?.trim() && result.requested.refersTo === payload.refersTo?.trim() && result.requested.visible === (payload.visible ?? true) && result.requested.scope === 'workbook' && result.observed.name === payload.name?.trim() && result.observed.refersTo === payload.refersTo?.trim() && result.observed.visible === (payload.visible ?? true) && result.observed.scope === 'workbook' && Array.isArray(result.observed.names) && jsonMatches(result.observed.names.filter((item) => item.name !== payload.name?.trim()), precondition.definedNames) && result.observed.verified === true
-  }
-  if (operation === 'delete_defined_name') {
-    const expected = precondition?.definedNames?.find((item) => item.name === payload.name?.trim()); return precondition?.version === 3 && !!expected && result.requested.name === expected.name && jsonMatches(result.requested.refersTo, expected.refersTo) && result.observed.name === expected.name && result.observed.deleted === true && jsonMatches(result.observed.names, precondition.definedNames.filter((item) => item.name !== expected.name)) && result.observed.verified === true
-  }
-  if (operation === 'activate_worksheet') {
-    const sheets = precondition?.sheets; const source = payload.sheetName
-    const expected = Array.isArray(sheets) ? sheets.map((sheet) => ({ ...sheet, active: sheet.name === source })) : null
-    return precondition?.version === 3 && typeof source === 'string' && Object.keys(payload ?? {}).length === 1 && hasSingleReadableActiveSheet(sheets) && !!expected && validWorkbookSheets(result.observed.sheets) && result.requested.sheetName === source && result.observed.sheetName === source && jsonMatches(result.observed.sheets, expected) && result.observed.verified === true
-  }
-  if (operation === 'move_worksheet') {
-    const sheets = precondition?.sheets; const source = payload.sourceName ?? payload.sheetName; if (precondition?.version !== 3 || !validWorkbookSheets(sheets) || !Number.isInteger(payload.index) || !sheets.some((item) => item.name === source)) return false
-    const expected = sheets.filter((item) => item.name !== source); expected.splice(payload.index - 1, 0, sheets.find((item) => item.name === source)); const expectedSnapshot = expected.map((item, index) => ({ ...item, index: index + 1 }))
-    return result.requested.sourceName === source && result.requested.index === payload.index && jsonMatches(result.observed.order, expectedSnapshot.map((item) => item.name)) && validWorkbookSheets(result.observed.sheets) && jsonMatches(result.observed.sheets, expectedSnapshot) && result.observed.verified === true
-  }
-  if (operation === 'set_worksheet_visibility') {
-    const sheets = precondition?.sheets; const source = payload.sourceName ?? payload.sheetName; const expected = Array.isArray(sheets) ? sheets.map((item) => item.name === source ? { ...item, visible: payload.visible } : item) : null
-    return precondition?.version === 3 && validWorkbookSheets(sheets) && sheets.every((item) => typeof item.visible === 'boolean') && sheets.some((item) => item.name === source) && typeof payload.visible === 'boolean' && !(payload.visible === false && sheets.find((item) => item.name === source)?.active === true) && !!expected && result.requested.sheetName === source && result.requested.visible === payload.visible && result.observed.sheetName === source && result.observed.visible === payload.visible && validWorkbookSheets(result.observed.sheets) && jsonMatches(result.observed.sheets, expected) && result.observed.verified === true
-  }
-  if (operation === 'replace_range_text') {
-    const plan = spreadsheetP0Plan(operation, payload, precondition); const what = payload.what; const replacement = payload.replacement ?? ''
-    if (!plan || typeof what !== 'string' || !what || typeof replacement !== 'string') return false
-    let count = 0; const expectedValues = plan.sourceState.values.map((row) => row.map((value) => { const next = spreadsheetReplacement(value, what, replacement, payload.matchEntireCell === true, payload.matchCase === true); count += next.count; return next.value }))
-    const expectedFormulas = plan.sourceState.formulas.map((row) => row.map((formula) => typeof formula === 'string' && formula.startsWith('=') ? spreadsheetReplacement(formula, what, replacement, payload.matchEntireCell === true, payload.matchCase === true).value : formula))
-    const formulaChanged = !jsonMatches(expectedFormulas, plan.sourceState.formulas)
-    return hasVerifiedSpreadsheetRange(result, payload) && result.requested.what === what && result.requested.replacement === replacement && result.requested.matchEntireCell === (payload.matchEntireCell === true) && result.requested.matchCase === (payload.matchCase === true) && result.requested.allowFormulaChanges === (payload.allowFormulaChanges === true) && (!formulaChanged || payload.allowFormulaChanges === true) && jsonMatches(result.observed.values, expectedValues) && jsonMatches(result.observed.formulas, expectedFormulas) && result.observed.replacementCount === count
-  }
-  if (operation === 'text_to_columns') {
-    const plan = spreadsheetP0Plan(operation, payload, precondition); if (!plan) return false
-    const expectedValues = plan.split.map((row) => [...row, ...Array(plan.width - row.length).fill(null)])
-    return result.requested.range === payload.range && result.requested.outputRange === plan.output && result.requested.delimiter === (payload.delimiter ?? 'comma') && result.requested.consecutiveDelimiter === (payload.consecutiveDelimiter === true) && result.observed.range === payload.range && result.observed.outputRange === plan.output && jsonMatches(result.observed.values, expectedValues) && spreadsheetSameShape(result.observed.formulas, expectedValues) && spreadsheetBlankMatrix(result.observed.formulas) && result.observed.verified === true
-  }
-  if (operation === 'remove_duplicates') {
-    const plan = spreadsheetP0Plan(operation, payload, precondition); const columns = payload.columns; const hasHeader = payload.hasHeader !== false
-    if (!plan || !Array.isArray(columns) || columns.length === 0 || columns.some((column) => !Number.isInteger(column) || column < 1 || column > plan.sourceState.values[0]?.length) || new Set(columns).size !== columns.length) return false
-    const expectedValues = hasHeader ? [plan.sourceState.values[0].slice()] : []; const expectedFormulas = hasHeader ? [plan.sourceState.formulas[0].slice()] : []; const seen = new Set(); let removed = 0
-    for (let index = hasHeader ? 1 : 0; index < plan.sourceState.values.length; index += 1) { const value = plan.sourceState.values[index]; const key = columns.map((column) => spreadsheetDuplicateKey(value[column - 1])).join('\u001f'); if (seen.has(key)) removed += 1; else { seen.add(key); expectedValues.push(value.slice()); expectedFormulas.push(plan.sourceState.formulas[index].slice()) } }
-    while (expectedValues.length < plan.sourceState.values.length) { expectedValues.push(Array(plan.sourceState.values[0].length).fill(null)); expectedFormulas.push(Array(plan.sourceState.values[0].length).fill('')) }
-    return hasVerifiedSpreadsheetRange(result, payload) && jsonMatches(result.requested.columns, columns) && result.requested.hasHeader === hasHeader && jsonMatches(result.observed.values, expectedValues) && jsonMatches(result.observed.formulas, expectedFormulas) && result.observed.duplicateRowsRemoved === removed
-  }
-  if (operation === 'move_range') {
-    const plan = spreadsheetP0Plan(operation, payload, precondition); if (!plan) return false
-    return result.requested.range === payload.range && result.requested.destination === payload.destination && result.requested.outputRange === plan.output && result.observed.range === payload.range && result.observed.outputRange === plan.output && result.observed.sourceBlank === true && spreadsheetSameShape(result.observed.sourceValues, plan.sourceState.values) && spreadsheetSameShape(result.observed.sourceFormulas, plan.sourceState.formulas) && spreadsheetBlankMatrix(result.observed.sourceValues) && spreadsheetBlankMatrix(result.observed.sourceFormulas) && jsonMatches(result.observed.values, plan.sourceState.values) && jsonMatches(result.observed.formulas, plan.sourceState.formulas) && jsonMatches(result.observed.format, plan.sourceState.format) && result.observed.merged === plan.sourceState.merged && result.observed.verified === true
-  }
-  return false
-}
-
 function validTeamParent(value) {
   return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every((key) => ['parentId', 'bookId', 'parentName', 'parentType', 'fingerprint', 'canRead', 'canCreate'].includes(key))
     && ['parentId', 'bookId', 'parentName', 'fingerprint'].every((key) => typeof value[key] === 'string' && value[key].length > 0)
@@ -1299,17 +659,16 @@ function validTeamKnowledgeParent(value) {
   return validTeamParent(value) && typeof value.parentType === 'string' && value.parentType.length > 0
 }
 const TEAM_KNOWLEDGE_LIGHT_STAGES = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
-const TEAM_KNOWLEDGE_SPREADSHEET_STAGES = ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified']
 function validTeamKnowledgeItem(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && typeof value.catalogId === 'string' && /^\d+$/.test(value.catalogId)
-    && ['light_document', 'spreadsheet'].includes(value.kind)
+    && value.kind === 'light_document'
     && typeof value.name === 'string' && value.name.length > 0
     && typeof value.url === 'string' && value.url.startsWith('https://doc.midea.com/')
     && typeof value.fingerprint === 'string' && value.fingerprint.length > 0
 }
-function validTeamKnowledgeStages(value, kind) {
-  const expected = kind === 'light_document' ? TEAM_KNOWLEDGE_LIGHT_STAGES : TEAM_KNOWLEDGE_SPREADSHEET_STAGES
+function validTeamKnowledgeStages(value) {
+  const expected = TEAM_KNOWLEDGE_LIGHT_STAGES
   if (!Array.isArray(value)) return false
   let previous = -1
   for (const stage of value) { const index = expected.indexOf(stage); if (index <= previous) return false; previous = index }
@@ -1319,29 +678,19 @@ function validTeamKnowledgeItemResult(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !['verified_write', 'partial_delivery', 'ok'].includes(value.status)) return false
   if (value.status === 'ok') return validTeamKnowledgeParent(value.parent) || (validTeamKnowledgeItem(value.item) && value.readback && typeof value.readback === 'object')
   if (value.status === 'verified_write') return validTeamKnowledgeItem(value.item)
-    && validTeamKnowledgeStages(value.stages, value.item.kind) && value.stages.length === (value.item.kind === 'light_document' ? 5 : 4)
+    && validTeamKnowledgeStages(value.stages) && value.stages.length === TEAM_KNOWLEDGE_LIGHT_STAGES.length
     && value.readback && typeof value.readback === 'object'
   if ((value.item !== null && !validTeamKnowledgeItem(value.item)) || !Array.isArray(value.stages) || !['inspect', 'create', 'rediscover', 'write', 'readback', 'unsupported', 'confirmation'].includes(value.failedAt)
     || typeof value.error !== 'string' || value.error.length === 0) return false
   return value.diagnostic === undefined || (value.diagnostic && typeof value.diagnostic === 'object' && Number.isInteger(value.diagnostic.httpStatus) && (typeof value.diagnostic.errorCode === 'string' || value.diagnostic.errorCode === null))
 }
 function teamKnowledgeTargetFingerprint(target, parent, kind) {
-  return hash(JSON.stringify({ browser: target.browser, windowId: target.windowId, tabId: target.tabId, url: target.url, parentFingerprint: parent.fingerprint, kind }))
+  // Batch writes intentionally navigate this tab from the parent directory to
+  // each created document. The stable fence is the tab plus verified parent
+  // identity; including the transient URL makes a safe partial retry conflict.
+  return hash(JSON.stringify({ browser: target.browser, windowId: target.windowId, tabId: target.tabId, parentFingerprint: parent.fingerprint, kind }))
 }
 function teamKnowledgeContentHash(kind, name, body) { return hash(JSON.stringify({ kind, name, body })) }
-function validTeamKnowledgeItemArguments(args) {
-  if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
-  const keys = Object.keys(args)
-  if (args.action === 'inspect_parent') return keys.length === 1
-  if (args.action === 'preview') return (keys.length === 4 || keys.length === 5) && (args.parentFingerprint === undefined || typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0)
-    && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.name === 'string' && args.name.trim().length > 0 && args.name.length <= 120
-    && typeof args.body === 'string' && args.body.length <= 100000 && (args.kind === 'spreadsheet' || args.body.trim().length > 0)
-  if (args.action === 'create') return keys.length === 6 && typeof args.challenge === 'string' && args.challenge.length > 0
-    && typeof args.idempotencyIdentity === 'string' && args.idempotencyIdentity.length > 0 && args.idempotencyIdentity.length <= 128
-    && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.name === 'string' && args.name.trim().length > 0 && args.name.length <= 120
-    && typeof args.body === 'string' && args.body.length <= 100000 && (args.kind === 'spreadsheet' || args.body.trim().length > 0)
-  return args.action === 'readback' && keys.length === 3 && ['light_document', 'spreadsheet'].includes(args.kind) && typeof args.catalogId === 'string' && /^\d+$/.test(args.catalogId)
-}
 function validTeamKnowledgeBatchItems(items) {
   return Array.isArray(items) && items.length >= 1 && items.length <= 10
     && items.every((item) => item && typeof item === 'object' && !Array.isArray(item) && Object.keys(item).length === 2
@@ -1352,8 +701,6 @@ function validTeamKnowledgeBatchItems(items) {
 function validTeamKnowledgeBatchArguments(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
   const keys = Object.keys(args)
-  if (args.action === 'inspect_parent') return keys.length === 1
-  if (args.action === 'status') return keys.length === 2 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
   if (args.action === 'preview') return (keys.length === 3 || keys.length === 4) && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
     && (args.parentFingerprint === undefined || typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256) && validTeamKnowledgeBatchItems(args.items)
   return args.action === 'create' && keys.length === 3 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
@@ -1364,13 +711,17 @@ function teamKnowledgeBatchFingerprint(items) {
 }
 const PMD_ANALYSIS_MARKERS = [
   '# 需求分析与研发交付',
-  '## 1. 需求理解与范围',
-  '## 2. 证据分类',
-  '## 3. 规模评估与拆分',
-  '## 4. 代码影响地图',
-  '## 5. 纵向任务',
-  '## 6. 验收合同',
-  '## 7. 研发交付与风险',
+  '## 1. 需求最终理解',
+  '## 2. 产品纠正',
+  '## 3. 最终业务规则',
+  '## 4. 代码修改位置',
+  '## 5. 具体修改方式',
+  '## 6. 验收清单',
+  '### 正常情况',
+  '### 异常情况',
+  '### 边界情况',
+  '### 权限情况',
+  '### 兼容情况',
 ]
 const PMD_PRD_MARKERS = [
   '# PRD:',
@@ -1385,11 +736,6 @@ const PMD_PRD_MARKERS = [
   '# 七、配置与开关 【选填】',
   '# 八、测试关注点 [必填]',
   '# 九、参考文档 【选填】',
-  '## AccrUI 需求交接附录',
-  '### A. 需求过程与证据分类',
-  '### B. 需求交接索引',
-  '### C. 研发继续工作入口',
-  '### D. 生成完整性规则',
 ]
 function markdownOutsideFences(body) {
   let fence = null
@@ -1416,10 +762,19 @@ function pmdBatchTemplateFailure(batchId, items) {
   for (const document of items) if (/\\n/.test(markdownOutsideFences(document.body))) return `${document.name} contains a literal \\n outside a fenced code block`
   const missingAnalysis = orderedMarkdownMarkersMissing(analysis.body, PMD_ANALYSIS_MARKERS)
   if (missingAnalysis) return `analysis document is missing or reorders: ${missingAnalysis}`
-  for (const header of ['| Evidence ID |', '| Impact ID |', '| Task ID |', '| AC ID |']) if (!analysis.body.includes(header)) return `analysis document is missing required table: ${header}`
+  if (!analysis.body.includes('| 改什么 | 在哪里改 | 怎么改 | 改完效果 |')) return 'analysis document is missing the code-change table'
   const missingPrd = orderedMarkdownMarkersMissing(prd.body, PMD_PRD_MARKERS)
   if (missingPrd) return `PRD document is missing or reorders: ${missingPrd}`
   for (const header of ['| 业务需求名称 |', '| 版本 | 日期 |', '| 角色 | 功能/页面 |', '| 指标项 | 目标值 |']) if (!prd.body.includes(header)) return `PRD document is missing required table: ${header}`
+  const internalTerm = /\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/
+  const analysisInternalTerm = markdownOutsideFences(analysis.body).match(internalTerm)
+  if (analysisInternalTerm) return `analysis document exposes an internal delivery term: ${analysisInternalTerm[0]}`
+  const visiblePrd = markdownOutsideFences(prd.body)
+  const prdInternalTerm = visiblePrd.match(internalTerm)
+  if (prdInternalTerm) return `PRD document exposes an internal delivery term: ${prdInternalTerm[0]}`
+  if (/AccrUI\s*需求交接附录/.test(visiblePrd)) return 'PRD document appends a non-company-template handoff section'
+  const codeLocator = visiblePrd.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs)\b/m)
+  if (codeLocator) return `PRD document contains a code locator: ${codeLocator[0].trim()}`
   return null
 }
 function teamKnowledgeVisibleText(value) {
@@ -1521,50 +876,11 @@ function validVerifiedTeamKnowledgeBatchItem(result, approved, persisted = false
   return persisted || teamKnowledgeLightDocumentReadbackMatches(approved.body, result.readback?.body)
 }
 
-const TEAM_DOC_STAGES = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
-function validTeamDocStages(value) {
-  if (!Array.isArray(value)) return false
-  let previous = -1
-  for (const stage of value) {
-    const index = TEAM_DOC_STAGES.indexOf(stage)
-    if (index <= previous) return false
-    previous = index
-  }
-  return true
-}
-function validTeamDocResult(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-    || !validTeamDocStages(value.stages)) return false
-  if (value.status === 'verified_write') {
-    return typeof value.documentId === 'string' && /^\d+$/.test(value.documentId)
-      && value.readbackMatches === true
-      && JSON.stringify(value.stages) === JSON.stringify(TEAM_DOC_STAGES)
-      && (value.observedBody === undefined || typeof value.observedBody === 'string')
-  }
-  if (value.status !== 'partial_delivery' || value.readbackMatches !== false
-    || !((typeof value.documentId === 'string' && /^\d+$/.test(value.documentId)) || value.documentId === null)
-    || !['inspect', 'create', 'rediscover', 'write', 'readback'].includes(value.failedAt)
-    || typeof value.error !== 'string' || value.error.length === 0) return false
-  if (value.diagnostic !== undefined && (!value.diagnostic || typeof value.diagnostic !== 'object'
-    || !Number.isInteger(value.diagnostic.httpStatus)
-    || !(typeof value.diagnostic.errorCode === 'string' || value.diagnostic.errorCode === null))) return false
-  return value.observedBody === undefined || typeof value.observedBody === 'string'
-}
 function hash(value) { return createHash('sha256').update(value).digest('hex') }
 function flatSelectionReplaceIdentity(challenge) {
   // Challenge values are server-generated one-time random values. Hashing keeps
-  // them out of storage/logs while this namespace cannot collide with a model
-  // supplied office_document identity.
+  // them out of storage/logs while this namespace cannot collide with another write.
   return `flat-selection:${hash(challenge).slice(0, 48)}`
-}
-function teamDocTargetFingerprint(target, parent) {
-  return hash(JSON.stringify({ browser: target.browser, windowId: target.windowId, tabId: target.tabId, url: target.url, parentFingerprint: parent.fingerprint }))
-}
-function validTeamDocInspectArguments(args) {
-  if (!args || typeof args !== 'object' || Array.isArray(args) || args.phase !== 'inspect') return false
-  const allowed = new Set(['phase', 'challenge', 'idempotencyIdentity', 'name', 'body'])
-  return Object.keys(args).every((key) => allowed.has(key)
-    && (key === 'phase' || args[key] === ''))
 }
 function teamDocInspectFailureText(result) {
   const diagnostic = result?.diagnostic
@@ -1586,31 +902,6 @@ function validOfficeReadFailure(value) {
   return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 2
     && ['unsupported', 'preview', 'readonly', 'invalid_range', 'navigation', 'iframe_replaced', 'timeout', 'cancelled', 'fingerprint_mismatch', 'readback_mismatch', 'runtime_error'].includes(value.code)
     && typeof value.message === 'string' && value.message.length > 0
-}
-
-function validBrowserOpenTabArguments(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || typeof value.url !== 'string') return false
-  try {
-    const url = new URL(value.url)
-    return url.protocol === 'http:' || url.protocol === 'https:'
-  } catch {
-    return false
-  }
-}
-
-function validPageIdentity(value, browserTarget) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).length === 2 && typeof value.title === 'string' && value.url === browserTarget.url
-}
-
-function validBrowserOpenTabOutput(value) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).length === 5
-    && typeof value.runId === 'string' && value.runId.length > 0
-    && typeof value.requestId === 'string' && value.requestId.length > 0
-    && typeof value.generation === 'string' && value.generation.length > 0
-    && validBrowserTarget(value.browserTarget)
-    && validPageIdentity(value.pageIdentity, value.browserTarget)
 }
 
 async function readJson(request) {
@@ -1771,7 +1062,7 @@ export function knowledgeHttpsFetch(input, init = {}, timeouts = {}) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, officeRequestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore, officeSpreadsheetWriteStore?: OfficeSpreadsheetWriteRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, officeRequestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
@@ -1794,9 +1085,7 @@ export class BrowserConnector {
     this.unavailableBrowserTargets = new Map()
     this.currentRunId = undefined
     this.pending = new Map()
-    this.teamDocChallenges = new Map()
     this.teamDocStore = options.teamDocStore ?? new TeamDocRecordStore()
-    this.teamKnowledgeItemChallenges = new Map()
     this.teamKnowledgeBatchStore = options.teamKnowledgeBatchStore ?? new TeamKnowledgeBatchRecordStore()
     this.teamKnowledgeBatchChallenges = new Map()
     this.teamKnowledgeBatchLocks = new Map()
@@ -1804,9 +1093,6 @@ export class BrowserConnector {
     this.officeDocumentWrites = new Map()
     this.uncertainSelectionWrite = undefined
     this.officeDocumentWriteStore = options.officeDocumentWriteStore ?? new OfficeDocumentWriteRecordStore()
-    this.officeSpreadsheetChallenges = new Map()
-    this.officeSpreadsheetWrites = new Map()
-    this.officeSpreadsheetWriteStore = options.officeSpreadsheetWriteStore ?? new OfficeSpreadsheetWriteRecordStore()
   }
 
   /** @returns {Promise<{ url: string, token: string, generation: string }>} */
@@ -1849,9 +1135,6 @@ export class BrowserConnector {
     this.officeDocumentChallenges.clear()
     this.officeDocumentWrites.clear()
     this.uncertainSelectionWrite = undefined
-    this.officeSpreadsheetChallenges.clear()
-    this.officeSpreadsheetWrites.clear()
-    this.teamKnowledgeItemChallenges.clear()
     this.teamKnowledgeBatchChallenges.clear()
     this.browserTargets.clear()
     this.browserTargetSets.clear()
@@ -1874,9 +1157,6 @@ export class BrowserConnector {
     if (this.currentRunId !== undefined && this.currentRunId !== runId) {
       this.officeDocumentChallenges.clear()
       this.officeDocumentWrites.clear()
-      this.officeSpreadsheetChallenges.clear()
-      this.officeSpreadsheetWrites.clear()
-      this.teamKnowledgeItemChallenges.clear()
       this.teamKnowledgeBatchChallenges.clear()
       this.uncertainSelectionWrite = undefined
     }
@@ -1904,17 +1184,13 @@ export class BrowserConnector {
       || typeof response.requestId !== 'string') return false
     const pending = this.pending.get(response.requestId)
     if (!pending) return false
-    const isOfficeContextRequest = pending.request.tool === 'office_get_context'
+    const isOfficeContextRequest = pending.request.tool === 'list_work_tabs'
     const isReadWorkTabRequest = pending.request.tool === 'read_work_tab'
-    const isOfficeReadRangeRequest = pending.request.tool === 'office_read_range'
-    const isOfficeWriteRangeRequest = pending.request.tool === 'office_write_range'
-    const isOfficeDocumentRequest = pending.request.tool === 'office_document'
-    const isOfficeSpreadsheetRequest = pending.request.tool === 'office_spreadsheet'
-    const isTeamDocRequest = pending.request.tool === 'team_doc_create'
-    const isTeamKnowledgeItemRequest = pending.request.tool === 'team_knowledge_item'
+    const isOfficeDocumentRequest = pending.request.tool === 'light_document'
+    const isTeamKnowledgeBatchRequest = pending.request.tool === 'team_knowledge_batch'
     const isKnowledgeRequest = pending.request.tool === 'knowledge_search' || pending.request.tool === 'code_search'
     const isSelectedSourceScopeRequest = pending.request.tool === 'selected_source_scope'
-    const isOfficeRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest || isTeamDocRequest || isTeamKnowledgeItemRequest
+    const isBrowserBoundRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeDocumentRequest || isTeamKnowledgeBatchRequest
     const sameOpenIdentity = response.runId === pending.request.runId && response.generation === pending.request.generation
     const currentTarget = this.browserTargets.get(pending.request.runId)
     const currentTargets = this.browserTargetSets.get(pending.request.runId) ?? (currentTarget === undefined ? undefined : [currentTarget])
@@ -1924,15 +1200,11 @@ export class BrowserConnector {
     const sameOfficeIdentity = sameOpenIdentity && sameBrowserTarget(response.browserTarget, currentTarget)
       && sameBrowserTargetList(responseTargets, currentTargets)
       && sameUnavailableBrowserTargetList(responseUnavailable, currentUnavailable)
-    if ((isOfficeRequest && !sameOfficeIdentity) || (!isOfficeRequest && !sameOpenIdentity)) return false
+    if ((isBrowserBoundRequest && !sameOfficeIdentity) || (!isBrowserBoundRequest && !sameOpenIdentity)) return false
     clearTimeout(pending.timeout)
     this.pending.delete(response.requestId)
     if (!Object.hasOwn(response, 'result')) {
-      // Office failures carry a structured {code, message} from the runtime;
-      // transparency requires surfacing it verbatim (AGENTS §4) for every
-      // office tool, not only the range/document ones. A spreadsheet failure
-      // must never collapse into a generic "no Connector result".
-      if ((isReadWorkTabRequest || isOfficeReadRangeRequest || isOfficeWriteRangeRequest || isOfficeDocumentRequest || isOfficeSpreadsheetRequest) && validOfficeReadFailure(response.error)) {
+      if ((isReadWorkTabRequest || isOfficeDocumentRequest) && validOfficeReadFailure(response.error)) {
         pending.reject(new Error(JSON.stringify(response.error)))
       } else if (typeof response.error === 'string' && response.error.length > 0) {
         pending.reject(new Error(response.error))
@@ -1941,16 +1213,9 @@ export class BrowserConnector {
       }
       return true
     }
-    if (isTeamDocRequest) {
-      if (!response.result || typeof response.result !== 'object' || Array.isArray(response.result)) { pending.reject(new Error('Extension peer returned an invalid Team Doc result')); return true }
-      pending.resolve({ browserTarget: response.browserTarget, teamDoc: response.result }); return true
-    }
-    if (isTeamKnowledgeItemRequest) {
+    if (isTeamKnowledgeBatchRequest) {
       if (!validTeamKnowledgeItemResult(response.result)) { pending.reject(new Error('Extension peer returned an invalid Team Knowledge item result')); return true }
       pending.resolve({ browserTarget: response.browserTarget, teamKnowledgeItem: response.result }); return true
-    }
-    if (isOfficeSpreadsheetRequest && ((pending.request.action === 'write' && !validOfficeSpreadsheetWriteResult(response.result)) || (pending.request.action !== 'write' && !validOfficeSpreadsheetReadResult(response.result, pending.request.action, pending.request)))) {
-      pending.reject(new Error('Extension peer returned an invalid spreadsheet result')); return true
     }
     if (isKnowledgeRequest) {
       if (!validKnowledgeResult(response.result)) { pending.reject(new Error('Extension peer returned an invalid Knowledge Platform result')); return true }
@@ -1966,40 +1231,18 @@ export class BrowserConnector {
       pending.reject(new Error('Extension peer returned an invalid canonical Office context schema'))
       return true
     }
-    if (isOfficeReadRangeRequest && !validOfficeReadRangeResult(response.result)) {
-      pending.reject(new Error('Extension peer returned an invalid bounded Office range schema'))
-      return true
-    }
-    if (isOfficeWriteRangeRequest && !validOfficeWriteRangeResult(response.result)) {
-      pending.reject(new Error('Extension peer returned an invalid verified Office write schema'))
-      return true
-    }
     if (isReadWorkTabRequest && !validReadWorkTabResult(response.result)) {
       pending.reject(new Error('Extension peer returned an invalid work-tab read'))
       return true
     }
     if (isOfficeDocumentRequest && ((pending.request.action === 'write' && !verifiedLightDocumentWriteMatches(response.result, pending.request))
-      || (pending.request.action !== 'write' && !validOfficeDocumentReadResult(response.result)))) {
+      || (pending.request.action !== 'write' && !validLightDocumentReadResult(response.result)))) {
       pending.reject(new Error('Extension peer returned an invalid light-document result'))
-      return true
-    }
-    if (!isOfficeRequest) {
-      if (!validBrowserTarget(response.browserTarget) || !validPageIdentity(response.result.pageIdentity, response.browserTarget)) {
-        pending.reject(new Error('Extension peer returned an invalid browser_open_tab result'))
-        return true
-      }
-      pending.resolve({ browserTarget: response.browserTarget, pageIdentity: response.result.pageIdentity })
       return true
     }
     pending.resolve(isReadWorkTabRequest ? {
       browserTarget: response.browserTarget,
       result: response.result,
-    } : isOfficeSpreadsheetRequest ? { browserTarget: response.browserTarget, result: response.result } : isOfficeWriteRangeRequest ? {
-      browserTarget: response.browserTarget, resource: response.result.resource, requested: response.result.requested, observed: response.result.observed,
-    } : isOfficeReadRangeRequest ? {
-      browserTarget: response.browserTarget,
-      range: response.result.range,
-      resource: response.result.resource,
     } : isOfficeDocumentRequest ? {
       browserTarget: response.browserTarget,
       result: response.result,
@@ -2065,55 +1308,18 @@ export class BrowserConnector {
     }
     if (message.method === 'tools/list') {
       this.onToolsListed?.()
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, readWorkTabTool, officeReadRangeTool, officeWriteRangeTool, lightDocumentReadTool, lightDocumentSelectionReadTool, lightDocumentSelectionReplacePreviewTool, lightDocumentSelectionReplaceCommitTool, officeDocumentTool, officeSpreadsheetTool, teamKnowledgeSpreadsheetPreviewTool, teamKnowledgeSpreadsheetCreateTool, teamKnowledgeSpreadsheetReadbackTool, teamKnowledgeBatchPreviewTool, teamKnowledgeBatchCreateTool, teamKnowledgeBatchStatusTool, browserOpenTabTool, knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool] } })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { tools: [officeGetContextTool, readWorkTabTool, lightDocumentReadTool, lightDocumentSelectionReadTool, lightDocumentSelectionReplacePreviewTool, lightDocumentSelectionReplaceCommitTool, lightDocumentSearchTool, lightDocumentWritePreviewTool, lightDocumentWriteCommitTool, teamKnowledgeBatchPreviewTool, teamKnowledgeBatchCreateTool, knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool] } })
       return
     }
     if (message.method !== 'tools/call') {
       this.#reply(response, errorResponse(message.id, -32601, 'method not found'))
       return
     }
-    if (message.params?.name === 'browser_open_tab') {
-      await this.#openBrowserTab(message, response)
-      return
-    }
-    if (message.params?.name === 'office_read_range') {
-      await this.#readOfficeRange(message, response)
-      return
-    }
-    if (message.params?.name === 'office_write_range') {
-      await this.#writeOfficeRange(message, response)
-      return
-    }
-    if (message.params?.name === 'office_document') {
-      await this.#officeDocument(message, response, { modelFacing: true })
-      return
-    }
-    if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit'].includes(message.params?.name)) {
+    if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit'].includes(message.params?.name)) {
       await this.#flatLightDocument(message, response)
       return
     }
-    if (message.params?.name === 'office_spreadsheet') {
-      await this.#officeSpreadsheet(message, response)
-      return
-    }
-    if (message.params?.name === 'team_doc_create') {
-      await this.#teamDoc(message, response)
-      return
-    }
-    if (message.params?.name === 'team_knowledge_item') {
-      await this.#teamKnowledgeItem(message, response)
-      return
-    }
-    const spreadsheetAction = ({ team_knowledge_spreadsheet_preview: 'preview', team_knowledge_spreadsheet_create: 'create', team_knowledge_spreadsheet_readback: 'readback' })[message.params?.name]
-    if (spreadsheetAction !== undefined) {
-      await this.#teamKnowledgeItem({ ...message, params: { ...message.params, arguments: { ...(message.params?.arguments ?? {}), action: spreadsheetAction, kind: 'spreadsheet' } } }, response)
-      return
-    }
-    if (message.params?.name === 'team_knowledge_batch') {
-      await this.#teamKnowledgeBatch(message, response)
-      return
-    }
-    const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create', team_knowledge_batch_status: 'status' })[message.params?.name]
+    const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create' })[message.params?.name]
     if (batchAction !== undefined) {
       await this.#teamKnowledgeBatch({ ...message, params: { ...message.params, arguments: { ...(message.params?.arguments ?? {}), action: batchAction } } }, response)
       return
@@ -2130,7 +1336,11 @@ export class BrowserConnector {
       await this.#readWorkTab(message, response)
       return
     }
-    if (!['list_work_tabs', 'office_get_context'].includes(message.params?.name) || !validOfficeGetContextArguments(message.params.arguments ?? {})) {
+    if (message.params?.name !== 'list_work_tabs') {
+      this.#reply(response, errorResponse(message.id, -32601, `Unknown Connector tool: ${String(message.params?.name ?? '')}`))
+      return
+    }
+    if (!validOfficeGetContextArguments(message.params.arguments ?? {})) {
       this.#reply(response, errorResponse(message.id, -32602, 'list_work_tabs accepts no model-controlled target arguments'))
       return
     }
@@ -2153,7 +1363,7 @@ export class BrowserConnector {
       generation: this.generation,
       browserTarget: boundTarget,
       ...(isMultiTarget ? { browserTargets, unavailableBrowserTargets } : {}),
-      tool: 'office_get_context',
+      tool: 'list_work_tabs',
     }
     try {
       const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
@@ -2251,35 +1461,6 @@ export class BrowserConnector {
     }
   }
 
-  async #readOfficeRange(message, response) {
-    if (!validOfficeReadRangeArguments(message.params?.arguments ?? {})) {
-      this.#reply(response, errorResponse(message.id, -32602, 'office_read_range requires one bounded A1 range argument'))
-      return
-    }
-    const runId = this.currentRunId
-    const boundTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
-    if (!validBrowserTarget(boundTarget)) {
-      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
-      return
-    }
-    const correlation = {
-      type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation,
-      browserTarget: boundTarget, tool: 'office_read_range', range: message.params.arguments.range.trim(),
-    }
-    try {
-      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
-      const structuredContent = {
-        runId: correlation.runId, requestId: correlation.requestId, generation: correlation.generation,
-        browserTarget: resolved.browserTarget, resource: resolved.resource, range: resolved.range,
-      }
-      if (!validOfficeReadRangeOutput(structuredContent)) throw new Error('Browser Connector produced an invalid bounded Office range schema')
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } })
-    } catch (error) {
-      const failure = error instanceof Error ? error.message : 'Browser Connector request failed'
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: failure }], isError: true } })
-    }
-  }
-
   async #knowledgeSearch(message, response) {
     const kind = message.params.name === 'knowledge_search' ? 'knowledge_search' : 'code_search'
     if (!validKnowledgeArguments(message.params.arguments ?? {})) {
@@ -2341,30 +1522,6 @@ export class BrowserConnector {
     }
   }
 
-  async #writeOfficeRange(message, response) {
-    if (!validOfficeWriteRangeArguments(message.params?.arguments ?? {})) {
-      this.#reply(response, errorResponse(message.id, -32602, 'office_write_range requires a bounded A1 range, rectangular values, and a prior read resource fingerprint'))
-      return
-    }
-    const runId = this.currentRunId
-    const boundTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
-    if (!validBrowserTarget(boundTarget)) {
-      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
-      return
-    }
-    const args = message.params.arguments
-    const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: boundTarget, tool: 'office_write_range', range: args.range.trim(), values: args.values, resource: args.resource }
-    try {
-      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
-      const structuredContent = { runId: correlation.runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, resource: resolved.resource, requested: resolved.requested, observed: resolved.observed }
-      if (!validOfficeWriteRangeOutput(structuredContent)) throw new Error('Browser Connector produced an invalid verified Office write schema')
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } })
-    } catch (error) {
-      const failure = error instanceof Error ? error.message : 'Browser Connector write request failed'
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: failure }], isError: true } })
-    }
-  }
-
   async #readWorkTab(message, response) {
     const args = message.params?.arguments ?? {}
     if (!validReadWorkTabArguments(args)) {
@@ -2415,15 +1572,21 @@ export class BrowserConnector {
   async #flatLightDocument(message, response) {
     const name = message.params?.name
     const args = message.params?.arguments ?? {}
+    if (name === 'light_document_write_preview' && lightDocumentPayloadHasLiteralEscapedNewline(args.payload)) {
+      this.#reply(response, errorResponse(message.id, -32602, 'Light-document payload contains a literal \\n outside a code block. Use real paragraph/list blocks or actual newline characters before requesting a write.'))
+      return
+    }
     if (!validFlatLightDocumentArguments(name, args)) {
       this.#reply(response, errorResponse(message.id, -32602, `${name} received invalid arguments; use its flat schema exactly.`))
       return
     }
-    // Read-only flat tools deliberately reuse the proven office_document
-    // routing path.  The extension still owns frame discovery and the model
+    // All light-document tools reuse one internal routing path. The extension owns frame discovery and the model
     // cannot supply a Browser Target or resource identity.
-    if (name === 'light_document_read' || name === 'light_document_selection_read') {
-      await this.#officeDocument({ ...message, params: { ...message.params, arguments: name === 'light_document_read' ? { action: 'read', ...args } : { action: 'selection' } } }, response)
+    if (name === 'light_document_read' || name === 'light_document_selection_read' || name === 'light_document_search') {
+      const mapped = name === 'light_document_read' ? { action: 'read', ...args }
+        : name === 'light_document_search' ? { action: 'search', ...args }
+          : { action: 'selection' }
+      await this.#lightDocument({ ...message, params: { ...message.params, arguments: mapped } }, response)
       return
     }
     const runId = this.currentRunId
@@ -2434,18 +1597,31 @@ export class BrowserConnector {
       this.#toolError(response, message.id, 'Selected-content write is uncertain after failed readback. Stop automatic recovery, report the exact error, and wait for a new Browser Target or Run before another write.')
       return
     }
+    if (name === 'light_document_write_preview') {
+      await this.#lightDocument({ ...message, params: { ...message.params, arguments: { action: 'inspect_write', operation: args.operation, payload: args.payload } } }, response)
+      return
+    }
+    if (name === 'light_document_write_commit') {
+      const grant = this.officeDocumentChallenges.get(args.challenge)
+      if (!grant || grant.flatSelectionReplace === true || typeof grant.operation !== 'string' || !grant.payload) {
+        this.#toolError(response, message.id, 'Light-document write challenge is missing, stale, or not issued by light_document_write_preview.')
+        return
+      }
+      await this.#lightDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: grant.operation, payload: grant.payload } } }, response)
+      return
+    }
     if (name === 'light_document_selection_replace_commit') {
       const grant = this.officeDocumentChallenges.get(args.challenge)
       if (!grant || grant.flatSelectionReplace !== true || !grant.payload || typeof grant.operation !== 'string' || typeof grant.idempotencyIdentity !== 'string') { this.#toolError(response, message.id, 'Selected-content approval challenge is missing, stale, or not issued by preview.'); return }
       // Do not permit any raw action, operation, target, or body to enter this
       // endpoint.  Commit reconstitutes exactly what preview approved.
-      await this.#officeDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: grant.operation, payload: grant.payload } } }, response)
+      await this.#lightDocument({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: grant.operation, payload: grant.payload } } }, response)
       return
     }
-    const selectionCorrelation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'selection' }
+    const selectionCorrelation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'light_document', action: 'selection' }
     try {
       const selected = await this.#requestExtension(selectionCorrelation, undefined, this.officeRequestTimeoutMs)
-      if (!validOfficeDocumentReadResult(selected.result)) throw new Error('Browser Connector produced an invalid light-document selection')
+      if (!validLightDocumentReadResult(selected.result)) throw new Error('Browser Connector produced an invalid light-document selection')
       const selection = selected.result.document?.selection
       const selectionFingerprint = selection?.selectionFingerprint
       if (!selection?.supported || selection?.truncated || selection?.hasSelection !== true || selection?.isCollapsed || selection?.stable !== true || typeof selectionFingerprint !== 'string' || !/^selection-v4-[0-9a-f]{32}$/.test(selectionFingerprint)) {
@@ -2474,18 +1650,14 @@ export class BrowserConnector {
     }
   }
 
-  async #officeDocument(message, response, { modelFacing = false } = {}) {
+  async #lightDocument(message, response) {
     const args = message.params?.arguments ?? {}
-    if (modelFacing && (args.action === 'selection' || ['selection_replace', 'selection_content_replace', 'selection_blocks_replace'].includes(args.operation))) {
-      this.#reply(response, errorResponse(message.id, -32602, 'Selected-content reads and replacement are unavailable through office_document. Use light_document_selection_read and light_document_selection_replace_preview/commit.'))
-      return
-    }
     if (['inspect_write', 'write'].includes(args.action) && lightDocumentPayloadHasLiteralEscapedNewline(args.payload)) {
       this.#reply(response, errorResponse(message.id, -32602, 'Light-document payload contains a literal \\n outside a code block. Use real paragraph/list blocks or actual newline characters before requesting a write.'))
       return
     }
-    if (!validOfficeDocumentArguments(args)) {
-      this.#reply(response, errorResponse(message.id, -32602, officeDocumentArgumentsHint(args)))
+    if (!validLightDocumentArguments(args)) {
+      this.#reply(response, errorResponse(message.id, -32602, lightDocumentArgumentsHint(args)))
       return
     }
     const runId = this.currentRunId
@@ -2494,13 +1666,6 @@ export class BrowserConnector {
       this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
       return
     }
-    if (modelFacing && ['inspect_write', 'write'].includes(args.action)
-      && this.uncertainSelectionWrite?.runId === runId && this.uncertainSelectionWrite.generation === this.generation
-      && sameBrowserTarget(this.uncertainSelectionWrite.browserTarget, browserTarget)) {
-      this.#toolError(response, message.id, 'Selected-content write is uncertain after failed readback. Stop automatic recovery, report the exact error, and wait for a new Browser Target or Run before another write.')
-      return
-    }
-
     if (args.action === 'write') {
       const grant = this.officeDocumentChallenges.get(args.challenge)
       this.officeDocumentChallenges.delete(args.challenge)
@@ -2539,7 +1704,7 @@ export class BrowserConnector {
           : 'This idempotency identity is uncertain after an interrupted write; automatic retry is forbidden. Reread and resolve manually.')
         return
       }
-      const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: 'write', operation: args.operation, payload: args.payload, resource: grant.resource }
+      const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'light_document', action: 'write', operation: args.operation, payload: args.payload, resource: grant.resource }
       try {
         const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
@@ -2557,12 +1722,12 @@ export class BrowserConnector {
     }
 
     const correlation = {
-      type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_document', action: args.action,
+      type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'light_document', action: args.action,
       ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.query === undefined ? {} : { query: args.query.trim() }), ...(args.payload === undefined ? {} : { payload: args.payload }), ...(args.operation === undefined ? {} : { operation: args.operation }),
     }
     try {
       const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
-      if (!validOfficeDocumentReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded light-document read')
+      if (!validLightDocumentReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded light-document read')
       if (args.action === 'inspect_write') {
         const blockCount = Number.isInteger(resolved.result.document?.blockCount) ? resolved.result.document.blockCount : undefined
         if (['replace', 'delete', 'format', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format'].includes(args.operation) && blockCount === 0) {
@@ -2572,7 +1737,7 @@ export class BrowserConnector {
         const challenge = randomBytes(32).toString('base64url')
         for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
         if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
-        this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payloadHash: lightDocumentWriteHash(args.operation, args.payload), expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payload: args.payload, payloadHash: lightDocumentWriteHash(args.operation, args.payload), idempotencyIdentity: `light-write:${lightDocumentWriteHash(args.operation, args.payload).slice(0, 48)}`, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, challenge }
         this.#reply(response, lightDocumentToolResponse(message.id, result))
         return
@@ -2582,187 +1747,6 @@ export class BrowserConnector {
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document read failed')
     }
-  }
-
-  async #officeSpreadsheet(message, response) {
-    let args = message.params?.arguments ?? {}
-    args = normalizeOfficeSpreadsheetArguments(args)
-    if (!validOfficeSpreadsheetArguments(args)) { this.#reply(response, errorResponse(message.id, -32602, spreadsheetArgumentsHint(args))); return }
-    const runId = this.currentRunId; const browserTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
-    if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
-    if (args.action === 'write') {
-      const grant = this.officeSpreadsheetChallenges.get(args.challenge); this.officeSpreadsheetChallenges.delete(args.challenge)
-      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.browserTarget, browserTarget)) { this.#toolError(response, message.id, 'Spreadsheet approval challenge is missing, stale, or already used.'); return }
-      if (grant.operation !== args.operation || grant.payloadHash !== spreadsheetWriteHash(args.operation, args.payload)) { this.#toolError(response, message.id, 'Spreadsheet approval does not match this operation and payload.'); return }
-      if (!validOfficeResource(args.resource) || args.resource.fingerprint !== grant.resource.fingerprint || args.resource.sheetName !== grant.resource.sheetName) { this.#toolError(response, message.id, 'Spreadsheet resource differs from the approved inspection.'); return }
-      const fingerprint = spreadsheetWriteHash(args.operation, args.payload)
-      const existing = this.officeSpreadsheetWrites.get(args.idempotencyIdentity)
-      if (existing) {
-        if (existing.fingerprint !== fingerprint || existing.resourceFingerprint !== grant.resource.fingerprint) { this.#toolError(response, message.id, 'Spreadsheet idempotency identity conflicts with the approved operation or payload.'); return }
-        this.#reply(response, spreadsheetToolResponse(message.id, existing.result)); return
-      }
-      let checkpoint
-      try {
-        checkpoint = await this.officeSpreadsheetWriteStore.create({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint: hash(canonicalJson(browserTarget)), resourceFingerprint: grant.resource.fingerprint, operation: args.operation, payloadHash: fingerprint })
-      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Could not persist spreadsheet write fence.'); return }
-      if (!checkpoint.createdNew) {
-        this.#toolError(response, message.id, checkpoint.record.state === 'verified'
-          ? 'This idempotency identity was already verified; reread the spreadsheet before continuing.'
-          : 'This idempotency identity is uncertain after an interrupted write; automatic retry is forbidden. Reread and resolve manually.')
-        return
-      }
-      const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: 'write', resource: grant.resource, operation: args.operation, payload: args.payload, precondition: grant.precondition }
-      try {
-        const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
-        if (!verifiedSpreadsheetWriteMatches(resolved.result, args.operation, args.payload, grant.resource, grant.precondition)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
-        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
-        await this.officeSpreadsheetWriteStore.setState(args.idempotencyIdentity, 'verified')
-        if (this.officeSpreadsheetWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetWrites.delete(this.officeSpreadsheetWrites.keys().next().value)
-        this.officeSpreadsheetWrites.set(args.idempotencyIdentity, { fingerprint, resourceFingerprint: grant.resource.fingerprint, result })
-        this.#reply(response, spreadsheetToolResponse(message.id, result))
-      } catch (error) { try { await this.officeSpreadsheetWriteStore.setState(args.idempotencyIdentity, 'uncertain') } catch {}; this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet write failed') }
-      return
-    }
-    const correlation = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'office_spreadsheet', action: args.action, ...(args.range === undefined ? {} : { range: args.range }), ...(args.axis === undefined ? {} : { axis: args.axis }), ...(args.kind === undefined ? {} : { kind: args.kind }), ...(args.sheetName === undefined ? {} : { sheetName: args.sheetName }), ...(args.query === undefined ? {} : { query: args.query }), ...(args.matchCase === undefined ? {} : { matchCase: args.matchCase }), ...(args.matchEntireCell === undefined ? {} : { matchEntireCell: args.matchEntireCell }), ...(args.searchBy === undefined ? {} : { searchBy: args.searchBy }), ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.operation === undefined ? {} : { operation: args.operation }), ...(args.payload === undefined ? {} : { payload: args.payload }) }
-    try {
-      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
-      if (!validOfficeSpreadsheetReadResult(resolved.result, args.action, args)) throw new Error('Browser Connector produced an invalid bounded spreadsheet read')
-      if (args.action === 'inspect_write') {
-        if (!validSpreadsheetPrecondition(resolved.result.precondition) || !validSpreadsheetOperationPrecondition(args.operation, args.payload, resolved.result.precondition)) throw new Error('Browser Connector produced an invalid spreadsheet write precondition')
-        const challenge = randomBytes(32).toString('base64url')
-        for (const [key, candidate] of this.officeSpreadsheetChallenges) if (candidate.expiresAt < Date.now()) this.officeSpreadsheetChallenges.delete(key)
-        if (this.officeSpreadsheetChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeSpreadsheetChallenges.delete(this.officeSpreadsheetChallenges.keys().next().value)
-        this.officeSpreadsheetChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payloadHash: spreadsheetWriteHash(args.operation, args.payload), precondition: resolved.result.precondition, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, challenge }
-        this.#reply(response, spreadsheetToolResponse(message.id, result)); return
-      }
-      const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
-      this.#reply(response, spreadsheetToolResponse(message.id, result))
-    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet read failed') }
-  }
-
-  async #teamDoc(message, response) {
-    const args = message.params?.arguments ?? {}
-    const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
-    if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
-    if (args.phase === 'inspect') {
-      if (!validTeamDocInspectArguments(args)) {
-        this.#reply(response, errorResponse(message.id, -32602, 'team_doc_create inspect accepts only empty known placeholder fields'))
-        return
-      }
-      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_doc_create', phase: 'inspect' }
-      try {
-        const resolved = await this.#requestExtension(request)
-        if (validTeamDocResult(resolved.teamDoc) && resolved.teamDoc.status === 'partial_delivery'
-          && resolved.teamDoc.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(resolved.teamDoc))
-        const parent = resolved.teamDoc.parent
-        if (!validTeamParent(parent)) throw new Error('Extension peer returned an invalid Team Doc parent')
-        const challenge = randomBytes(32).toString('base64url')
-        this.teamDocChallenges.set(challenge, { runId, generation: this.generation, target: resolved.browserTarget, parent })
-        const result = { phase: 'inspect', browserTarget: resolved.browserTarget, parent, challenge }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Doc inspect failed') }
-      return
-    }
-    if (args.phase !== 'create' || !['challenge', 'idempotencyIdentity', 'name', 'body', 'phase'].every((key) => typeof args[key] === 'string') || Object.keys(args).length !== 5) { this.#reply(response, errorResponse(message.id, -32602, 'team_doc_create create requires challenge, idempotencyIdentity, name, and body')); return }
-    const grant = this.teamDocChallenges.get(args.challenge)
-    this.teamDocChallenges.delete(args.challenge)
-    if (!grant || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)) { this.#toolError(response, message.id, 'Team Doc approval challenge is missing, stale, or already used.'); return }
-    const contentHash = hash(args.body); const targetFingerprint = teamDocTargetFingerprint(grant.target, grant.parent)
-    const existing = await this.teamDocStore.load(args.idempotencyIdentity)
-    if (existing) {
-      if (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== contentHash) { this.#toolError(response, message.id, 'Team Doc idempotency identity conflicts with target or body.'); return }
-      if (existing.verified) { this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(existing.result) }], structuredContent: existing.result } }); return }
-    }
-    const recovery = existing ? { documentId: existing.documentId ?? null, stages: existing.stages ?? [] } : undefined
-    await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, stages: recovery?.stages ?? [], documentId: recovery?.documentId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
-    const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_doc_create', phase: 'create', parent: grant.parent, idempotencyIdentity: args.idempotencyIdentity, name: args.name, body: args.body, ...(recovery ? { recovery } : {}) }
-    try {
-      const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const result = resolved.teamDoc
-      if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Doc Browser Target changed after confirmation.')
-      if (!validTeamDocResult(result)) throw new Error('Extension peer returned an invalid canonical Team Doc result')
-      await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, stages: result.stages, documentId: result.documentId, verified: result.status === 'verified_write', result })
-      const content = { ...result, browserTarget: grant.target }
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent: content } })
-    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Doc create failed') }
-  }
-
-  async #teamKnowledgeItem(message, response) {
-    const args = message.params?.arguments ?? {}
-    if (!validTeamKnowledgeItemArguments(args)) {
-      this.#reply(response, errorResponse(message.id, -32602, 'team_knowledge_item requires a valid action-specific payload'))
-      return
-    }
-    const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
-    if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
-    const inspect = async () => {
-      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
-      const resolved = await this.#requestExtension(request)
-      const result = resolved.teamKnowledgeItem
-      if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
-      if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge parent')
-      return { request, target: resolved.browserTarget, result }
-    }
-    try {
-      if (args.action === 'inspect_parent') {
-        const resolved = await inspect()
-        const result = { action: 'inspect_parent', browserTarget: resolved.target, parent: resolved.result.parent, capabilities: resolved.result.capabilities ?? {} }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-        return
-      }
-      if (args.action === 'preview') {
-        const resolved = await inspect(); const parent = resolved.result.parent
-        if (args.parentFingerprint !== undefined && parent.fingerprint !== args.parentFingerprint) { this.#toolError(response, message.id, 'Team Knowledge parent changed; inspect and confirm the directory again.'); return }
-        const supported = resolved.result.capabilities?.[args.kind]
-        if (supported === false) { this.#toolError(response, message.id, `team_knowledge_${args.kind}_unsupported`); return }
-        for (const [key, grant] of this.teamKnowledgeItemChallenges) if (grant.expiresAt < Date.now()) this.teamKnowledgeItemChallenges.delete(key)
-        const challenge = randomBytes(32).toString('base64url')
-        const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
-        const targetFingerprint = teamKnowledgeTargetFingerprint(resolved.target, parent, args.kind)
-        const idempotencyIdentity = `team-item:${hash(JSON.stringify({ targetFingerprint, contentHash })).slice(0, 48)}`
-        const expiresAt = Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS
-        this.teamKnowledgeItemChallenges.set(challenge, { runId, generation: this.generation, target: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, expiresAt })
-        const result = { action: 'preview', browserTarget: resolved.target, parent, kind: args.kind, name: args.name, contentHash, idempotencyIdentity, challenge, expiresAt }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
-        return
-      }
-      if (args.action === 'readback') {
-        const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'readback', kind: args.kind, catalogId: args.catalogId }
-        const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
-        if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok') throw new Error('Extension peer returned an invalid Team Knowledge item readback')
-        const content = { runId, requestId: request.requestId, generation: request.generation, browserTarget: resolved.browserTarget, ...result }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent: content } })
-        return
-      }
-      const grant = this.teamKnowledgeItemChallenges.get(args.challenge)
-      this.teamKnowledgeItemChallenges.delete(args.challenge)
-      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.target, target)) {
-        this.#toolError(response, message.id, 'Team Knowledge approval challenge is missing, stale, or already used.'); return
-      }
-      const contentHash = teamKnowledgeContentHash(args.kind, args.name, args.body)
-      const requiresPreviewIdentity = message.params?.name !== 'team_knowledge_item'
-      if (grant.kind !== args.kind || grant.name !== args.name || grant.contentHash !== contentHash
-        || (requiresPreviewIdentity && grant.idempotencyIdentity !== args.idempotencyIdentity)) {
-        this.#toolError(response, message.id, 'Team Knowledge approval challenge conflicts with the confirmed kind, name, body, or idempotency identity.'); return
-      }
-      const targetFingerprint = teamKnowledgeTargetFingerprint(grant.target, grant.parent, args.kind)
-      const existing = await this.teamDocStore.load(args.idempotencyIdentity)
-      if (existing) {
-        if (existing.targetFingerprint !== targetFingerprint || existing.contentHash !== contentHash || existing.kind !== args.kind || existing.name !== args.name) {
-          this.#toolError(response, message.id, 'Team Knowledge idempotency identity conflicts with the parent, kind, name, or body.'); return
-        }
-        if (existing.verified) { this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(existing.result) }], structuredContent: existing.result } }); return }
-      }
-      const recovery = existing ? { catalogId: existing.catalogId ?? null, stages: existing.stages ?? [] } : undefined
-      await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, kind: args.kind, name: args.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
-      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: args.kind, name: args.name, body: args.body, idempotencyIdentity: args.idempotencyIdentity, ...(recovery ? { recovery } : {}) }
-      const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const result = resolved.teamKnowledgeItem
-      if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Knowledge Browser Target changed after confirmation.')
-      if (!validTeamKnowledgeItemResult(result) || !['verified_write', 'partial_delivery'].includes(result.status)) throw new Error('Extension peer returned an invalid Team Knowledge item create result')
-      await this.teamDocStore.save({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint, contentHash, kind: args.kind, name: args.name, stages: result.stages, catalogId: result.item?.catalogId ?? null, verified: result.status === 'verified_write', result })
-      const content = { ...result, browserTarget: grant.target }
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(content) }], structuredContent: content } })
-    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge item operation failed') }
   }
 
   async #withTeamKnowledgeBatchLock(key, work) {
@@ -2781,13 +1765,13 @@ export class BrowserConnector {
   async #teamKnowledgeBatch(message, response) {
     const args = message.params?.arguments ?? {}
     if (!validTeamKnowledgeBatchArguments(args)) {
-      this.#reply(response, errorResponse(message.id, -32602, 'team_knowledge_batch requires a valid action-specific payload'))
+      this.#reply(response, errorResponse(message.id, -32602, `${String(message.params?.name ?? 'team_knowledge_batch')} received invalid arguments`))
       return
     }
     const runId = this.currentRunId; const target = runId === undefined ? undefined : this.browserTargets.get(runId)
     if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
     const inspectParent = async () => {
-      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_item', action: 'inspect_parent' }
+      const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_batch', action: 'inspect_parent' }
       const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
       if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge batch parent')
@@ -2795,21 +1779,6 @@ export class BrowserConnector {
       return { target: resolved.browserTarget, result }
     }
     try {
-      if (args.action === 'status') {
-        const inspected = await inspectParent()
-        const batch = await this.teamKnowledgeBatchStore.load(args.batchId)
-        if (!batch) throw new Error('team_knowledge_batch_not_found')
-        if (batch.targetFingerprint !== teamKnowledgeTargetFingerprint(inspected.target, inspected.result.parent, 'light_document')) throw new Error('team_knowledge_batch_target_mismatch')
-        const result = { action: 'status', browserTarget: inspected.target, parent: inspected.result.parent, batch: teamKnowledgeBatchView(batch) }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
-        return
-      }
-      if (args.action === 'inspect_parent') {
-        const inspected = await inspectParent()
-        const result = { action: 'inspect_parent', browserTarget: inspected.target, parent: inspected.result.parent, capabilities: inspected.result.capabilities ?? {} }
-        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
-        return
-      }
       if (args.action === 'preview') {
         const templateFailure = pmdBatchTemplateFailure(args.batchId, args.items)
         if (templateFailure) throw new Error(`pmd_prd_template_invalid: ${templateFailure}`)
@@ -2867,7 +1836,7 @@ export class BrowserConnector {
           await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'creating', error: null })
           await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
           try {
-            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_item', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, userConfirmation: { itemIndex: item.index + 1, totalItems: batch.items.length }, ...(recovery ? { recovery } : {}) }
+            const request = { type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_batch', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, userConfirmation: { itemIndex: item.index + 1, totalItems: batch.items.length }, ...(recovery ? { recovery } : {}) }
             const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const itemResult = resolved.teamKnowledgeItem
             if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Knowledge Browser Target changed during batch creation.')
             if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid Team Knowledge batch item result')
@@ -2884,31 +1853,6 @@ export class BrowserConnector {
       })
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result, ...(result.status === 'partial_delivery' ? { isError: true } : {}) } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch operation failed') }
-  }
-
-  async #openBrowserTab(message, response) {
-    if (!validBrowserOpenTabArguments(message.params.arguments ?? {})) {
-      this.#reply(response, errorResponse(message.id, -32602, 'browser_open_tab requires one http(s) url argument'))
-      return
-    }
-    const runId = this.currentRunId
-    const boundTarget = runId === undefined ? undefined : this.browserTargets.get(runId)
-    if (!validBrowserTarget(boundTarget)) {
-      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
-      return
-    }
-    const correlation = {
-      type: 'connector_request', requestId: randomUUID(), runId, generation: this.generation,
-      tool: 'browser_open_tab', url: message.params.arguments.url,
-    }
-    try {
-      const opened = await this.#requestExtension(correlation)
-      const structuredContent = { runId, requestId: correlation.requestId, generation: correlation.generation, ...opened }
-      if (!validBrowserOpenTabOutput(structuredContent)) throw new Error('Browser Connector produced an invalid browser_open_tab result')
-      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } })
-    } catch (error) {
-      this.#toolError(response, message.id, error instanceof Error ? error.message : 'Browser tab could not be opened')
-    }
   }
 
   #requestExtension(correlation, response, timeoutMs = this.requestTimeoutMs) {

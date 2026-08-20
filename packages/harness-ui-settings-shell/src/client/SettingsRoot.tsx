@@ -126,7 +126,7 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
   }, [])
   const closeQuick = useCallback(() => { setQuickOpen(false) }, [])
   const runQuickAction = useCallback((action: typeof quickActions[number]) => {
-    if (currentSessionId !== undefined) void action.run(currentSessionId)
+    if (action.requiresSession === false || currentSessionId !== undefined) void action.run(currentSessionId)
     closeQuick()
   }, [closeQuick, currentSessionId])
   const compactQuickActions = quickActions.filter(action =>
@@ -184,7 +184,7 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
                 type="button"
                 role="menuitem"
                 className={css.quickItem}
-                disabled={currentSessionId === undefined}
+                disabled={action.requiresSession !== false && currentSessionId === undefined}
                 onClick={() => { runQuickAction(action) }}
               >{action.label}</button>
             ))}

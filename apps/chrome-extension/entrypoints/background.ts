@@ -603,7 +603,7 @@ interface ConnectorRequest {
   browserTarget: BrowserTarget
   browserTargets?: BrowserTarget[]
   unavailableBrowserTargets?: UnavailableBrowserTarget[]
-  tool: 'office_get_context'
+  tool: 'list_work_tabs'
 }
 
 interface ReadWorkTabRequest {
@@ -618,36 +618,6 @@ interface ReadWorkTabRequest {
   tab: number
   offset?: number
   limit?: number
-}
-
-interface OfficeReadRangeRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  browserTarget: BrowserTarget
-  tool: 'office_read_range'
-  range: string
-}
-
-interface OfficeResourceIdentity {
-  kind: 'webedit_spreadsheet'
-  origin: 'https://webedit.midea.com'
-  workbookName: string | null
-  sheetName: string | null
-  fingerprint: string
-}
-
-interface OfficeWriteRangeRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  browserTarget: BrowserTarget
-  tool: 'office_write_range'
-  range: string
-  values: Array<Array<string | number | boolean | null>>
-  resource: OfficeResourceIdentity
 }
 
 type OfficeDocumentAction = 'read' | 'search' | 'selection' | 'inspect_write' | 'write'
@@ -667,7 +637,7 @@ interface OfficeDocumentRequest {
   runId: string
   generation: string
   browserTarget: BrowserTarget
-  tool: 'office_document'
+  tool: 'light_document'
   action: OfficeDocumentAction
   offset?: number
   limit?: number
@@ -675,57 +645,6 @@ interface OfficeDocumentRequest {
   operation?: OfficeDocumentOperation
   payload?: Record<string, unknown>
   resource?: LightDocumentResourceIdentity
-}
-
-type OfficeSpreadsheetAction = 'context' | 'selection' | 'used_range' | 'range' | 'range_features' | 'search' | 'sheets' | 'defined_names' | 'capabilities' | 'view' | 'print_settings' | 'outline' | 'dimensions' | 'special_cells' | 'inspect_write' | 'write'
-type OfficeSpreadsheetOperation = 'set_values' | 'set_formula' | 'clear' | 'format' | 'merge' | 'unmerge' | 'row_height' | 'column_width' | 'fill_range' | 'batch_write' | 'sort' | 'set_auto_filter' | 'clear_filters' | 'set_data_validation' | 'clear_data_validation' | 'add_hyperlink' | 'delete_hyperlinks' | 'add_conditional_format' | 'clear_conditional_formats' | 'set_zoom' | 'set_freeze_panes' | 'set_print_settings' | 'set_outline_group' | 'set_rows_hidden' | 'set_columns_hidden' | 'auto_fit' | 'replace_range_text' | 'text_to_columns' | 'remove_duplicates' | 'move_range' | 'create_defined_name' | 'delete_defined_name' | 'activate_worksheet' | 'move_worksheet' | 'set_worksheet_visibility'
-interface OfficeSpreadsheetPreconditionTarget {
-  range: string
-  state: {
-    values: unknown[][]
-    formulas: unknown[][]
-    merged: boolean | null
-    filter: { operator: string } | null
-    rowHeight: number | null
-    columnWidth: number | null
-    format: Record<string, unknown>
-    validation?: { type: number; alertStyle: number; operator: number; formula1: string; formula2: string; ignoreBlank: boolean; showError: boolean; errorTitle: string; errorMessage: string } | null
-    hyperlinks?: Array<{ address: string; subAddress: string; textToDisplay: string; name: string; type: string | number; screenTip?: string }>
-    conditionalFormats?: Array<{ type: number; operator: number; formula1: string; formula2: string; priority: number; fillColor: string; fontColor: string; bold: boolean; italic: boolean }>
-  }
-}
-interface OfficeSpreadsheetPreconditionV1 extends OfficeSpreadsheetPreconditionTarget {
-  version: 1
-}
-interface OfficeSpreadsheetPreconditionV2 { version: 2; targets: OfficeSpreadsheetPreconditionTarget[] }
-interface OfficeSpreadsheetPreconditionV3 { version: 3; sheets: Array<{ index: number; name: string; visible: boolean | null; active: boolean | null }>; definedNames?: Array<{ name: string; refersTo: string; visible: boolean | null; scope: string | number | null }> }
-interface OfficeSpreadsheetPreconditionV4 { version: 4; view: { sheetName: string; activeCell: string; freezePanes: boolean; splitRow: number; splitColumn: number; zoom: number; scrollRow: number; scrollColumn: number } }
-interface OfficeSpreadsheetPreconditionV5 { version: 5; printSettings: { sheetName: string; printArea: string; printTitleRows: string; printTitleColumns: string; orientation: 'portrait' | 'landscape'; zoom: false | number; fitToPagesWide: number; fitToPagesTall: number; centerHorizontally: boolean; centerVertically: boolean; leftMargin: number; rightMargin: number; topMargin: number; bottomMargin: number; headerMargin: number; footerMargin: number } }
-interface OfficeSpreadsheetPreconditionV6 { version: 6; outline: { sheetName: string; range: string; axis: 'row' | 'column'; levels: number[] } }
-interface OfficeSpreadsheetPreconditionV7 { version: 7; dimensions: { sheetName: string; range: string; axis: 'row' | 'column'; items: Array<{ index: number; hidden: boolean; size: number }> } }
-type OfficeSpreadsheetPrecondition = OfficeSpreadsheetPreconditionV1 | OfficeSpreadsheetPreconditionV2 | OfficeSpreadsheetPreconditionV3 | OfficeSpreadsheetPreconditionV4 | OfficeSpreadsheetPreconditionV5 | OfficeSpreadsheetPreconditionV6 | OfficeSpreadsheetPreconditionV7
-interface OfficeSpreadsheetRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  browserTarget: BrowserTarget
-  tool: 'office_spreadsheet'
-  action: OfficeSpreadsheetAction
-  range?: string
-  axis?: 'row' | 'column'
-  kind?: 'blanks' | 'constants' | 'formulas' | 'lastCell' | 'visible'
-  sheetName?: string
-  query?: string
-  matchCase?: boolean
-  matchEntireCell?: boolean
-  searchBy?: 'value' | 'text' | 'formula'
-  offset?: number
-  limit?: number
-  resource?: OfficeResourceIdentity
-  operation?: OfficeSpreadsheetOperation
-  payload?: Record<string, unknown>
-  precondition?: OfficeSpreadsheetPrecondition
 }
 
 interface OfficeReadFailure {
@@ -743,7 +662,7 @@ interface TeamDocParent {
   parentType?: string
 }
 
-type TeamKnowledgeItemKind = 'light_document' | 'spreadsheet'
+type TeamKnowledgeItemKind = 'light_document'
 type TeamKnowledgeItemAction = 'inspect_parent' | 'create' | 'readback'
 
 interface TeamKnowledgeUserConfirmation {
@@ -759,7 +678,7 @@ interface TeamKnowledgeItemRequest {
   runId: string
   generation: string
   browserTarget: BrowserTarget
-  tool: 'team_knowledge_item'
+  tool: 'team_knowledge_batch'
   action: TeamKnowledgeItemAction
   parent?: TeamKnowledgeParent
   kind?: TeamKnowledgeItemKind
@@ -771,27 +690,7 @@ interface TeamKnowledgeItemRequest {
   userConfirmation?: TeamKnowledgeUserConfirmation
 }
 
-interface TeamDocRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  browserTarget: BrowserTarget
-  tool: 'team_doc_create'
-  phase: 'inspect' | 'create'
-  parent?: TeamDocParent
-  idempotencyIdentity?: string
-  name?: string
-  body?: string
-  recovery?: TeamDocRecovery
-}
-
 type TeamDocStage = 'parent_inspected' | 'created' | 'rediscovered' | 'body_written' | 'readback_verified'
-
-interface TeamDocRecovery {
-  documentId: string | null
-  stages: TeamDocStage[]
-}
 
 interface TeamDocPartialDelivery {
   status: 'partial_delivery'
@@ -810,15 +709,6 @@ interface TeamDocPartialDelivery {
 }
 
 const resourceWriteQueues = new Map<string, Promise<void>>()
-
-interface BrowserOpenTabRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  tool: 'browser_open_tab'
-  url: string
-}
 
 interface KnowledgeQueryRequest {
   type: 'connector_request'
@@ -854,7 +744,7 @@ function isConnectorRequest(message: NativeMessage): message is ConnectorRequest
     && typeof message.requestId === 'string'
     && typeof message.runId === 'string'
     && typeof message.generation === 'string'
-    && message.tool === 'office_get_context'
+    && message.tool === 'list_work_tabs'
     && typeof target === 'object' && target !== null
     && (target as BrowserTarget).browser === 'chrome'
     && Number.isInteger((target as BrowserTarget).windowId) && (target as BrowserTarget).windowId >= 0
@@ -880,34 +770,6 @@ function isReadWorkTabRequest(message: NativeMessage): message is ReadWorkTabReq
       && message.unavailableBrowserTargets.every(isUnavailableBrowserTarget)))
 }
 
-function isOfficeReadRangeRequest(message: NativeMessage): message is OfficeReadRangeRequest {
-  const target = message.browserTarget
-  return message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
-    && typeof message.generation === 'string' && message.tool === 'office_read_range' && typeof message.range === 'string'
-    && message.range.trim().length > 0 && message.range.length <= 128 && isBrowserTarget(target)
-}
-
-function isOfficeResourceIdentity(value: unknown): value is OfficeResourceIdentity {
-  return typeof value === 'object' && value !== null
-    && (value as OfficeResourceIdentity).kind === 'webedit_spreadsheet'
-    && (value as OfficeResourceIdentity).origin === 'https://webedit.midea.com'
-    && (typeof (value as OfficeResourceIdentity).workbookName === 'string' || (value as OfficeResourceIdentity).workbookName === null)
-    && (typeof (value as OfficeResourceIdentity).sheetName === 'string' || (value as OfficeResourceIdentity).sheetName === null)
-    && typeof (value as OfficeResourceIdentity).fingerprint === 'string' && (value as OfficeResourceIdentity).fingerprint.length > 0
-}
-
-function isOfficeWriteRangeRequest(message: NativeMessage): message is OfficeWriteRangeRequest {
-  const values = message.values
-  if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
-    && typeof message.generation === 'string' && message.tool === 'office_write_range' && typeof message.range === 'string'
-    && message.range.trim().length > 0 && message.range.length <= 128 && isBrowserTarget(message.browserTarget)
-    && Array.isArray(values) && values.length > 0 && values.length <= 100 && Array.isArray(values[0]) && values[0].length > 0 && values[0].length <= 50)) return false
-  const width = values[0].length
-  return values.every((row) => Array.isArray(row) && row.length === width
-      && row.every((cell) => typeof cell === 'string' || typeof cell === 'number' || typeof cell === 'boolean' || cell === null))
-    && isOfficeResourceIdentity(message.resource)
-}
-
 function isLightDocumentResourceIdentity(value: unknown): value is LightDocumentResourceIdentity {
   return typeof value === 'object' && value !== null
     && (value as LightDocumentResourceIdentity).kind === 'webedit_light_document'
@@ -918,7 +780,7 @@ function isLightDocumentResourceIdentity(value: unknown): value is LightDocument
 
 function isOfficeDocumentRequest(message: NativeMessage): message is OfficeDocumentRequest {
   if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
-    && typeof message.generation === 'string' && message.tool === 'office_document' && isBrowserTarget(message.browserTarget))) return false
+    && typeof message.generation === 'string' && message.tool === 'light_document' && isBrowserTarget(message.browserTarget))) return false
   if (!['read', 'search', 'selection', 'inspect_write', 'write'].includes(String(message.action))) return false
   const action = message.action as OfficeDocumentAction
   const validPayload = message.payload === undefined || (message.payload !== null && typeof message.payload === 'object' && !Array.isArray(message.payload) && JSON.stringify(message.payload).length <= 100000)
@@ -936,159 +798,6 @@ function isOfficeDocumentRequest(message: NativeMessage): message is OfficeDocum
     && JSON.stringify(message.payload).length <= 100000 && isLightDocumentResourceIdentity(message.resource)
 }
 
-function isOfficeSpreadsheetPrecondition(value: unknown): value is OfficeSpreadsheetPrecondition {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const validTarget = (candidate: Partial<OfficeSpreadsheetPreconditionTarget>) => {
-    const state = candidate.state
-    return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
-    && !!state && typeof state === 'object' && !Array.isArray(state)
-    && Array.isArray(state.values) && Array.isArray(state.formulas)
-    && (state.merged === null || typeof state.merged === 'boolean')
-    && (state.filter === null || !!state.filter && typeof state.filter === 'object' && !Array.isArray(state.filter) && typeof state.filter.operator === 'string' && state.filter.operator.length <= 64)
-    && (state.rowHeight === null || typeof state.rowHeight === 'number')
-    && (state.columnWidth === null || typeof state.columnWidth === 'number')
-    && !!state.format && typeof state.format === 'object' && !Array.isArray(state.format)
-    && (state.validation === undefined || state.validation === null || !!state.validation && typeof state.validation === 'object' && !Array.isArray(state.validation)
-      && Object.keys(state.validation).length === 8 && Number.isInteger(state.validation.type) && state.validation.type >= 1 && state.validation.type <= 7
-      && Number.isInteger(state.validation.alertStyle) && Number.isInteger(state.validation.operator)
-      && typeof state.validation.formula1 === 'string' && state.validation.formula1.length <= 1024 && typeof state.validation.formula2 === 'string' && state.validation.formula2.length <= 1024
-      && typeof state.validation.ignoreBlank === 'boolean' && typeof state.validation.showError === 'boolean'
-      && typeof state.validation.errorTitle === 'string' && state.validation.errorTitle.length <= 255 && typeof state.validation.errorMessage === 'string' && state.validation.errorMessage.length <= 1024)
-    && (state.hyperlinks === undefined || Array.isArray(state.hyperlinks) && state.hyperlinks.length <= 200 && state.hyperlinks.every((item) => item && typeof item.address === 'string' && item.address.length <= 2048 && typeof item.subAddress === 'string' && item.subAddress.length <= 256 && typeof item.textToDisplay === 'string' && item.textToDisplay.length <= 500 && typeof item.name === 'string' && item.name.length <= 500 && (typeof item.type === 'string' || typeof item.type === 'number') && (item.screenTip === undefined || typeof item.screenTip === 'string' && item.screenTip.length <= 500)))
-    && (state.conditionalFormats === undefined || Array.isArray(state.conditionalFormats) && state.conditionalFormats.length <= 200 && state.conditionalFormats.every((item) => item && Object.keys(item).length === 9 && Number.isInteger(item.type) && [1, 2].includes(item.type) && Number.isInteger(item.operator) && item.operator >= 1 && item.operator <= 8 && typeof item.formula1 === 'string' && item.formula1.length > 0 && item.formula1.length <= 1024 && typeof item.formula2 === 'string' && item.formula2.length <= 1024 && (![1, 2].includes(item.operator) || item.formula2.length > 0) && Number.isInteger(item.priority) && item.priority >= 1 && item.priority <= 200 && typeof item.fillColor === 'string' && /^#[0-9A-F]{6}$/.test(item.fillColor) && typeof item.fontColor === 'string' && /^#[0-9A-F]{6}$/.test(item.fontColor) && typeof item.bold === 'boolean' && typeof item.italic === 'boolean'))
-  }
-  const candidate = value as { version?: unknown; range?: unknown; state?: unknown; targets?: unknown }
-  const print = value as Partial<OfficeSpreadsheetPreconditionV5>
-  const outline = value as Partial<OfficeSpreadsheetPreconditionV6>
-  const dimensions = value as Partial<OfficeSpreadsheetPreconditionV7>
-  const validPrint = candidate.version === 5 && isCompleteOfficeSpreadsheetPrintSettings(print.printSettings)
-  const validOutline = candidate.version === 6 && isCompleteOfficeSpreadsheetOutline(outline.outline)
-  const validDimensions = candidate.version === 7 && isCompleteOfficeSpreadsheetDimensions(dimensions.dimensions)
-  const view = value as Partial<OfficeSpreadsheetPreconditionV4>
-  const activeCell = typeof view.view?.activeCell === 'string' ? /^([A-Z]{1,3})([1-9]\d*)$/i.exec(view.view.activeCell) : null
-  const activeColumn = activeCell ? activeCell[1].toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0) : 0
-  const activeRow = activeCell ? Number(activeCell[2]) : 0
-  const validView = candidate.version === 4 && !!view.view && typeof view.view === 'object' && Object.keys(view.view).length === 8 && typeof view.view.sheetName === 'string' && view.view.sheetName.length > 0 && !!activeCell && activeColumn <= 16384 && activeRow <= 1048576 && typeof view.view.freezePanes === 'boolean' && Number.isInteger(view.view.splitRow) && view.view.splitRow >= 0 && view.view.splitRow <= 1048575 && Number.isInteger(view.view.splitColumn) && view.view.splitColumn >= 0 && view.view.splitColumn <= 16383 && Number.isInteger(view.view.zoom) && view.view.zoom >= 10 && view.view.zoom <= 400 && Number.isInteger(view.view.scrollRow) && view.view.scrollRow >= 1 && view.view.scrollRow <= 1048576 && Number.isInteger(view.view.scrollColumn) && view.view.scrollColumn >= 1 && view.view.scrollColumn <= 16384
-  const workbook = value as Partial<OfficeSpreadsheetPreconditionV3>
-  const validWorkbook = candidate.version === 3 && Array.isArray(workbook.sheets) && workbook.sheets.length >= 1 && workbook.sheets.length <= 200 && workbook.sheets.every((sheet) => sheet && Number.isInteger(sheet.index) && sheet.index >= 1 && typeof sheet.name === 'string' && sheet.name.length > 0 && (sheet.visible === null || typeof sheet.visible === 'boolean') && (sheet.active === null || typeof sheet.active === 'boolean')) && (workbook.definedNames === undefined || Array.isArray(workbook.definedNames) && workbook.definedNames.length <= 200 && workbook.definedNames.every((name) => name && typeof name.name === 'string' && name.name.length > 0 && typeof name.refersTo === 'string' && name.refersTo.length > 0 && (name.visible === null || typeof name.visible === 'boolean') && (name.scope === null || typeof name.scope === 'string' || typeof name.scope === 'number')))
-  return (validPrint || validOutline || validDimensions || validView || (candidate.version === 1 && validTarget(candidate as Partial<OfficeSpreadsheetPreconditionTarget>)) || (candidate.version === 2 && Array.isArray(candidate.targets) && candidate.targets.length >= 1 && candidate.targets.length <= 2 && candidate.targets.every((target: unknown) => validTarget(target as Partial<OfficeSpreadsheetPreconditionTarget>))) || validWorkbook)
-    && JSON.stringify(value).length <= 100_000
-}
-
-function isSafeInternalHyperlinkReference(value: string): boolean {
-  if (value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f\[\]]/.test(value)) return false
-  const a1 = '\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6}(?::\\$?[A-Z]{1,3}\\$?[1-9][0-9]{0,6})?'
-  const sheet = "(?:[A-Za-z_][A-Za-z0-9_.]{0,30}|'(?:[^'\\[\\]\\u0000-\\u001f\\u007f]|''){1,62}')!"
-  return new RegExp(`^(?:${sheet})?${a1}$`).test(value) || /^[A-Za-z_][A-Za-z0-9_.]{0,254}$/.test(value)
-}
-
-function isOfficeSpreadsheetConditionalFormatPayload(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
-  const value = payload as Record<string, unknown>; const keys = Object.keys(value); const type = ({ cellValue: 1, expression: 2 } as Record<string, number>)[String(value.conditionType)]; const operator = ({ between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 } as Record<string, number>)[String(value.operator ?? 'equal')]; const formula2 = value.formula2 ?? ''
-  return typeof value.range === 'string' && value.range.length > 0 && value.range.length <= 128 && keys.every((key) => ['range', 'sheetName', 'conditionType', 'operator', 'formula1', 'formula2', 'fillColor', 'fontColor', 'bold', 'italic'].includes(key)) && !!type && !!operator && typeof value.formula1 === 'string' && value.formula1.length > 0 && value.formula1.length <= 1024 && typeof formula2 === 'string' && formula2.length <= 1024 && ((operator !== 1 && operator !== 2) || value.formula2 !== undefined && formula2.length > 0) && (value.fillColor === undefined || typeof value.fillColor === 'string' && /^#[0-9a-f]{6}$/i.test(value.fillColor)) && (value.fontColor === undefined || typeof value.fontColor === 'string' && /^#[0-9a-f]{6}$/i.test(value.fontColor)) && (value.bold === undefined || typeof value.bold === 'boolean') && (value.italic === undefined || typeof value.italic === 'boolean')
-}
-
-const OFFICE_SPREADSHEET_PRINT_KEYS = ['printArea', 'printTitleRows', 'printTitleColumns', 'orientation', 'zoom', 'fitToPagesWide', 'fitToPagesTall', 'centerHorizontally', 'centerVertically', 'leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'headerMargin', 'footerMargin']
-function isOfficeSpreadsheetOutlineRange(value: unknown, axis: unknown): boolean {
-  if (axis === 'row') { const match = typeof value === 'string' && /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(value); return !!match && Number(match[1]) <= Number(match[2]) && Number(match[2]) <= 1048576 && Number(match[2]) - Number(match[1]) < 1000 }
-  if (axis === 'column') { const match = typeof value === 'string' && /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(value); const index = (name: string) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0); return !!match && index(match[1]) <= index(match[2]) && index(match[2]) <= 16384 && index(match[2]) - index(match[1]) < 1000 }
-  return false
-}
-function isOfficeSpreadsheetSpecialCellsRange(value: unknown): boolean { const match = typeof value === 'string' && /^([A-Z]{1,3})([1-9]\d*)(?::([A-Z]{1,3})([1-9]\d*))?$/i.exec(value); if (!match) return false; const column = (name: string) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0); const colFrom = column(match[1]); const rowFrom = Number(match[2]); const colTo = column(match[3] ?? match[1]); const rowTo = Number(match[4] ?? match[2]); return rowTo >= rowFrom && rowTo <= 1048576 && colTo >= colFrom && colTo <= 16384 && (rowTo - rowFrom + 1) * (colTo - colFrom + 1) <= 100000 }
-function isOfficeSpreadsheetPrintValue(key: string, value: unknown): boolean {
-  if (key === 'printArea') { const match = typeof value === 'string' && value.length <= 128 && /^([A-Z]{1,3})([1-9]\d*)(?::([A-Z]{1,3})([1-9]\d*))?$/i.exec(value); const index = (name: string) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0); return value === '' || !!match && index(match[1]) <= 16384 && Number(match[2]) <= 1048576 && (match[3] === undefined || index(match[1]) <= index(match[3]) && index(match[3]) <= 16384 && Number(match[2]) <= Number(match[4]) && Number(match[4]) <= 1048576) }
-  if (key === 'printTitleRows') { const match = typeof value === 'string' && value.length <= 64 && /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(value); return value === '' || !!match && Number(match[1]) <= Number(match[2]) && Number(match[2]) <= 1048576 }
-  if (key === 'printTitleColumns') { const match = typeof value === 'string' && value.length <= 32 && /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(value); const index = (name: string) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0); return value === '' || !!match && index(match[1]) <= index(match[2]) && index(match[2]) <= 16384 }
-  if (key === 'orientation') return value === 'portrait' || value === 'landscape'
-  if (key === 'zoom') return value === false || Number.isInteger(value) && Number(value) >= 10 && Number(value) <= 400
-  if (key === 'fitToPagesWide' || key === 'fitToPagesTall') return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 100
-  if (key === 'centerHorizontally' || key === 'centerVertically') return typeof value === 'boolean'
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 720
-}
-function isCompleteOfficeSpreadsheetPrintSettings(value: unknown): boolean { if (!value || typeof value !== 'object' || Array.isArray(value)) return false; const item = value as Record<string, unknown>; return Object.keys(item).length === 16 && typeof item.sheetName === 'string' && item.sheetName.length > 0 && OFFICE_SPREADSHEET_PRINT_KEYS.every((key) => isOfficeSpreadsheetPrintValue(key, item[key])) }
-function isCompleteOfficeSpreadsheetOutline(value: unknown): boolean { const item = value as Record<string, unknown>; if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 4 || typeof item.sheetName !== 'string' || typeof item.axis !== 'string' || !isOfficeSpreadsheetOutlineRange(item.range, item.axis) || !Array.isArray(item.levels)) return false; const match = item.axis === 'row' ? /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(String(item.range)) : /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(String(item.range)); const index = (name: string) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0); const from = match ? item.axis === 'row' ? Number(match[1]) : index(match[1]) : 0; const to = match ? item.axis === 'row' ? Number(match[2]) : index(match[2]) : -1; return item.levels.length === to - from + 1 && item.levels.every((level) => Number.isInteger(level) && Number(level) >= 0 && Number(level) <= 8) }
-function isCompleteOfficeSpreadsheetDimensions(value: unknown): boolean { const item = value as Record<string, unknown>; if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(item).length !== 4 || typeof item.sheetName !== 'string' || typeof item.axis !== 'string' || !isOfficeSpreadsheetOutlineRange(item.range, item.axis) || !Array.isArray(item.items)) return false; const match = item.axis === 'row' ? /^\$?([1-9]\d{0,6}):\$?([1-9]\d{0,6})$/.exec(String(item.range)) : /^\$?([A-Z]{1,3}):\$?([A-Z]{1,3})$/i.exec(String(item.range)); const index = (name: string) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0); const from = match ? item.axis === 'row' ? Number(match[1]) : index(match[1]) : 0; const to = match ? item.axis === 'row' ? Number(match[2]) : index(match[2]) : -1; return item.items.length === to - from + 1 && item.items.every((entry, offset) => !!entry && typeof entry === 'object' && !Array.isArray(entry) && Object.keys(entry as object).length === 3 && (entry as { index?: unknown }).index === from + offset && typeof (entry as { hidden?: unknown }).hidden === 'boolean' && typeof (entry as { size?: unknown }).size === 'number' && Number.isFinite((entry as { size: number }).size) && (entry as { size: number }).size >= 0 && (entry as { size: number }).size <= 10000) }
-
-function isOfficeSpreadsheetBatchWritePayload(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
-  const value = payload as Record<string, unknown>
-  if (!Object.keys(value).every((key) => ['sheetName', 'cells'].includes(key)) || !Array.isArray(value.cells) || value.cells.length < 1 || value.cells.length > 500) return false
-  const seen = new Set<string>(); const coordinates: Array<{ row: number; column: number }> = []
-  const columnNumber = (name: string) => name.toUpperCase().split('').reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0)
-  for (const entry of value.cells) {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).length !== 2) return false
-    const item = entry as { cell?: unknown; value?: unknown }; const match = typeof item.cell === 'string' && /^([A-Z]{1,3})([1-9]\d*)$/i.exec(item.cell)
-    const row = match ? Number(match[2]) : 0; const column = match ? columnNumber(match[1]) : 0; const identity = typeof item.cell === 'string' ? item.cell.toUpperCase() : ''
-    if (!match || row > 1048576 || column > 16384 || seen.has(identity) || !(typeof item.value === 'string' || typeof item.value === 'number' || typeof item.value === 'boolean' || item.value === null)) return false
-    seen.add(identity); coordinates.push({ row, column })
-  }
-  const rows = coordinates.map((item) => item.row); const columns = coordinates.map((item) => item.column)
-  return (Math.max(...rows) - Math.min(...rows) + 1) * (Math.max(...columns) - Math.min(...columns) + 1) === coordinates.length
-}
-
-function isOfficeSpreadsheetDataValidationPayload(operation: unknown, payload: unknown): boolean {
-  if (operation === 'fill_range') { const value = payload as Record<string, unknown>; return !!payload && typeof payload === 'object' && !Array.isArray(payload) && typeof value.range === 'string' && /^[A-Z]{1,3}[1-9]\d*(?::[A-Z]{1,3}[1-9]\d*)?$/i.test(value.range) && Object.keys(value).every((key) => ['sheetName', 'range', 'direction'].includes(key)) && ['down', 'up', 'left', 'right'].includes(String(value.direction)) }
-  if (operation === 'batch_write') return isOfficeSpreadsheetBatchWritePayload(payload)
-  if (operation === 'set_rows_hidden' || operation === 'set_columns_hidden' || operation === 'auto_fit') { const value = payload as Record<string, unknown>; const axis = operation === 'set_rows_hidden' ? 'row' : operation === 'set_columns_hidden' ? 'column' : value?.axis; return !!payload && typeof payload === 'object' && !Array.isArray(payload) && isOfficeSpreadsheetOutlineRange(value.range, axis) && Object.keys(value).every((key) => ['sheetName', 'range', 'hidden', 'axis'].includes(key)) && (operation === 'auto_fit' ? (axis === 'row' || axis === 'column') && value.hidden === undefined && Object.hasOwn(value, 'axis') : value.axis === undefined && typeof value.hidden === 'boolean') }
-  if (operation === 'set_print_settings') { const value = payload as Record<string, unknown>; return !!payload && typeof payload === 'object' && !Array.isArray(payload) && Object.keys(value).every((key) => key === 'sheetName' || OFFICE_SPREADSHEET_PRINT_KEYS.includes(key)) && OFFICE_SPREADSHEET_PRINT_KEYS.some((key) => Object.hasOwn(value, key)) && OFFICE_SPREADSHEET_PRINT_KEYS.filter((key) => Object.hasOwn(value, key)).every((key) => key === 'zoom' ? Number.isInteger(value[key]) && Number(value[key]) >= 10 && Number(value[key]) <= 400 : isOfficeSpreadsheetPrintValue(key, value[key])) && !(Object.hasOwn(value, 'zoom') && (Object.hasOwn(value, 'fitToPagesWide') || Object.hasOwn(value, 'fitToPagesTall'))) }
-  if (operation === 'set_outline_group') { const value = payload as Record<string, unknown>; return !!payload && typeof payload === 'object' && !Array.isArray(payload) && Object.keys(value).every((key) => ['sheetName', 'range', 'axis', 'grouped'].includes(key)) && isOfficeSpreadsheetOutlineRange(value.range, value.axis) && typeof value.grouped === 'boolean' }
-  if (operation === 'set_zoom') return !!payload && typeof payload === 'object' && !Array.isArray(payload) && Object.keys(payload as Record<string, unknown>).every((key) => ['sheetName', 'zoom'].includes(key)) && Number.isInteger((payload as Record<string, unknown>).zoom) && Number((payload as Record<string, unknown>).zoom) >= 10 && Number((payload as Record<string, unknown>).zoom) <= 400
-  if (operation === 'set_freeze_panes') { const value = payload as Record<string, unknown>; return !!payload && typeof payload === 'object' && !Array.isArray(payload) && Object.keys(value).every((key) => ['sheetName', 'freeze', 'target'].includes(key)) && typeof value.freeze === 'boolean' && (value.freeze ? typeof value.target === 'string' && /^[A-Z]{1,3}[1-9]\d*$/i.test(value.target) : value.target === undefined) }
-  if (operation === 'add_hyperlink') {
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
-    const value = payload as Record<string, unknown>; const keys = Object.keys(value); const url = value.url ?? ''; const subAddress = value.subAddress ?? ''
-    if (typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !keys.every((key) => ['range', 'sheetName', 'url', 'subAddress', 'screenTip', 'textToDisplay'].includes(key)) || typeof url !== 'string' || url.length > 2048 || typeof subAddress !== 'string' || subAddress.length > 256 || typeof value.textToDisplay !== 'string' || value.textToDisplay.length > 500 || (value.screenTip !== undefined && (typeof value.screenTip !== 'string' || value.screenTip.length > 500)) || /[\u0000-\u001f\u007f]/.test(url) || /[\u0000-\u001f\u007f]/.test(subAddress)) return false
-    if (subAddress && !isSafeInternalHyperlinkReference(subAddress)) return false
-    if (!url) return isSafeInternalHyperlinkReference(subAddress)
-    try { const parsed = new URL(url); return /^https?:$/.test(parsed.protocol) && !parsed.username && !parsed.password && parsed.href === url } catch { return false }
-  }
-  if (operation === 'delete_hyperlinks') return !!payload && typeof payload === 'object' && !Array.isArray(payload) && typeof (payload as Record<string, unknown>).range === 'string' && Object.keys(payload as Record<string, unknown>).every((key) => ['range', 'sheetName'].includes(key))
-  if (operation === 'add_conditional_format') return isOfficeSpreadsheetConditionalFormatPayload(payload)
-  if (operation === 'clear_conditional_formats') return !!payload && typeof payload === 'object' && !Array.isArray(payload) && typeof (payload as Record<string, unknown>).range === 'string' && Object.keys(payload as Record<string, unknown>).every((key) => ['range', 'sheetName'].includes(key))
-  if (operation !== 'set_data_validation' && operation !== 'clear_data_validation') return true
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
-  const value = payload as Record<string, unknown>; const keys = Object.keys(value)
-  if (typeof value.range !== 'string' || value.range.length === 0 || value.range.length > 128 || !keys.every((key) => ['range', 'sheetName', 'validationType', 'alertStyle', 'operator', 'formula1', 'formula2', 'ignoreBlank', 'showError', 'errorTitle', 'errorMessage'].includes(key))) return false
-  if (operation === 'clear_data_validation') return keys.every((key) => ['range', 'sheetName'].includes(key))
-  const type = ({ wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 } as Record<string, number>)[String(value.validationType)]
-  const alertStyle = ({ stop: 1, warning: 2, information: 3 } as Record<string, number>)[String(value.alertStyle ?? 'stop')]
-  const operator = ({ between: 1, notBetween: 2, equal: 3, notEqual: 4, greater: 5, less: 6, greaterEqual: 7, lessEqual: 8 } as Record<string, number>)[String(value.operator ?? 'between')]
-  return !!type && !!alertStyle && !!operator && typeof value.formula1 === 'string' && value.formula1.length <= 1024 && typeof (value.formula2 ?? '') === 'string' && String(value.formula2 ?? '').length <= 1024
-    && ((operator !== 1 && operator !== 2) || typeof value.formula2 === 'string')
-    && (value.ignoreBlank === undefined || typeof value.ignoreBlank === 'boolean') && (value.showError === undefined || typeof value.showError === 'boolean')
-    && (value.errorTitle === undefined || typeof value.errorTitle === 'string' && value.errorTitle.length <= 255) && (value.errorMessage === undefined || typeof value.errorMessage === 'string' && value.errorMessage.length <= 1024)
-}
-
-function hasCompleteDataValidationRangeState(precondition: unknown): boolean {
-  if (!precondition || typeof precondition !== 'object' || Array.isArray(precondition)) return false
-  const state = (precondition as { state?: unknown }).state
-  if (!state || typeof state !== 'object' || Array.isArray(state)) return false
-  const value = state as Record<string, unknown>; const format = value.format as Record<string, unknown> | null
-  const validation = value.validation as Record<string, unknown> | null
-  return Object.hasOwn(value, 'validation') && (validation === null || !!validation && typeof validation === 'object' && !Array.isArray(validation) && Object.keys(validation).length === 8 && Number.isInteger(validation.type) && Number.isInteger(validation.alertStyle) && Number.isInteger(validation.operator) && typeof validation.formula1 === 'string' && typeof validation.formula2 === 'string' && typeof validation.ignoreBlank === 'boolean' && typeof validation.showError === 'boolean' && typeof validation.errorTitle === 'string' && typeof validation.errorMessage === 'string')
-    && typeof value.merged === 'boolean' && !!value.filter && typeof (value.filter as { operator?: unknown }).operator === 'string' && typeof value.rowHeight === 'number' && Number.isFinite(value.rowHeight) && typeof value.columnWidth === 'number' && Number.isFinite(value.columnWidth)
-    && !!format && typeof format === 'object' && ['bold', 'italic', 'underline', 'size', 'name', 'color', 'fill', 'numberFormat', 'alignment', 'wrap'].every((key) => Object.hasOwn(format, key) && format[key] !== null)
-}
-
-function isOfficeSpreadsheetRequest(message: NativeMessage): message is OfficeSpreadsheetRequest {
-  const candidate = message as NativeMessage & Partial<OfficeSpreadsheetRequest>
-  if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
-    && message.tool === 'office_spreadsheet' && isBrowserTarget(message.browserTarget)
-    && ['context', 'selection', 'used_range', 'range', 'range_features', 'search', 'sheets', 'defined_names', 'capabilities', 'view', 'print_settings', 'outline', 'dimensions', 'special_cells', 'inspect_write', 'write'].includes(String(candidate.action)))) return false
-  if (candidate.action === 'context' || candidate.action === 'sheets' || candidate.action === 'defined_names') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined
-  if (candidate.action === 'selection' || candidate.action === 'used_range') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
-  if (candidate.action === 'view') return candidate.range === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
-  if (candidate.action === 'print_settings') return candidate.range === undefined && candidate.axis === undefined && candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
-  if (candidate.action === 'outline') return candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && isOfficeSpreadsheetOutlineRange(candidate.range, candidate.axis) && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
-  if (candidate.action === 'special_cells') return candidate.resource === undefined && candidate.axis === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && isOfficeSpreadsheetSpecialCellsRange(candidate.range) && ['blanks', 'constants', 'formulas', 'lastCell', 'visible'].includes(String(candidate.kind)) && (candidate.offset === undefined || Number.isInteger(candidate.offset) && candidate.offset >= 0 && candidate.offset <= 100000) && (candidate.limit === undefined || Number.isInteger(candidate.limit) && candidate.limit >= 1 && candidate.limit <= 200) && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
-  if (candidate.action === 'dimensions') return candidate.resource === undefined && candidate.operation === undefined && candidate.payload === undefined && candidate.precondition === undefined && isOfficeSpreadsheetOutlineRange(candidate.range, candidate.axis) && (candidate.sheetName === undefined || typeof candidate.sheetName === 'string')
-  if (candidate.action === 'inspect_write') return candidate.range === undefined && candidate.axis === undefined && candidate.resource === undefined && candidate.precondition === undefined && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'fill_range', 'batch_write', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'set_zoom', 'set_freeze_panes', 'set_print_settings', 'set_outline_group', 'set_rows_hidden', 'set_columns_hidden', 'auto_fit', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload)
-  if (candidate.action === 'range' || candidate.action === 'range_features') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
-  if (candidate.action === 'capabilities') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128
-  if (candidate.action === 'search') return typeof candidate.range === 'string' && candidate.range.length > 0 && candidate.range.length <= 128 && typeof candidate.query === 'string' && candidate.query.trim().length > 0 && candidate.query.length <= 500
-  return isOfficeResourceIdentity(candidate.resource) && typeof candidate.operation === 'string' && ['set_values', 'set_formula', 'clear', 'format', 'merge', 'unmerge', 'row_height', 'column_width', 'fill_range', 'batch_write', 'sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'set_zoom', 'set_freeze_panes', 'set_print_settings', 'set_outline_group', 'set_rows_hidden', 'set_columns_hidden', 'auto_fit', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range', 'create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility'].includes(candidate.operation) && candidate.payload !== null && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload) && JSON.stringify(candidate.payload).length <= 100_000 && isOfficeSpreadsheetDataValidationPayload(candidate.operation, candidate.payload) && isOfficeSpreadsheetPrecondition(candidate.precondition) && (!['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats'].includes(candidate.operation) || hasCompleteDataValidationRangeState(candidate.precondition)) && (!['set_zoom', 'set_freeze_panes'].includes(candidate.operation) || (candidate.precondition as OfficeSpreadsheetPreconditionV4).version === 4 && (candidate.precondition as OfficeSpreadsheetPreconditionV4).view.sheetName === ((candidate.payload as Record<string, unknown>).sheetName ?? (candidate.precondition as OfficeSpreadsheetPreconditionV4).view.sheetName)) && (candidate.operation !== 'set_print_settings' || (candidate.precondition as OfficeSpreadsheetPreconditionV5).version === 5 && (candidate.precondition as OfficeSpreadsheetPreconditionV5).printSettings.sheetName === ((candidate.payload as Record<string, unknown>).sheetName ?? (candidate.precondition as OfficeSpreadsheetPreconditionV5).printSettings.sheetName)) && (candidate.operation !== 'set_outline_group' || (candidate.precondition as OfficeSpreadsheetPreconditionV6).version === 6 && (candidate.precondition as OfficeSpreadsheetPreconditionV6).outline.sheetName === ((candidate.payload as Record<string, unknown>).sheetName ?? (candidate.precondition as OfficeSpreadsheetPreconditionV6).outline.sheetName)) && (!['set_rows_hidden', 'set_columns_hidden', 'auto_fit'].includes(candidate.operation) || (candidate.precondition as OfficeSpreadsheetPreconditionV7).version === 7 && (candidate.precondition as OfficeSpreadsheetPreconditionV7).dimensions.sheetName === ((candidate.payload as Record<string, unknown>).sheetName ?? (candidate.precondition as OfficeSpreadsheetPreconditionV7).dimensions.sheetName)) && (!['add_hyperlink', 'delete_hyperlinks'].includes(candidate.operation) || !!candidate.precondition && typeof candidate.precondition === 'object' && Object.hasOwn(candidate.precondition as unknown as Record<string, unknown>, 'state') && Object.hasOwn((candidate.precondition as { state: Record<string, unknown> }).state, 'hyperlinks')) && (!['add_conditional_format', 'clear_conditional_formats'].includes(candidate.operation) || !!candidate.precondition && typeof candidate.precondition === 'object' && Object.hasOwn(candidate.precondition as unknown as Record<string, unknown>, 'state') && Object.hasOwn((candidate.precondition as { state: Record<string, unknown> }).state, 'conditionalFormats'))
-}
-
 function isTeamDocParent(value: unknown): value is TeamDocParent {
   if (!value || typeof value !== 'object') return false
   const parent = value as Partial<TeamDocParent>
@@ -1099,26 +808,6 @@ function isTeamDocParent(value: unknown): value is TeamDocParent {
     && typeof parent.fingerprint === 'string' && parent.fingerprint.length > 0
 }
 
-function isTeamDocRequest(message: NativeMessage): message is TeamDocRequest {
-  if (!(message.type === 'connector_request' && typeof message.requestId === 'string'
-    && typeof message.runId === 'string' && typeof message.generation === 'string'
-    && message.tool === 'team_doc_create' && isBrowserTarget(message.browserTarget)
-    && (message.phase === 'inspect' || message.phase === 'create'))) return false
-  if (message.phase === 'inspect') {
-    return message.parent === undefined && message.idempotencyIdentity === undefined
-      && message.name === undefined && message.body === undefined && message.recovery === undefined
-  }
-  const recovery = message.recovery
-  const validRecovery = recovery === undefined || (typeof recovery === 'object' && recovery !== null
-    && ((recovery as TeamDocRecovery).documentId === null
-      || (typeof (recovery as TeamDocRecovery).documentId === 'string' && /^\d+$/.test((recovery as TeamDocRecovery).documentId!)))
-    && validTeamDocStages((recovery as TeamDocRecovery).stages))
-  return validRecovery && isTeamDocParent(message.parent)
-    && typeof message.idempotencyIdentity === 'string' && message.idempotencyIdentity.length > 0 && message.idempotencyIdentity.length <= 128
-    && typeof message.name === 'string' && message.name.trim().length > 0 && message.name.length <= 120
-    && typeof message.body === 'string' && message.body.trim().length > 0 && message.body.length <= 100_000
-}
-
 function isTeamKnowledgeParent(value: unknown): value is TeamKnowledgeParent {
   return isTeamDocParent(value) && typeof (value as TeamKnowledgeParent).parentType === 'string' && (value as TeamKnowledgeParent).parentType.length > 0
 }
@@ -1126,43 +815,19 @@ function isTeamKnowledgeParent(value: unknown): value is TeamKnowledgeParent {
 function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnowledgeItemRequest {
   const candidate = message as NativeMessage & Partial<TeamKnowledgeItemRequest>
   if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
-    && typeof message.generation === 'string' && message.tool === 'team_knowledge_item' && isBrowserTarget(message.browserTarget)
+    && typeof message.generation === 'string' && message.tool === 'team_knowledge_batch' && isBrowserTarget(message.browserTarget)
     && ['inspect_parent', 'create', 'readback'].includes(String(candidate.action)))) return false
   if (candidate.action === 'inspect_parent') return candidate.parent === undefined && candidate.kind === undefined && candidate.name === undefined && candidate.body === undefined && candidate.catalogId === undefined && candidate.userConfirmation === undefined
-  if (candidate.action === 'readback') return (candidate.kind === 'light_document' || candidate.kind === 'spreadsheet') && typeof candidate.catalogId === 'string' && /^\d+$/.test(candidate.catalogId) && candidate.userConfirmation === undefined
+  if (candidate.action === 'readback') return candidate.kind === 'light_document' && typeof candidate.catalogId === 'string' && /^\d+$/.test(candidate.catalogId) && candidate.userConfirmation === undefined
   const recovery = candidate.recovery
-  return isTeamKnowledgeParent(candidate.parent) && (candidate.kind === 'light_document' || candidate.kind === 'spreadsheet')
+  return isTeamKnowledgeParent(candidate.parent) && candidate.kind === 'light_document'
     && typeof candidate.name === 'string' && candidate.name.trim().length > 0 && candidate.name.length <= 120
-    && typeof candidate.body === 'string' && candidate.body.length <= 100_000 && (candidate.kind === 'spreadsheet' || candidate.body.trim().length > 0)
+    && typeof candidate.body === 'string' && candidate.body.trim().length > 0 && candidate.body.length <= 100_000
     && typeof candidate.idempotencyIdentity === 'string' && candidate.idempotencyIdentity.length > 0 && candidate.idempotencyIdentity.length <= 128
     && (recovery === undefined || (typeof recovery === 'object' && recovery !== null && ((recovery.catalogId === null) || (typeof recovery.catalogId === 'string' && /^\d+$/.test(recovery.catalogId))) && Array.isArray(recovery.stages)))
     && (candidate.userConfirmation === undefined || (typeof candidate.userConfirmation === 'object' && candidate.userConfirmation !== null
       && Number.isSafeInteger(candidate.userConfirmation.itemIndex) && candidate.userConfirmation.itemIndex >= 1
       && Number.isSafeInteger(candidate.userConfirmation.totalItems) && candidate.userConfirmation.totalItems >= candidate.userConfirmation.itemIndex))
-}
-
-const TEAM_DOC_STAGES: TeamDocStage[] = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
-
-function validTeamDocStages(value: unknown): value is TeamDocStage[] {
-  if (!Array.isArray(value)) return false
-  let previous = -1
-  for (const stage of value) {
-    const index = TEAM_DOC_STAGES.indexOf(stage as TeamDocStage)
-    if (index <= previous) return false
-    previous = index
-  }
-  return true
-}
-
-function isBrowserOpenTabRequest(message: NativeMessage): message is BrowserOpenTabRequest {
-  if (message.type !== 'connector_request' || typeof message.requestId !== 'string' || typeof message.runId !== 'string'
-    || typeof message.generation !== 'string' || message.tool !== 'browser_open_tab' || typeof (message as { url?: unknown }).url !== 'string') return false
-  try {
-    const url = new URL((message as { url: string }).url)
-    return url.protocol === 'http:' || url.protocol === 'https:'
-  } catch {
-    return false
-  }
 }
 
 function isKnowledgeQueryRequest(message: NativeMessage): message is KnowledgeQueryRequest {
@@ -1572,7 +1237,7 @@ async function readOfficeContext(request: ConnectorRequest): Promise<Record<stri
   const primaryPage = pages.find((page) => page.isPrimary === true)
   if (primaryPage === undefined) throw new Error('The primary Browser Target changed before Office context could be read.')
   // The primary page's probed WebEdit identity rides along so downstream models
-  // can route to office_spreadsheet / office_document without guessing from the
+  // can route to read_work_tab / light_document_read without guessing from the
   // tab title; null now means no webedit frame answered ready on either channel.
   return {
     status: 'browser_target_verified',
@@ -1715,7 +1380,7 @@ async function readWorkTabContent(request: ReadWorkTabRequest): Promise<Record<s
     browserTarget: request.browserTarget,
     browserTargets: request.browserTargets,
     unavailableBrowserTargets: request.unavailableBrowserTargets,
-    tool: 'office_get_context',
+    tool: 'list_work_tabs',
   })
   const live = await liveRosterPage(pageFromRoster(binding, request.tab))
   const tab = await chrome.tabs.get(live.tabId)
@@ -1759,7 +1424,7 @@ function respondToReadWorkTab(port: chrome.runtime.Port, request: ReadWorkTabReq
       browserTarget: request.browserTarget,
       browserTargets: request.browserTargets,
       unavailableBrowserTargets: request.unavailableBrowserTargets,
-      tool: 'office_get_context',
+      tool: 'list_work_tabs',
     })
     if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
     const result = await readWorkTabContent({ ...request, ...binding })
@@ -1944,7 +1609,7 @@ function probeIdentityOf(reply: { ok?: unknown; result?: unknown } | undefined):
  * Lower rank wins; ties keep getAllFrames order.
  */
 /**
- * One quick identity sweep for office_get_context: ask every webedit frame on
+ * One quick identity sweep for list_work_tabs: ask every webedit frame on
  * both editor channels (spreadsheet + light document), without the 8s wait or
  * healing budget that real operations use. A hardcoded documentIdentity:null
  * made downstream models read "no WebEdit document here" out of a page whose
@@ -1954,7 +1619,7 @@ function probeIdentityOf(reply: { ok?: unknown; result?: unknown } | undefined):
  * accr-ui classifies /weboffice/office/o/ as a light document and /office/s/
  * as a spreadsheet. A Team Knowledge light-document page also preloads a
  * blank spreadsheet iframe; prefer the ready light document over that blank
- * sheet so office_document is used instead of office_spreadsheet.
+ * sheet so light_document_read is used instead of a spreadsheet read.
  */
 async function probeDocumentIdentity(tabId: number): Promise<Record<string, unknown> | null> {
   try {
@@ -2000,7 +1665,7 @@ async function probeDocumentIdentity(tabId: number): Promise<Record<string, unkn
       return spreadsheetKind(best)
     }
     return null
-  } catch { /* a failed context probe must never break office_get_context itself */ return null }
+  } catch { /* a failed context probe must never break list_work_tabs itself */ return null }
 }
 
 function framePreference(identity: ProbeIdentity | undefined): number {  if (identity?.hasContent === true) return 0
@@ -2117,8 +1782,8 @@ async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.Ge
   const hint = siblingType === null || siblingReadyCount === 0
     ? ''
     : siblingType === 'office-spreadsheet/v1'
-      ? ` ${siblingReadyCount} of them expose a ready WebEdit spreadsheet runtime instead — this Browser Target hosts a spreadsheet, so call office_spreadsheet (its view action reports the selected cell).`
-      : ` ${siblingReadyCount} of them expose a ready WebEdit light-document editor instead — this Browser Target hosts a document, so call office_document.`
+      ? ` ${siblingReadyCount} of them expose a ready WebEdit spreadsheet runtime instead — this Browser Target hosts a spreadsheet, so call read_work_tab.`
+      : ` ${siblingReadyCount} of them expose a ready WebEdit light-document editor instead — this Browser Target hosts a document, so call light_document_read.`
   throw { code: 'unsupported', message: `The bound Browser Target has ${frames.length} WebEdit iframe(s), but none exposed a ready ${channelReadyLabel(channel)} within ${Math.round(waitBudgetMs / 100) / 10}s.${hint}` } satisfies OfficeReadFailure
 }
 
@@ -2137,44 +1802,6 @@ async function waitForTeamDocWritableFrame(tabId: number, timeoutMs = 30_000): P
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
   return undefined
-}
-
-async function readOfficeRange(request: OfficeReadRangeRequest): Promise<Record<string, unknown>> {
-  const binding = boundBrowserTargets.get(request.runId)
-  if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) {
-    throw { code: 'navigation', message: 'The trusted Browser Target changed before the range could be read.' } satisfies OfficeReadFailure
-  }
-  const tab = await chrome.tabs.get(request.browserTarget.tabId)
-  if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
-    throw { code: 'navigation', message: 'The trusted Browser Target navigated before the range could be read.' } satisfies OfficeReadFailure
-  }
-  const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
-    .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
-  if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
-  try {
-    const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, { type: 'office-read-range/v1', range: request.range })
-    if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while reading.' }
-    const latestFrames = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-    if (!latestFrames.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) {
-      throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while reading.' } satisfies OfficeReadFailure
-    }
-    return reply.result as Record<string, unknown>
-  } catch (error) {
-    throw officeReadFailure(error)
-  }
-}
-
-function respondToOfficeReadRange(port: chrome.runtime.Port, request: OfficeReadRangeRequest): void {
-  void queueNativeLifecycle(async () => {
-    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    const result = await readOfficeRange(request)
-    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    return result
-  }).then((result) => {
-    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result })
-  }).catch((error: unknown) => {
-    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) })
-  })
 }
 
 async function readOfficeDocument(request: OfficeDocumentRequest): Promise<Record<string, unknown>> {
@@ -2207,7 +1834,7 @@ async function readOfficeDocument(request: OfficeDocumentRequest): Promise<Recor
 
 function respondToOfficeDocument(port: chrome.runtime.Port, request: OfficeDocumentRequest): void {
   // ADR-0006: reads may run concurrently, but writes against one Resource
-  // Identity pass through a Write Fence. Mirror office_write_range: a write
+  // Identity pass through a Write Fence. A write
   // leaves the global lifecycle chain and is serialized per resource
   // fingerprint, so two documents edit in parallel while the same document's
   // read-patch-readback cycles can never interleave.
@@ -2224,37 +1851,6 @@ function respondToOfficeDocument(port: chrome.runtime.Port, request: OfficeDocum
   else void respond(queueNativeLifecycle(execute))
 }
 
-async function readOfficeSpreadsheet(request: OfficeSpreadsheetRequest): Promise<Record<string, unknown>> {
-  const binding = boundBrowserTargets.get(request.runId)
-  if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) throw { code: 'navigation', message: 'The trusted Browser Target changed before the spreadsheet operation.' } satisfies OfficeReadFailure
-  const tab = await chrome.tabs.get(request.browserTarget.tabId)
-  if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) throw { code: 'navigation', message: 'The trusted Browser Target navigated before the spreadsheet operation.' } satisfies OfficeReadFailure
-  const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
-    .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
-  if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
-  try {
-    const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, {
-      type: 'office-spreadsheet/v1', action: request.action,
-      ...(request.range === undefined ? {} : { range: request.range }), ...(request.axis === undefined ? {} : { axis: request.axis }), ...(request.kind === undefined ? {} : { kind: request.kind }), ...(request.sheetName === undefined ? {} : { sheetName: request.sheetName }), ...(request.query === undefined ? {} : { query: request.query }), ...(request.matchCase === undefined ? {} : { matchCase: request.matchCase }), ...(request.matchEntireCell === undefined ? {} : { matchEntireCell: request.matchEntireCell }), ...(request.searchBy === undefined ? {} : { searchBy: request.searchBy }), ...(request.offset === undefined ? {} : { offset: request.offset }), ...(request.limit === undefined ? {} : { limit: request.limit }), ...(request.resource === undefined ? {} : { resource: request.resource }), ...(request.operation === undefined ? {} : { operation: request.operation }), ...(request.payload === undefined ? {} : { payload: request.payload }), ...(request.precondition === undefined ? {} : { precondition: request.precondition }),
-    })
-    if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while handling the spreadsheet.' }
-    const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-    if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while handling the spreadsheet.' } satisfies OfficeReadFailure
-    return reply.result as Record<string, unknown>
-  } catch (error) { throw officeReadFailure(error) }
-}
-
-function respondToOfficeSpreadsheet(port: chrome.runtime.Port, request: OfficeSpreadsheetRequest): void {
-  const execute = async () => {
-    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    const result = request.action === 'write' && request.resource ? await queueResourceWrite(request.resource, () => readOfficeSpreadsheet(request)) : await readOfficeSpreadsheet(request)
-    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    return result
-  }
-  void queueNativeLifecycle(execute).then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
-    .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
-}
-
 async function queueResourceWrite<T>(resource: { origin: string; fingerprint: string }, action: () => Promise<T>): Promise<T> {
   const key = `${resource.origin}|${resource.fingerprint}`
   const prior = resourceWriteQueues.get(key) ?? Promise.resolve()
@@ -2268,39 +1864,6 @@ async function queueResourceWrite<T>(resource: { origin: string; fingerprint: st
     release()
     if (resourceWriteQueues.get(key) === current) resourceWriteQueues.delete(key)
   }
-}
-
-async function writeOfficeRange(request: OfficeWriteRangeRequest): Promise<Record<string, unknown>> {
-  return queueResourceWrite(request.resource, async () => {
-    const binding = boundBrowserTargets.get(request.runId)
-    if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) {
-      throw { code: 'navigation', message: 'The trusted Browser Target changed before the write could start.' } satisfies OfficeReadFailure
-    }
-    const tab = await chrome.tabs.get(request.browserTarget.tabId)
-    if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
-      throw { code: 'navigation', message: 'The trusted Browser Target navigated before the write could start.' } satisfies OfficeReadFailure
-    }
-    const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
-      .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
-    if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
-    try {
-      const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, { type: 'office-write-range/v1', range: request.range, values: request.values, resource: request.resource })
-      if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while writing.' }
-      const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
-      if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while writing.' } satisfies OfficeReadFailure
-      return reply.result as Record<string, unknown>
-    } catch (error) { throw officeReadFailure(error) }
-  })
-}
-
-function respondToOfficeWriteRange(port: chrome.runtime.Port, request: OfficeWriteRangeRequest): void {
-  void (async () => {
-    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    const result = await writeOfficeRange(request)
-    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    return result
-  })().then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
-    .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
 }
 
 function extractTeamDocParentId(url: string): string | null {
@@ -2605,17 +2168,17 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     const url = new URL(rawUrl, 'https://doc.midea.com').href
     return new URL(url).origin === 'https://doc.midea.com' ? url : null
   }
-  const itemKindFromRecord = (value: unknown): TeamKnowledgeItemKind | null => {
+  const lightDocumentRecordStatus = (value: unknown): boolean | null => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null
     const record = value as Record<string, unknown>
     const values = [record.fileType, record.fileTypeName, record.fileTypeValue, record.type, record.format, record.fileFormat, record.kind, record.value]
     for (const candidate of values) {
-      if (candidate === 4 || candidate === '4') return 'light_document'
-      if (candidate === 8 || candidate === '8') return 'spreadsheet'
+      if (candidate === 4 || candidate === '4') return true
+      if (candidate === 8 || candidate === '8') return false
       if (typeof candidate !== 'string') continue
       const normalized = candidate.trim().toLowerCase()
-      if (/^(newword|lightdoc|light_document|light-document|轻文档)$/.test(normalized)) return 'light_document'
-      if (/^(newexcel|spreadsheet|excel|xlsx|表格)$/.test(normalized)) return 'spreadsheet'
+      if (/^(newword|lightdoc|light_document|light-document|轻文档)$/.test(normalized)) return true
+      if (/^(newexcel|spreadsheet|excel|xlsx|表格)$/.test(normalized)) return false
     }
     return null
   }
@@ -2641,18 +2204,15 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     }
     const fileTypes = await parse(await fetch('/g-kmp/team-knowledge-main/teamKnowledge/getAllFileType?createFlag=true', { credentials: 'include' }))
     const fileTypeRecords = Array.isArray(fileTypes.payload?.data) ? fileTypes.payload.data : []
-    const wantedKind = input.kind ?? 'light_document'
     const selectedType = fileTypeRecords.find((value) => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return false
       const record = value as Record<string, unknown>
       const descriptor = [record.value, record.name, record.icon, record.format].filter((item) => typeof item === 'string').join(' ')
-      return wantedKind === 'light_document'
-        ? /newword|lightdoc|轻文档/i.test(descriptor)
-        : /newexcel|excel|spreadsheet|表格|xlsx/i.test(descriptor)
+      return /newword|lightdoc|轻文档/i.test(descriptor)
     }) as Record<string, unknown> | undefined
     const fileType = selectedType?.type
     if (!fileTypes.response.ok || fileTypes.payload?.errorCode !== '00000' || (typeof fileType !== 'number' && typeof fileType !== 'string')) {
-      return { ok: false, failedAt: wantedKind === 'spreadsheet' ? 'unsupported' : 'create', error: wantedKind === 'spreadsheet' ? 'team_knowledge_spreadsheet_unsupported' : 'team_doc_file_type_unavailable', diagnostic: diagnostic(fileTypes) }
+      return { ok: false, failedAt: 'create', error: 'team_doc_file_type_unavailable', diagnostic: diagnostic(fileTypes) }
     }
     const createReply = await parse(await fetch('https://apiprod.midea.com/g-kmp/team-knowledge-main/teamKnowledge/add', {
       method: 'POST', credentials: 'include',
@@ -2684,23 +2244,16 @@ async function createTeamDocInPage(input: { bookId: string; parentId: string; na
     if (!url) return { ok: false, failedAt: 'rediscover', error: 'team_doc_document_url_invalid', documentId }
     // A document-parent listing may omit its child's file type or expose a
     // symbolic alias (for example `newword`). Keep the exact same-parent
-    // lookup, then use the exact child record only when that listing cannot
-    // identify the dynamically created kind.
-    if (input.kind !== undefined) {
-      const actualKind = itemKindFromRecord(match) ?? itemKindFromRecord(await exactTypeRecord(documentId))
-      if (actualKind === null) {
-        // getDataByParentId can prove this exact child belongs to the parent
-        // while omitting its type. A light-document editor identity can make
-        // the final type proof after navigation; never make this exception
-        // for spreadsheets, whose identity/readback contract is different.
-        if (wantedKind === 'light_document') return { ok: true, documentId, catalogId: documentId, kind: wantedKind, provisionalKind: true, url }
-        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId, catalogId: documentId, url, diagnostic: diagnostic(children.reply) }
-      }
-      if (actualKind !== wantedKind) {
-        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId, catalogId: documentId, url, diagnostic: diagnostic(children.reply) }
-      }
+    // lookup, then use the exact child record when the listing cannot identify
+    // the dynamically created light-document kind.
+    const actualIsLightDocument = lightDocumentRecordStatus(match) ?? lightDocumentRecordStatus(await exactTypeRecord(documentId))
+    if (actualIsLightDocument === null) {
+      return { ok: true, documentId, catalogId: documentId, kind: 'light_document', provisionalKind: true, url }
     }
-    return { ok: true, documentId, catalogId: documentId, kind: wantedKind, url }
+    if (!actualIsLightDocument) {
+      return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId, catalogId: documentId, url, diagnostic: diagnostic(children.reply) }
+    }
+    return { ok: true, documentId, catalogId: documentId, kind: 'light_document', url }
   } catch {
     return { ok: false, failedAt: 'create', error: 'team_doc_create_failed' }
   }
@@ -2766,17 +2319,17 @@ async function rediscoverTeamDocInPage(input: {
         (value as Record<string, unknown>).pid,
       ].some((candidate) => candidate === input.documentId)
       && (requestedName === null || recordName(value) === requestedName)) as Record<string, unknown> | undefined
-    const itemKindFromRecord = (value: unknown): TeamKnowledgeItemKind | null => {
+    const lightDocumentStatus = (value: unknown): boolean | null => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return null
       const record = value as Record<string, unknown>
       const values = [record.fileType, record.fileTypeName, record.fileTypeValue, record.type, record.format, record.fileFormat, record.kind, record.value]
       for (const candidate of values) {
-        if (candidate === 4 || candidate === '4') return 'light_document'
-        if (candidate === 8 || candidate === '8') return 'spreadsheet'
+        if (candidate === 4 || candidate === '4') return true
+        if (candidate === 8 || candidate === '8') return false
         if (typeof candidate !== 'string') continue
         const normalized = candidate.trim().toLowerCase()
-        if (/^(newword|lightdoc|light_document|light-document|轻文档)$/.test(normalized)) return 'light_document'
-        if (/^(newexcel|spreadsheet|excel|xlsx|表格)$/.test(normalized)) return 'spreadsheet'
+        if (/^(newword|lightdoc|light_document|light-document|轻文档)$/.test(normalized)) return true
+        if (/^(newexcel|spreadsheet|excel|xlsx|表格)$/.test(normalized)) return false
       }
       return null
     }
@@ -2851,20 +2404,14 @@ async function rediscoverTeamDocInPage(input: {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return false
         const record = value as Record<string, unknown>
         const descriptor = [record.value, record.name, record.icon, record.format].filter((item) => typeof item === 'string').join(' ')
-        return input.kind === 'light_document'
-          ? /newword|lightdoc|轻文档/i.test(descriptor)
-          : /newexcel|excel|spreadsheet|表格|xlsx/i.test(descriptor)
+        return /newword|lightdoc|轻文档/i.test(descriptor)
       }) as Record<string, unknown> | undefined
       if (!fileTypesResponse.ok || fileTypesPayload.errorCode !== '00000' || !expected) {
-        if (input.kind === 'light_document') return { ok: true, recovered: true, documentId: input.documentId, catalogId: input.documentId, kind: input.kind, name: recordName(match) ?? recordName(located), provisionalKind: true, url }
-        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId: input.documentId }
+        return { ok: true, recovered: true, documentId: input.documentId, catalogId: input.documentId, kind: input.kind, name: recordName(match) ?? recordName(located), provisionalKind: true, url }
       }
-      const actualKind = itemKindFromRecord(match) ?? itemKindFromRecord(await exactTypeRecord())
-      if (actualKind === null) {
-        if (input.kind === 'light_document') return { ok: true, recovered: true, documentId: input.documentId, catalogId: input.documentId, kind: input.kind, name: recordName(match) ?? recordName(located), provisionalKind: true, url }
-        return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_unavailable', documentId: input.documentId, diagnostic: children.diagnostic }
-      }
-      if (actualKind !== input.kind) {
+      const actualIsLightDocument = lightDocumentStatus(match) ?? lightDocumentStatus(await exactTypeRecord())
+      if (actualIsLightDocument === null) return { ok: true, recovered: true, documentId: input.documentId, catalogId: input.documentId, kind: input.kind, name: recordName(match) ?? recordName(located), provisionalKind: true, url }
+      if (!actualIsLightDocument) {
         return { ok: false, failedAt: 'rediscover', error: 'team_knowledge_item_type_mismatch', documentId: input.documentId, diagnostic: children.diagnostic }
       }
     }
@@ -2914,15 +2461,7 @@ async function writeTeamDocInWebEdit(body: string, readOnly = false): Promise<un
       // positioning flags can move editor selection state without inserting
       // the content, which is observable only through the strict readback.
       await selection!.insertContent({ markdown: body })
-      afterXml = await canvas.getDocXml()
-      const changeDeadline = Date.now() + 3_000
-      while (Date.now() < changeDeadline && (typeof afterXml !== 'string' || afterXml === beforeXml)) {
-        await wait(50); afterXml = await canvas.getDocXml()
-      }
-      if (typeof afterXml !== 'string' || afterXml === beforeXml) return { ok: false, failedAt: 'write', error: 'team_doc_write_not_observed' }
     }
-    if (typeof afterXml !== 'string') return { ok: false, failedAt: 'readback', error: readOnly ? 'team_knowledge_document_persisted_readback_unavailable' : 'team_doc_readback_mismatch' }
-    const observedBody = decodeXml(afterXml)
     const visibleText = (value: string) => value
       .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
       .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -2949,7 +2488,34 @@ async function writeTeamDocInWebEdit(body: string, readOnly = false): Promise<un
       const fragment = visibleText(withoutHeadingNumber)
       return fragment ? [fragment] : []
     }).filter(Boolean)
-    const readbackMatches = observedBody.length > 0 && visibleFragments.length > 0 && visibleFragments.every((fragment) => observedBody.includes(fragment))
+    // WebEdit serializes a large insert in several XML updates. A first XML
+    // change proves only that serialization started, not that every visible
+    // fragment (including tables and Mermaid text) can be read back.
+    const readbackStartedAt = Date.now()
+    const readbackDeadline = readbackStartedAt + 15_000
+    const minimumObservationMs = 5_000
+    const stableXmlMs = 2_000
+    let lastXml: string | undefined
+    let lastXmlChangedAt = readbackStartedAt
+    let observedBody = ''
+    let readbackMatches = false
+    while (Date.now() <= readbackDeadline) {
+      afterXml = await canvas.getDocXml()
+      if (typeof afterXml === 'string') {
+        if (afterXml !== lastXml) {
+          lastXml = afterXml
+          lastXmlChangedAt = Date.now()
+        }
+        observedBody = decodeXml(afterXml)
+        readbackMatches = observedBody.length > 0 && visibleFragments.length > 0 && visibleFragments.every((fragment) => observedBody.includes(fragment))
+        if (readbackMatches) break
+      }
+      const elapsed = Date.now() - readbackStartedAt
+      if (elapsed >= minimumObservationMs && Date.now() - lastXmlChangedAt >= stableXmlMs) break
+      await wait(100)
+    }
+    if (typeof afterXml !== 'string') return { ok: false, failedAt: 'readback', error: readOnly ? 'team_knowledge_document_persisted_readback_unavailable' : 'team_doc_readback_mismatch' }
+    if (!readOnly && afterXml === beforeXml) return { ok: false, failedAt: 'write', error: 'team_doc_write_not_observed' }
     if (readbackMatches && !readOnly) {
       // An XML change proves only the editor's in-memory state. Give WebEdit's
       // asynchronous save/sync cycle a bounded chance to settle before the
@@ -3023,81 +2589,6 @@ async function waitForTeamDocTab(tabId: number, expectedUrl: string, timeoutMs =
   throw new Error('team_doc_navigation_timeout')
 }
 
-function teamDocPartial(input: Partial<TeamDocPartialDelivery> & Pick<TeamDocPartialDelivery, 'failedAt' | 'error'>): TeamDocPartialDelivery {
-  return {
-    status: 'partial_delivery', documentId: input.documentId ?? null, stages: input.stages ?? [],
-    readbackMatches: false, failedAt: input.failedAt, error: input.error,
-    ...(input.diagnostic ? { diagnostic: input.diagnostic } : {}),
-    ...(typeof input.observedBody === 'string' ? { observedBody: input.observedBody } : {}),
-  }
-}
-
-async function runTeamDocRequest(request: TeamDocRequest): Promise<object> {
-  await assertTeamDocTarget(request)
-  const parentId = extractTeamDocParentId(request.browserTarget.url)
-  if (!parentId) return teamDocPartial({ failedAt: 'inspect', error: 'team_doc_parent_id_missing' })
-  const documentDetail = /\/teamKnowledge\/detail\/docOnline\//i.test(request.browserTarget.url)
-  const trustedLightDocument = documentDetail ? await waitForTrustedLightDocumentIdentity(request.browserTarget) : false
-  const inspected = (await chrome.scripting.executeScript({
-    target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: inspectTeamDocParentInPage, args: [parentId, documentDetail, trustedLightDocument],
-  }))[0]?.result as { ok?: unknown; parent?: unknown; capabilities?: unknown; error?: unknown; diagnostic?: unknown } | undefined
-  if (inspected?.ok !== true || !isTeamDocParent(inspected.parent)) {
-    return teamDocPartial({ failedAt: 'inspect', error: typeof inspected?.error === 'string' ? inspected.error : 'team_doc_parent_inspection_failed', diagnostic: inspected?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
-  }
-  if (request.phase === 'inspect') return { parent: inspected.parent }
-  if (!request.parent || inspected.parent.fingerprint !== request.parent.fingerprint
-    || inspected.parent.parentId !== request.parent.parentId || inspected.parent.bookId !== request.parent.bookId) {
-    return teamDocPartial({ failedAt: 'inspect', error: 'team_doc_parent_fingerprint_mismatch' })
-  }
-  const stages = TEAM_DOC_STAGES.filter((stage) => stage === 'parent_inspected' || request.recovery?.stages.includes(stage))
-  const recoveryDocumentId = request.recovery?.documentId
-  const resolution = recoveryDocumentId
-    ? await chrome.scripting.executeScript({
-      target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage,
-      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, documentId: recoveryDocumentId, name: request.name!, parentType: request.parent.parentType, renameOnMismatch: true }],
-    })
-    : await chrome.scripting.executeScript({
-      target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: createTeamDocInPage,
-      args: [{ bookId: request.parent.bookId, parentId: request.parent.parentId, name: request.name!, parentType: request.parent.parentType }],
-    })
-  const created = resolution[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown; failedAt?: unknown; error?: unknown; diagnostic?: unknown } | undefined
-  if (created?.ok !== true || typeof created.documentId !== 'string' || typeof created.url !== 'string') {
-    return teamDocPartial({ documentId: typeof created?.documentId === 'string' ? created.documentId : null, stages,
-      failedAt: created?.failedAt === 'rediscover' ? 'rediscover' : 'create', error: typeof created?.error === 'string' ? created.error : 'team_doc_create_failed', diagnostic: created?.diagnostic as TeamDocPartialDelivery['diagnostic'] })
-  }
-  for (const stage of ['created', 'rediscovered'] as TeamDocStage[]) {
-    if (!stages.includes(stage)) stages.push(stage)
-  }
-  stages.sort((left, right) => TEAM_DOC_STAGES.indexOf(left) - TEAM_DOC_STAGES.indexOf(right))
-  let writeResult: { ok?: unknown; failedAt?: unknown; error?: unknown; readbackMatches?: unknown; observedBody?: unknown } | undefined
-  let restored = false
-  try {
-    await chrome.tabs.update(request.browserTarget.tabId, { url: created.url })
-    await waitForTeamDocTab(request.browserTarget.tabId, created.url)
-    const frame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
-    if (!frame) return teamDocPartial({ documentId: created.documentId, stages, failedAt: 'write', error: 'team_doc_webedit_frame_unavailable' })
-    writeResult = (await chrome.scripting.executeScript({
-      target: { tabId: request.browserTarget.tabId, frameIds: [frame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!],
-    }))[0]?.result as typeof writeResult
-  } finally {
-    try {
-      await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url })
-      await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url)
-      restored = true
-    } catch { restored = false }
-  }
-  if (writeResult?.ok !== true || writeResult.readbackMatches !== true || typeof writeResult.observedBody !== 'string') {
-    const failedAt = writeResult?.failedAt === 'readback' ? 'readback' : 'write'
-    return teamDocPartial({ documentId: created.documentId, stages, failedAt, error: typeof writeResult?.error === 'string' ? writeResult.error : 'team_doc_webedit_write_failed', observedBody: typeof writeResult?.observedBody === 'string' ? writeResult.observedBody : undefined })
-  }
-  for (const stage of ['body_written', 'readback_verified'] as TeamDocStage[]) {
-    if (!stages.includes(stage)) stages.push(stage)
-  }
-  stages.sort((left, right) => TEAM_DOC_STAGES.indexOf(left) - TEAM_DOC_STAGES.indexOf(right))
-  if (!restored) return teamDocPartial({ documentId: created.documentId, stages, failedAt: 'readback', error: 'team_doc_parent_restore_failed', observedBody: writeResult.observedBody })
-  return { status: 'verified_write', documentId: created.documentId, stages, readbackMatches: true, observedBody: writeResult.observedBody }
-}
-
 function teamKnowledgeItemPartial(input: {
   failedAt: 'inspect' | 'create' | 'rediscover' | 'write' | 'readback' | 'unsupported' | 'confirmation'
   error: string
@@ -3155,28 +2646,9 @@ async function saveTeamKnowledgeCreateCheckpoint(idempotencyIdentity: string, ch
   await chrome.storage.local.set({ [TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY]: next })
 }
 
-async function teamKnowledgeItemFrame(tabId: number): Promise<chrome.webNavigation.GetAllFrameResultDetails | undefined> {
-  const deadline = Date.now() + 30_000
-  while (Date.now() < deadline) {
-    const frames = await chrome.webNavigation.getAllFrames({ tabId }) ?? []
-    const frame = frames.find((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
-    if (frame) return frame
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-  return undefined
-}
-
 async function readCreatedTeamKnowledgeItem(request: TeamKnowledgeItemRequest, item: { catalogId: string; kind: TeamKnowledgeItemKind; name: string; url: string }): Promise<Record<string, unknown>> {
-  const frame = item.kind === 'light_document'
-    ? await waitForTeamDocWritableFrame(request.browserTarget.tabId)
-    : await teamKnowledgeItemFrame(request.browserTarget.tabId)
+  const frame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
   if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
-  if (item.kind === 'spreadsheet') {
-    const { reply } = await sendToWebEditFrame(request.browserTarget.tabId, [frame], { type: 'office-read-range/v1', range: 'A1' })
-    const result = reply?.result as { status?: unknown; resource?: unknown; range?: unknown } | undefined
-    if (reply?.ok !== true || result?.status !== 'ok' || !isOfficeResourceIdentity(result.resource)) throw new Error('team_knowledge_spreadsheet_identity_unavailable')
-    return { resource: result.resource, range: result.range }
-  }
   const { reply } = await sendToWebEditFrame(request.browserTarget.tabId, [frame], { type: 'office-document/v1', action: 'read', offset: 0, limit: 200 })
   const result = reply?.result as { status?: unknown; resource?: unknown; document?: unknown } | undefined
   if (reply?.ok !== true || result?.status !== 'ok' || !isLightDocumentResourceIdentity(result.resource) || !result.document || typeof result.document !== 'object') throw new Error('team_knowledge_document_readback_unavailable')
@@ -3254,6 +2726,49 @@ async function waitForTeamKnowledgeUserConfirmation(input: TeamKnowledgeUserConf
   })
 }
 
+function showTeamKnowledgeReadbackFailure(input: { name: string; error: string }): { shown: boolean } {
+  if (location.protocol !== 'https:' || location.hostname !== 'doc.midea.com' || !document.body) return { shown: false }
+  document.querySelector('[data-dsh-team-knowledge-readback-failure="card"]')?.remove()
+  const card = document.createElement('section')
+  card.dataset.dshTeamKnowledgeReadbackFailure = 'card'
+  card.setAttribute('role', 'alert')
+  card.setAttribute('aria-live', 'assertive')
+  card.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;max-width:360px;padding:14px 16px;border:1px solid #f0c9c4;border-radius:12px;background:#fff;color:#1f2937;box-shadow:0 12px 32px rgba(15,23,42,.18);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
+  const title = document.createElement('strong')
+  title.textContent = '内容尚未完成验证'
+  const description = document.createElement('div')
+  description.style.cssText = 'margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+  description.textContent = input.name
+  const hint = document.createElement('div')
+  hint.style.cssText = 'margin-top:8px;color:#8a3b32;font-size:12px;'
+  hint.textContent = '文档已保留在当前页，但未能完整回读；检查后请返回原目录，再在侧边栏重试此项。'
+  const dismiss = document.createElement('button')
+  dismiss.type = 'button'
+  dismiss.textContent = '知道了'
+  dismiss.style.cssText = 'display:block;margin:12px 0 0 auto;border:0;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;padding:6px 10px;'
+  dismiss.addEventListener('click', () => card.remove())
+  card.append(title, description, hint, dismiss)
+  document.body.append(card)
+  return { shown: true }
+}
+
+type TeamDocWebEditReadback = { ok?: unknown; readbackMatches?: unknown; observedBody?: unknown; failedAt?: unknown; error?: unknown }
+
+function teamDocWebEditReadbackMatches(result: TeamDocWebEditReadback | undefined): result is TeamDocWebEditReadback & { ok: true; readbackMatches: true; observedBody: string } {
+  return result?.ok === true && result.readbackMatches === true && typeof result.observedBody === 'string'
+}
+
+async function pollTeamDocWebEditReadback(tabId: number, frameId: number, body: string, first: TeamDocWebEditReadback | undefined): Promise<TeamDocWebEditReadback | undefined> {
+  let result = first
+  const deadline = Date.now() + 10_000
+  while (true) {
+    if (teamDocWebEditReadbackMatches(result)) return result
+    if (result?.failedAt !== 'readback' || Date.now() >= deadline) return result
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    result = (await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [body, true] }))[0]?.result as TeamDocWebEditReadback | undefined
+  }
+}
+
 async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): Promise<object> {
   await assertTeamDocTarget(request)
   const parentId = extractTeamDocParentId(request.browserTarget.url)
@@ -3271,8 +2786,8 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   if (request.action === 'readback') {
     const catalogId = request.catalogId
     if (typeof catalogId !== 'string' || !/^\d+$/.test(catalogId)) return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: 'team_knowledge_item_catalog_id_invalid' })
-    if (request.kind !== 'light_document' && request.kind !== 'spreadsheet') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
-    const kind = request.kind
+    if (request.kind !== 'light_document') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
+    const kind: TeamKnowledgeItemKind = 'light_document'
     const recovered = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: rediscoverTeamDocInPage, args: [{ bookId: parent.bookId, parentId: parent.parentId, documentId: catalogId, kind, parentType: parent.parentType, renameOnMismatch: false }] }))[0]?.result as { ok?: unknown; documentId?: unknown; url?: unknown; name?: unknown; error?: unknown } | undefined
     if (recovered?.ok !== true || recovered.documentId !== catalogId || typeof recovered.url !== 'string') return teamKnowledgeItemPartial({ failedAt: 'rediscover', error: typeof recovered?.error === 'string' ? recovered.error : 'team_knowledge_item_rediscover_mismatch' })
     let readback: Record<string, unknown>
@@ -3288,8 +2803,8 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   if (!request.parent || parent.fingerprint !== request.parent.fingerprint || parent.parentId !== request.parent.parentId || parent.bookId !== request.parent.bookId || parent.parentType !== request.parent.parentType) {
     return teamKnowledgeItemPartial({ failedAt: 'inspect', error: 'team_knowledge_parent_fingerprint_mismatch' })
   }
-  const kind = request.kind
-  if (kind !== 'light_document' && kind !== 'spreadsheet') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
+  if (request.kind !== 'light_document') return teamKnowledgeItemPartial({ failedAt: 'unsupported', error: 'team_knowledge_kind_unsupported' })
+  const kind: TeamKnowledgeItemKind = 'light_document'
   const priorStages = request.recovery?.stages ?? []
   const stages = ['parent_inspected', ...priorStages.filter((stage) => stage !== 'parent_inspected')]
   const checkpointContractHash = await teamKnowledgeContractHash(request, parent)
@@ -3333,76 +2848,67 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
   let restoreParentAfterLightDocument = true
   try {
     await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
-    if (kind === 'light_document') {
-      // A same-parent catalog entry can be authoritative for identity but not
-      // its file type. In that narrowly bounded case, obtain the existing
-      // WebEdit resource identity before any body mutation.
-      if (created.provisionalKind === true) await readCreatedTeamKnowledgeItem(request, item)
-      const frame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
-      if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
-      const write = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [frame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!] }))[0]?.result as { ok?: unknown; readbackMatches?: unknown; observedBody?: unknown; error?: unknown } | undefined
-      if (write?.ok !== true || write.readbackMatches !== true || typeof write.observedBody !== 'string') throw new Error(typeof write?.error === 'string' ? write.error : 'team_knowledge_document_readback_mismatch')
-      if (!stages.includes('body_written')) stages.push('body_written')
-      if (request.userConfirmation) {
-        // The in-memory XML readback above is complete, but must not be
-        // mistaken for persistent delivery. Keep the document open while the
-        // user reviews it; only an explicit confirmation permits navigation.
-        restoreParentAfterLightDocument = false
-        let confirmation: { status?: unknown } | undefined
-        try {
-          confirmation = (await chrome.scripting.executeScript({
-            target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: waitForTeamKnowledgeUserConfirmation,
-            args: [{ ...request.userConfirmation, name: request.name! }],
-          }))[0]?.result as { status?: unknown } | undefined
-        } catch {
-          return teamKnowledgeItemPartial({ item, stages, failedAt: 'confirmation', error: 'team_knowledge_user_confirmation_page_unloaded' })
-        }
-        if (confirmation?.status !== 'confirmed') {
-          const error = confirmation?.status === 'stopped'
-            ? 'team_knowledge_user_confirmation_stopped'
-            : confirmation?.status === 'timeout'
-              ? 'team_knowledge_user_confirmation_timeout'
-              : confirmation?.status === 'unloaded'
-                ? 'team_knowledge_user_confirmation_page_unloaded'
-                : 'team_knowledge_user_confirmation_unavailable'
-          return teamKnowledgeItemPartial({ item, stages, failedAt: 'confirmation', error })
-        }
-        restoreParentAfterLightDocument = true
+    // A same-parent catalog entry can be authoritative for identity but not
+    // its file type. In that narrowly bounded case, obtain the existing
+    // WebEdit resource identity before any body mutation.
+    if (created.provisionalKind === true) await readCreatedTeamKnowledgeItem(request, item)
+    const frame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
+    if (!frame) throw new Error('team_knowledge_webedit_frame_unavailable')
+    const initialWrite = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [frame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!] }))[0]?.result as TeamDocWebEditReadback | undefined
+    const write = await pollTeamDocWebEditReadback(request.browserTarget.tabId, frame.frameId, request.body!, initialWrite)
+    if (!teamDocWebEditReadbackMatches(write)) throw new Error(typeof write?.error === 'string' ? write.error : 'team_knowledge_document_readback_mismatch')
+    if (!stages.includes('body_written')) stages.push('body_written')
+    if (request.userConfirmation) {
+      // The in-memory XML readback above is complete, but must not be
+      // mistaken for persistent delivery. Keep the document open while the
+      // user reviews it; only an explicit confirmation permits navigation.
+      restoreParentAfterLightDocument = false
+      let confirmation: { status?: unknown } | undefined
+      try {
+        confirmation = (await chrome.scripting.executeScript({
+          target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: waitForTeamKnowledgeUserConfirmation,
+          args: [{ ...request.userConfirmation, name: request.name! }],
+        }))[0]?.result as { status?: unknown } | undefined
+      } catch {
+        return teamKnowledgeItemPartial({ item, stages, failedAt: 'confirmation', error: 'team_knowledge_user_confirmation_page_unloaded' })
       }
-      await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url)
-      await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
-      const reopenedFrame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
-      if (!reopenedFrame) throw new Error('team_knowledge_webedit_frame_unavailable')
-      const persistedReadback = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [reopenedFrame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!, true] }))[0]?.result as { ok?: unknown; readbackMatches?: unknown; observedBody?: unknown; error?: unknown } | undefined
-      if (persistedReadback?.ok !== true || persistedReadback.readbackMatches !== true || typeof persistedReadback.observedBody !== 'string') throw new Error(typeof persistedReadback?.error === 'string' ? persistedReadback.error : 'team_knowledge_document_persisted_readback_mismatch')
-      readback = { body: persistedReadback.observedBody }
-      if (!stages.includes('readback_verified')) stages.push('readback_verified')
-    } else {
-      readback = await readCreatedTeamKnowledgeItem(request, { catalogId, kind, name: request.name!, url: created.url })
-      if (!stages.includes('identity_readback_verified')) stages.push('identity_readback_verified')
+      if (confirmation?.status !== 'confirmed') {
+        const error = confirmation?.status === 'stopped'
+          ? 'team_knowledge_user_confirmation_stopped'
+          : confirmation?.status === 'timeout'
+            ? 'team_knowledge_user_confirmation_timeout'
+            : confirmation?.status === 'unloaded'
+              ? 'team_knowledge_user_confirmation_page_unloaded'
+              : 'team_knowledge_user_confirmation_unavailable'
+        return teamKnowledgeItemPartial({ item, stages, failedAt: 'confirmation', error })
+      }
+      restoreParentAfterLightDocument = true
     }
+    await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url)
+    await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
+    const reopenedFrame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
+    if (!reopenedFrame) throw new Error('team_knowledge_webedit_frame_unavailable')
+    const persistedReadback = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [reopenedFrame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!, true] }))[0]?.result as TeamDocWebEditReadback | undefined
+    if (!teamDocWebEditReadbackMatches(persistedReadback)) throw new Error(typeof persistedReadback?.error === 'string' ? persistedReadback.error : 'team_knowledge_document_persisted_readback_mismatch')
+    readback = { body: persistedReadback.observedBody }
+    if (!stages.includes('readback_verified')) stages.push('readback_verified')
   } catch (error) {
-    return teamKnowledgeItemPartial({ item, stages, failedAt: kind === 'spreadsheet' && error instanceof Error && error.message === 'team_knowledge_spreadsheet_identity_unavailable' ? 'unsupported' : 'readback', error: error instanceof Error ? error.message : 'team_knowledge_item_readback_failed' })
+    restoreParentAfterLightDocument = false
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: request.browserTarget.tabId }, world: 'MAIN', func: showTeamKnowledgeReadbackFailure,
+        args: [{ name: request.name!, error: error instanceof Error ? error.message : 'team_knowledge_item_readback_failed' }],
+      })
+    } catch { /* The verified-write failure is still returned when the page prompt cannot be injected. */ }
+    return teamKnowledgeItemPartial({ item, stages, failedAt: 'readback', error: error instanceof Error ? error.message : 'team_knowledge_item_readback_failed' })
   } finally {
     if (restoreParentAfterLightDocument) {
       try { await chrome.tabs.update(request.browserTarget.tabId, { url: request.browserTarget.url }); await waitForTeamDocTab(request.browserTarget.tabId, request.browserTarget.url) } catch {}
     }
   }
-  const expected = kind === 'light_document'
-    ? ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
-    : ['parent_inspected', 'created', 'rediscovered', 'identity_readback_verified']
+  const expected = ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified']
   stages.sort((left, right) => expected.indexOf(left) - expected.indexOf(right))
   return { status: 'verified_write', item, stages, readback }
-}
-
-function respondToTeamDoc(port: chrome.runtime.Port, request: TeamDocRequest): void {
-  void queueNativeLifecycle(async () => {
-    if (nativePort !== port) throw new Error('Team Doc request belongs to a stale Native connection.')
-    const result = await runTeamDocRequest(request)
-    if (nativePort !== port) throw new Error('Team Doc request became stale before completion.')
-    return result
-  }).then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
-    .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
 }
 
 function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnowledgeItemRequest): void {
@@ -3410,14 +2916,14 @@ function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnow
     if (nativePort !== port) throw new Error('Team Knowledge item request belongs to a stale Native connection.')
     // Team Knowledge batch/item calls may be the first tool after the user
     // selects another document in the same tab. Resolve and migrate the live
-    // Browser Target here instead of requiring an office_get_context preflight.
+    // Browser Target here instead of requiring an list_work_tabs preflight.
     const binding = await resolveOfficeBrowserTarget({
       type: request.type,
       requestId: request.requestId,
       runId: request.runId,
       generation: request.generation,
       browserTarget: request.browserTarget,
-      tool: 'office_get_context',
+      tool: 'list_work_tabs',
     })
     const resolvedRequest = { ...request, browserTarget: binding.browserTarget }
     const result = await runTeamKnowledgeItemRequest(resolvedRequest)
@@ -3425,26 +2931,6 @@ function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnow
     return { browserTarget: binding.browserTarget, result }
   }).then(({ browserTarget, result }) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget, result }))
     .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
-}
-
-function respondToBrowserOpenTab(port: chrome.runtime.Port, request: BrowserOpenTabRequest): void {
-  void queueNativeLifecycle(async () => {
-    if (nativePort !== port) throw new Error('Browser-open request belongs to a stale Native connection.')
-    const tab = await chrome.tabs.create({ url: request.url, active: true })
-    if (nativePort !== port) throw new Error('Browser-open request became stale before its target could be transferred.')
-    const browserTarget = targetFromActionTab(tab)
-    if (browserTarget === undefined) throw new Error('Chrome did not return a Browser Target for the opened tab.')
-    await transferBrowserTarget(request.runId, bindingForTarget(browserTarget), request.requestId)
-    port.postMessage({
-      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
-      browserTarget, result: { pageIdentity: { title: tab.title ?? '', url: browserTarget.url } },
-    })
-  }).catch((error: unknown) => {
-    port.postMessage({
-      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
-      error: asError(error),
-    })
-  })
 }
 
 function settleTargetTransfer(requestId: unknown, payload: NativeTransferPayload): void {
@@ -3508,24 +2994,8 @@ function connectNativePort(): chrome.runtime.Port {
       respondToReadWorkTab(port, message)
       return
     }
-    if (isOfficeReadRangeRequest(message)) {
-      respondToOfficeReadRange(port, message)
-      return
-    }
-    if (isOfficeWriteRangeRequest(message)) {
-      respondToOfficeWriteRange(port, message)
-      return
-    }
     if (isOfficeDocumentRequest(message)) {
       respondToOfficeDocument(port, message)
-      return
-    }
-    if (isOfficeSpreadsheetRequest(message)) {
-      respondToOfficeSpreadsheet(port, message)
-      return
-    }
-    if (isTeamDocRequest(message)) {
-      respondToTeamDoc(port, message)
       return
     }
     if (isTeamKnowledgeItemRequest(message)) {
@@ -3542,10 +3012,6 @@ function connectNativePort(): chrome.runtime.Port {
     }
     if (isKnowledgeCancel(message)) {
       activeKnowledgeQueries.get(message.requestId)?.abort()
-      return
-    }
-    if (isBrowserOpenTabRequest(message)) {
-      respondToBrowserOpenTab(port, message)
       return
     }
     if (message.type === 'browser_target_transferred') {
@@ -3688,10 +3154,70 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown }
     if (request.type === 'ensure-harness') {
       void startHarnessForSettings()
         .then((url) => sendResponse({ ok: true, url }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'switch-harness-surface/v1') {
+      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || (request.sessionId !== undefined && !validSessionIdentity(request.sessionId))) {
+        sendResponse({ ok: false, error: 'Chrome could not switch the Harness Workspace to a Tab.' })
+        return false
+      }
+      const windowId = request.windowId as number
+      if (request.surface === 'fullscreen-tab') {
+        if (chrome.tabs?.create === undefined || chrome.sidePanel?.close === undefined) {
+          sendResponse({ ok: false, error: 'Chrome could not switch the Harness Workspace to a Tab.' })
+          return false
+        }
+        void (async () => {
+          const url = new URL(chrome.runtime.getURL('sidepanel.html'))
+          url.searchParams.set('dshHarnessSurface', 'fullscreen-tab')
+          if (typeof request.sessionId === 'string') url.searchParams.set('dshHarnessSessionId', request.sessionId)
+          const tab = await chrome.tabs.create({ windowId, active: true, url: url.toString() })
+          try {
+            await chrome.sidePanel.close({ windowId })
+          } catch (error) {
+            if (tab.id !== undefined && chrome.tabs.remove !== undefined) await chrome.tabs.remove(tab.id).catch(() => {})
+            throw error
+          }
+        })()
+          .then(() => sendResponse({ ok: true }))
+          .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+        return true
+      }
+      if (request.surface === 'sidepanel' && Number.isInteger(request.tabId) && (request.tabId as number) >= 0 && typeof request.sessionId === 'string' && chrome.tabs?.get !== undefined && chrome.tabs?.remove !== undefined && chrome.sidePanel?.close !== undefined && chrome.sidePanel?.setOptions !== undefined && chrome.sidePanel?.open !== undefined) {
+        const tabId = request.tabId as number
+        void (async () => {
+          const tab = await chrome.tabs.get(tabId)
+          if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
+          const path = `sidepanel.html?dshHarnessSessionId=${encodeURIComponent(request.sessionId)}`
+          await chrome.sidePanel.close({ windowId })
+          try {
+            await chrome.sidePanel.setOptions({ path, enabled: true })
+            await chrome.sidePanel.open({ windowId })
+          } catch (error) {
+            await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true }).catch(() => {})
+            throw error
+          }
+          await chrome.tabs.remove(tabId)
+        })()
+          .then(() => sendResponse({ ok: true }))
+          .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+        return true
+      }
+      sendResponse({ ok: false, error: 'Chrome could not switch the Harness Workspace to the side panel.' })
+      return false
+    }
+    if (request.type === 'consume-sidepanel-handoff/v1') {
+      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || chrome.sidePanel?.setOptions === undefined) {
+        sendResponse({ ok: false, error: 'Chrome could not finalize the Harness side-panel handoff.' })
+        return false
+      }
+      void chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true })
+        .then(() => sendResponse({ ok: true }))
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }

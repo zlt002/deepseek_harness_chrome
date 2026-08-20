@@ -1,16 +1,54 @@
-import { createSnapshotStore, type ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import { createSnapshotStore, type ClientContext, type SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BrowserTargetControl, BrowserTargetPanel, type BrowserTargetInjected } from './BrowserTargetControl.tsx'
 import { HarnessReconnectAction, type HarnessReconnectActionInjected } from './HarnessReconnectAction.tsx'
 import { activeTabBridgeConfig, createBrowserTargetBridge } from './active-tab-bridge.ts'
 
-export const inject = ['slots']
+export const inject = ['slots', 'settingsQuickActions']
 
 /** Mount the accepted e327 Browser Target UI through public slots. */
 export function apply(ctx: ClientContext): void {
   const config = activeTabBridgeConfig()
+  const quickActions = ctx.get('settingsQuickActions')!
+  const fullscreenTab = config?.surface === 'fullscreen-tab'
+  ctx.effect(() => quickActions.register({
+    id: fullscreenTab ? 'close-fullscreen' : 'open-fullscreen',
+    label: fullscreenTab ? '关闭全屏' : '全屏',
+    order: 5,
+    requiresSession: false,
+    run: (sessionId?: SessionId) => {
+      if (config !== undefined) {
+        window.parent.postMessage({ type: fullscreenTab ? 'return-to-sidepanel/v1' : 'open-fullscreen-tab/v1', nonce: config.nonce, ...(sessionId === undefined ? {} : { sessionId: String(sessionId) }) }, config.parentOrigin)
+      } else {
+        window.open(window.location.href, '_blank')
+      }
+    },
+  }), 'accrui-browser-target: open-fullscreen action')
   if (config === undefined) return
+  if (fullscreenTab) {
+    ctx.effect(() => {
+      const reportSelectedSession = (): void => {
+        const sessionId = ctx.sessions.list.getSnapshot().current
+        window.parent.postMessage({ type: 'harness-session-selected/v1', nonce: config.nonce, ...(sessionId === undefined ? {} : { sessionId: String(sessionId) }) }, config.parentOrigin)
+      }
+      reportSelectedSession()
+      return ctx.sessions.list.subscribe(reportSelectedSession)
+    }, 'accrui-browser-target: report full-screen session')
+  }
+  if (config.sessionId !== undefined) {
+    ctx.effect(() => {
+      const select = (): boolean => {
+        if (ctx.sessions.list.getSnapshot().byId[config.sessionId!] === undefined) return false
+        ctx.sessions.open(config.sessionId! as SessionId)
+        return true
+      }
+      if (select()) return
+      const stop = ctx.sessions.list.subscribe(() => { if (select()) stop() })
+      return stop
+    }, 'accrui-browser-target: restore handed-off session')
+  }
   const bridge = createBrowserTargetBridge(config.nonce, config.parentOrigin)
   const panel = createSnapshotStore(false)
   const injected = (): BrowserTargetInjected => ({

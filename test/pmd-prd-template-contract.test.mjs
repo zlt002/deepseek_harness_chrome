@@ -44,6 +44,7 @@ function materialiseTemplate(body) {
     .replace(/\{[^{}\n]+\}/g, '[待确认]')
   return filled.split('\n').map((line) => {
     const trimmed = line.trim()
+    if (trimmed === '- [ ]') return '- [ ] [待确认]'
     if (!trimmed.startsWith('|') || !trimmed.endsWith('|') || /^\|(?:\s*:?-{3,}:?\s*\|)+$/.test(trimmed)) return line
     const cells = trimmed.slice(1, -1).split('|').map((cell) => cell.trim() || '[待确认]')
     return `| ${cells.join(' | ')} |`
@@ -54,11 +55,10 @@ async function completeBodies() {
   const authority = await readFile(authorityPath, 'utf8')
   const analysis = extractBlock(authority, '# 需求分析与研发交付')
   const prd = extractBlock(authority, '# PRD:')
-  const appendixStart = authority.indexOf('## AccrUI 需求交接附录')
-  assert.ok(analysis && prd && appendixStart >= 0, 'authoritative templates must expose both complete bodies')
+  assert.ok(analysis && prd, 'authoritative templates must expose both complete bodies')
   return {
     analysis: materialiseTemplate(analysis),
-    prd: materialiseTemplate(`${prd}\n\n${authority.slice(appendixStart)}`),
+    prd: materialiseTemplate(prd),
   }
 }
 
@@ -89,7 +89,7 @@ test('accepts complete frozen analysis and PRD bodies from the authoritative tem
   assert.match(result.stdout, /PASS: PMD frozen deliverable contract/)
 })
 
-test('rejects summary, reordered, missing-information, filename, and literal backslash-n violations', async () => {
+test('rejects summary, old complex analysis, missing six parts, unsupported numbers, filename, and literal backslash-n violations', async () => {
   const bodies = await completeBodies()
   const cases = [
     {
@@ -98,8 +98,13 @@ test('rejects summary, reordered, missing-information, filename, and literal bac
       message: /analysis is missing or reorders/,
     },
     {
-      name: 'reordered analysis',
-      fixture: { ...bodies, analysis: bodies.analysis.replace('## 2. 证据分类', '## 8. 证据分类') },
+      name: 'old complex analysis',
+      fixture: { ...bodies, analysis: bodies.analysis.replace('## 2. 产品纠正', '## 2. 证据分类\n| Evidence ID | 类型 |\n|---|---|') },
+      message: /analysis is missing or reorders|internal delivery term/,
+    },
+    {
+      name: 'missing six-part section',
+      fixture: { ...bodies, analysis: bodies.analysis.replace('## 6. 验收清单', '## 7. 验收清单') },
       message: /analysis is missing or reorders/,
     },
     {
@@ -111,6 +116,21 @@ test('rejects summary, reordered, missing-information, filename, and literal bac
       name: 'filename suffix',
       fixture: { ...bodies, analysisName: 'req_contract_模板完整性_analysis.md' },
       message: /filename must end with/,
+    },
+    {
+      name: 'unsupported number',
+      fixture: { ...bodies, analysis: `${bodies.analysis}\n\n预计 12 人天完成。` },
+      message: /unsupported quantified claim/,
+    },
+    {
+      name: 'empty acceptance category',
+      fixture: { ...bodies, analysis: bodies.analysis.replace('- [ ] [待确认]', '- [ ]') },
+      message: /acceptance checklist is empty/,
+    },
+    {
+      name: 'technical PRD locator',
+      fixture: { ...bodies, prd: `${bodies.prd}\n\n实现位于 src/views/Home.vue。` },
+      message: /code locator that belongs in the handoff/,
     },
     {
       name: 'literal backslash-n',

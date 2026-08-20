@@ -66,9 +66,11 @@ export default defineConfig({
     },
   },
   manifest: {
-    name: 'DeepSeek Harness',
-    description: 'Use DeepSeek Harness from a Chrome side panel.',
-    minimum_chrome_version: '120',
+    name: 'ACCRUI',
+    description: 'Use ACCRUI from a Chrome side panel.',
+    // `chrome.sidePanel.close()` keeps the full-screen Tab and side panel
+    // mutually exclusive without globally disabling the extension surface.
+    minimum_chrome_version: '141',
     permissions: ['sidePanel', 'nativeMessaging', 'storage', 'tabs', 'webNavigation', 'scripting', 'cookies'],
     host_permissions: [
       'http://127.0.0.1/*',
@@ -87,7 +89,7 @@ export default defineConfig({
       matches: ['https://webedit.midea.com/*'],
     }],
     action: {
-      default_title: 'Open DeepSeek Harness',
+      default_title: 'Open ACCRUI',
     },
     side_panel: {
       default_path: 'sidepanel.html',

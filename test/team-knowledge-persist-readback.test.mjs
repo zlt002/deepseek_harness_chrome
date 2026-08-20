@@ -61,18 +61,18 @@ async function loadBackground() {
   return { executions, navigations, send, cleanup: () => { delete globalThis.chrome; delete globalThis.defineBackground } }
 }
 
-test('does not report a Team Knowledge item verified when its reopened WebEdit body is empty', async () => {
+test('keeps the created Team Knowledge document open and surfaces a retry prompt when persisted WebEdit readback is empty', async () => {
   const harness = await loadBackground()
   try {
     const response = await harness.send({
       type: 'connector_request', requestId: 'persist-readback', runId: 'run-team-doc', generation: 'generation-1', browserTarget: target,
-      tool: 'team_knowledge_item', action: 'create', parent, kind: 'light_document', idempotencyIdentity: 'persist-readback-item', name: 'Child', body: '# Child',
+      tool: 'team_knowledge_batch', action: 'create', parent, kind: 'light_document', idempotencyIdentity: 'persist-readback-item', name: 'Child', body: '# Child',
     })
     assert.equal(response.result.status, 'partial_delivery')
     assert.equal(response.result.failedAt, 'readback')
     assert.equal(response.result.error, 'team_knowledge_document_persisted_readback_mismatch')
-    assert.deepEqual(harness.executions.map((request) => request.func.name), ['inspectTeamDocParentInPage', 'createTeamDocInPage', 'writeTeamDocInWebEdit', 'writeTeamDocInWebEdit'])
-    assert.equal(harness.executions.at(-1).args[1], true)
-    assert.deepEqual(harness.navigations, [createdUrl, parentUrl, createdUrl, parentUrl])
+    assert.deepEqual(harness.executions.map((request) => request.func.name), ['inspectTeamDocParentInPage', 'createTeamDocInPage', 'writeTeamDocInWebEdit', 'writeTeamDocInWebEdit', 'showTeamKnowledgeReadbackFailure'])
+    assert.equal(harness.executions.filter((request) => request.func.name === 'writeTeamDocInWebEdit').at(-1).args[1], true)
+    assert.deepEqual(harness.navigations, [createdUrl, parentUrl, createdUrl])
   } finally { harness.cleanup() }
 })

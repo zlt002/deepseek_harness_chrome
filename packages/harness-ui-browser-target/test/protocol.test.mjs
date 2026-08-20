@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { browserTargetBridgeConfig, createBrowserTargetProtocol, requestHarnessReconnect } from '../src/client/protocol.js'
+import { browserTargetBridgeConfig, createBrowserTargetProtocol, requestHarnessReconnect, requestOpenFullscreenTab, requestReturnToSidepanel } from '../src/client/protocol.js'
 
 function store(initial) { return { value: initial, set(value) { this.value = value } } }
 const snapshot = { settings: { mode: 'follow-active-tab', pinnedTabs: [] }, tabs: [], activeTab: { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://example.test', title: 'Example' } }
@@ -27,7 +27,8 @@ test('emits extension commands with its own increasing sequence', () => {
 })
 
 test('requires an exact chrome extension parent origin in the opt-in bridge URL', () => {
-  assert.deepEqual(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabc')), { nonce: 'n', parentOrigin: 'chrome-extension://abc' })
+  assert.deepEqual(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabc')), { nonce: 'n', parentOrigin: 'chrome-extension://abc', surface: 'sidepanel' })
+  assert.deepEqual(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabc&dshBrowserTargetSurface=fullscreen-tab&dshHarnessSessionId=session-current')), { nonce: 'n', parentOrigin: 'chrome-extension://abc', surface: 'fullscreen-tab', sessionId: 'session-current' })
   assert.equal(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=https%3A%2F%2Fexample.test')), undefined)
 })
 
@@ -35,4 +36,15 @@ test('reconnect action posts only the nonce-bound message to the configured pare
   const sent = []
   requestHarnessReconnect({ postMessage: (message, origin) => sent.push({ message, origin }) }, 'nonce', 'chrome-extension://abc')
   assert.deepEqual(sent, [{ message: { type: 'harness-reconnect/v1', nonce: 'nonce' }, origin: 'chrome-extension://abc' }])
+})
+
+test('full-screen handoff messages remain nonce- and origin-bound in both directions', () => {
+  const sent = []
+  const parent = { postMessage: (message, origin) => sent.push({ message, origin }) }
+  requestOpenFullscreenTab(parent, 'nonce', 'chrome-extension://abc', 'session-current')
+  requestReturnToSidepanel(parent, 'nonce', 'chrome-extension://abc')
+  assert.deepEqual(sent, [
+    { message: { type: 'open-fullscreen-tab/v1', nonce: 'nonce', sessionId: 'session-current' }, origin: 'chrome-extension://abc' },
+    { message: { type: 'return-to-sidepanel/v1', nonce: 'nonce' }, origin: 'chrome-extension://abc' },
+  ])
 })

@@ -28,8 +28,8 @@ test('background forwards selection_insert to WebEdit and rejects unknown light-
     await import(`data:text/javascript,${encodeURIComponent(compiled)}#office-light-document-background-${Date.now()}`)
     await new Promise((resolve, reject) => { const opened = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error))); if (opened !== true) reject(new Error('ensure-harness did not retain the response channel')) })
     const payload = { text: '写入内容', expectedSelectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef' }
-    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'selection-1', runId: 'light-document-background-run', generation: 'g-1', browserTarget: target, tool: 'office_document', action: 'write', resource, operation: 'selection_insert', payload }))
-    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'unknown-1', runId: 'light-document-background-run', generation: 'g-1', browserTarget: target, tool: 'office_document', action: 'inspect_write', operation: 'unknown_operation', payload }))
+    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'selection-1', runId: 'light-document-background-run', generation: 'g-1', browserTarget: target, tool: 'light_document', action: 'write', resource, operation: 'selection_insert', payload }))
+    listeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'unknown-1', runId: 'light-document-background-run', generation: 'g-1', browserTarget: target, tool: 'light_document', action: 'inspect_write', operation: 'unknown_operation', payload }))
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.deepEqual(sent.filter((entry) => entry.message.action !== 'probe'), [{ tabId: 42, message: { type: 'office-document/v1', action: 'write', resource, operation: 'selection_insert', payload }, options: { frameId: 17 } }])
     assert.equal(nativeMessages.filter((message) => message.type === 'connector_response').length, 1)
@@ -63,7 +63,7 @@ test('concurrent light-document writes fence per resource fingerprint while diff
     webNavigation: { getAllFrames: async () => [{ frameId: 0, url: target.url }, { frameId: 17, url: 'https://webedit.midea.com/edit/abc' }] }, sidePanel: { open: async () => {} },
   }
   globalThis.defineBackground = (setup) => setup()
-  const write = (requestId, fingerprint, text) => ({ type: 'connector_request', requestId, runId: 'light-document-fence-run', generation: 'g-1', browserTarget: target, tool: 'office_document', action: 'write', resource: { ...resource, fingerprint }, operation: 'replace', payload: { index: 0, text } })
+  const write = (requestId, fingerprint, text) => ({ type: 'connector_request', requestId, runId: 'light-document-fence-run', generation: 'g-1', browserTarget: target, tool: 'light_document', action: 'write', resource: { ...resource, fingerprint }, operation: 'replace', payload: { index: 0, text } })
   try {
     await import(`data:text/javascript,${encodeURIComponent(compiled)}#office-light-document-fence-${Date.now()}`)
     await new Promise((resolve, reject) => { const opened = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error))); if (opened !== true) reject(new Error('ensure-harness did not retain the response channel')) })

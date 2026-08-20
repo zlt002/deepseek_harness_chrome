@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0 }) {
+async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
@@ -15,6 +15,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
   let currentActiveTab = activeTab
   const nativeMessages = []
   const createdUrls = []
+  const removedTabs = []
   const ports = []
   const connectNative = () => {
     const nativeMessageListeners = new Set()
@@ -63,6 +64,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
     action: { onClicked: { addListener: () => {} } },
     runtime: {
       connectNative,
+      getURL: (path) => `chrome-extension://test/${path}`,
       lastError: undefined,
       onMessage: { addListener: (listener) => { runtimeListener = listener } },
       sendMessage: async () => {},
@@ -82,13 +84,18 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
         createdUrls.push(options.url)
         return createdTab ?? Object.values(tabsById).find((tab) => tab.url === options.url)
       },
+      remove: async (tabId) => { removedTabs.push(tabId) },
       onActivated: { addListener: (listener) => { activatedListener = listener } },
       onCreated: { addListener: (listener) => { createdListener = listener } },
       onUpdated: { addListener: (listener) => { updatedListener = listener } },
     },
     scripting: { executeScript: async (options) => executeScript?.(options) ?? [] },
     webNavigation: { getAllFrames: async () => [] },
-    sidePanel: { open: async () => {} },
+    sidePanel: {
+      open: async (options) => openSidePanel?.(options),
+      close: async (options) => closeSidePanel?.(options),
+      setOptions: async (options) => setSidePanelOptions?.(options),
+    },
   }
   globalThis.defineBackground = (setup) => setup()
   globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS = teamDocProbeWaitMs
@@ -96,6 +103,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
   return {
     nativeMessages,
     createdUrls,
+    removedTabs,
     sendRuntimeMessage: (message) => new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('runtime response timeout')), 100)
       const keepChannelOpen = runtimeListener(message, {}, (response) => {
@@ -125,6 +133,73 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
     },
   }
 }
+
+test('background creates the selected-session full-screen Harness Tab before closing the side panel', async () => {
+  const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/follow', title: 'Follow target' }
+  const closeCalls = []
+  let background
+  let createdAtClose = 0
+  background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] },
+    activeTab,
+    closeSidePanel: async (options) => { createdAtClose = background.createdUrls.length; closeCalls.push(options) },
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'switch-harness-surface/v1', surface: 'fullscreen-tab', windowId: 7, sessionId: 'session-current' })
+    assert.deepEqual(response, { ok: true })
+    assert.deepEqual(background.createdUrls, ['chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab&dshHarnessSessionId=session-current'])
+    assert.equal(createdAtClose, 1, 'the persistent background creates the Tab before it closes the side-panel document')
+    assert.deepEqual(closeCalls, [{ windowId: 7 }])
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('background replaces an already-open Side Panel before closing the full-screen Tab and restores the selected session', async () => {
+  const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab', title: 'ACCRUI' }
+  const steps = []
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] },
+    activeTab: fullScreenTab,
+    closeSidePanel: async (options) => { steps.push(['close', options]) },
+    setSidePanelOptions: async (options) => { steps.push(['setOptions', options]) },
+    openSidePanel: async (options) => { steps.push(['open', options]) },
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'switch-harness-surface/v1', surface: 'sidepanel', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    assert.deepEqual(response, { ok: true })
+    assert.deepEqual(steps, [
+      ['close', { windowId: 7 }],
+      ['setOptions', { path: 'sidepanel.html?dshHarnessSessionId=session-current', enabled: true }],
+      ['open', { windowId: 7 }],
+    ])
+    assert.deepEqual(background.removedTabs, [91])
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('background leaves the full-screen Tab open when the replacement Side Panel cannot open', async () => {
+  const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab', title: 'ACCRUI' }
+  const options = []
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] },
+    activeTab: fullScreenTab,
+    setSidePanelOptions: async (value) => { options.push(value) },
+    openSidePanel: async () => { throw new Error('side-panel-open-failed') },
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'switch-harness-surface/v1', surface: 'sidepanel', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    assert.deepEqual(response, { ok: false, error: 'side-panel-open-failed' })
+    assert.deepEqual(background.removedTabs, [])
+    assert.deepEqual(options, [
+      { path: 'sidepanel.html?dshHarnessSessionId=session-current', enabled: true },
+      { path: 'sidepanel.html', enabled: true },
+    ])
+  } finally {
+    background.cleanup()
+  }
+})
 
 test('sidepanel ensure-harness resolves the last-focused active tab for the default follow-active-tab mode', async () => {
   const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/follow', title: 'Follow target' }
@@ -177,14 +252,14 @@ test('follow-active-tab uses the tab activated after one office turn for the nex
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     background.emitNative({
       type: 'connector_request', requestId: 'baidu-turn', runId: 'run-follow', generation: 'generation-1',
-      browserTarget: baiduTarget, tool: 'office_get_context',
+      browserTarget: baiduTarget, tool: 'list_work_tabs',
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     background.activateTab(43)
     await new Promise((resolve) => setTimeout(resolve, 0))
     background.emitNative({
       type: 'connector_request', requestId: 'wb-turn', runId: 'run-follow', generation: 'generation-1',
-      browserTarget: baiduTarget, tool: 'office_get_context',
+      browserTarget: baiduTarget, tool: 'list_work_tabs',
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     const transferIndex = background.nativeMessages.findIndex((message) => message.type === 'transfer-browser-target' && message.requestId === 'wb-turn')
@@ -210,7 +285,7 @@ test('follow-active-tab refreshes a same-tab URL change before the next Office t
     background.updateActiveTab({ url: selected.url, title: selected.title }, selected)
     background.emitNative({
       type: 'connector_request', requestId: 'selected-parent-turn', runId: 'run-follow', generation: 'generation-1',
-      browserTarget: originalTarget, tool: 'office_get_context',
+      browserTarget: originalTarget, tool: 'list_work_tabs',
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'selected-parent-turn')
@@ -236,7 +311,7 @@ test('Team Knowledge inspection transfers to a same-tab selected parent without 
     background.updateActiveTab({ url: selected.url, title: selected.title }, selected)
     background.emitNative({
       type: 'connector_request', requestId: 'team-knowledge-inspect', runId: 'run-follow', generation: 'generation-1',
-      browserTarget: originalTarget, tool: 'team_knowledge_item', action: 'inspect_parent',
+      browserTarget: originalTarget, tool: 'team_knowledge_batch', action: 'inspect_parent',
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'team-knowledge-inspect')
@@ -273,7 +348,7 @@ test('Team Knowledge waits for a same-tab candidate update before resolving its 
     background.updateActiveTab({ url: selected.url, title: selected.title }, selected)
     background.emitNative({
       type: 'connector_request', requestId: 'candidate-race', runId: 'run-follow', generation: 'generation-1',
-      browserTarget: originalTarget, tool: 'team_knowledge_item', action: 'inspect_parent',
+      browserTarget: originalTarget, tool: 'team_knowledge_batch', action: 'inspect_parent',
     })
     await candidateSaveStarted
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -379,7 +454,7 @@ test('sidepanel persists pinned multiple tabs with a primary target, and none st
   }
 })
 
-test('pinned office_get_context returns every available checked tab, keeps the primary, and reports unavailable tabs', async () => {
+test('pinned list_work_tabs returns every available checked tab, keeps the primary, and reports unavailable tabs', async () => {
   const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
   const first = { browser: 'chrome', windowId: 7, tabId: 51, url: 'https://docs.example.test/one' }
   const primary = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/two' }
@@ -394,7 +469,7 @@ test('pinned office_get_context returns every available checked tab, keeps the p
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     background.emitNative({
-      type: 'connector_request', requestId: 'multi-context', runId: 'run-follow', generation: 'generation-multi', tool: 'office_get_context',
+      type: 'connector_request', requestId: 'multi-context', runId: 'run-follow', generation: 'generation-multi', tool: 'list_work_tabs',
       browserTarget: primary, browserTargets: [first, primary], unavailableBrowserTargets: [{ browserTarget: stale, reason: 'closed_or_changed' }],
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -477,7 +552,7 @@ test('pinned mode follows the same tab after it navigates and refreshes the save
   }
 })
 
-test('pinned office_get_context transfers the live URL after a same-tab navigation', async () => {
+test('pinned list_work_tabs transfers the live URL after a same-tab navigation', async () => {
   const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
   const pinned = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/original' }
   const live = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/child' }
@@ -490,7 +565,7 @@ test('pinned office_get_context transfers the live URL after a same-tab navigati
     tabsById[52] = { id: 52, windowId: 7, url: live.url, title: 'Child doc' }
     background.emitNative({
       type: 'connector_request', requestId: 'pin-nav', runId: 'run-follow', generation: 'generation-pin-nav',
-      tool: 'office_get_context', browserTarget: pinned,
+      tool: 'list_work_tabs', browserTarget: pinned,
     })
     let response
     for (let attempt = 0; attempt < 10 && response === undefined; attempt += 1) {
@@ -602,7 +677,7 @@ test('a hung read_work_tab does not stall a later list_work_tabs roster', async 
     await new Promise((resolve) => setTimeout(resolve, 20))
     background.emitNative({
       type: 'connector_request', requestId: 'roster-after-hung', runId: 'run-follow', generation: 'generation-roster',
-      tool: 'office_get_context', browserTarget: primary, browserTargets: [first, primary],
+      tool: 'list_work_tabs', browserTarget: primary, browserTargets: [first, primary],
     })
     let roster
     for (let attempt = 0; attempt < 20 && roster === undefined; attempt += 1) {
@@ -674,106 +749,6 @@ test('Native transfer NACK rejects the correlated runtime request immediately', 
     assert.equal(response.ok, false)
     assert.match(response.error, /does not match/i)
     assert.ok(performance.now() - startedAt < 100)
-  } finally {
-    background.cleanup()
-  }
-})
-
-test('a correlated browser_open_tab Connector request creates a tab then transfers only that AI-created target', async () => {
-  const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
-  const openedTab = { id: 66, windowId: 7, url: 'https://docs.example.test/opened', title: 'Opened' }
-  const background = await loadBackground({
-    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab, createdTab: openedTab, tabsById: { 66: openedTab },
-  })
-  try {
-    await background.sendRuntimeMessage({ type: 'ensure-harness' })
-    background.emitNative({
-      type: 'connector_request', requestId: 'connector-open', runId: 'run-follow', generation: 'generation-open',
-      tool: 'browser_open_tab', url: openedTab.url,
-    })
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    assert.deepEqual(background.nativeMessages.slice(1), [
-      {
-        type: 'transfer-browser-target', requestId: 'connector-open', runId: 'run-follow',
-        browserTarget: { browser: 'chrome', windowId: 7, tabId: 66, url: openedTab.url },
-      },
-      {
-        type: 'connector_response', requestId: 'connector-open', runId: 'run-follow', generation: 'generation-open',
-        browserTarget: { browser: 'chrome', windowId: 7, tabId: 66, url: openedTab.url },
-        result: { pageIdentity: { title: 'Opened', url: openedTab.url } },
-      },
-    ])
-  } finally {
-    background.cleanup()
-  }
-})
-
-test('a browser_open_tab request received from a stale Native port is rejected before chrome.tabs.create', async () => {
-  const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
-  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab })
-  try {
-    await background.sendRuntimeMessage({ type: 'ensure-harness' })
-    background.disconnectNative()
-    background.emitNative({
-      type: 'connector_request', requestId: 'stale-open', runId: 'run-follow', generation: 'old-generation',
-      tool: 'browser_open_tab', url: 'https://docs.example.test/stale',
-    })
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    assert.deepEqual(background.createdUrls, [])
-    assert.match(background.nativeMessages.at(-1).error, /stale Native connection/i)
-  } finally {
-    background.cleanup()
-  }
-})
-
-test('a browser_open_tab queued after reconnect starts rejects its old Native port before chrome.tabs.create', async () => {
-  const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
-  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab })
-  try {
-    await background.sendRuntimeMessage({ type: 'ensure-harness' })
-    const restarting = background.sendRuntimeMessage({ type: 'restart-harness' })
-    background.emitNative({
-      type: 'connector_request', requestId: 'queued-stale-open', runId: 'run-follow', generation: 'old-generation',
-      tool: 'browser_open_tab', url: 'https://docs.example.test/stale-after-reconnect',
-    }, 0)
-    await restarting
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    assert.equal(background.nativeMessages.filter((message) => message.type === 'start').length, 2)
-    assert.deepEqual(background.createdUrls, [])
-    const response = background.nativeMessages.find((message) => message.requestId === 'queued-stale-open')
-    assert.match(response.error, /stale Native connection/i)
-  } finally {
-    background.cleanup()
-  }
-})
-
-test('restart waits for an already-started browser_open_tab transfer before replacing the Native Run', async () => {
-  const activeTab = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
-  const openedTab = { id: 66, windowId: 7, url: 'https://docs.example.test/opened', title: 'Opened' }
-  let releaseTransfer
-  const transferAck = new Promise((resolve) => { releaseTransfer = resolve })
-  const background = await loadBackground({
-    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab, createdTab: openedTab, tabsById: { 66: openedTab }, waitForTransferAck: transferAck,
-  })
-  try {
-    await background.sendRuntimeMessage({ type: 'ensure-harness' })
-    background.emitNative({
-      type: 'connector_request', requestId: 'queued-open', runId: 'run-follow', generation: 'generation-open',
-      tool: 'browser_open_tab', url: openedTab.url,
-    })
-    for (let attempt = 0; attempt < 10 && !background.nativeMessages.some((message) => message.type === 'transfer-browser-target'); attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0))
-    }
-    assert.equal(background.nativeMessages.some((message) => message.type === 'transfer-browser-target'), true)
-    const restarting = background.sendRuntimeMessage({ type: 'restart-harness' })
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    assert.equal(background.nativeMessages.filter((message) => message.type === 'start').length, 1)
-    releaseTransfer()
-    await restarting
-    const responseIndex = background.nativeMessages.findIndex((message) => message.type === 'connector_response' && message.requestId === 'queued-open')
-    const restartIndex = background.nativeMessages.findIndex((message, index) => index > 0 && message.type === 'start')
-    assert.ok(responseIndex > 0)
-    assert.ok(restartIndex > responseIndex)
   } finally {
     background.cleanup()
   }

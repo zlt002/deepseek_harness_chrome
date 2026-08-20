@@ -6,19 +6,35 @@ import { CopySessionLogDialog, type CopySessionLogDialogInjected } from './Dialo
 import { CopySessionLogController } from './controller.ts'
 import { en, NS, zh, type CopySessionLogKey } from './locales.ts'
 
+/** Public surface supplied by the official Session-log export client plugin. */
+interface SessionLogDownload {
+  download(sessionId: SessionId): Promise<void>
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    sessionLogDownload: SessionLogDownload
+  }
+}
+
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap { productSessionLogCopy: CopySessionLogKey }
 }
 
-export const inject = ['slots', 'locale', 'settingsQuickActions']
+export const inject = ['slots', 'locale', 'settingsQuickActions', 'sessionLogDownload']
 
 export function apply(ctx: ClientContext): void {
   const controller = new CopySessionLogController()
+  const sessionLogDownload = ctx.get('sessionLogDownload')!
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'product-session-log-copy: dictionaries')
   ctx.effect(() => ctx.get('settingsQuickActions')!.register({
     id: 'copy-session-log', label: '复制日志', order: 20,
     run: (sessionId: SessionId) => controller.copy(sessionId),
   }), 'product-session-log-copy: quick action')
+  ctx.effect(() => ctx.get('settingsQuickActions')!.register({
+    id: 'download-session-log', label: '下载 Session log', order: 30,
+    run: (sessionId: SessionId) => sessionLogDownload.download(sessionId),
+  }), 'product-session-log-copy: download quick action')
   ctx.effect(() => async () => { await controller.dispose() }, 'product-session-log-copy: lifecycle')
   ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
     name: 'conversation.session.header.utilities', id: 'accrui-copy-session-log', order: 10, locale: NS,

@@ -35,6 +35,14 @@ unsupported-type notice.
 replaces the input card, and lets the generic question card collapse to its
 title row.
 
+`0017` provides an ordered composer-submission transform registry. Each
+registered transform can enrich the prompt and receives its acknowledgement
+only after the host accepts that exact transformed prompt.
+
+`0018` gives finalized assistant message bodies a stable, display-neutral DOM
+identity marker so any client plugin can associate a text Range with exactly
+one durable assistant message without scanning transcript text.
+
 Verify against the pinned upstream commit:
 
 ```sh

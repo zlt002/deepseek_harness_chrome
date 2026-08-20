@@ -172,6 +172,8 @@
    its containing block just like the accepted e327 layout. */
 .root :global([data-composer-overlay-host]) {
   position: static;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 :global([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu']) {

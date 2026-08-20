@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-const READ_RESULT = { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Budget.xlsx', sheetName: 'Summary', fingerprint: 'webedit:budget-summary' }, range: { address: 'Summary!A1:B1', rowCount: 1, columnCount: 2, rows: [{ index: 1, cells: [{ address: 'A1', row: 1, column: 1, text: 'A', value: 'A', formula: null }, { address: 'B1', row: 1, column: 2, text: '2', value: 2, formula: null }] }] } }
+const READ_RESULT = { status: 'ok', resource: { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: 'Budget', fingerprint: 'doc-1' }, document: { blockCount: 1 } }
 
 async function compileBackground() {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
@@ -59,7 +59,7 @@ async function driveOfficeReadRange({ sendMessageBehavior, frames = DEFAULT_FRAM
       const open = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error)))
       if (open !== true) reject(new Error('ensure-harness did not retain the response channel'))
     })
-    nativeListeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'read-1', runId: 'run-healing', generation: 'g-1', browserTarget: target, tool: 'office_read_range', range: 'Summary!A1:B1', ...request }))
+    nativeListeners.forEach((listener) => listener({ type: 'connector_request', requestId: 'read-1', runId: 'run-healing', generation: 'g-1', browserTarget: target, tool: 'light_document', action: 'read', offset: 0, limit: 20, ...request }))
     const settleDeadline = Date.now() + 3_000
     while (!nativeMessages.some((message) => message.type === 'connector_response') && Date.now() < settleDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 10))
@@ -86,12 +86,11 @@ test('re-injects the content script and retries once when the WebEdit frame lost
   })
   assert.equal(probes, 2, 'probe must be retried exactly once after re-injection')
   assert.deepEqual(injections, [{ target: { tabId: 42, frameIds: [17] }, files: ['content-scripts/office-read.js'] }])
-  const realRead = sentToFrames.find((entry) => entry.message.range !== undefined)
-  assert.deepEqual(realRead.message, { type: 'office-read-range/v1', range: 'Summary!A1:B1' })
+  const realRead = sentToFrames.find((entry) => entry.message.action === 'read')
+  assert.deepEqual(realRead.message, { type: 'office-document/v1', action: 'read', offset: 0, limit: 20 })
   assert.equal(realRead.options.frameId, 17)
   const response = nativeMessages.find((message) => message.type === 'connector_response')
   assert.equal(response.error, undefined, `expected success, got ${JSON.stringify(response.error)}`)
-  assert.equal(response.result.range.rows[0].cells[1].value, 2)
 })
 
 test('keeps the error transparent when re-injection does not revive the frame', async () => {
@@ -123,7 +122,7 @@ test('uses the ready spreadsheet frame when a sibling WebEdit iframe never answe
   const { sentToFrames, nativeMessages } = await driveOfficeReadRange({
     frames,
     probeWaitMs: 400,
-    request: { tool: 'office_spreadsheet', action: 'selection', range: undefined },
+    request: { tool: 'read_work_tab', tab: 1 },
     sendMessageBehavior: (message, options) => {
       if (message.action === 'probe') {
         probedFrames.push({ type: message.type, frameId: options.frameId })
@@ -134,15 +133,14 @@ test('uses the ready spreadsheet frame when a sibling WebEdit iframe never answe
         return Promise.resolve({ ok: true, result: { status: 'probe', ready: false } })
       }
       assert.equal(options.frameId, 6, 'the hung preload must not block the ready spreadsheet')
-      assert.equal(message.action, 'selection')
-      return Promise.resolve({ ok: true, result: { status: 'ok', resource: READ_RESULT.resource, selection: { supported: true, address: 'D11:G20', rowsCount: 10, columnsCount: 4, singleCell: false, value2: [['人事部']] } } })
+      assert.equal(message.action, 'used_range')
+      return Promise.resolve({ ok: true, result: { status: 'ok', usedRange: { address: 'A1:B2', text: '人事部' } } })
     },
   })
   assert.ok(probedFrames.some((entry) => entry.frameId === 6 && entry.type === 'office-spreadsheet/v1'))
   const response = nativeMessages.find((message) => message.type === 'connector_response')
   assert.equal(response.error, undefined, `expected success, got ${JSON.stringify(response.error)}`)
-  assert.equal(response.result.selection.address, 'D11:G20')
-  assert.equal(sentToFrames.filter((entry) => entry.message.action === 'selection').length, 1)
+  assert.equal(response.result.kind, 'webedit_spreadsheet')
 })
 
 test('skips WebEdit frames whose editor runtime is not ready and uses the ready one', async () => {
@@ -165,10 +163,9 @@ test('skips WebEdit frames whose editor runtime is not ready and uses the ready 
   })
   assert.deepEqual([...new Set(probedFrames)].sort((left, right) => left - right), [5, 6], 'every webedit candidate must be probed')
   assert.equal(injections.length, 0, 'no healing needed: receivers answered')
-  assert.equal(sentToFrames.filter((entry) => entry.message.range !== undefined).length, 1, 'exactly one real read must be sent')
+  assert.equal(sentToFrames.filter((entry) => entry.message.action === 'read').length, 1, 'exactly one real read must be sent')
   const response = nativeMessages.find((message) => message.type === 'connector_response')
   assert.equal(response.error, undefined, `expected success, got ${JSON.stringify(response.error)}`)
-  assert.equal(response.result.range.rows[0].cells[1].value, 2)
 })
 
 test('prefers the content-bearing WebEdit frame when several editors are ready', async () => {
@@ -215,7 +212,7 @@ test('keeps first-ready order when no identity distinguishes the frames', async 
       return Promise.resolve({ ok: true, result: READ_RESULT })
     },
   })
-  assert.equal(sentToFrames.filter((entry) => entry.message.range !== undefined).length, 1)
+  assert.equal(sentToFrames.filter((entry) => entry.message.action === 'read').length, 1)
   assert.equal(nativeMessages.find((message) => message.type === 'connector_response').error, undefined)
 })
 
@@ -231,11 +228,11 @@ test('reports a transparent unsupported error when no WebEdit frame becomes read
   })
   const response = nativeMessages.find((message) => message.type === 'connector_response')
   assert.equal(response.error.code, 'unsupported')
-  assert.match(response.error.message, /1 WebEdit iframe\(s\), but none exposed a ready editor runtime within 0\.1s/, 'the error must distinguish frames-exist-but-not-ready from no-iframe-at-all')
+  assert.match(response.error.message, /1 WebEdit iframe\(s\), but none exposed a ready light-document editor within 0\.1s/, 'the error must distinguish frames-exist-but-not-ready from no-iframe-at-all')
   assert.ok(probeCount.value >= 2, 'the sweep must retry within the wait budget before giving up')
 })
 
-test('names office_spreadsheet when the frames host a ready spreadsheet but no light document', async () => {
+test('names read_work_tab when the frames host a ready spreadsheet but no light document', async () => {
   const frames = [
     { frameId: 0, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/1' },
     { frameId: 5, url: 'https://webedit.midea.com/weboffice/office/s/392' },
@@ -243,7 +240,7 @@ test('names office_spreadsheet when the frames host a ready spreadsheet but no l
   const probedChannels = new Set()
   const { sentToFrames, nativeMessages } = await driveOfficeReadRange({
     frames,
-    request: { tool: 'office_document', action: 'selection', range: undefined },
+    request: { tool: 'light_document', action: 'read', offset: 0, limit: 20 },
     sendMessageBehavior: (message, options) => {
       if (message.action === 'probe') {
         probedChannels.add(message.type)
@@ -259,30 +256,32 @@ test('names office_spreadsheet when the frames host a ready spreadsheet but no l
   assert.equal(response.error.code, 'unsupported')
   assert.match(response.error.message, /none exposed a ready light-document editor within 0\.1s/)
   assert.match(response.error.message, /1 of them expose a ready WebEdit spreadsheet runtime instead/)
-  assert.match(response.error.message, /call office_spreadsheet/)
+  assert.match(response.error.message, /call read_work_tab/)
 })
 
-test('names office_document when the frames host a ready light document but no spreadsheet', async () => {
+test('names light_document_read when the frames host a ready light document but no spreadsheet', async () => {
   const frames = [
     { frameId: 0, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/1' },
     { frameId: 5, url: 'https://webedit.midea.com/weboffice/office/d/77' },
   ]
-  const { nativeMessages } = await driveOfficeReadRange({
+  const { nativeMessages, sentToFrames } = await driveOfficeReadRange({
     frames,
-    request: { tool: 'office_spreadsheet', action: 'context', range: undefined },
+    request: { tool: 'light_document', action: 'read', offset: 0, limit: 20 },
     sendMessageBehavior: (message) => {
-      if (message.action !== 'probe') return Promise.reject(new Error('the real context must never run'))
-      if (message.type === 'office-spreadsheet/v1') return Promise.resolve({ ok: true, result: { status: 'probe', ready: false } })
-      return Promise.resolve({ ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/d/77' } } })
+      if (message.action === 'probe') {
+        if (message.type === 'office-spreadsheet/v1') return Promise.resolve({ ok: true, result: { status: 'probe', ready: false } })
+        return Promise.resolve({ ok: true, result: { status: 'probe', ready: true, identity: { path: '/weboffice/office/d/77' } } })
+      }
+      assert.equal(message.type, 'office-document/v1')
+      return Promise.resolve({ ok: true, result: READ_RESULT })
     },
   })
   const response = nativeMessages.find((message) => message.type === 'connector_response')
-  assert.equal(response.error.code, 'unsupported')
-  assert.match(response.error.message, /none exposed a ready spreadsheet runtime within 0\.1s/)
-  assert.match(response.error.message, /call office_document/)
+  assert.equal(response.error, undefined, `expected success, got ${JSON.stringify(response.error)}`)
+  assert.equal(sentToFrames.some((entry) => entry.message.action === 'read'), true)
 })
 
-test('office_get_context reports the probed spreadsheet identity instead of a hardcoded null', async () => {
+test('list_work_tabs reports the probed spreadsheet identity instead of a hardcoded null', async () => {
   const frames = [
     { frameId: 0, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/1' },
     { frameId: 5, url: 'https://webedit.midea.com/weboffice/office/s/392' },
@@ -290,7 +289,7 @@ test('office_get_context reports the probed spreadsheet identity instead of a ha
   ]
   const { sentToFrames, nativeMessages } = await driveOfficeReadRange({
     frames,
-    request: { tool: 'office_get_context', range: undefined },
+    request: { tool: 'list_work_tabs', range: undefined },
     sendMessageBehavior: (message, options) => {
       assert.equal(message.action, 'probe', 'context must only probe frames, never operate')
       if (message.type === 'office-spreadsheet/v1') {
@@ -307,7 +306,7 @@ test('office_get_context reports the probed spreadsheet identity instead of a ha
   assert.deepEqual(response.result.pages[0].documentIdentity, { kind: 'webedit_spreadsheet', workbookName: null, sheetName: 'Sheet1', hasContent: true, webeditFrames: 2 })
 })
 
-test('office_get_context prefers a ready light document over a blank preloaded spreadsheet', async () => {
+test('list_work_tabs prefers a ready light document over a blank preloaded spreadsheet', async () => {
   const frames = [
     { frameId: 0, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/2089336886234255362' },
     { frameId: 5, url: 'https://webedit.midea.com/weboffice/office/o/2089336886234255362' },
@@ -315,7 +314,7 @@ test('office_get_context prefers a ready light document over a blank preloaded s
   ]
   const { nativeMessages } = await driveOfficeReadRange({
     frames,
-    request: { tool: 'office_get_context', range: undefined },
+    request: { tool: 'list_work_tabs', range: undefined },
     sendMessageBehavior: (message, options) => {
       assert.equal(message.action, 'probe', 'context must only probe frames, never operate')
       if (message.type === 'office-document/v1' && options.frameId === 5) {
@@ -333,14 +332,14 @@ test('office_get_context prefers a ready light document over a blank preloaded s
   assert.deepEqual(response.result.pages[0].documentIdentity, { kind: 'webedit_light_document', workbookName: null, sheetName: null, hasContent: null, webeditFrames: 2 })
 })
 
-test('office_get_context keeps null only when no webedit frame answers ready', async () => {
+test('list_work_tabs keeps null only when no webedit frame answers ready', async () => {
   const frames = [
     { frameId: 0, url: 'https://doc.midea.com/some/page' },
     { frameId: 5, url: 'https://webedit.midea.com/booting' },
   ]
   const { nativeMessages } = await driveOfficeReadRange({
     frames,
-    request: { tool: 'office_get_context', range: undefined },
+    request: { tool: 'list_work_tabs', range: undefined },
     sendMessageBehavior: () => Promise.resolve({ ok: true, result: { status: 'probe', ready: false } }),
   })
   const response = nativeMessages.find((message) => message.type === 'connector_response')
@@ -355,7 +354,7 @@ test('keeps the plain none-ready error when the sibling channel is also silent',
   ]
   const { nativeMessages } = await driveOfficeReadRange({
     frames,
-    request: { tool: 'office_document', action: 'selection', range: undefined },
+    request: { tool: 'light_document', action: 'read', offset: 0, limit: 20 },
     sendMessageBehavior: () => Promise.resolve({ ok: true, result: { status: 'probe', ready: false } }),
   })
   const response = nativeMessages.find((message) => message.type === 'connector_response')
@@ -375,7 +374,7 @@ test('times out a hung WebEdit operation after the ready probe instead of stalli
   })
   const response = nativeMessages.find((message) => message.type === 'connector_response')
   assert.equal(response.error.code, 'timeout')
-  assert.match(response.error.message, /did not finish the editor runtime operation within 0\.2s/)
+  assert.match(response.error.message, /did not finish the light-document editor operation within 0\.2s/)
 })
 
 test('keeps sweeping until a slow-booting editor becomes ready instead of failing on the first probe', async () => {
@@ -400,6 +399,5 @@ test('keeps sweeping until a slow-booting editor becomes ready instead of failin
   assert.equal(injections.length, 0)
   const response = nativeMessages.find((message) => message.type === 'connector_response')
   assert.equal(response.error, undefined, `expected success, got ${JSON.stringify(response.error)}`)
-  assert.equal(response.result.range.rows[0].cells[1].value, 2)
-  assert.equal(sentToFrames.filter((entry) => entry.message.range !== undefined).length, 1, 'exactly one real read must be sent')
+  assert.equal(sentToFrames.filter((entry) => entry.message.action === 'read').length, 1, 'exactly one real read must be sent')
 })

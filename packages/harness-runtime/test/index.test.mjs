@@ -4,11 +4,11 @@ import { apply, createSelectedSourceDispatchGuard, partitionTools, publicToolNam
 
 test('separates only configured raw MCP names into the continuable-child scope', () => {
   const tools = new Map([
-    ['mcp__chrome__browser_open_tab', { rawName: 'browser_open_tab', definition: {} }],
+    ['mcp__chrome__list_work_tabs', { rawName: 'list_work_tabs', definition: {} }],
     ['mcp__chrome__code_search', { rawName: 'code_search', definition: {} }],
   ])
   const result = partitionTools(tools, { code_search: 'continuable-child', default: 'global' })
-  assert.deepEqual([...result.global.keys()], ['mcp__chrome__browser_open_tab'])
+  assert.deepEqual([...result.global.keys()], ['mcp__chrome__list_work_tabs'])
   assert.deepEqual([...result.continuableChild.keys()], ['mcp__chrome__code_search'])
 })
 
@@ -89,7 +89,7 @@ test('installs scoped MCP tools only for continuable children and cleans them up
   }
   const originalFetch = globalThis.fetch
   const listedTools = [
-    { name: 'browser_open_tab', description: 'open a tab', inputSchema: { type: 'object' } },
+    { name: 'list_work_tabs', description: 'list work tabs', inputSchema: { type: 'object' } },
     { name: 'code_search', description: 'search code', inputSchema: { type: 'object' } },
     { name: 'knowledge_search', description: 'search knowledge', inputSchema: { type: 'object' } },
   ]
@@ -114,7 +114,7 @@ test('installs scoped MCP tools only for continuable children and cleans them up
     })
 
     assert.equal(typeof installContinuableChild, 'function')
-    assert.deepEqual([...rootTools.registered.keys()], ['mcp__chrome__browser_open_tab'])
+    assert.deepEqual([...rootTools.registered.keys()], ['mcp__chrome__list_work_tabs'])
     assert.deepEqual([...normalChildTools.registered.keys()], [])
 
     const removeContinuableChild = installContinuableChild({ tools: continuableChildTools })
@@ -123,7 +123,7 @@ test('installs scoped MCP tools only for continuable children and cleans them up
       'mcp__chrome__knowledge_search',
     ])
     assert.deepEqual([...new Map([...rootTools.registered, ...continuableChildTools.registered]).keys()], [
-      'mcp__chrome__browser_open_tab',
+      'mcp__chrome__list_work_tabs',
       'mcp__chrome__code_search',
       'mcp__chrome__knowledge_search',
     ])

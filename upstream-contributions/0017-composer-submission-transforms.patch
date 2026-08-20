@@ -1,0 +1,158 @@
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+index 9714831..86a436e 100644
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -24,6 +24,7 @@ import type { IConversation } from './service.ts'
+ import { ComposerBlockRegistry } from './input/blocks.ts'
+ import type { ComposerBlock } from './input/blocks.ts'
+ import { InputHub } from './input/hub.ts'
++import { ComposerSubmissionTransforms } from './input/submission-transforms.ts'
+ import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
+ import { InputBar } from './skeleton/InputBar.tsx'
+ import { EnterBehaviorRow } from './settings/EnterBehaviorRow.tsx'
+@@ -185,7 +186,9 @@ export function apply(ctx: Context): void {
+ 
+   // The per-session input machine registry (SessionInputResolver face; published as
+   // ctx.conversation.input by the service below sharing this one instance).
+-  const inputHub = new InputHub(ctx, t)
++  const submissionTransforms = new ComposerSubmissionTransforms()
++  ctx.provide('composerSubmissionTransforms', submissionTransforms)
++  const inputHub = new InputHub(ctx, t, submissionTransforms)
+ 
+   // The composer-block registry: a plugin that knows a session cannot send —
+   // ui-model-selection, when no adapter serves the session's route — raises a block
+diff --git a/packages/client/ui-conversation/src/client/index.ts b/packages/client/ui-conversation/src/client/index.ts
+index f700218..c34fe10 100644
+--- a/packages/client/ui-conversation/src/client/index.ts
++++ b/packages/client/ui-conversation/src/client/index.ts
+@@ -18,6 +18,11 @@ export { apply, inject } from './apply.ts'
+ export { ConversationController } from './service.ts'
+ export type { IConversation } from './service.ts'
+ export type { DraftAttachmentId } from './input/contract.ts'
++export {
++  ComposerSubmissionTransforms,
++  type ComposerSubmissionPreparation,
++  type ComposerSubmissionTransform,
++} from './input/submission-transforms.ts'
+ export { ConversationViewState } from './view-state.ts'
+ 
+ export type {
+@@ -46,5 +51,7 @@ declare module '@deepseek-ai/cordis' {
+     conversationViewState: import('./view-state.ts').ConversationViewState
+     /** Optional non-image remainder of composer paste/drop; absent keeps image-only intake. */
+     composerFileIntake?: import('./contract/slots.ts').ComposerFileIntake
++    /** Product-neutral prompt enrichments committed only after successful delivery. */
++    composerSubmissionTransforms: import('./input/submission-transforms.ts').ComposerSubmissionTransforms
+   }
+ }
+diff --git a/packages/client/ui-conversation/src/client/input/hub.ts b/packages/client/ui-conversation/src/client/input/hub.ts
+index 54e0920..51c4fdb 100644
+--- a/packages/client/ui-conversation/src/client/input/hub.ts
++++ b/packages/client/ui-conversation/src/client/input/hub.ts
+@@ -16,6 +16,7 @@ import type { ComposerKeyboard, DraftAttachmentId, SessionInputResolver, Session
+ import type { InputSubmitMode } from '../contract/composer-submission.ts'
+ import type { PopupDismissFace } from './facade.ts'
+ import { SessionInputShell } from './facade.ts'
++import { ComposerSubmissionTransforms } from './submission-transforms.ts'
+ 
+ /** Structural command face for per-session popup resolution. */
+ interface CommandFace {
+@@ -44,6 +45,7 @@ export class InputHub implements SessionInputResolver {
+   constructor(
+     private readonly rootCtx: ClientContext,
+     private readonly t: TranslateNS<'conversation'>,
++    private readonly submissionTransforms = new ComposerSubmissionTransforms(),
+   ) {}
+ 
+   /**
+@@ -154,9 +156,12 @@ export class InputHub implements SessionInputResolver {
+   ): void {
+     if (text === '' && imageIds.length === 0) return
+     const shell = this.shells.get(session.sessionId)
++    const prepared = this.submissionTransforms.prepare(session.sessionId, text)
+     // Commit, not an editable clear: undo must not resurrect sent content.
+     shell?.commitSend(imageIds)
+-    void this.conversation().sendSession(session, text, imageIds, mode).catch(() => {
++    void this.conversation().sendSession(session, prepared.text, imageIds, mode).then(() => {
++      prepared.accept?.()
++    }).catch(() => {
+       if (this.shells.get(session.sessionId) === shell) {
+         shell?.restoreImages(imageIds)
+         if (shell?.snapshot.draft === '') shell.setDraft(text)
+diff --git a/packages/client/ui-conversation/src/client/input/submission-transforms.ts b/packages/client/ui-conversation/src/client/input/submission-transforms.ts
+new file mode 100644
+index 0000000..7f19b2e
+--- /dev/null
++++ b/packages/client/ui-conversation/src/client/input/submission-transforms.ts
+@@ -0,0 +1,43 @@
++import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
++
++/** One product-neutral transformation performed immediately before prompt delivery. */
++export interface ComposerSubmissionTransform {
++  /** Stable registry key; duplicate keys are rejected. */
++  readonly id: string
++  /** Return the text that should enter the ordinary conversation send path. */
++  prepare(sessionId: SessionId, text: string): ComposerSubmissionPreparation
++}
++
++/** One transformed prompt plus the exact successful-delivery acknowledgement. */
++export interface ComposerSubmissionPreparation {
++  readonly text: string
++  /** Runs only after the host has accepted the transformed prompt. */
++  readonly accept?: () => void
++}
++
++/** Registry for independently owned prompt enrichments at the composer boundary. */
++export class ComposerSubmissionTransforms {
++  private readonly transforms = new Map<string, ComposerSubmissionTransform>()
++
++  register(transform: ComposerSubmissionTransform): () => void {
++    if (this.transforms.has(transform.id)) {
++      throw new Error(`composer submission transform already registered: ${transform.id}`)
++    }
++    this.transforms.set(transform.id, transform)
++    return () => { this.transforms.delete(transform.id) }
++  }
++
++  prepare(sessionId: SessionId, text: string): ComposerSubmissionPreparation {
++    let current = text
++    const accepted: (() => void)[] = []
++    for (const transform of this.transforms.values()) {
++      const next = transform.prepare(sessionId, current)
++      current = next.text
++      if (next.accept !== undefined) accepted.push(next.accept)
++    }
++    return {
++      text: current,
++      ...(accepted.length === 0 ? {} : { accept: () => { for (const acknowledge of accepted) acknowledge() } }),
++    }
++  }
++}
+diff --git a/packages/client/ui-conversation/tests/submission-transforms.client.spec.ts b/packages/client/ui-conversation/tests/submission-transforms.client.spec.ts
+new file mode 100644
+index 0000000..88a2025
+--- /dev/null
++++ b/packages/client/ui-conversation/tests/submission-transforms.client.spec.ts
+@@ -0,0 +1,22 @@
++import { describe, expect, it } from 'vitest'
++import { ComposerSubmissionTransforms } from '../src/client/input/submission-transforms.ts'
++
++describe('ComposerSubmissionTransforms', () => {
++  it('composes transforms in registration order and acknowledges only after acceptance', () => {
++    const transforms = new ComposerSubmissionTransforms()
++    const accepted: string[] = []
++    transforms.register({ id: 'first', prepare: (_session, text) => ({ text: `${text} A`, accept: () => { accepted.push('first') } }) })
++    transforms.register({ id: 'second', prepare: (_session, text) => ({ text: `${text} B`, accept: () => { accepted.push('second') } }) })
++    const prepared = transforms.prepare('session-1' as never, 'prompt')
++    expect(prepared.text).toBe('prompt A B')
++    expect(accepted).toEqual([])
++    prepared.accept?.()
++    expect(accepted).toEqual(['first', 'second'])
++  })
++
++  it('rejects duplicate transform identities', () => {
++    const transforms = new ComposerSubmissionTransforms()
++    transforms.register({ id: 'same', prepare: (_session, text) => ({ text }) })
++    expect(() => transforms.register({ id: 'same', prepare: (_session, text) => ({ text }) })).toThrow('same')
++  })
++})

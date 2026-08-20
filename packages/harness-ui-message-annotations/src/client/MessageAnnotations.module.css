@@ -1,0 +1,26 @@
+.strip {
+  margin: 0 12px 8px;
+  border: 1px solid var(--dsw-border-secondary);
+  border-radius: 10px;
+  background: var(--dsw-bg-primary);
+  color: var(--dsw-fg-primary);
+  font-size: 12px;
+}
+
+.strip summary { padding: 8px 10px; cursor: pointer; color: var(--dsw-fg-secondary); }
+.strip ul { margin: 0; padding: 0 10px 10px; list-style: none; display: grid; gap: 8px; }
+.strip li { position: relative; padding: 8px 34px 8px 8px; border-radius: 8px; background: var(--dsw-interactive-bg-hover); }
+.strip q { display: block; margin-top: 3px; color: var(--dsw-fg-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strip p { margin: 5px 0 0; white-space: pre-wrap; }
+.strip li button { position: absolute; top: 7px; right: 7px; border: 0; background: transparent; color: var(--dsw-fg-secondary); cursor: pointer; font-size: 12px; }
+
+.panel { position: fixed; z-index: 110; box-sizing: border-box; width: min(280px, calc(100vw - 16px)); padding: 8px; border: 1px solid var(--dsw-border-secondary); border-radius: 12px; background: var(--dsw-bg-primary); box-shadow: var(--dsw-shadow-lv3); color: var(--dsw-fg-primary); }
+.panel header, .panel footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.panel header button, .panel footer button { border: 0; border-radius: 7px; padding: 6px 9px; background: var(--dsw-interactive-bg-hover); color: inherit; cursor: pointer; }
+.panel footer { justify-content: flex-end; margin-top: 10px; }
+.panel footer button:last-child { background: var(--dsw-interactive-primary); color: var(--dsw-fg-on-primary); }
+.panel footer button:disabled { opacity: .5; cursor: default; }
+.panel blockquote { margin: 10px 0; padding: 8px 10px; border-left: 2px solid var(--dsw-interactive-primary); background: var(--dsw-interactive-bg-hover); color: var(--dsw-fg-secondary); white-space: pre-wrap; }
+.panel label { display: grid; gap: 6px; font-size: 12px; }
+.panel textarea { min-height: 76px; resize: vertical; border: 1px solid var(--dsw-border-secondary); border-radius: 8px; padding: 8px; color: inherit; background: transparent; font: inherit; }
+.entry { border: 0; border-radius: 8px; padding: 6px 9px; background: var(--dsw-interactive-primary); color: var(--dsw-fg-on-primary); cursor: pointer; font-size: 12px; }

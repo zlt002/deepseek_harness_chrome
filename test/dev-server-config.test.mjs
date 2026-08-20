@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises'
 
 const packageJsonUrl = new URL('../package.json', import.meta.url)
 const wxtConfigUrl = new URL('../apps/chrome-extension/wxt.config.ts', import.meta.url)
+const sidepanelHtmlUrl = new URL('../apps/chrome-extension/entrypoints/sidepanel/index.html', import.meta.url)
+const sidepanelSourceUrl = new URL('../apps/chrome-extension/entrypoints/sidepanel/main.tsx', import.meta.url)
 
 test('pnpm dev uses a dedicated port instead of the AccrUI dev server port', async () => {
   const packageJson = JSON.parse(await readFile(packageJsonUrl, 'utf8'))
@@ -18,4 +20,20 @@ test('WXT development config rejects a busy port instead of falling back to a CS
   assert.match(wxtConfig, /host:\s*'127\.0\.0\.1'/)
   assert.match(wxtConfig, /origin:\s*'127\.0\.0\.1'/)
   assert.match(wxtConfig, /strictPort:\s*true/)
+})
+
+test('Chrome extension uses ACCRUI consistently for user-visible branding', async () => {
+  const [wxtConfig, sidepanelHtml, sidepanelSource] = await Promise.all([
+    readFile(wxtConfigUrl, 'utf8'),
+    readFile(sidepanelHtmlUrl, 'utf8'),
+    readFile(sidepanelSourceUrl, 'utf8'),
+  ])
+
+  assert.match(wxtConfig, /name:\s*'ACCRUI'/)
+  assert.match(wxtConfig, /description:\s*'Use ACCRUI from a Chrome side panel\.'/)
+  assert.match(wxtConfig, /default_title:\s*'Open ACCRUI'/)
+  assert.match(sidepanelHtml, /<title>ACCRUI<\/title>/)
+  assert.match(sidepanelSource, /title="ACCRUI Web UI"/)
+  assert.match(sidepanelSource, /正在启动 ACCRUI…/)
+  assert.doesNotMatch(sidepanelSource, /DeepSeek Harness/)
 })

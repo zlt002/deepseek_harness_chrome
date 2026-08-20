@@ -35,7 +35,6 @@ async function callTool(endpoint, name, arguments_, id = 1) {
   assert.equal(response.status, 200)
   return response.json()
 }
-
 test('publishes list_work_tabs and correlates a simulated extension response', async () => {
   const requests = []
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/budget' }
@@ -119,7 +118,6 @@ test('publishes list_work_tabs and correlates a simulated extension response', a
     await connector.stop()
   }
 })
-
 test('commits selected-content replacement from a challenge-only flat tool with an internal write fence', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 71, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/71?id=71' }
   const movedTarget = { ...target, tabId: 72 }
@@ -142,11 +140,11 @@ test('commits selected-content replacement from a challenge-only flat tool with 
   connector.bindBrowserTarget('flat-selection-run', target); const endpoint = await connector.start()
   try {
     const legacySelection = await callTool(endpoint, 'office_document', { action: 'selection' })
-    assert.equal(legacySelection.error.code, -32602)
+    assert.equal(legacySelection.error.code, -32601)
     const legacyReplace = await callTool(endpoint, 'office_document', {
       action: 'inspect_write', operation: 'selection_replace', payload: { text: '旧入口', expectedSelectionFingerprint: selectionFingerprint },
     })
-    assert.equal(legacyReplace.error.code, -32602)
+    assert.equal(legacyReplace.error.code, -32601)
     assert.deepEqual(requests, [])
     const preview = await callTool(endpoint, 'light_document_selection_replace_preview', { blocks })
     assert.deepEqual(requests.map((request) => request.action), ['selection'], 'preview must not perform a redundant inspect_write round trip')
@@ -165,8 +163,8 @@ test('commits selected-content replacement from a challenge-only flat tool with 
     const drift = await callTool(endpoint, 'light_document_selection_replace_commit', { challenge: driftPreview.result.structuredContent.challenge }, 6)
     assert.equal(drift.result.isError, true); assert.equal(writes, 2)
     assert.match(drift.result.content[0].text, /readback_mismatch/)
-    const forbiddenRecovery = await callTool(endpoint, 'office_document', {
-      action: 'inspect_write', operation: 'blocks_replace', payload: { id: 'old-one', text: '再次覆盖' },
+    const forbiddenRecovery = await callTool(endpoint, 'light_document_write_preview', {
+      operation: 'blocks_replace', payload: { id: 'old-one', text: '再次覆盖' },
     }, 7)
     assert.equal(forbiddenRecovery.result.isError, true)
     assert.match(forbiddenRecovery.result.content[0].text, /selected-content write is uncertain/i)
@@ -181,7 +179,6 @@ test('commits selected-content replacement from a challenge-only flat tool with 
     assert.equal(moved.result.isError, true); assert.equal(writes, 2)
   } finally { await connector.stop() }
 })
-
 test('surfaces the probed WebEdit document identity so the model can route tools', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/1' }
   const identity = { kind: 'webedit_spreadsheet', workbookName: null, sheetName: 'Sheet1', hasContent: true, webeditFrames: 2 }
@@ -221,7 +218,6 @@ test('surfaces the probed WebEdit document identity so the model can route tools
     await connector.stop()
   }
 })
-
 test('still rejects a malformed document identity object', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/broken' }
   const connector = new BrowserConnector({
@@ -253,7 +249,6 @@ test('still rejects a malformed document identity object', async () => {
     await connector.stop()
   }
 })
-
 test('publishes every trusted pinned context and unavailable item without model-selected targets', async () => {
   const first = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/one' }
   const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
@@ -285,7 +280,6 @@ test('publishes every trusted pinned context and unavailable item without model-
     await connector.stop()
   }
 })
-
 test('read_work_tab reads a roster page by 1-based index and rejects a raw tabId', async () => {
   const first = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/one' }
   const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
@@ -323,7 +317,6 @@ test('read_work_tab reads a roster page by 1-based index and rejects a raw tabId
     await connector.stop()
   }
 })
-
 test('office reads wait longer than the generic connector timeout so a cold WebEdit probe can finish', async () => {
   const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
   let officeTimeoutMs
@@ -353,7 +346,6 @@ test('office reads wait longer than the generic connector timeout so a cold WebE
     await connector.stop()
   }
 })
-
 test('accepts the official MCP client at the public tools/list and tools/call seam', async () => {
   const target = { browser: 'chrome', windowId: 3, tabId: 8, url: 'https://docs.example.test/official' }
   const connector = new BrowserConnector({
@@ -382,42 +374,25 @@ test('accepts the official MCP client at the public tools/list and tools/call se
   try {
     await client.connect(transport)
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['list_work_tabs', 'read_work_tab', 'office_read_range', 'office_write_range', 'light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'office_document', 'office_spreadsheet', 'team_knowledge_spreadsheet_preview', 'team_knowledge_spreadsheet_create', 'team_knowledge_spreadsheet_readback', 'team_knowledge_batch_preview', 'team_knowledge_batch_create', 'team_knowledge_batch_status', 'browser_open_tab', 'knowledge_search', 'code_search', 'selected_source_scope'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['list_work_tabs', 'read_work_tab', 'light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit', 'team_knowledge_batch_preview', 'team_knowledge_batch_create', 'knowledge_search', 'code_search', 'selected_source_scope'])
     const teamKnowledgeBatchPreview = tools.tools.find((tool) => tool.name === 'team_knowledge_batch_preview')
     assert.deepEqual(teamKnowledgeBatchPreview.inputSchema.required, ['batchId', 'items'])
     assert.equal(teamKnowledgeBatchPreview.inputSchema.oneOf, undefined)
-    const teamKnowledgeSpreadsheetCreate = tools.tools.find((tool) => tool.name === 'team_knowledge_spreadsheet_create')
-    assert.deepEqual(teamKnowledgeSpreadsheetCreate.inputSchema.required, ['challenge', 'idempotencyIdentity', 'name', 'body'])
     const flatCommit = tools.tools.find((tool) => tool.name === 'light_document_selection_replace_commit')
     assert.deepEqual(flatCommit.inputSchema.required, ['challenge'])
     assert.equal(Object.hasOwn(flatCommit.inputSchema.properties, 'blocks'), false)
     assert.equal(Object.hasOwn(flatCommit.inputSchema.properties, 'idempotencyIdentity'), false)
-    assert.match(flatCommit.description, /do not retry through office_document or blocks_batch_edit/)
+    assert.match(flatCommit.description, /do not retry through a different write tool or blocks_batch_edit/)
     const flatPreview = tools.tools.find((tool) => tool.name === 'light_document_selection_replace_preview')
     assert.equal(flatPreview.inputSchema.oneOf, undefined)
     assert.deepEqual(flatPreview.inputSchema.required, ['blocks'])
     assert.ok(Object.hasOwn(flatPreview.inputSchema.properties.blocks.items.properties, 'type'))
     assert.deepEqual(flatPreview.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false })
-    const legacyDocument = tools.tools.find((tool) => tool.name === 'office_document')
-    assert.equal(legacyDocument.inputSchema.properties.action.enum.includes('selection'), false)
-    assert.equal(legacyDocument.inputSchema.properties.operation.enum.includes('selection_replace'), false)
-    assert.equal(legacyDocument.inputSchema.properties.operation.enum.includes('selection_content_replace'), false)
-    assert.equal(legacyDocument.inputSchema.properties.operation.enum.includes('selection_blocks_replace'), false)
+    assert.equal(tools.tools.some((tool) => tool.name === 'office_document'), false)
+    assert.ok(tools.tools.some((tool) => tool.name === 'light_document_write_preview'))
+    assert.ok(tools.tools.some((tool) => tool.name === 'light_document_write_commit'))
     const flatRead = tools.tools.find((tool) => tool.name === 'light_document_read')
     assert.deepEqual(flatRead.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
-    const spreadsheet = tools.tools.find((tool) => tool.name === 'office_spreadsheet')
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_zoom'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_freeze_panes'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_print_settings'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_outline_group'))
-    assert.ok(spreadsheet.inputSchema.properties.action.enum.includes('special_cells'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_rows_hidden'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('set_columns_hidden'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('auto_fit'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('fill_range'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('batch_write'))
-    assert.ok(spreadsheet.inputSchema.properties.operation.enum.includes('activate_worksheet'))
-    assert.equal(spreadsheet.inputSchema.properties.operation.enum.includes('copy_worksheet'), false)
     const codeSearch = tools.tools.find((tool) => tool.name === 'code_search')
     assert.deepEqual(codeSearch?.inputSchema, {
       type: 'object', additionalProperties: false, required: ['question'],
@@ -435,7 +410,6 @@ test('accepts the official MCP client at the public tools/list and tools/call se
     await connector.stop()
   }
 })
-
 test('echoes the selected source names from a parent session without searching', async () => {
   let seen
   const connector = new BrowserConnector({
@@ -464,7 +438,6 @@ test('echoes the selected source names from a parent session without searching',
     assert.equal(seen.question, undefined)
   } finally { await connector.stop() }
 })
-
 test('rejects a parent-session code_search call and names the remote-code wrapper', async () => {
   const connector = new BrowserConnector({ requestExtension: () => {} })
   connector.registerRun('parent-code-search')
@@ -485,7 +458,6 @@ test('rejects a parent-session code_search call and names the remote-code wrappe
     assert.doesNotMatch(body.result.content[0].text, /Knowledge search is available only inside the continuable Knowledge subagent\.$/)
   } finally { await connector.stop() }
 })
-
 test('knowledge tools/call writes headers and keep-alive bytes before the Extension finishes', async () => {
   const connector = new BrowserConnector({
     requestExtension: (request) => {
@@ -509,7 +481,6 @@ test('knowledge tools/call writes headers and keep-alive bytes before the Extens
     assert.equal(body.result.structuredContent.answer, '事实')
   } finally { await connector.stop() }
 })
-
 test('routes a continuable child identity to the knowledge adapter without model-controlled scope arguments', async () => {
   let seen
   const connector = new BrowserConnector({
@@ -533,7 +504,6 @@ test('routes a continuable child identity to the knowledge adapter without model
     assert.deepEqual(seen, { type: 'connector_request', requestId: seen.requestId, runId: 'knowledge-run', generation: seen.generation, tool: 'knowledge_search', harnessSessionId: 'child-1', harnessParentSessionId: 'parent-1', question: '订单流程' })
   } finally { await connector.stop() }
 })
-
 test('proxies only bounded Knowledge Platform requests with browser cookies inside the native boundary', async () => {
   const upstreamCalls = []
   const connector = new BrowserConnector({
@@ -576,7 +546,6 @@ test('proxies only bounded Knowledge Platform requests with browser cookies insi
     assert.equal(upstreamCalls.length, 2)
   } finally { await connector.stop() }
 })
-
 test('accepts a large enterprise SSO cookie header within the AccrUI 64KB boundary', async () => {
   const upstreamCalls = []
   const connector = new BrowserConnector({
@@ -597,7 +566,6 @@ test('accepts a large enterprise SSO cookie header within the AccrUI 64KB bounda
     assert.equal(upstreamCalls.length, 1)
   } finally { await connector.stop() }
 })
-
 test('knowledgeHttpsFetch keeps a quiet SSE body open when bodyTimeout is 0', async () => {
   const server = createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -618,14 +586,12 @@ test('knowledgeHttpsFetch keeps a quiet SSE body open when bodyTimeout is 0', as
     await new Promise((resolve) => server.close(resolve))
   }
 })
-
 test('knowledgeErrorChain keeps undici cause codes instead of a generic fetch failed', () => {
   const wrapped = new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNRESET 10.0.0.1:443'), { code: 'ECONNRESET' }) })
   assert.match(knowledgeErrorChain(wrapped), /fetch failed/)
   assert.match(knowledgeErrorChain(wrapped), /ECONNRESET/)
   assert.equal(isRetryableKnowledgeTransport(wrapped), true)
 })
-
 test('retries a retryable knowledge-proxy handshake and surfaces the cause chain', async () => {
   let attempts = 0
   const connector = new BrowserConnector({
@@ -652,7 +618,6 @@ test('retries a retryable knowledge-proxy handshake and surfaces the cause chain
     assert.equal(attempts, 3)
   } finally { await connector.stop() }
 })
-
 test('knowledge-proxy 502 includes the undici cause instead of a bare fetch failed', async () => {
   const connector = new BrowserConnector({
     requestExtension: () => {},
@@ -673,7 +638,6 @@ test('knowledge-proxy 502 includes the undici cause instead of a bare fetch fail
     assert.match(text, /ECONNREFUSED/)
   } finally { await connector.stop() }
 })
-
 test('bounds catalog proxy requests separately from long knowledge queries', async () => {
   const connector = new BrowserConnector({
     requestExtension: () => {},
@@ -698,7 +662,6 @@ test('bounds catalog proxy requests separately from long knowledge queries', asy
     assert.equal(response.status, 502)
   } finally { await connector.stop() }
 })
-
 test('keeps the long knowledge timeout separate and cancels the Extension request when it expires', async () => {
   const requests = []
   const connector = new BrowserConnector({
@@ -722,62 +685,6 @@ test('keeps the long knowledge timeout separate and cancels the Extension reques
     })
   } finally { await connector.stop() }
 })
-
-test('publishes browser_open_tab and returns the target that the Extension explicitly transferred for the Run', async () => {
-  const opened = { browser: 'chrome', windowId: 4, tabId: 19, url: 'https://docs.example.test/opened' }
-  const initial = { browser: 'chrome', windowId: 4, tabId: 18, url: 'https://docs.example.test/initial' }
-  const requests = []
-  const connector = new BrowserConnector({
-    requestExtension: (request) => {
-      requests.push(request)
-      queueMicrotask(() => connector.acceptExtensionResponse({
-        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
-        browserTarget: opened, result: { pageIdentity: { title: 'Opened target', url: opened.url } },
-      }))
-    },
-  })
-  connector.bindBrowserTarget('run-open', initial)
-  const endpoint = await connector.start()
-  try {
-    const response = await fetch(`${endpoint.url}/mcp`, {
-      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0', id: 1, method: 'tools/call',
-        params: { name: 'browser_open_tab', arguments: { url: opened.url } },
-      }),
-    })
-    const body = await response.json()
-    assert.equal(body.result.structuredContent.runId, 'run-open')
-    assert.deepEqual(body.result.structuredContent.browserTarget, opened)
-    assert.deepEqual(body.result.structuredContent.pageIdentity, { title: 'Opened target', url: opened.url })
-    assert.deepEqual(requests[0], {
-      type: 'connector_request', requestId: requests[0].requestId, runId: 'run-open', generation: requests[0].generation,
-      tool: 'browser_open_tab', url: opened.url,
-    })
-  } finally {
-    await connector.stop()
-  }
-})
-
-test('rejects browser_open_tab for an unbound none Run without requesting the Extension', async () => {
-  let extensionRequests = 0
-  const connector = new BrowserConnector({ requestExtension: () => { extensionRequests += 1 } })
-  connector.registerRun('run-none')
-  const endpoint = await connector.start()
-  try {
-    const response = await fetch(`${endpoint.url}/mcp`, {
-      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'browser_open_tab', arguments: { url: 'https://docs.example.test/new' } } }),
-    })
-    const body = await response.json()
-    assert.equal(body.result.isError, true)
-    assert.match(body.result.content[0].text, /No Browser Target is bound/i)
-    assert.equal(extensionRequests, 0)
-  } finally {
-    await connector.stop()
-  }
-})
-
 test('rejects list_work_tabs before extension execution until the trusted Native Host binding exists', async () => {
   const boundTarget = { browser: 'chrome', windowId: 9, tabId: 6, url: 'https://docs.example.test/bound' }
   let extensionRequests = 0
@@ -824,7 +731,6 @@ test('rejects list_work_tabs before extension execution until the trusted Native
     await connector.stop()
   }
 })
-
 test('uses an Extension-confirmed Browser Target transfer for the next office turn', async () => {
   const initial = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://www.baidu.com/' }
   const next = { browser: 'chrome', windowId: 7, tabId: 43, url: 'https://wb.example.test/' }
@@ -859,7 +765,6 @@ test('uses an Extension-confirmed Browser Target transfer for the next office tu
     await connector.stop()
   }
 })
-
 test('rejects an Extension response that does not satisfy the canonical list_work_tabs output schema', async () => {
   const target = { browser: 'chrome', windowId: 2, tabId: 5, url: 'https://docs.example.test/canonical' }
   const connector = new BrowserConnector({
@@ -885,98 +790,6 @@ test('rejects an Extension response that does not satisfy the canonical list_wor
     await connector.stop()
   }
 })
-
-test('surfaces structured spreadsheet failures verbatim instead of no Connector result', async () => {
-  const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/sheet' }
-  const connector = new BrowserConnector({
-    requestExtension: (request) => {
-      queueMicrotask(() => connector.acceptExtensionResponse({
-        type: 'connector_response',
-        requestId: request.requestId,
-        runId: request.runId,
-        generation: request.generation,
-        browserTarget: request.browserTarget,
-        error: { code: 'invalid_range', message: 'a valid spreadsheet action is required' },
-      }))
-    },
-  })
-  connector.bindBrowserTarget('run-sheet-error', target)
-  const endpoint = await connector.start()
-
-  try {
-    const failed = await fetch(`${endpoint.url}/mcp`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_spreadsheet', arguments: { action: 'view' } } }),
-    })
-    assert.equal(failed.status, 200)
-    const body = await failed.json()
-    assert.equal(body.result.isError, true)
-    const parsed = JSON.parse(body.result.content[0].text)
-    assert.equal(parsed.code, 'invalid_range')
-    assert.equal(parsed.message, 'a valid spreadsheet action is required')
-    assert.ok(!body.result.content[0].text.includes('no Connector result'), 'a spreadsheet failure must never collapse into the generic message')
-  } finally {
-    await connector.stop()
-  }
-})
-
-test('normalizes a sheet-prefixed spreadsheet range before forwarding and validating', async () => {
-  const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/sheet' }
-  let forwarded = null
-  const connector = new BrowserConnector({
-    requestExtension: (request) => {
-      forwarded = request
-      queueMicrotask(() => connector.acceptExtensionResponse({
-        type: 'connector_response',
-        requestId: request.requestId,
-        runId: request.runId,
-        generation: request.generation,
-        browserTarget: request.browserTarget,
-        result: { status: 'ok', resource: { kind: 'webedit_spreadsheet', origin: 'https://webedit.midea.com', workbookName: 'Budget.xlsx', sheetName: 'Sheet1', fingerprint: 'webedit:budget|Sheet1' }, range: { address: 'A1:B2', values: [[1, 2], [3, 4]], formulas: [['', ''], ['', '']], text: [['1', '2'], ['3', '4']], rows: [] } },
-      }))
-    },
-  })
-  connector.bindBrowserTarget('run-sheet-prefix', target)
-  const endpoint = await connector.start()
-
-  try {
-    const call = await fetch(`${endpoint.url}/mcp`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_spreadsheet', arguments: { action: 'range', range: 'Sheet1!A1:B2' } } }),
-    })
-    assert.equal(call.status, 200)
-    const body = await call.json()
-    assert.equal(body.result.structuredContent.status, 'ok')
-    assert.equal(forwarded.range, 'A1:B2')
-    assert.equal(forwarded.sheetName, 'Sheet1')
-  } finally {
-    await connector.stop()
-  }
-})
-
-test('names the missing spreadsheet arguments instead of a generic rejection', async () => {
-  const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/sheet' }
-  const connector = new BrowserConnector({ requestExtension: () => {} })
-  connector.bindBrowserTarget('run-sheet-hint', target)
-  const endpoint = await connector.start()
-
-  try {
-    const call = await fetch(`${endpoint.url}/mcp`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'office_spreadsheet', arguments: { action: 'special_cells', kind: 'lastCell' } } }),
-    })
-    assert.equal(call.status, 200)
-    const body = await call.json()
-    assert.equal(body.error.code, -32602)
-    assert.match(body.error.message, /special_cells requires a bounded bare range/)
-  } finally {
-    await connector.stop()
-  }
-})
-
 test('surfaces the Extension error message for office tools instead of a generic reply', async () => {
   const target = { browser: 'chrome', windowId: 3, tabId: 9, url: 'https://docs.example.test/error' }
   const connector = new BrowserConnector({

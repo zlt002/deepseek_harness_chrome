@@ -60,26 +60,20 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
     })
 
     assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name).sort(), [
-      'mcp__chrome__browser_open_tab',
       'mcp__chrome__code_search',
       'mcp__chrome__knowledge_search',
       'mcp__chrome__light_document_read',
+      'mcp__chrome__light_document_search',
       'mcp__chrome__light_document_selection_read',
       'mcp__chrome__light_document_selection_replace_commit',
       'mcp__chrome__light_document_selection_replace_preview',
+      'mcp__chrome__light_document_write_commit',
+      'mcp__chrome__light_document_write_preview',
       'mcp__chrome__list_work_tabs',
-      'mcp__chrome__office_document',
-      'mcp__chrome__office_read_range',
-      'mcp__chrome__office_spreadsheet',
-      'mcp__chrome__office_write_range',
       'mcp__chrome__read_work_tab',
       'mcp__chrome__selected_source_scope',
       'mcp__chrome__team_knowledge_batch_create',
       'mcp__chrome__team_knowledge_batch_preview',
-      'mcp__chrome__team_knowledge_batch_status',
-      'mcp__chrome__team_knowledge_spreadsheet_create',
-      'mcp__chrome__team_knowledge_spreadsheet_preview',
-      'mcp__chrome__team_knowledge_spreadsheet_readback',
     ])
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,

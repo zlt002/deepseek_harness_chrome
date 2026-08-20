@@ -61,7 +61,7 @@ export function browserTargetBridgeConfig(location = window.location) {
   try {
     const parsed = new URL(parentOrigin)
     return parsed.protocol === 'chrome-extension:' && parsed.host !== '' && `${parsed.protocol}//${parsed.host}` === parentOrigin
-      ? { nonce, parentOrigin }
+      ? { nonce, parentOrigin, surface: query.get('dshBrowserTargetSurface') === 'fullscreen-tab' ? 'fullscreen-tab' : 'sidepanel', ...(query.get('dshHarnessSessionId') ? { sessionId: query.get('dshHarnessSessionId') } : {}) }
       : undefined
   } catch {
     return undefined
@@ -71,4 +71,14 @@ export function browserTargetBridgeConfig(location = window.location) {
 /** Post the minimal reconnect request to the already verified extension parent. */
 export function requestHarnessReconnect(parent, nonce, parentOrigin) {
   parent.postMessage({ type: 'harness-reconnect/v1', nonce }, parentOrigin)
+}
+
+/** Post the open-fullscreen request to the already verified extension parent. */
+export function requestOpenFullscreenTab(parent, nonce, parentOrigin, sessionId) {
+  parent.postMessage({ type: 'open-fullscreen-tab/v1', nonce, ...(sessionId === undefined ? {} : { sessionId }) }, parentOrigin)
+}
+
+/** Post the return-to-sidepanel request to the already verified extension parent. */
+export function requestReturnToSidepanel(parent, nonce, parentOrigin) {
+  parent.postMessage({ type: 'return-to-sidepanel/v1', nonce }, parentOrigin)
 }

@@ -5,6 +5,41 @@
 export interface HarnessFrameBridge {
   nonce: string
   parentOrigin: string
+  surface: HarnessSurface
+  sessionId?: string
+}
+
+/** The two extension-owned containers for one Harness Workspace. */
+export type HarnessSurface = 'sidepanel' | 'fullscreen-tab'
+
+const SURFACE_QUERY_KEY = 'dshHarnessSurface'
+const SESSION_QUERY_KEY = 'dshHarnessSessionId'
+
+/** Treat unmarked extension pages as the normal side panel for compatibility. */
+export function HarnessSurfaceFromLocation(location: Pick<Location, 'search'> = window.location): HarnessSurface {
+  return new URLSearchParams(location.search).get(SURFACE_QUERY_KEY) === 'fullscreen-tab'
+    ? 'fullscreen-tab'
+    : 'sidepanel'
+}
+
+/** Build the extension-owned Tab URL used for the full-screen Workspace surface. */
+export function FullscreenHarnessTabUrl(extensionUrl: string): string {
+  const source = new URL(extensionUrl)
+  source.searchParams.set(SURFACE_QUERY_KEY, 'fullscreen-tab')
+  return source.toString()
+}
+
+/** Preserve the selected Harness session while the extension container changes. */
+export function FullscreenHarnessTabUrlForSession(extensionUrl: string, sessionId?: string): string {
+  const source = new URL(FullscreenHarnessTabUrl(extensionUrl))
+  if (sessionId !== undefined && sessionId.trim() !== '') source.searchParams.set(SESSION_QUERY_KEY, sessionId)
+  return source.toString()
+}
+
+/** Only an explicit handoff carries a session; ordinary side-panel boots retain the normal selection flow. */
+export function HarnessHandoffSessionFromLocation(location: Pick<Location, 'search'> = window.location): string | undefined {
+  const sessionId = new URLSearchParams(location.search).get(SESSION_QUERY_KEY)
+  return sessionId === null || sessionId.trim() === '' ? undefined : sessionId
 }
 
 /** Read-only tab fields supplied by the extension's active-tab notification. */
@@ -39,5 +74,7 @@ export function HarnessFrameSource(nativeUrl: string, bridge?: HarnessFrameBridg
   source.searchParams.set('dshBrowserTargetBridge', '1')
   source.searchParams.set('dshBrowserTargetNonce', bridge.nonce)
   source.searchParams.set('dshBrowserTargetParentOrigin', bridge.parentOrigin)
+  source.searchParams.set('dshBrowserTargetSurface', bridge.surface)
+  if (bridge.sessionId !== undefined) source.searchParams.set(SESSION_QUERY_KEY, bridge.sessionId)
   return source.toString()
 }

@@ -2,6 +2,7 @@ import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client
 
 /** Browser Target selection modes owned by the Chrome extension. */
 export type BrowserTargetMode = 'follow-active-tab' | 'pinned-tabs' | 'none'
+export type HarnessSurface = 'sidepanel' | 'fullscreen-tab'
 
 /** A target identifier safe to persist in the Chrome extension. */
 export interface BrowserTarget {
@@ -89,6 +90,8 @@ export function createBrowserTargetBridge(nonce: string, parentOrigin: string): 
   accept(event: Pick<MessageEvent, 'source' | 'origin' | 'data'>, parent: WindowProxy): boolean
   send(command: BrowserTargetCommand, parent: WindowProxy): void
   reconnectHarness(parent: WindowProxy): void
+  openFullscreenTab(parent: WindowProxy): void
+  returnToSidePanel(parent: WindowProxy): void
 } {
   const source = createSnapshotStore<BrowserTargetSnapshot | undefined>(undefined)
   let incomingSequence = 0
@@ -109,11 +112,17 @@ export function createBrowserTargetBridge(nonce: string, parentOrigin: string): 
     reconnectHarness(parent): void {
       parent.postMessage({ type: 'harness-reconnect/v1', nonce }, parentOrigin)
     },
+    openFullscreenTab(parent): void {
+      parent.postMessage({ type: 'open-fullscreen-tab/v1', nonce }, parentOrigin)
+    },
+    returnToSidePanel(parent): void {
+      parent.postMessage({ type: 'return-to-sidepanel/v1', nonce }, parentOrigin)
+    },
   }
 }
 
 /** Read the opt-in iframe bridge configuration. */
-export function activeTabBridgeConfig(location: Location = window.location): { nonce: string; parentOrigin: string } | undefined {
+export function activeTabBridgeConfig(location: Location = window.location): { nonce: string; parentOrigin: string; surface: HarnessSurface; sessionId?: string } | undefined {
   const query = new URLSearchParams(location.search)
   if (query.get('dshBrowserTargetBridge') !== '1') return undefined
   const nonce = query.get('dshBrowserTargetNonce')
@@ -123,7 +132,9 @@ export function activeTabBridgeConfig(location: Location = window.location): { n
     const parentOrigin = new URL(rawParentOrigin)
     const normalizedParentOrigin = `${parentOrigin.protocol}//${parentOrigin.host}`
     if (parentOrigin.protocol !== 'chrome-extension:' || parentOrigin.host === '' || normalizedParentOrigin !== rawParentOrigin) return undefined
-    return { nonce, parentOrigin: rawParentOrigin }
+    const surface = query.get('dshBrowserTargetSurface')
+    const sessionId = query.get('dshHarnessSessionId')
+    return { nonce, parentOrigin: rawParentOrigin, surface: surface === 'fullscreen-tab' ? 'fullscreen-tab' : 'sidepanel', ...(sessionId === null || sessionId.trim() === '' ? {} : { sessionId }) }
   } catch {
     return undefined
   }

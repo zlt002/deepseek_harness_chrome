@@ -3,7 +3,8 @@
 import '@vitejs/plugin-react/preamble'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
-import { HarnessFrameSource, NormalizeActiveTabForBrowserTarget } from './harness-frame'
+import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from './harness-frame'
+import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
 import './style.css'
 
 type HarnessStatus = 'starting' | 'ready' | 'error'
@@ -88,6 +89,50 @@ function requestKnowledgeScope(message: unknown): Promise<KnowledgeScopeResponse
   })
 }
 
+function consumeSidePanelHandoff(windowId: number): void {
+  chrome.runtime.sendMessage({ type: 'consume-sidepanel-handoff/v1', windowId }, () => undefined)
+}
+
+function currentExtensionTab(): Promise<chrome.tabs.Tab | undefined> {
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || chrome.tabs?.getCurrent === undefined) { resolve(undefined); return }
+    chrome.tabs.getCurrent((tab) => {
+      resolve(chrome.runtime.lastError === undefined ? tab : undefined)
+    })
+  })
+}
+
+async function currentBrowserWindowId(): Promise<number | undefined> {
+  const tab = await currentExtensionTab()
+  if (tab?.windowId !== undefined) return tab.windowId
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || chrome.windows?.getLastFocused === undefined) { resolve(undefined); return }
+    chrome.windows.getLastFocused((window) => resolve(chrome.runtime.lastError === undefined ? window.id : undefined))
+  })
+}
+
+/** Switch from the side panel to an extension Tab without keeping both containers visible. */
+async function openFullscreenTab(sessionId?: string): Promise<void> {
+  if (typeof chrome === 'undefined' || chrome.runtime?.sendMessage === undefined) {
+    window.open(window.location.href, '_blank')
+    return
+  }
+  const windowId = await currentBrowserWindowId()
+  if (windowId === undefined) throw new Error('Chrome could not identify the browser window for the side panel.')
+  await openFullscreenTabFromSidePanel(chrome, windowId, sessionId)
+}
+
+/** The background owns the close -> re-open -> Tab removal transaction. */
+async function returnToSidePanel(sessionId?: string): Promise<void> {
+  const tab = await currentExtensionTab()
+  if (tab?.windowId === undefined || tab.id === undefined) throw new Error('Chrome could not identify the full-screen Harness Tab.')
+  await returnToSidePanelFromFullscreen(chrome, tab.windowId, tab.id, sessionId)
+}
+
+function isHarnessSessionIdentity(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
+}
+
 /** The extension shell owns Chrome permissions; the iframe owns all target UI. */
 function App(): React.JSX.Element {
   const [status, setStatus] = useState<HarnessStatus>('starting')
@@ -109,9 +154,19 @@ function App(): React.JSX.Element {
   const knowledgeLoginAttemptsRef = useRef(0)
   const knowledgeLoginTimerRef = useRef<number | undefined>(undefined)
   const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => Promise<void>>(async () => {})
+  const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
+  const handoffSessionId = useMemo(() => HarnessHandoffSessionFromLocation(), [])
+  const [activeHarnessSessionId, setActiveHarnessSessionId] = useState<string | undefined>(handoffSessionId)
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
-  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin }), [frameNonce, url])
+  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }) }), [frameNonce, handoffSessionId, surface, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
+
+  useEffect(() => {
+    if (surface !== 'sidepanel' || handoffSessionId === undefined) return
+    void currentBrowserWindowId().then((windowId) => {
+      if (windowId !== undefined) consumeSidePanelHandoff(windowId)
+    })
+  }, [handoffSessionId, surface])
 
   useEffect(() => { targetSettingsRef.current = targetSettings }, [targetSettings])
   useEffect(() => { availableTabsRef.current = availableTabs }, [availableTabs])
@@ -120,7 +175,7 @@ function App(): React.JSX.Element {
     setStatus('starting'); setError(undefined)
     const response = await requestHarness()
     if (response.ok && response.url !== undefined) { setUrl(response.url); setStatus('ready'); return }
-    setStatus('error'); setError(response.error ?? 'Unable to start the DeepSeek Harness native server.')
+    setStatus('error'); setError(response.error ?? 'Unable to start the ACCRUI native server.')
   }, [])
 
   const loadTargetSettings = useCallback(async () => {
@@ -262,6 +317,15 @@ function App(): React.JSX.Element {
       const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown }
       if (value.nonce !== frameNonce) return
       if (value.type === 'harness-reconnect/v1' && value.nonce === frameNonce) { void connect(); return }
+      if (value.type === 'open-fullscreen-tab/v1' && value.nonce === frameNonce) {
+        void openFullscreenTab(typeof value.sessionId === 'string' && value.sessionId.trim() !== '' ? value.sessionId : undefined).catch((error: unknown) => console.error('[deepseek-harness] Failed to open full-screen Tab:', error))
+        return
+      }
+      if (value.type === 'return-to-sidepanel/v1' && value.nonce === frameNonce) {
+        void returnToSidePanel(isHarnessSessionIdentity(value.sessionId) ? value.sessionId : activeHarnessSessionId).catch((error: unknown) => console.error('[deepseek-harness] Failed to return to the side panel:', error))
+        return
+      }
+      if (value.type === 'harness-session-selected/v1' && isHarnessSessionIdentity(value.sessionId)) { setActiveHarnessSessionId(value.sessionId); return }
       if (value.type === 'browser-target-ready/v1') { commandSequenceRef.current = 0; sendBrowserTargetSnapshot(); return }
       if (value.type === 'knowledge-scope-command/v1') {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= knowledgeCommandSequenceRef.current || typeof value.sessionId !== 'string' || value.sessionId.length === 0 || (value.scope !== undefined && !isKnowledgeScope(value.scope))) return
@@ -276,18 +340,27 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [connect, frameNonce, frameOrigin, handleFrameCommand, handleKnowledgeScopeCommand, sendBrowserTargetSnapshot])
+  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleFrameCommand, handleKnowledgeScopeCommand, sendBrowserTargetSnapshot])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (
       <section className="harness-frame-shell">
-        <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="DeepSeek Harness Web UI" allow="clipboard-read; clipboard-write" onLoad={() => { sendBrowserTargetSnapshot(); replaySearchProgress() }} />
+        <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="ACCRUI Web UI" allow="clipboard-read; clipboard-write" onLoad={() => { sendBrowserTargetSnapshot(); replaySearchProgress() }} />
+        {surface === 'fullscreen-tab' && <button
+          className="fullscreen-collapse"
+          type="button"
+          aria-label="收起全屏"
+          title="收起全屏"
+          onClick={() => { void returnToSidePanel(activeHarnessSessionId).catch((error: unknown) => console.error('[deepseek-harness] Failed to return to the side panel:', error)) }}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M21 16v5h-5M3 3l6 6M21 3l-6 6M3 21l6-6M21 21l-6-6" /></svg>
+        </button>}
       </section>
     ) : (
       <section className="status-card" aria-live="polite">
         <div className={`status-dot status-${status}`} />
-        <h2>{status === 'starting' ? '正在启动本地 Harness…' : 'Harness 尚未连接'}</h2>
-        <p>{status === 'starting' ? '扩展正在通过 Native Messaging 启动 native-server，并等待本地 Web UI 就绪。' : '请确认已构建 DeepSeek Harness，并完成 native host 注册。'}</p>
+        <h2>{status === 'starting' ? '正在启动 ACCRUI…' : 'ACCRUI 尚未连接'}</h2>
+        <p>{status === 'starting' ? '扩展正在通过 Native Messaging 启动本地服务，并等待 Web UI 就绪。' : '请确认已构建 ACCRUI，并完成 native host 注册。'}</p>
         {error !== undefined && <pre className="error">{error}</pre>}
         {status === 'error' && <button onClick={() => void connect()}>再次连接</button>}
       </section>

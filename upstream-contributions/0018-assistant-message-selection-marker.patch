@@ -1,0 +1,49 @@
+diff --git a/packages/client/ui-conversation/src/client/chat/AssistantNodeView.tsx b/packages/client/ui-conversation/src/client/chat/AssistantNodeView.tsx
+index 72e8a6a..a3e7bcf 100644
+--- a/packages/client/ui-conversation/src/client/chat/AssistantNodeView.tsx
++++ b/packages/client/ui-conversation/src/client/chat/AssistantNodeView.tsx
+@@ -21,13 +21,15 @@ export const AssistantNodeView = memo(function AssistantNodeView({
+     [fileMentions, owner],
+   )
+   return (
+-    <AssistantMarkdown
+-      blocks={data.blocks}
+-      streaming={data.status === 'running'}
+-      interrupted={data.status === 'interrupted'}
+-      loadImage={loadImage}
+-      mentions={mentions}
+-      t={t}
+-    />
++    <div data-assistant-message-id={data.finalNode?.messageId} style={{ display: 'contents' }}>
++      <AssistantMarkdown
++        blocks={data.blocks}
++        streaming={data.status === 'running'}
++        interrupted={data.status === 'interrupted'}
++        loadImage={loadImage}
++        mentions={mentions}
++        t={t}
++      />
++    </div>
+   )
+ })
+diff --git a/packages/client/ui-conversation/tests/chat-view.client.spec.tsx b/packages/client/ui-conversation/tests/chat-view.client.spec.tsx
+index 360b589..69efb35 100644
+--- a/packages/client/ui-conversation/tests/chat-view.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/chat-view.client.spec.tsx
+@@ -93,7 +93,7 @@ const user = (seq: number, text: string): UserMessageNode => ({
+   source: null,
+ })
+ const assistant = (seq: number, text: string, turn = 1): AssistantMessageNode => ({
+-  kind: 'assistant', seq, time: seq * 1_000, turn, step: 1, blocks: [{ kind: 'text', text }],
++  kind: 'assistant', seq, messageId: `assistant-${seq}` as NonNullable<AssistantMessageNode['messageId']>, time: seq * 1_000, turn, step: 1, blocks: [{ kind: 'text', text }],
+ })
+ const retry = (seq: number): ModelRetryNode => ({
+   kind: 'model-retry', retryId: 'chat-view-retry' as ModelRetryNode['retryId'],
+@@ -443,6 +443,7 @@ describe('ChatView', () => {
+         'fixture:user:1', 'fixture:assistant:2',
+         'fixture:tool:a', 'call:a', 'fixture:tool:b', 'call:b',
+       ])
++    expect(view.getByText('running tools').closest('[data-assistant-message-id]')?.getAttribute('data-assistant-message-id')).toBe('assistant-2')
+   })
+ 
+   it('renders Host-pending steering at the flow tail and hands off to the durable node', () => {

@@ -110,6 +110,7 @@ test('mounts Harness-native skills before Claude skills so duplicate names resol
 test('mounts every product UI package outside upstream by default', () => {
   assert.match(productUiPatch({}), /@accrui\/harness-ui-browser-target/)
   assert.equal(productUiPatch({}).match(/@accrui\/harness-ui-conversation-shell/g)?.length, 1)
+  assert.equal(productUiPatch({}).match(/@accrui\/harness-ui-message-annotations/g)?.length, 1)
   assert.equal(productUiPatch({}).match(/@accrui\/harness-ui-responsive-sidebar/g)?.length, 1)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-subagent-compact/)
   assert.match(productUiPatch({}), /@accrui\/harness-ui-session-log-copy/)
@@ -118,6 +119,7 @@ test('mounts every product UI package outside upstream by default', () => {
   assert.equal(patch.match(/@accrui\/harness-ui-agent-preset/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-browser-target/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-conversation-shell/g)?.length, 1)
+  assert.equal(patch.match(/@accrui\/harness-ui-message-annotations/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-responsive-sidebar/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-subagent-compact/g)?.length, 1)
   assert.equal(patch.match(/@accrui\/harness-ui-session-log-copy/g)?.length, 1)
@@ -135,6 +137,11 @@ test('installs a managed product UI link into an isolated Harness profile', asyn
   assert.equal(
     resolve(dirname(link), await readlink(link)),
     resolve(projectRoot, 'packages/harness-ui-browser-target'),
+  )
+  const annotationsLink = resolve(dshHome, 'profiles/web/node_modules/@accrui/harness-ui-message-annotations')
+  assert.equal(
+    resolve(dirname(annotationsLink), await readlink(annotationsLink)),
+    resolve(projectRoot, 'packages/harness-ui-message-annotations'),
   )
 })
 
@@ -160,7 +167,8 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   const capabilityMatrix = await readFile(new URL('../skills/pmd-prd/references/capability-matrix.md', import.meta.url), 'utf8')
   assert.match(skill, /name: pmd-prd/)
   assert.match(skill, /disable-model-invocation: true/)
-  for (const tool of ['mcp__chrome__team_knowledge_batch_preview', 'mcp__chrome__team_knowledge_batch_create', 'mcp__chrome__team_knowledge_batch_status']) assert.match(skill, new RegExp(tool))
+  for (const tool of ['mcp__chrome__team_knowledge_batch_preview', 'mcp__chrome__team_knowledge_batch_create']) assert.match(skill, new RegExp(tool))
+  assert.doesNotMatch(skill, /mcp__chrome__team_knowledge_batch_status/)
   assert.doesNotMatch(skill, /pmd_prd_delivery/)
   assert.doesNotMatch(capabilityMatrix, /pmd_prd_delivery/)
   assert.doesNotMatch(capabilityMatrix, /deliveryRunId/)
@@ -192,13 +200,15 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   for (const heading of [
     '# 一、术语与缩写', '# 二、背景与目标', '# 三、整体流程', '# 四、功能性需求',
     '# 五、角色权限', '# 六、非功能性需求', '# 七、配置与开关', '# 八、测试关注点',
-    '# 九、参考文档', '## AccrUI 需求交接附录',
+    '# 九、参考文档',
   ]) assert.match(template, new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  for (const rule of ['必填项无事实时写', '选填项不适用时写', '每个功能至少包含正常场景', 'PRD 只写结论和索引']) assert.match(template, new RegExp(rule))
-  for (const field of ['Evidence ID', 'Impact ID', '仓库', '模块或文件', '符号或接口', '当前行为', '计划改动', '不确定项', 'Task ID', '测试 seam', 'AC ID', 'Given', 'When', 'Then', '验证层级', '通过标准']) assert.match(template, new RegExp(field))
-  assert.match(template, /每个 Impact 必须映射 Evidence；每个 Task 必须映射 Impact 和至少一个 AC；每个 AC 必须映射需求和 Task/)
-  assert.match(capabilityMatrix, /两个普通信号或一个高风险信号/)
-  assert.match(capabilityMatrix, /任务均可独立演示或验证/)
+  for (const rule of ['必填项无事实时写', '选填项不适用时写', '每个功能至少包含正常场景', 'PRD 只写最终业务结论']) assert.match(template, new RegExp(rule))
+  for (const heading of ['需求最终理解', '产品纠正', '最终业务规则', '代码修改位置', '具体修改方式', '验收清单']) assert.match(template, new RegExp(heading))
+  assert.match(template, /改什么 \| 在哪里改 \| 怎么改 \| 改完效果/)
+  for (const category of ['正常情况', '异常情况', '边界情况', '权限情况', '兼容情况']) assert.match(template, new RegExp(category))
+  assert.doesNotMatch(template, /AccrUI 需求交接附录|Evidence ID|Impact ID|测试 seam|验收合同/)
+  assert.match(capabilityMatrix, /初始理解与纠正循环/)
+  assert.match(capabilityMatrix, /六部分研发交接包/)
 })
 
 test('declares pmd-prd run binding, isolated scope, persisted state, and stale-confirmation recovery contracts', async () => {
@@ -218,33 +228,25 @@ test('declares pmd-prd run binding, isolated scope, persisted state, and stale-c
   assert.match(processState, /包装工具没有 `question` 参数/)
   assert.match(processState, /生成新的内部标识/)
   assert.match(processState, /旧确认在恢复后失效/)
-  assert.match(processState, /阶段 4 确认正文快照是唯一交付正文/)
-  assert.match(processState, /阶段 5 的父目录确认与线上创建严格分离/)
+  assert.match(processState, /阶段 5 确认正文快照是唯一交付正文/)
+  assert.match(processState, /阶段 6 的父目录确认与线上创建严格分离/)
   assert.match(processState, /稳定的 `batchId = pmd:\$\{requirementId\}`/)
   assert.match(processState, /`team_knowledge_batch_preview` 内部只检查父节点并冻结目标与正文/)
-  assert.match(processState, /预估超过 10 人天/)
-  assert.match(processState, /多个系统\/仓库/)
-  assert.match(processState, /多个角色\/权限范围/)
-  assert.match(processState, /数据迁移\/外部依赖/)
-  assert.match(processState, /超过 5 个可独立功能切片/)
-  assert.match(processState, /复杂性能\/高可用/)
-  assert.match(processState, /高风险写/)
-  assert.match(processState, /父需求\+子需求/)
-  assert.match(processState, /单需求分阶段/)
-  assert.match(processState, /明确接受风险继续整体分析/)
-  assert.match(processState, /未确认选择不得进入阶段 4/)
-  for (const confirmation of ['evidence_confirmed', 'impact_map_confirmed', 'tasks_confirmed', 'acceptance_confirmed', 'decomposition_decided']) assert.match(processState, new RegExp(confirmation))
+  for (const confirmation of ['understanding_confirmed', 'corrections_confirmed', 'business_rules_confirmed', 'code_plan_confirmed', 'acceptance_confirmed']) assert.match(processState, new RegExp(confirmation))
   assert.match(processState, /每行一个独立、合法 JSON 对象/)
   assert.match(processState, /同一轮更新受影响的过程文件/)
-  assert.match(skill, /抽取并执行设计树\/frontier、领域术语\/边界\/不变量、纵向 tracer-bullet、测试 seam、复杂需求地图和按需原型/)
-  assert.match(skill, /decomposition_decided/)
-  assert.match(skill, /需求\/PRD → Evidence → Impact → Task → AC/)
+  assert.match(skill, /AI 原理解、产品纠正、最终理解、影响/)
+  assert.match(skill, /提问、选项和推荐全部使用业务语言/)
+  assert.match(skill, /不出现 URL 参数、本地缓存、数据库、接口方式、类名、函数名等实现术语/)
+  assert.match(skill, /筛选条件是否需要随链接分享、是否需要跨设备保留/)
+  assert.match(skill, /技术实现建议只在阶段 4 基于实际代码证据提出/)
+  assert.match(skill, /代码定位、修改建议与验收/)
   assert.match(skill, /`pmd:\$\{requirementId\}`/)
   assert.match(skill, /生成并持久化稳定的 `batchId`/)
   assert.doesNotMatch(skill, /deliveryRunId/)
   assert.match(skill, /恰好两项 `items`/)
   assert.match(skill, /参数只能是 `\{ batchId, challenge \}`/)
-  assert.match(skill, /team_knowledge_batch_status`，且参数只能是 `\{ batchId \}`/)
+  assert.match(skill, /以 `team_knowledge_batch_create` 返回的 batch 状态为准/)
   assert.match(skill, /challenge 过期、已消费或 ephemeral plan 缺失/)
   assert.match(skill, /重新 preview，取得新 challenge，并重新完成这一次用户确认/)
   assert.doesNotMatch(skill, /fresh preview/)
@@ -267,14 +269,17 @@ test('declares pmd-prd run binding, isolated scope, persisted state, and stale-c
   }
 })
 
-test('keeps an empty pmd-prd invocation free of workspace scans and manifest recovery', async () => {
+test('keeps empty and new pmd-prd runs free of old workspace scans and manifest recovery', async () => {
   const skill = await readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8')
   const processState = await readFile(new URL('../skills/pmd-prd/references/process-state.md', import.meta.url), 'utf8')
 
   assert.match(skill, /只输入 `\/pmd-prd` 时，第一响应只能请用户直接描述业务需求/)
   assert.match(skill, /不得扫描目录、读取旧 manifest 或创建任何状态/)
+  assert.match(skill, /不得 Glob\/List 需求工作区根目录/)
+  assert.match(skill, /不得读取任何旧 manifest 来查重或判断是否恢复/)
   assert.match(skill, /只有用户明确表示恢复或继续旧 Run 时，才读取 manifest/)
   assert.match(processState, /空 `\/pmd-prd` 不是恢复请求/)
+  assert.match(processState, /不枚举工作区、不读取其他需求目录或旧 manifest/)
 })
 
 test('keeps pmd-prd project-agnostic and bounds Code Mode execution', async () => {
@@ -296,7 +301,7 @@ test('keeps pmd-prd project-agnostic and bounds Code Mode execution', async () =
   assert.match(skill, /不得先做 RAG 检索再问/)
   assert.match(skill, /包装工具不接受 `question`/)
   assert.match(skill, /需要立刻写分析时设 `run_in_background: false`/)
-  assert.match(skill, /后续阶段 3–6 必须使用这次包装工具回执里的远程证据/)
+  assert.match(skill, /后续阶段 3–5 必须使用这次包装工具回执里的远程证据/)
 })
 
 test('advertises distinct selected-source routes with isolated MCP tools', async () => {
@@ -326,8 +331,16 @@ test('advertises distinct selected-source routes with isolated MCP tools', async
   assert.match(code, /first action must be exactly one[\s\S]*mcp__chrome__code_search call/)
   assert.match(code, /keep that question to one file, one function, or one short topic/)
   assert.match(code, /never use "query", repeat the search, or split one delegation into exploratory searches/)
+  assert.match(code, /successful MCP result[\s\S]*answer[\s\S]*final content[\s\S]*verbatim/)
+  assert.match(code, /must not summary, rewrite, condense, or add commentary/)
+  assert.match(code, /tool error[\s\S]*report the specific error verbatim[\s\S]*must not fabricate an answer/)
+  assert.doesNotMatch(code, /Then answer from that one result/)
   assert.doesNotMatch(code, /mcp__chrome__knowledge_search/)
   assert.match(knowledge, /allow: \['mcp__chrome__knowledge_search'\]/)
+  assert.match(knowledge, /successful MCP result[\s\S]*answer[\s\S]*final content[\s\S]*verbatim/)
+  assert.match(knowledge, /must not summary, rewrite, condense, or add commentary/)
+  assert.match(knowledge, /tool error[\s\S]*report the specific error verbatim[\s\S]*must not fabricate an answer/)
+  assert.doesNotMatch(knowledge, /Then answer from that one result/)
   assert.doesNotMatch(knowledge, /mcp__chrome__code_search/)
 })
 

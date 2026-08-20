@@ -508,6 +508,21 @@ index 2463165..72382ff 100644
 +    fallback: <DefaultConversationPresentation {...presentation} />,
 +  })
  }
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+index e7f3c4d..44b611e 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+@@ -317,7 +317,8 @@
+ .modes {
+   gap: 12px;
+ }
+
+ .trailing {
+-  flex: none;
++  flex: 0 1 auto;
++  min-width: 0;
+   gap: 12px;
+ }
 diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
 index 9585677..0e0158e 100644
 --- a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
@@ -871,6 +886,36 @@ index e53001d..186ca89 100644
            role="menu"
            aria-label={t('menu.aria')}
            aria-busy={state.status === 'loading' || busy}
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.module.css b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+index d062145..55b23d9 100644
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.module.css
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+@@ -1,6 +1,7 @@
+ .root {
+   position: relative;
+   min-width: 0;
++  flex: 0 1 auto;
+ }
+
+ /* Figma 313:14108 ToggleButton: 13/20 medium secondary label, 4px gap,
+@@ -9,8 +10,9 @@
+ .trigger {
+   display: flex;
+   align-items: center;
+   gap: 4px;
+   min-width: 0;
+   max-width: 220px;
++  width: 100%;
+   height: 28px;
+   padding: 0 4px 0 8px;
+@@ -42,6 +43,7 @@
+ .triggerLabel {
++  flex: 0 1 auto;
+   min-width: 0;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+ }
 diff --git a/packages/client/ui-conversation/src/client/view-state.ts b/packages/client/ui-conversation/src/client/view-state.ts
 new file mode 100644
 index 0000000..c37e2c6

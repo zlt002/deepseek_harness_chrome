@@ -20,6 +20,7 @@ const productPluginNames = [
   'harness-ui-agent-preset',
   'harness-ui-browser-target',
   'harness-ui-conversation-shell',
+  'harness-ui-message-annotations',
   'harness-ui-responsive-sidebar',
   'harness-ui-workspace-picker',
   'harness-ui-knowledge-scope',

@@ -38,7 +38,7 @@
 
   // Instant readiness check for the background frame probe: no polling, no waiting.
   // Light-document frames also expose globalThis.APP (openApi.editor.canvas).
-  // Claiming "spreadsheet ready" from APP alone makes office_get_context
+  // Claiming "spreadsheet ready" from APP alone makes list_work_tabs
   // misroute a Team Knowledge light document to office_spreadsheet.
   function readyNow() {
     const app = globalThis.APP ?? globalThis.WPSOpenApi?.Application

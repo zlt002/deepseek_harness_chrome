@@ -130,20 +130,15 @@ function buildTemplateContract(authority) {
   const prdHeadings = headingLines(prdTemplate).filter((heading) => (
     heading.level === 1 || (heading.level === 2 && /^(需求基本信息|修订记录)/.test(heading.text))
   ))
-  const authorityHeadings = headingLines(authority)
-  const appendixStart = authorityHeadings.findIndex((heading) => heading.level === 2 && heading.text.startsWith('AccrUI 需求交接附录'))
-  const appendixHeadings = appendixStart < 0 ? [] : authorityHeadings.slice(appendixStart).filter((heading) => (
-    (heading.level === 2 && heading.text.startsWith('AccrUI 需求交接附录')) || (heading.level === 3 && /^[A-D]\.\s/.test(heading.text))
-  ))
   const analysisHeaders = tableHeaders(analysisTemplate)
   const basicInfoHeaders = tableHeaders(findSection(prdTemplate, /^##\s+需求基本信息$/, /^##\s+修订记录/)).at(0)
   const revisionHeaders = tableHeaders(findSection(prdTemplate, /^##\s+修订记录/, /^#\s+一、/)).at(0)
 
-  if (analysisHeadings.length !== 8 || prdHeadings.length !== 12 || appendixHeadings.length !== 5 || analysisHeaders.length < 4 || basicInfoHeaders === undefined || revisionHeaders === undefined) {
+  if (analysisHeadings.length !== 12 || prdHeadings.length !== 12 || analysisHeaders.length !== 1 || basicInfoHeaders === undefined || revisionHeaders === undefined) {
     throw new Error('references/templates.md does not expose the expected PMD template contract')
   }
 
-  return { analysisHeadings, prdHeadings, appendixHeadings, analysisHeaders, prdHeaders: [basicInfoHeaders, revisionHeaders] }
+  return { analysisHeadings, prdHeadings, analysisHeaders, prdHeaders: [basicInfoHeaders, revisionHeaders] }
 }
 
 function stripMarkdownExtension(name) {
@@ -222,6 +217,40 @@ function validateMissingInformation(body, label) {
   return errors
 }
 
+function validateHandoffLanguage(body) {
+  const visible = markdownOutsideFences(body)
+  const errors = []
+  const internalTerm = visible.match(/\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/)
+  if (internalTerm !== null) errors.push(`analysis exposes an internal delivery term: ${internalTerm[0]}`)
+  const quantifiedClaim = visible.match(/(?:预计|预估)\s*\d+(?:\.\d+)?\s*(?:人天|天)|(?:页面响应时间|接口响应时间|并发用户数|吞吐量)\s*\|[^\n|]*\d/)
+  if (quantifiedClaim !== null && !quantifiedClaim[0].includes('[待确认]')) errors.push(`analysis contains an unsupported quantified claim: ${quantifiedClaim[0]}`)
+  return errors
+}
+
+function validateAcceptanceChecklist(body) {
+  const lines = markdownOutsideFences(body).split('\n')
+  const errors = []
+  for (const category of ['正常情况', '异常情况', '边界情况', '权限情况', '兼容情况']) {
+    const start = lines.findIndex((line) => line.trim() === `### ${category}`)
+    const end = lines.findIndex((line, index) => index > start && /^#{1,3}\s+/.test(line.trim()))
+    const section = start < 0 ? [] : lines.slice(start + 1, end < 0 ? lines.length : end)
+    if (!section.some((line) => /^\s*-\s*\[[ xX]\]\s+\S/.test(line))) {
+      errors.push(`analysis acceptance checklist is empty: ${category}`)
+    }
+  }
+  return errors
+}
+
+function validatePrdLanguage(body) {
+  const visible = markdownOutsideFences(body)
+  const errors = []
+  const internalTerm = visible.match(/\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/)
+  if (internalTerm !== null) errors.push(`PRD exposes an internal delivery term: ${internalTerm[0]}`)
+  const codeLocator = visible.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs)\b/m)
+  if (codeLocator !== null) errors.push(`PRD contains a code locator that belongs in the handoff: ${codeLocator[0].trim()}`)
+  return errors
+}
+
 export function validateBodies({ analysisName, analysisBody, prdName, prdBody, authority }) {
   const errors = []
   let contract
@@ -239,11 +268,13 @@ export function validateBodies({ analysisName, analysisBody, prdName, prdBody, a
   if (typeof analysisBody === 'string' && analysisBody.trim().length > 0) {
     errors.push(...validateHeadingSequence(analysisBody, contract.analysisHeadings, 'analysis'))
     errors.push(...validateTableHeaders(analysisBody, contract.analysisHeaders, 'analysis'))
+    errors.push(...validateHandoffLanguage(analysisBody))
+    errors.push(...validateAcceptanceChecklist(analysisBody))
   }
   if (typeof prdBody === 'string' && prdBody.trim().length > 0) {
     errors.push(...validateHeadingSequence(prdBody, contract.prdHeadings, 'PRD'))
-    errors.push(...validateHeadingSequence(prdBody, contract.appendixHeadings, 'PRD appendix', { requireStart: false }))
     errors.push(...validateTableHeaders(prdBody, contract.prdHeaders, 'PRD'))
+    errors.push(...validatePrdLanguage(prdBody))
   }
   return { ok: errors.length === 0, errors }
 }
