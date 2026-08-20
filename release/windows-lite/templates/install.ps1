@@ -120,18 +120,27 @@ function Get-InstalledProductProcesses([string]$Root) {
   })
 }
 
+function Stop-InstalledProductProcess([int]$processId) {
+  if (-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)) { return }
+  try {
+    Start-Process -FilePath taskkill.exe -ArgumentList @('/PID', $processId, '/T', '/F') -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop | Out-Null
+  } catch {
+    # A process can disappear after enumeration. The liveness check below decides whether that is benign.
+  }
+  if (-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)) { return }
+  Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+}
+
 function Stop-InstalledProductProcesses([string]$Root) {
   $processes = @(Get-InstalledProductProcesses $Root)
   if ($processes.Count -eq 0) { return }
   $ids = @($processes | ForEach-Object { [int]$_.ProcessId })
   $roots = @($processes | Where-Object { $ids -notcontains [int]$_.ParentProcessId })
   foreach ($process in $roots) {
-    & taskkill.exe /PID $process.ProcessId /T /F 2>$null | Out-Null
+    Stop-InstalledProductProcess $process.ProcessId
   }
   foreach ($processId in $ids) {
-    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-      Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-    }
+    Stop-InstalledProductProcess $processId
   }
   $deadline = [DateTime]::UtcNow.AddSeconds(8)
   do {
