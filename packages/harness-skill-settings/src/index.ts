@@ -5,7 +5,7 @@ import type { SkillInvocationPolicy, SkillSummary } from '@deepseek-ai/dsh-skill
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SKILL_INSTALL_MAX_ARCHIVE_BYTES, SKILL_INSTALL_PATH, installSkill, waitForInstalledSkill } from './installer.mjs'
+import { SKILL_INSTALL_MAX_ARCHIVE_BYTES, SKILL_INSTALL_PATH, deleteInstalledSkill, installSkill, waitForInstalledSkill, waitForRemovedSkill } from './installer.mjs'
 
 export const name = 'accrui-skill-settings'
 export const inject = ['skills', 'sessions']
@@ -59,7 +59,38 @@ export async function apply(ctx: Context): Promise<void> {
       kind: 'exact', path: SKILL_INSTALL_PATH,
       handler: (req, res) => { void handleInstall(ctx as Context & { sessions: SessionLookup }, req, res) },
     }), 'accrui skill settings: skill install route')
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact', path: '/api/settings.skill.delete',
+      handler: (req, res) => { void handleDelete(ctx as Context & { sessions: SessionLookup }, req, res) },
+    }), 'accrui skill settings: skill delete route')
   })
+}
+
+async function handleDelete(ctx: Context & { sessions: SessionLookup }, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== 'POST') return json(res, 405, { error: '技能删除仅支持 POST' })
+  if (!trusted(req)) return json(res, 403, { error: '技能删除仅允许本机同源请求' })
+  try {
+    const request = JSON.parse(await readBody(req, 16 * 1024)) as { sessionId?: unknown, name?: unknown }
+    const sessionId = typeof request.sessionId === 'string' ? request.sessionId : ''
+    const name = typeof request.name === 'string' ? request.name : ''
+    const cwd = ctx.sessions.get(sessionId)?.header.cwd
+    if (cwd === undefined || cwd === '') throw new Error('技能删除需要一个已打开的项目会话')
+    const deleted = await deleteInstalledSkill(productSkillsRoot(), name)
+    // Invalidate before readback so the bounded confirmation does not rely on
+    // the filesystem watcher's eventual event alone.
+    ctx.skills.invalidateInvocationPolicy()
+    try {
+      const confirmation = await waitForRemovedSkill(deleted.name, options => ctx.skills.list(options), cwd)
+      json(res, 200, confirmation.disappeared
+        ? deleted
+        : { ...deleted, refreshWarning: `技能 /${deleted.name} 的文件夹已删除，但列表仍显示同名技能；它可能来自其他来源。` })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      json(res, 200, { ...deleted, refreshWarning: `技能 /${deleted.name} 的文件夹已删除，但 Harness 列表刷新确认失败：${detail}` })
+    }
+  } catch (error) {
+    json(res, 400, { error: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 async function handleInstall(ctx: Context & { sessions: SessionLookup }, req: IncomingMessage, res: ServerResponse): Promise<void> {

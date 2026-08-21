@@ -107,7 +107,7 @@ export default defineConfig({
         "script-src 'self' 'wasm-unsafe-eval'",
         "object-src 'self'",
         "frame-src 'self' http://127.0.0.1:* http://localhost:*",
-        "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* https://anapi-uat.annto.com",
+        "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* https://anapi-uat.annto.com http://signinuat.midea.com https://signinuat.midea.com",
         "img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*",
       ].join('; '),
     },

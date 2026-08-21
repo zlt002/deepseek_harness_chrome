@@ -11,8 +11,12 @@ const KNOWLEDGE_SESSION_STORAGE_KEY = 'harnessKnowledgeSessionsV1'
 const KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY = 'harnessKnowledgeEnabledPreferenceV1'
 const KNOWLEDGE_LOGIN_URL = 'https://wb-uat.annto.com/'
 const ACCOUNT_LOCAL_SIGN_OUT_STORAGE_KEY = 'harnessAccountLocalSignOutV1'
-const ACCOUNT_AUTH_COOKIE_NAMES = new Set(['MAS_TGC_UAT', 'midea_auth_uat'])
+const ACCOUNT_AUTH_COOKIE_NAMES = new Set(['MAS_TGC_UAT', 'midea_auth_uat', 'OAM_ID'])
 const ACCOUNT_AUTH_COOKIE_DOMAIN = 'annto.com'
+const COMPANY_PORTAL_LOGOUT_URL = 'https://wb-uat.annto.com/api-auth/ssoLogout'
+const COMPANY_PORTAL_RETURN_URL = 'https://wb-uat.annto.com/index'
+const COMPANY_SSO_LOGIN_URL = `https://signinuat.midea.com/?service=${encodeURI(COMPANY_PORTAL_RETURN_URL)}`
+const COMPANY_SSO_LOGOUT_URL = `http://signinuat.midea.com/logout?service=${encodeURI(COMPANY_SSO_LOGIN_URL)}`
 const COMPANY_GATEWAY_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-anthropic/v1`
 const COMPANY_GATEWAY_METADATA_STORAGE_KEY = 'harnessCompanyGatewayMetadataV1'
 const COMPANY_GATEWAY_TIMEOUT_MS = 15_000
@@ -1239,6 +1243,47 @@ function companyAuthenticationCookieDescription(cookie: chrome.cookies.Cookie): 
   return `${cookie.name} @ ${cookie.domain}${cookie.path}`
 }
 
+async function invalidateCompanyPortalSession(): Promise<void> {
+  let response: Response
+  try {
+    response = await fetch(COMPANY_PORTAL_LOGOUT_URL, {
+      method: 'GET',
+      credentials: 'include',
+      redirect: 'manual',
+    })
+  } catch (error) {
+    throw new Error(`公司账号退出失败：门户会话未退出（${asError(error)}）。`)
+  }
+  if (!response.ok) {
+    throw new Error(`公司账号退出失败：门户会话未退出（HTTP ${response.status}）。`)
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new Error('公司账号退出失败：门户会话未退出（服务未返回有效结果）。')
+  }
+  if (typeof payload !== 'object' || payload === null || !('code' in payload) || (payload.code !== '0' && payload.code !== 0)) {
+    throw new Error('公司账号退出失败：门户会话未退出（服务未确认退出）。')
+  }
+}
+
+async function invalidateCompanySingleSignOnSession(): Promise<void> {
+  let response: Response
+  try {
+    response = await fetch(COMPANY_SSO_LOGOUT_URL, {
+      method: 'GET',
+      credentials: 'include',
+      redirect: 'manual',
+    })
+  } catch (error) {
+    throw new Error(`公司账号退出失败：统一登录状态未退出（${asError(error)}）。`)
+  }
+  if (response.type !== 'opaqueredirect' && !response.ok) {
+    throw new Error(`公司账号退出失败：统一登录状态未退出（HTTP ${response.status}）。`)
+  }
+}
+
 async function clearCompanyAuthenticationCookies(): Promise<void> {
   const cookies = await companyAuthenticationCookies()
   for (const cookie of cookies) {
@@ -1302,6 +1347,8 @@ async function assertAccountAccessForProtectedSource(): Promise<void> {
 }
 
 async function locallySignOutAccount(): Promise<AccountAccessSnapshot> {
+  await invalidateCompanyPortalSession()
+  await invalidateCompanySingleSignOnSession()
   await clearCompanyAuthenticationCookies()
   await setAccountLocallySignedOut(true)
   knowledgeCatalogCache = undefined

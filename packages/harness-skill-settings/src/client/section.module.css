@@ -28,7 +28,7 @@
 .installCopy strong { flex: none; font-size: 14px; line-height: 22px; }
 .installCopy p { min-width: 0; margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 .installActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 6px; max-width: 100%; }
-.installButton {
+.secondaryButton {
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
@@ -44,8 +44,9 @@
   line-height: 18px;
   cursor: pointer;
 }
-.installButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
-.installButton:disabled { opacity: .4; cursor: default; }
+.secondaryButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.secondaryButton[aria-pressed='true'] { background: var(--dsw-specific-sidebar-nav-item-active); color: var(--dsw-alias-label-primary); font-weight: 500; }
+.secondaryButton:disabled { opacity: .4; cursor: default; }
 .hiddenInput { display: none; }
 .install > .status,
 .install > .success,
@@ -69,50 +70,22 @@
   list-style: none;
 }
 
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+
 .row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
   padding: 12px 14px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
 }
 
-.row > div:first-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.skillCopy { min-width: 0; overflow-wrap: anywhere; }
+.cardHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
 .row strong { font-size: 14px; line-height: 22px; }
 .row span + span { margin-left: 8px; }
 
-.modeControl {
-  display: grid;
-  flex: 0 0 auto;
-  grid-template-columns: repeat(3, max-content);
-  padding: 2px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-2);
-}
-
-.modeButton {
-  min-width: 0;
-  height: 30px;
-  padding: 4px 6px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font: inherit;
-  font-size: 12px;
-  line-height: 20px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.modeButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
-.modeButton[aria-checked='true'] {
-  background: var(--dsw-specific-sidebar-nav-item-active);
-  color: var(--dsw-alias-label-primary);
-  font-weight: 500;
-}
-.modeButton:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: -2px; }
-.modeButton:disabled { color: var(--dsw-alias-label-dimmed); cursor: default; }
+.cardActions { position: relative; display: flex; flex: 0 0 auto; gap: 6px; }
+.moreMenu { position: absolute; z-index: 1; top: calc(100% + 4px); right: 0; display: flex; flex-direction: column; min-width: 96px; padding: 4px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 4px 12px rgb(0 0 0 / 14%); }
+.moreMenu button { min-height: 28px; padding: 4px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; line-height: 20px; text-align: left; white-space: nowrap; cursor: pointer; }
+.moreMenu button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.moreMenu .deleteButton { color: var(--dsw-alias-label-danger); }
+.moreMenu button:disabled { opacity: .4; cursor: default; }

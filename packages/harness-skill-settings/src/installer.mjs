@@ -1,6 +1,6 @@
 import { inflateRaw } from 'node:zlib'
 import { promisify } from 'node:util'
-import { lstat, mkdir, open, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 
@@ -10,6 +10,7 @@ export const SKILL_INSTALL_MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 export const SKILL_INSTALL_MAX_TOTAL_BYTES = 32 * 1024 * 1024
 export const SKILL_INSTALL_MAX_FILE_BYTES = 8 * 1024 * 1024
 export const SKILL_INSTALL_MAX_FILES = 128
+const INSTALL_MARKER = '.accrui-installed-skill.json'
 
 /** Install one browser-supplied ZIP or folder into the product-owned skill root. */
 export async function installSkill(root, request) {
@@ -17,6 +18,30 @@ export async function installSkill(root, request) {
   const skill = validateSkill(source)
   await writeSkill(resolve(root), skill)
   return { name: skill.name, description: skill.description }
+}
+
+/** Remove one directory that was previously installed under the product-owned root. */
+export async function deleteInstalledSkill(root, name) {
+  const skillName = validateSkillName(name)
+  const productRoot = resolve(root)
+  let rootInfo
+  try { rootInfo = await lstat(productRoot) } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error(`技能 /${skillName} 不是产品安装的技能，不能删除`)
+    throw error
+  }
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('产品技能根目录不可用，不能删除技能')
+  const destination = join(productRoot, skillName)
+  assertInside(productRoot, destination)
+  let destinationInfo
+  try { destinationInfo = await lstat(destination) } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error(`技能 /${skillName} 不是产品安装的技能，不能删除`)
+    throw error
+  }
+  if (destinationInfo.isSymbolicLink()) throw new Error(`技能 /${skillName} 是符号链接，拒绝删除`)
+  if (!destinationInfo.isDirectory()) throw new Error(`技能 /${skillName} 不是产品管理的技能目录，不能删除`)
+  await assertInstalledByProduct(destination, skillName)
+  await rm(destination, { recursive: true, force: false, maxRetries: 2 })
+  return { name: skillName }
 }
 
 async function sourceFiles(request) {
@@ -108,6 +133,22 @@ export async function waitForInstalledSkill(name, list, cwd, { attempts = 20, de
   throw new Error(`Harness 未在限定时间内发现 /${name}${detail}`)
 }
 
+/** Confirm that the same Host registry view no longer contains a deleted name. */
+export async function waitForRemovedSkill(name, list, cwd, { attempts = 20, delayMs = 100 } = {}) {
+  let lastError
+  let stillPresent = false
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      if (!(await list({ cwd })).some(skill => skill.name === name)) return { disappeared: true }
+      stillPresent = true
+    } catch (error) { lastError = error }
+    if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, delayMs))
+  }
+  if (stillPresent) return { disappeared: false }
+  const detail = lastError instanceof Error ? `：${lastError.message}` : ''
+  throw new Error(`Harness 未在限定时间内移除 /${name}${detail}`)
+}
+
 function centralDirectory(archive) {
   const minimum = 22
   if (archive.byteLength < minimum) throw new Error('不是有效的 ZIP 压缩包')
@@ -146,7 +187,9 @@ function validateSkill(files) {
     }
   }
   const metadata = parseSkillFrontmatter(new TextDecoder('utf-8', { fatal: true }).decode(manifest.bytes))
-  return { ...metadata, files: files.map(file => ({ path: root === '' ? file.path : file.path.slice(root.length + 1), bytes: file.bytes })) }
+  const normalizedFiles = files.map(file => ({ path: root === '' ? file.path : file.path.slice(root.length + 1), bytes: file.bytes }))
+  if (normalizedFiles.some(file => file.path === INSTALL_MARKER)) throw new Error(`技能包不能包含保留文件：${INSTALL_MARKER}`)
+  return { ...metadata, files: normalizedFiles }
 }
 
 function parseSkillFrontmatter(text) {
@@ -161,9 +204,15 @@ function parseSkillFrontmatter(text) {
   if (typeof name !== 'string' || name.trim() === '' || typeof description !== 'string' || description.trim() === '') {
     throw new Error('SKILL.md frontmatter 必须包含 name 和 description')
   }
-  const normalizedName = name.trim()
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(normalizedName)) throw new Error(`SKILL.md 的 name 必须是 kebab-case：${normalizedName}`)
+  const normalizedName = validateSkillName(name.trim(), 'SKILL.md 的')
   return { name: normalizedName, description: description.trim() }
+}
+
+function validateSkillName(name, prefix = '') {
+  if (typeof name !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name)) {
+    throw new Error(`${prefix}name 必须是 kebab-case：${String(name)}`)
+  }
+  return name
 }
 
 async function writeSkill(root, skill) {
@@ -187,6 +236,7 @@ async function writeSkill(root, skill) {
       await mkdir(dirname(target), { recursive: true })
       await writeFile(target, file.bytes, { flag: 'wx' })
     }
+    await writeFile(join(staging, INSTALL_MARKER), JSON.stringify({ name: skill.name }), { flag: 'wx' })
     try { await lstat(destination); throw new Error(`技能 /${skill.name} 已存在，未覆盖。请先删除或更名后重试。`) } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
@@ -195,6 +245,21 @@ async function writeSkill(root, skill) {
     await lock.close()
     await rm(lockPath, { force: true })
     await rm(staging, { recursive: true, force: true })
+  }
+}
+
+async function assertInstalledByProduct(destination, name) {
+  const marker = join(destination, INSTALL_MARKER)
+  let markerInfo
+  try { markerInfo = await lstat(marker) } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error(`技能 /${name} 不是由本产品安装，不能删除内置或其他来源的技能`)
+    throw error
+  }
+  if (markerInfo.isSymbolicLink() || !markerInfo.isFile()) throw new Error(`技能 /${name} 的安装标记无效，拒绝删除`)
+  let installed
+  try { installed = JSON.parse(await readFile(marker, 'utf8')) } catch { throw new Error(`技能 /${name} 的安装标记无效，拒绝删除`) }
+  if (installed === null || typeof installed !== 'object' || installed.name !== name) {
+    throw new Error(`技能 /${name} 的安装标记无效，拒绝删除`)
   }
 }
 

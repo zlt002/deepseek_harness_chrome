@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import test from 'node:test'
-import { SKILL_INSTALL_MAX_FILE_BYTES, installSkill, waitForInstalledSkill } from '../src/installer.mjs'
+import { SKILL_INSTALL_MAX_FILE_BYTES, deleteInstalledSkill, installSkill, waitForInstalledSkill, waitForRemovedSkill } from '../src/installer.mjs'
 
 const encode = (text) => new TextEncoder().encode(text)
 const b64 = (bytes) => Buffer.from(bytes).toString('base64')
@@ -31,6 +31,7 @@ test('rejects traversal, multiple roots, invalid names, and collisions without r
   ] }), /同一个技能根目录/)
   await assert.rejects(installSkill(root, { kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode(skill('Bad_Name'))) }] }), /kebab-case/)
   await assert.rejects(installSkill(root, { kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode('---\nname: valid-skill\ndescription: [\n---\n')) }] }), /frontmatter 无效/)
+  await assert.rejects(installSkill(root, { kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode(skill('reserved-marker-skill'))) }, { path: '.accrui-installed-skill.json', data: b64(encode('{}')) }] }), /保留文件/)
   await installSkill(root, { kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode(skill())) }] })
   await writeFile(join(root, 'safe-skill', 'keep.txt'), 'keep')
   await assert.rejects(installSkill(root, { kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode(skill())) }] }), /已存在，未覆盖/)
@@ -71,6 +72,40 @@ test('waits for the Host registry to discover the installed name and fails withi
   }, '/workspace', { attempts: 3, delayMs: 0 })
   assert.equal(reads, 3)
   await assert.rejects(waitForInstalledSkill('missing-skill', async () => [], '/workspace', { attempts: 2, delayMs: 0 }), /限定时间内发现/)
+})
+
+test('deletes only a real product-managed name directory and waits for the registry to lose it', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'accr-skill-delete-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await installSkill(root, { kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode(skill('removable-skill'))) }] })
+
+  assert.deepEqual(await deleteInstalledSkill(root, 'removable-skill'), { name: 'removable-skill' })
+  await assert.rejects(lstat(join(root, 'removable-skill')), { code: 'ENOENT' })
+  let reads = 0
+  await waitForRemovedSkill('removable-skill', async () => {
+    reads += 1
+    return reads === 1 ? [{ name: 'removable-skill' }] : []
+  }, '/workspace', { attempts: 2, delayMs: 0 })
+  assert.equal(reads, 2)
+  assert.deepEqual(await waitForRemovedSkill('shadowed-skill', async () => [{ name: 'shadowed-skill' }], '/workspace', { attempts: 1, delayMs: 0 }), { disappeared: false })
+})
+
+test('refuses deletion outside a product-managed directory without following links', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'accr-skill-delete-'))
+  const outside = await mkdtemp(join(tmpdir(), 'accr-skill-outside-'))
+  t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]))
+  await writeFile(join(outside, 'SKILL.md'), skill('outside-skill'))
+  await symlink(outside, join(root, 'linked-skill'))
+  await writeFile(join(root, 'not-a-directory'), 'not a skill')
+  await mkdir(join(root, 'bundled-skill'))
+  await writeFile(join(root, 'bundled-skill', 'SKILL.md'), skill('bundled-skill'))
+
+  await assert.rejects(deleteInstalledSkill(root, '../outside-skill'), /name 必须是 kebab-case/)
+  await assert.rejects(deleteInstalledSkill(root, 'linked-skill'), /符号链接/)
+  await assert.rejects(deleteInstalledSkill(root, 'not-a-directory'), /不是产品管理的技能目录/)
+  await assert.rejects(deleteInstalledSkill(root, 'bundled-skill'), /不是由本产品安装/)
+  await assert.rejects(deleteInstalledSkill(root, 'missing-skill'), /不是产品安装的技能/)
+  assert.equal(await readFile(join(outside, 'SKILL.md'), 'utf8'), skill('outside-skill'))
 })
 
 function zip(entries) {
