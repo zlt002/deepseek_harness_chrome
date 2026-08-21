@@ -47,6 +47,10 @@ one durable assistant message without scanning transcript text.
 registrant may supply labels for known preset values; unrecognized values keep
 the official display formatting.
 
+`0020` shortens the settings document action label to “Configuration file” /
+“配置文件” and gives the action a shrinkable ellipsis width so narrow settings
+surfaces preserve the navigation icons first.
+
 Verify against the pinned upstream commit:
 
 ```sh

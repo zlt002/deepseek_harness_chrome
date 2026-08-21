@@ -9,5 +9,5 @@ test('narrow skill cards keep their compact header actions on the right while co
   assert.match(css, /\.cardHeader \{[\s\S]*?display: flex;[\s\S]*?min-width: 0;/)
   assert.match(css, /\.cardActions \{[\s\S]*?flex: 0 0 auto;[\s\S]*?gap: 6px;/)
   assert.match(css, /\.secondaryButton \{[\s\S]*?height: 28px;[\s\S]*?padding: 0 10px;/)
-  assert.match(css, /\.toolbar \{ display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; \}/)
+  assert.match(css, /\.toolbar \{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; \}/)
 })

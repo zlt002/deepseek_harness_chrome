@@ -57,6 +57,8 @@ test('Settings shell is product-owned and composes official settings slots', asy
   assert.match(css, /@media \(max-width: 999px\)[\s\S]*?\.navLabel \{[\s\S]*?display: none;/)
   assert.match(css, /@media \(max-width: 999px\)[\s\S]*?\.navCell\.active \.navLabel \{[\s\S]*?display: inline;/)
   assert.match(css, /\.actions \{[\s\S]*?white-space: nowrap;/)
+  assert.match(css, /\.actions :global\(button\) \{[\s\S]*?max-width: 88px;[\s\S]*?text-overflow: ellipsis;/)
+  assert.match(css, /@media \(max-width: 420px\)[\s\S]*?\.panel\[data-surface='sidepanel'\] \.actions :global\(button\),[\s\S]*?max-width: 64px;/)
   assert.match(css, /@media \(max-width: 999px\)[\s\S]*?\.navTitle \{[^}]*display: none;/)
   assert.match(css, /\.panel \{[^}]*min-height: 0;/)
   assert.match(css, /\.options \{[^}]*overflow-y: auto;/)

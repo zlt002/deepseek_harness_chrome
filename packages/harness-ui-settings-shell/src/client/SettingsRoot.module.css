@@ -139,7 +139,8 @@
   padding: 20px 14px 8px 10px;
   box-sizing: border-box;
 }
-.actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; white-space: nowrap; }
+.actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; white-space: nowrap; overflow: hidden; }
+.actions :global(button) { min-width: 0; max-width: 88px; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .close {
   display: inline-flex;
   align-items: center;
@@ -236,4 +237,9 @@
   }
 
   .options { grid-column: 1 / -1; grid-row: 2; padding-right: 16px; padding-bottom: 16px; padding-left: 16px; }
+}
+
+@media (max-width: 420px) {
+  .panel[data-surface='sidepanel'] .actions :global(button),
+  .actions :global(button) { max-width: 64px; }
 }

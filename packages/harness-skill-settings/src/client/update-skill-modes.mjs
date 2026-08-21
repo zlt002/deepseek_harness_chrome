@@ -16,3 +16,10 @@ export async function updateSkillModes(api, namespace, modes, initialRevision) {
 export async function refreshAfterDeletedSkill(api, namespace, name, revision) {
   return await updateSkillModes(api, namespace, { [name]: 'enabled' }, revision)
 }
+
+/** Project one selected subset into the single settings patch for a bulk action. */
+export function modesForSelection(skills, selected, mode) {
+  const modes = {}
+  for (const skill of skills) if (selected.has(skill.name)) modes[skill.name] = mode
+  return modes
+}

@@ -70,7 +70,8 @@
   list-style: none;
 }
 
-.toolbar { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.selectedCount { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 28px; white-space: nowrap; }
 
 .row {
   padding: 12px 14px;
@@ -80,6 +81,10 @@
 
 .skillCopy { min-width: 0; overflow-wrap: anywhere; }
 .cardHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.skillTitle { display: flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; }
+.skillTitle strong { min-width: 0; overflow-wrap: anywhere; }
+.selectionControl { display: inline-flex; flex: 0 0 auto; align-items: center; }
+.selectionControl input { width: 16px; height: 16px; margin: 0; accent-color: var(--dsw-alias-state-business-primary); }
 .row strong { font-size: 14px; line-height: 22px; }
 .row span + span { margin-left: 8px; }
 

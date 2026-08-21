@@ -156,6 +156,35 @@ test('logout waits for the same tab to commit the single-sign-on navigation befo
   }
 })
 
+test('logout accepts the final trusted single-sign-on login commit after redirects', async () => {
+  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
+  const background = await accountBackground(cookies, { pageLogout: async () => {
+    globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION('https://signinuat.annto.com/login')
+    return { ok: true }
+  } })
+  try {
+    const snapshot = await background.logout()
+    assert.equal(snapshot.status, 'guest')
+    assert.equal(await background.isAuthenticated(), false)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('logout rejects an untrusted single-sign-on navigation commit', async () => {
+  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
+  const background = await accountBackground(cookies, { pageLogout: async () => {
+    globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION('https://untrusted.example/login')
+    return { ok: true }
+  }, logoutNavigationTimeoutMs: 0 })
+  try {
+    await assert.rejects(background.logout(), /公司账号退出失败：统一登录状态未退出（统一登录退出跳转未发生/)
+    assert.equal(await background.isAuthenticated(), true)
+  } finally {
+    background.cleanup()
+  }
+})
+
 test('injected page logout requires a confirmed response before navigating to single-sign-on logout', async () => {
   const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
   const originalFetch = globalThis.fetch

@@ -14,6 +14,7 @@ test('declares an out-of-tree account settings plugin without upstream source im
   assert.match(section, /验证 Key 并加载/)
   assert.match(section, /退出公司账号/)
   assert.match(section, /退出会清除 wb-uat\.annto\.com 与公司 API 的登录状态/)
+  assert.match(section, /account\.status === 'unavailable' \? <p className=\{css\.error\} role="alert">\{account\.message \?\? '账号状态暂时无法验证，请检查网络后重试。'\}<\/p> : null/)
   assert.match(gateway, /COMPANY_GATEWAY_ANTHROPIC_BASE_URL/)
   assert.match(gateway, /COMPANY_GATEWAY_OPENAI_BASE_URL/)
   assert.match(section, /Anthropic URL/)

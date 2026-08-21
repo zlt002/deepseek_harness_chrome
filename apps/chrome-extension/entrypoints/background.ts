@@ -1267,7 +1267,7 @@ function waitForCompanySingleSignOnNavigation(tabId: number): { done: Promise<vo
       if (details.tabId !== tabId || details.frameId !== 0) return
       try {
         const url = new URL(details.url)
-        if (url.hostname === 'signinuat.midea.com' && (url.pathname === '/logout' || url.pathname === '/')) succeed()
+        if (['signinuat.midea.com', 'signinuat.annto.com'].includes(url.hostname) && ['/logout', '/', '/login'].includes(url.pathname)) succeed()
       } catch { /* unrelated malformed navigation detail */ }
     }
     const timer = setTimeout(() => fail(new Error('统一登录退出跳转未发生，请保留安得工作台页面后重试。')), companyLogoutNavigationTimeoutMs())

@@ -206,7 +206,7 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
         <div><dt>代码库</dt><dd>{account.codeAccess ? '可使用' : '登录后可用'}</dd></div>
         <div><dt>模型来源</dt><dd>验证 Key 后启用公司网关</dd></div>
       </dl>
-      {account.status === 'unavailable' ? <p className={css.error} role="alert">账号状态暂时无法验证，请检查网络后重试。</p> : null}
+      {account.status === 'unavailable' ? <p className={css.error} role="alert">{account.message ?? '账号状态暂时无法验证，请检查网络后重试。'}</p> : null}
       <div className={css.actions}>
         {!authenticated ? <button type="button" className={css.primary} onClick={() => command('login')}>登录公司账号</button> : null}
         <button type="button" onClick={() => command('refresh')}>重新检测</button>

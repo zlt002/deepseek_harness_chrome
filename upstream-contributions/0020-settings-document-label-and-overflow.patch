@@ -1,0 +1,89 @@
+--- a/packages/client/ui-settings-general/src/client/locales.ts
++++ b/packages/client/ui-settings-general/src/client/locales.ts
+@@ -5,7 +5,7 @@
+   'trigger': '设置',
+   'title': '设置',
+   'close': '关闭',
+-  'openDocument': '打开配置文件',
++  'openDocument': '配置文件',
+   'openDocument.error': '无法打开配置文件',
+   'general.nav': '通用设置',
+ } satisfies Record<string, string>
+--- a/packages/client/ui-settings-general/src/client/locales.ts
++++ b/packages/client/ui-settings-general/src/client/locales.ts
+@@ -18,7 +18,7 @@ export const en = {
+   'trigger': 'Settings',
+   'title': 'Settings',
+   'close': 'Close',
+-  'openDocument': 'Open configuration file',
++  'openDocument': 'Configuration file',
+   'openDocument.error': 'Could not open configuration file',
+   'general.nav': 'General',
+ } satisfies Record<SettingsKey, string>
+--- a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
++++ b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.tsx
+@@ -38,6 +38,7 @@
+     <div className={css.action}>
+       {state.error === null ? null : <span className={css.error} role="alert">{t('openDocument.error')}</span>}
+       <Button
++        className={css.button}
+         variant="outline"
+         size="sm"
+         disabled={state.opening}
+--- a/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
++++ b/packages/client/ui-settings-general/src/client/SettingsDocumentAction.module.css
+@@ -5,6 +5,14 @@
+   gap: 8px;
+ }
+ 
++.button {
++  min-width: 0;
++  max-width: 88px;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++
+ .error {
+   max-width: 180px;
+   overflow: hidden;
+--- a/packages/client/ui-settings-general/tests/components.client.spec.tsx
++++ b/packages/client/ui-settings-general/tests/components.client.spec.tsx
+@@ -82,7 +82,7 @@
+       controller={controller}
+       useSnapshot={bindSnapshotSelector(controller.store)}
+     />)
+-    const action = await screen.findByRole('button', { name: 'Open configuration file' })
++    const action = await screen.findByRole('button', { name: 'Configuration file' })
+     fireEvent.click(action)
+     await waitFor(() => { expect(openDocument).toHaveBeenCalledWith({}) })
+   })
+@@ -110,7 +110,7 @@
+       useSnapshot={bindSnapshotSelector(controller.store)}
+     />)
+     await waitFor(() => { expect(controller.store.getSnapshot().status).toBe('unavailable') })
+-    expect(screen.queryByRole('button', { name: 'Open configuration file' })).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Configuration file' })).toBeNull()
+     first.unmount()
+     render(<SettingsDocumentAction
+       {...kit}
+@@ -118,7 +118,7 @@
+       controller={controller}
+       useSnapshot={bindSnapshotSelector(controller.store)}
+     />)
+-    expect(await screen.findByRole('button', { name: 'Open configuration file' })).toBeTruthy()
++    expect(await screen.findByRole('button', { name: 'Configuration file' })).toBeTruthy()
+     expect(describe).toHaveBeenCalledTimes(2)
+   })
+ 
+@@ -144,8 +144,8 @@
+       controller={controller}
+       useSnapshot={bindSnapshotSelector(controller.store)}
+     />)
+-    fireEvent.click(await screen.findByRole('button', { name: 'Open configuration file' }))
++    fireEvent.click(await screen.findByRole('button', { name: 'Configuration file' }))
+     expect((await screen.findByRole('alert')).textContent).toBe('Could not open configuration file')
+-    expect(screen.getByRole('button', { name: 'Open configuration file' })).toBeTruthy()
++    expect(screen.getByRole('button', { name: 'Configuration file' })).toBeTruthy()
+   })
+ })

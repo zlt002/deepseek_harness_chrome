@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { refreshAfterDeletedSkill, updateSkillModes } from '../src/client/update-skill-modes.mjs'
+import { modesForSelection, refreshAfterDeletedSkill, updateSkillModes } from '../src/client/update-skill-modes.mjs'
 
 test('bulk mode update sends one settings namespace patch', async () => {
   const updates = []
@@ -37,4 +37,12 @@ test('deletion refresh resets only the deleted name to enabled through settings'
   assert.deepEqual(updates, [{
     ns: 'skill-settings', patch: { modes: { 'removed-skill': 'enabled' } }, expectedRevision: 5,
   }])
+})
+
+test('bulk selection writes only selected names, including manual-only', () => {
+  const skills = [{ name: 'first-skill' }, { name: 'second-skill' }, { name: 'third-skill' }]
+  assert.deepEqual(modesForSelection(skills, new Set(['first-skill', 'third-skill']), 'manual-only'), {
+    'first-skill': 'manual-only', 'third-skill': 'manual-only',
+  })
+  assert.deepEqual(modesForSelection(skills, new Set(), 'enabled'), {})
 })
