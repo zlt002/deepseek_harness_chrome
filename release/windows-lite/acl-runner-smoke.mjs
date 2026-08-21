@@ -68,7 +68,7 @@ try {
     workspace,
     temp,
     'workspace-write',
-    `$ErrorActionPreference='Stop'; try { Set-Content -LiteralPath ${quotePwsh(outsideWrite)} -Value 'escape'; Write-Output 'ACL-PWSH-ESCAPE: UNEXPECTED'; exit 12 } catch { [Console]::Error.WriteLine('ACL-PWSH-DENIED: ' + $_.Exception.Message); exit 13 }`,
+    `$ErrorActionPreference='Stop'; try { Set-Content -LiteralPath ${quotePwsh(outsideWrite)} -Value 'escape'; Write-Output 'ACL-PWSH-ESCAPE: UNEXPECTED'; exit 12 } catch { Write-Output ('ACL-PWSH-DENIED: ' + $_.Exception.Message); exit 13 }`,
   )
   assertDenied(outsideResult, outsideWrite, 'workspace-write outside workspace')
 
@@ -78,7 +78,7 @@ try {
     workspace,
     temp,
     'read-only',
-    `$ErrorActionPreference='Stop'; try { Set-Content -LiteralPath ${quotePwsh(readonlyWrite)} -Value 'escape'; Write-Output 'ACL-PWSH-READONLY: UNEXPECTED'; exit 12 } catch { [Console]::Error.WriteLine('ACL-PWSH-DENIED: ' + $_.Exception.Message); exit 13 }`,
+    `$ErrorActionPreference='Stop'; try { Set-Content -LiteralPath ${quotePwsh(readonlyWrite)} -Value 'escape'; Write-Output 'ACL-PWSH-READONLY: UNEXPECTED'; exit 12 } catch { Write-Output ('ACL-PWSH-DENIED: ' + $_.Exception.Message); exit 13 }`,
   )
   assertDenied(readonlyResult, readonlyWrite, 'read-only workspace')
 

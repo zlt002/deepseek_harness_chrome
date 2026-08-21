@@ -418,6 +418,8 @@ test('Windows acceptance executes the installed ACL runner through Pwsh and reta
   assert.match(smoke, /workspace-write/)
   assert.match(smoke, /read-only/)
   assert.match(smoke, /ACL-PWSH-DENIED/)
+  assert.match(smoke, /Write-Output \('ACL-PWSH-DENIED:/)
+  assert.doesNotMatch(smoke, /\[Console\]::/)
   assert.match(smoke, /windows-acl-run: unknown mode: invalid/)
 })
 
