@@ -15,7 +15,7 @@ Capabilities exist only in this Host runtime and must stay in the Extension back
 
 ## Client contract
 
-The Client injects a lazy overlay drawer into `sidebar.compact.action`. It sends the Host-created open record to a dedicated nonce/origin checked parent bridge:
+The Client registers `工作区` in the compact header's three-dot quick-action menu. Selecting that menu item opens the lazy overlay drawer mounted through `sidebar.compact.action`. It sends the Host-created open record to a dedicated nonce/origin checked parent bridge:
 
 ```ts
 { type: 'markdown-review-open/v1', nonce, review }

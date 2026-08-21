@@ -5,29 +5,39 @@
   pointer-events: none;
 }
 
-.tray { display: flex; min-width: 0; margin: 0 12px 6px; }
-.trayChip { border: 0; border-radius: 999px; padding: 4px 9px; background: var(--dsw-interactive-bg-hover, #f2f3f5); color: var(--dsw-fg-secondary, #5f6368); cursor: pointer; font: inherit; font-size: 12px; line-height: 18px; }
+.tray { display: flex; box-sizing: border-box; min-width: 0; width: 100%; max-width: var(--dsh-composer-card-max-width); margin: 0 auto 6px; padding: 0 12px; }
+.trayChip { display: inline-flex; align-items: center; box-sizing: border-box; height: 28px; padding: 0 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font: inherit; font-size: 12px; line-height: 18px; }
+.trayChip:hover, .trayChip:focus-visible, .trayChip[aria-expanded='true'] { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 
-.panel { position: fixed; box-sizing: border-box; max-height: min(246px, calc(100vh - 16px)); overflow: hidden; padding: 8px; border: 1px solid var(--dsw-border-secondary, #d9dce1); border-radius: 12px; background: var(--dsw-bg-primary, #fff); box-shadow: var(--dsw-shadow-lv3, 0 8px 24px rgb(0 0 0 / 18%)); color: var(--dsw-fg-primary, #17181a); pointer-events: auto; }
+.panel { position: fixed; box-sizing: border-box; max-height: min(246px, calc(100vh - 16px)); overflow: hidden; padding: 8px; border: 1px solid var(--dsw-alias-border-inverted); border-radius: 12px; background: var(--dsw-specific-menu); box-shadow: var(--dsw-shadow-lv3); color: var(--dsw-alias-label-primary); pointer-events: auto; }
 .editorPanel { width: min(280px, calc(100vw - 16px)); }
 .entryPanel { width: fit-content; max-height: none; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; overflow: visible; }
 .panel header, .panel footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.panel header button, .panel footer button { border: 0; border-radius: 7px; padding: 6px 9px; background: var(--dsw-interactive-bg-hover, #f2f3f5); color: inherit; cursor: pointer; }
+.panel header strong { font-size: 14px; line-height: 20px; font-weight: 500; }
+.panel header button { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font: inherit; line-height: 1; }
+.panel header button:hover, .panel header button:focus-visible { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .panel footer { justify-content: flex-end; margin-top: 8px; }
-.panel footer button:last-child { background: var(--dsw-interactive-primary, #2563eb); color: var(--dsw-fg-on-primary, #fff); }
-.panel footer button:disabled { opacity: .5; cursor: default; }
-.selectionSummary { margin: 7px 0 2px; color: var(--dsw-fg-secondary, #5f6368); font-size: 11px; }
-.selectionPreview { overflow: hidden; margin: 0 0 7px; color: var(--dsw-fg-secondary, #5f6368); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
-.panel label { display: grid; gap: 4px; font-size: 12px; }
-.panel textarea { box-sizing: border-box; width: 100%; min-height: 56px; max-height: 96px; resize: vertical; border: 1px solid var(--dsw-border-secondary, #d9dce1); border-radius: 8px; padding: 8px; color: inherit; background: var(--dsw-bg-primary, #fff); font: inherit; }
-.entry { border: 1px solid var(--dsw-border-secondary, #d9dce1); border-radius: 8px; padding: 5px 8px; background: var(--dsw-bg-primary, #fff); color: var(--dsw-fg-primary, #17181a); box-shadow: 0 4px 14px rgb(0 0 0 / 14%); cursor: pointer; font-size: 12px; white-space: nowrap; }
+.panel footer button { display: inline-flex; align-items: center; justify-content: center; height: 28px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px; background: transparent; color: var(--dsw-alias-label-primary); cursor: pointer; font: inherit; font-size: 12px; line-height: 18px; }
+.panel footer button:hover:not(:disabled), .panel footer button:focus-visible { background: var(--dsw-alias-interactive-bg-hover); }
+.panel footer button:last-child { border-color: transparent; background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground); }
+.panel footer button:last-child:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
+.panel footer button:disabled { opacity: .4; cursor: default; }
+.selectionSummary { margin: 7px 0 2px; color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.selectionPreview { overflow: hidden; margin: 0 0 7px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.panel label { display: grid; gap: 4px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
+.panel textarea { box-sizing: border-box; width: 100%; min-height: 56px; max-height: 96px; resize: vertical; border: 1px solid var(--dsw-alias-border-l2-darkmode-thin); border-radius: 8px; outline: none; padding: 8px; background: var(--dsw-specific-input-major); color: var(--dsw-alias-label-primary); caret-color: var(--dsw-alias-state-business-primary); font: inherit; font-size: 13px; line-height: 20px; }
+.panel textarea:focus { border-color: var(--dsw-alias-brand-primary); }
+.panel textarea::placeholder { color: var(--dsw-alias-label-caption); }
+.entry { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: 28px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-button-floating-fill); color: var(--dsw-alias-label-primary); box-shadow: var(--dsw-shadow-lv2); cursor: pointer; font: inherit; font-size: 12px; line-height: 18px; white-space: nowrap; }
+.entry:hover, .entry:focus-visible { background: var(--dsw-alias-button-floating-hover); }
 
 .trayPopover { display: flex; flex-direction: column; width: min(320px, calc(100vw - 16px)); max-height: min(280px, calc(100vh - 16px)); }
 .trayPopover ul { overflow: auto; margin: 7px 0 0; padding: 0; list-style: none; }
-.trayPopover li { position: relative; min-width: 0; padding: 10px 42px 10px 0; border-top: 1px solid var(--dsw-border-secondary, #e4e6ea); overflow-wrap: anywhere; }
+.trayPopover li { position: relative; min-width: 0; padding: 10px 42px 10px 0; border-top: 1px solid var(--dsw-alias-border-l1); overflow-wrap: anywhere; }
 .trayPopover li:first-child { border-top: 0; }
-.trayPopover li > button { position: absolute; top: 7px; right: 0; border: 0; background: transparent; color: var(--dsw-fg-secondary, #5f6368); cursor: pointer; font-size: 12px; }
-.trayPopover li b { display: block; overflow: hidden; color: var(--dsw-fg-primary, #17181a); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.trayPopover li > button { position: absolute; top: 7px; right: 0; border: 0; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font: inherit; font-size: 12px; }
+.trayPopover li > button:hover, .trayPopover li > button:focus-visible { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.trayPopover li b { display: block; overflow: hidden; color: var(--dsw-alias-label-primary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .trayQuote, .trayComment { margin: 4px 0 0; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
-.trayQuote { display: -webkit-box; overflow: hidden; color: var(--dsw-fg-secondary, #5f6368); font-size: 12px; line-height: 18px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.trayComment { display: -webkit-box; overflow: hidden; color: var(--dsw-fg-primary, #17181a); font-size: 12px; line-height: 18px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.trayQuote { display: -webkit-box; overflow: hidden; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.trayComment { display: -webkit-box; overflow: hidden; color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 18px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }

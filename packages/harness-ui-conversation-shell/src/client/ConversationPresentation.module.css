@@ -83,6 +83,13 @@
 
 .root[data-phase='settling'] > :global([data-composer-seat]) { visibility: hidden; }
 
+/* InputBar's status notice has horizontal padding but inherits content-box;
+   match the border-box sizing used by the composer card so both outer edges
+   share the same width. */
+.root > :global([data-composer-seat]) :global([role='status']) {
+  box-sizing: border-box;
+}
+
 /* ComposerOverlay is a generic upstream service. Its stable attributes expose
    a product-facing surface for model/permission/context panels, preserving
    mutual exclusion without owning state. */
@@ -167,18 +174,30 @@
 }
 
 /* The model chooser renders its sheet beside the provider instead of inside
-   ComposerOverlaySurface.  The generic host marker deliberately clears the
-   tiny trigger's positioning context, so the sheet uses the composer card as
-   its containing block just like the accepted e327 layout. */
+   ComposerOverlaySurface.  The resource strip lives between the input card
+   and the shared overlay anchor, so the card cannot be the menu's containing
+   block: its upward sheet would cover “select repository / knowledge scope”.
+   Let the existing composer seat position the sheet instead; that is the
+   same vertical baseline used by the permission menu. */
 .root :global([data-composer-overlay-host]) {
   position: static;
   flex: 0 1 auto;
   min-width: 0;
 }
 
+.root :global([data-composer-card]:has([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu'])) {
+  position: static;
+}
+
 :global([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu']) {
   position: absolute;
-  right: 0;
+  /* The composer seat spans the viewport, while the card is capped and
+     centered.  Preserve the card's right edge after moving the vertical
+     containing block to the seat. */
+  right: max(
+    var(--dsh-composer-side-clearance),
+    calc((100% - var(--dsh-composer-card-max-width)) / 2)
+  );
   bottom: calc(100% + 8px);
   left: auto;
   z-index: 100;

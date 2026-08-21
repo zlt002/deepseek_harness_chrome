@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { IconPaperclipOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ComposerFileIntake } from './intake.ts'
 import { ACCEPT } from './intake.ts'
 import css from './AttachDocumentControl.module.css'
@@ -24,7 +25,7 @@ export function AttachDocumentControl({ sessionId, intake }: ControlProps) {
         onMouseDown={event => { event.preventDefault() }}
         onClick={() => { inputRef.current?.click() }}
       >
-        <span aria-hidden="true">📎</span>
+        <span aria-hidden="true"><IconPaperclipOutline16 size={14} /></span>
       </button>
       <input
         ref={inputRef}

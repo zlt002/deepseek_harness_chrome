@@ -1,6 +1,4 @@
 .root { position: relative; }
-.trigger { width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-fg-primary); cursor: pointer; font-size: 17px; }
-.trigger:hover { background: var(--dsw-interactive-bg-hover); }
 .drawer { position: fixed; z-index: 120; top: 8px; right: 8px; bottom: 8px; width: min(340px, calc(100vw - 16px)); display: flex; flex-direction: column; border: 1px solid var(--dsw-border-secondary); border-radius: 12px; background: var(--dsw-bg-primary); box-shadow: var(--dsw-shadow-lv3); color: var(--dsw-fg-primary); }
 .header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; border-bottom: 1px solid var(--dsw-border-secondary); }
 .header button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 18px; }

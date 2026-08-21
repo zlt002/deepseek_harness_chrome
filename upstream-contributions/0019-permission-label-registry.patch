@@ -1,0 +1,236 @@
+# Product-extensible permission labels
+
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+index 86a436e..b8d8d2f 100644
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -26,6 +26,7 @@ import type { ComposerBlock } from './input/blocks.ts'
+ import { InputHub } from './input/hub.ts'
+ import { ComposerSubmissionTransforms } from './input/submission-transforms.ts'
+ import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
++import { PermissionLabelRegistry } from './permission-labels.ts'
+ import { InputBar } from './skeleton/InputBar.tsx'
+ import { EnterBehaviorRow } from './settings/EnterBehaviorRow.tsx'
+ import type { EnterBehaviorRowInjected } from './settings/EnterBehaviorRow.tsx'
+@@ -152,6 +153,8 @@ export function apply(ctx: Context): void {
+   const submissionPolicy = new ComposerSubmissionPolicy(
+     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
+   )
++  const permissionLabels = new PermissionLabelRegistry()
++  ctx.provide('permissionLabels', permissionLabels)
+-
++
+   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+     name: 'settings.general.item',
+@@ -313,6 +316,7 @@ export function apply(ctx: Context): void {
+     inject: (sessionId: SessionId | undefined): ComposerBarInjected => {
+       if (sessionId === undefined) {
+         return {
++          permissionLabels,
+           keyboard: undefined,
+           addImages: undefined,
+           removeImage: undefined,
+@@ -329,6 +333,7 @@ export function apply(ctx: Context): void {
+       const shell = inputHub.shell(sessionId)
+       const inputTriggers = inputHub.inputTriggers(sessionId)
+       return {
++        permissionLabels,
+         keyboard: shell,
+         addImages: (files) => {
+           try {
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+index 784795f..c141583 100644
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -14,6 +14,7 @@ import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives
+ import type { MessageId } from '@deepseek-ai/dsh-client-connection/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+ import type { ComposerBlock } from '../input/blocks.ts'
++import type { PermissionLabelRegistry } from '../permission-labels.ts'
+ import type {
+   ComposerKeyboard, DraftAttachmentId, EditSelection, InputActions, InputNotice, InputState,
+ } from '../input/contract.ts'
+@@ -515,6 +516,8 @@ export interface ComposerBarOwnerProps {
+-
++
+ /** Injected share of the composer-bar entry (package-internal faces). */
+ export interface ComposerBarInjected {
++  /** Product-neutral permission label registry; unknown values retain the official label. */
++  permissionLabels?: PermissionLabelRegistry
+   /** The InputBar-exclusive keyboard/DOM command face (private plane); absent with the session. */
+   keyboard: ComposerKeyboard | undefined
+   /** Create previews and append image ids to the session input. */
+diff --git a/packages/client/ui-conversation/src/client/index.ts b/packages/client/ui-conversation/src/client/index.ts
+index c34fe10..326ecbb 100644
+--- a/packages/client/ui-conversation/src/client/index.ts
++++ b/packages/client/ui-conversation/src/client/index.ts
+@@ -24,6 +24,8 @@ export {
+   type ComposerSubmissionTransform,
+ } from './input/submission-transforms.ts'
+ export { ConversationViewState } from './view-state.ts'
++export { PermissionLabelRegistry } from './permission-labels.ts'
++export type { PermissionLabelResolver } from './permission-labels.ts'
+-
++
+ export type {
+   CallId, ChatStoreState, SelectionTarget, ViewTab,
+@@ -53,5 +55,7 @@ declare module '@deepseek-ai/cordis' {
+     composerFileIntake?: import('./contract/slots.ts').ComposerFileIntake
+     /** Product-neutral prompt enrichments committed only after successful delivery. */
+     composerSubmissionTransforms: import('./input/submission-transforms.ts').ComposerSubmissionTransforms
++    /** Product-neutral presentation labels for the resident permission control. */
++    permissionLabels: import('./permission-labels.ts').PermissionLabelRegistry
+   }
+ }
+diff --git a/packages/client/ui-conversation/src/client/permission-labels.ts b/packages/client/ui-conversation/src/client/permission-labels.ts
+new file mode 100644
+index 0000000..66107e2
+--- /dev/null
++++ b/packages/client/ui-conversation/src/client/permission-labels.ts
+@@ -0,0 +1,43 @@
++/** Product-extensible labels for the existing permission controls. */
++export type PermissionLabelResolver = (value: string, fallback: string) => string | undefined
++
++/**
++ * Small registry rather than a locale table: permission presets are host
++ * supplied, while a product may know a stable subset that deserves its own
++ * presentation copy. Resolvers decline unknown values so the official label
++ * remains the safe fallback.
++ */
++export class PermissionLabelRegistry {
++  private readonly resolvers = new Set<PermissionLabelResolver>()
++  private readonly listeners = new Set<() => void>()
++  private revision = 0
++
++  readonly subscribe = (listener: () => void): (() => void) => {
++    this.listeners.add(listener)
++    return () => { this.listeners.delete(listener) }
++  }
++
++  readonly getSnapshot = (): number => this.revision
++
++  register(resolver: PermissionLabelResolver): () => void {
++    this.resolvers.add(resolver)
++    this.changed()
++    return () => {
++      if (!this.resolvers.delete(resolver)) return
++      this.changed()
++    }
++  }
++
++  resolve(value: string, fallback: string): string {
++    for (const resolver of [...this.resolvers].reverse()) {
++      const label = resolver(value, fallback)
++      if (label !== undefined) return label
++    }
++    return fallback
++  }
++
++  private changed(): void {
++    this.revision += 1
++    for (const listener of this.listeners) listener()
++  }
++}
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+index 0e0158e..87c10b3 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+@@ -46,7 +46,7 @@ export type InputBarProps = ComposerBarProps
+ export function InputBar({
+   useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages,
+   resolveSubmitMode, toggleCommandMenu, stop, command, t,
+-  renderSlot, useNotices, useLexicon, useMenuLauncher,
++  renderSlot, useNotices, useLexicon, useMenuLauncher, permissionLabels,
+   useProjection, sessionId, variant, disabled: inert = false, blocked,
+   workspacePickerOpen = false, onRequestWorkspace,
+   placeholder, accessory, heroModeControl, leftItems, rightItems, footer,
+@@ -559,7 +559,7 @@ export function InputBar({
+   // or while the command face is absent with the session).
+   const accessSelect: ReactNode = command === undefined
+     ? null
+-    : <PermissionSelect key={sessionId} value={permissions} locked={locked} command={command} compact={variant === 'hero'} t={t} />
++    : <PermissionSelect key={sessionId} value={permissions} locked={locked} command={command} compact={variant === 'hero'} labels={permissionLabels} t={t} />
+-
++
+   // Mirror-layer decorations: a visible backdrop with transparent text. The
+   // claim token highlights through behind the textarea glyphs; each U+FFFC
+diff --git a/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx b/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx
+index d010591..b10e80d 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/PermissionSelect.tsx
+@@ -1,14 +1,16 @@
+-import { useEffect, useState } from 'react'
++import { useEffect, useState, useSyncExternalStore } from 'react'
+ import type { ReactNode } from 'react'
+ import clsx from 'clsx'
+ import type { PermissionSelect as PermissionSelectValue } from '@deepseek-ai/dsh-permission-presets/client'
+ import { IconChevronDownOutline14, Menu, RiskConfirmation, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ComposerBarProps } from '../contract/slots.ts'
++import { PermissionLabelRegistry } from '../permission-labels.ts'
+ import css from './PermissionSelect.module.css'
+ import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
+-
++
+ const FULL_ACCESS = 'danger-full-access'
++const OFFICIAL_PERMISSION_LABELS = new PermissionLabelRegistry()
+-
++
+ /* Shield glyphs (design set 1556): check = read-only, pencil = workspace
+    write, exclamation = full access. currentColor so the trigger and menu
+@@ -58,8 +60,9 @@ function displayName(name: string): string {
+   return name.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+ }
+-
++
+-function optionLabel(option: PermissionSelectValue['options'][number]): string {
+-  return option.value === FULL_ACCESS ? 'Full access' : displayName(option.name)
++function optionLabel(option: PermissionSelectValue['options'][number], labels: PermissionLabelRegistry): string {
++  const fallback = option.value === FULL_ACCESS ? 'Full access' : displayName(option.name)
++  return labels.resolve(option.value, fallback)
+ }
+-
++
+ export interface PermissionSelectProps {
+@@ -68,15 +71,18 @@ export interface PermissionSelectProps {
+   command: (line: string) => Promise<boolean>
+   /** Hero only: keep the compact bottom toolbar to a single colored glyph. */
+   compact?: boolean | undefined
++  /** Product-extensible labels; absent resolvers retain the official display formatting. */
++  labels?: PermissionLabelRegistry | undefined
+   /** The owning bar's locale seat, passed down as a plain prop. */
+   t: ComposerBarProps['t']
+ }
+-
++
+-export function PermissionSelect({ value, locked, command, compact = false, t }: PermissionSelectProps) {
++export function PermissionSelect({ value, locked, command, compact = false, labels = OFFICIAL_PERMISSION_LABELS, t }: PermissionSelectProps) {
+   const [pick, setPick] = useState<string | null>(null)
+   const [open, setOpen] = useState(false)
+   const [confirmation, setConfirmation] = useState<string | null>(null)
+   const [acknowledged, setAcknowledged] = useState(false)
++  useSyncExternalStore(labels.subscribe, labels.getSnapshot, labels.getSnapshot)
+-
++
+   useEffect(() => {
+     if (!locked && value !== undefined) return
+@@ -91,13 +97,15 @@ export function PermissionSelect({ value, locked, command, compact = false, t }:
+   const currentValue = pick ?? value?.currentValue ?? ''
+   const current = value?.options.find(option => option.value === currentValue)
+   const busy = pick !== null || confirmation !== null
+-  const currentLabel = current === undefined ? displayName(currentValue) : optionLabel(current)
++  const currentLabel = current === undefined
++    ? labels.resolve(currentValue, displayName(currentValue))
++    : optionLabel(current, labels)
+-
++
+   const items: MenuEntry[] = value?.options
+     .filter(o => o.value !== 'custom')
+     .map((option) => {
+       const icon = permissionGlyph(option.value)
+-      return { id: option.value, label: optionLabel(option), ...icon === undefined ? {} : { icon } }
++      return { id: option.value, label: optionLabel(option, labels), ...icon === undefined ? {} : { icon } }
+     }) ?? []
+-
++
+   const submit = (id: string): void => {

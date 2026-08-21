@@ -14,6 +14,7 @@
 .sessionsPane { flex: 1; min-width: 0; border-left: 1px solid var(--dsw-alias-border-l1); }
 .paneTitle { min-width: 0; display: flex; align-items: center; height: 28px; color: var(--dsw-alias-label-tertiary); font-size: 12px; font-weight: 500; line-height: 16px; }
 .paneHeader { flex: none; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 4px 0 8px; }
+.headerActions { display: inline-flex; align-items: center; gap: 2px; flex: none; }
 .addWorkspace { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: none; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
 .addWorkspace:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .addWorkspace:disabled { color: var(--dsw-alias-label-dimmed); cursor: not-allowed; }
@@ -31,6 +32,7 @@
 .row:hover .rowActions, .rowMenuOpen .rowActions { display: inline-flex; }
 .iconButton { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; }
 .iconButton:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.verticalEllipsis { transform: rotate(90deg); }
 .hoverContent { display: flex; flex-direction: column; gap: 8px; }
 .hoverTitle { font-size: 14px; line-height: 20px; color: #FFFFFF; overflow-wrap: break-word; }
 .hoverPath { font-size: 12px; line-height: 16px; color: #CFD3D6; word-break: break-all; }
@@ -43,6 +45,10 @@
 .sessionRowTitle { flex: 1; min-width: 0; }
 .sessionState { display: inline-flex; align-items: center; flex: none; }
 .sessionTime { flex: none; min-width: 28px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; text-align: right; }
+.sessionRowActions { margin-left: auto; flex: none; display: none; align-items: center; }
+.sessionRowActions > :first-child { display: inline-flex; }
+.sessionRow:hover .sessionTime, .sessionRow.rowMenuOpen .sessionTime { display: none; }
+.sessionRow:hover .sessionRowActions, .sessionRow.rowMenuOpen .sessionRowActions { display: inline-flex; }
 .empty { padding: 12px 8px; color: var(--dsw-alias-label-tertiary); font-size: 13px; }
 .importOverlay { position: fixed; inset: 0; z-index: 1000; overflow: hidden; background: var(--dsw-alias-bg-layer-2); }
 .importPanel { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); }

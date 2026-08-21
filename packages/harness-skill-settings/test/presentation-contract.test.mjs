@@ -3,9 +3,12 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 test('Skill settings uses a dense three-state product control instead of a native select', async () => {
-  const [section, css] = await Promise.all([
+  const [section, css, enable, host, folderUpload] = await Promise.all([
     readFile(new URL('../src/client/section.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/section.module.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/enable-installed-skill.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../src/index.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/folder-upload.mjs', import.meta.url), 'utf8'),
   ])
 
   assert.doesNotMatch(section, /<select|<option/)
@@ -21,6 +24,33 @@ test('Skill settings uses a dense three-state product control instead of a nativ
   assert.match(css, /\.intro,[\s\S]*?\.row p,[\s\S]*?\.row span,[\s\S]*?\.status \{[\s\S]*?font-size: 14px;[\s\S]*?line-height: 22px;/)
   assert.match(css, /\.row \{[\s\S]*?display: flex;[\s\S]*?justify-content: space-between;/)
   assert.match(section, /view\.skills\.length === 0/)
+  assert.match(section, /api\/settings\.skill\.install/)
+  assert.match(section, /getAsFileSystemHandle/)
+  assert.doesNotMatch(section, /showDirectoryPicker/)
+  assert.match(section, /webkitdirectory/)
+  assert.match(section, /type="file" multiple/)
+  assert.match(folderUpload, /webkitRelativePath/)
+  assert.match(folderUpload, /MAX_FOLDER_FILES/)
+  assert.match(folderUpload, /MAX_FOLDER_FILE_BYTES/)
+  assert.match(folderUpload, /MAX_FOLDER_BYTES/)
+  assert.match(section, /installSuccess/)
+  assert.match(section, /installReadOnly/)
+  assert.match(section, /已落盘，但启用设置失败/)
+  assert.match(section, /disabled=\{installing \|\| !view\.writable\}/)
+  assert.match(enable, /expectedRevision: revision/)
+  assert.match(enable, /settings-conflict/)
+  assert.match(css, /\.install \{[\s\S]*?align-items: center;[\s\S]*?padding: 10px 12px;[\s\S]*?border: 1px solid var\(--dsw-alias-border-l2\);/)
+  assert.doesNotMatch(css, /\.install \{[\s\S]*?border: 1px dashed/)
+  assert.match(css, /\.installCopy \{[\s\S]*?min-width: 0;[\s\S]*?flex-wrap: wrap;/)
+  assert.match(css, /\.installCopy p \{[\s\S]*?overflow-wrap: anywhere;/)
+  assert.match(css, /\.installButton \{[\s\S]*?height: 28px;[\s\S]*?border-radius: 14px;/)
+  assert.match(css, /\.install\[data-drag-over='true'\]/)
+  assert.match(section, /onDragEnter=/)
+  assert.match(section, /onDragLeave=/)
+  assert.match(css, /\.error \{[\s\S]*?font-size: 14px/)
+  assert.match(css, /\.warning \{[\s\S]*?font-size: 14px/)
+  assert.match(host, /invalidateInvocationPolicy\(\)[\s\S]*?waitForInstalledSkill/)
+  assert.match(host, /refreshWarning/)
   assert.match(section, /t\('empty'\)/)
   assert.match(section, /t\('loadFailed'\)/)
   assert.match(section, /t\('saveFailed'\)/)
@@ -28,7 +58,9 @@ test('Skill settings uses a dense three-state product control instead of a nativ
   assert.match(section, /tabIndex=\{mode === option\.value \? 0 : -1\}/)
   assert.doesNotMatch(section, /css\.skillCopy|css\.restrictions/)
   assert.doesNotMatch(css, /\.section h2 \{|\.skillCopy|\.restrictions/)
-  assert.match(css, /\.row div \{ min-width: 0; \}/)
+  assert.match(css, /\.row > div:first-child \{ flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; \}/)
+  assert.match(css, /\.modeControl \{[\s\S]*?flex: 0 0 auto;[\s\S]*?grid-template-columns: repeat\(3, max-content\);/)
+  assert.doesNotMatch(css, /@media \(max-width: 640px\)/)
   assert.match(css, /\.row strong \{ font-size: 14px; line-height: 22px; \}/)
   assert.match(css, /\.row span \+ span \{ margin-left: 8px; \}/)
   assert.match(section, /ArrowRight/)

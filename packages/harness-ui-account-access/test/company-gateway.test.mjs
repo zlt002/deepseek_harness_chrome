@@ -13,6 +13,16 @@ const output = await build({
 })
 const gatewayModule = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString('base64')}`)
 
+const onboardingSource = await readFile(new URL('../src/client/onboarding.ts', import.meta.url), 'utf8')
+const onboardingOutput = await build({
+  stdin: { contents: onboardingSource, loader: 'ts', resolveDir: new URL('../src/client/', import.meta.url).pathname },
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  write: false,
+})
+const onboardingModule = await import(`data:text/javascript;base64,${Buffer.from(onboardingOutput.outputFiles[0].text).toString('base64')}`)
+
 const gateway = {
   models: [{ id: 'model-a', name: 'Model A' }],
   quota: { usagePercent: 20, nextResetTime: null, resetCycle: 'monthly' },
@@ -21,7 +31,7 @@ const gateway = {
 
 const ok = { result: { ok: true } }
 
-test('saveCompanyGateway writes the first catalog model as the default after the profile and credential', async () => {
+test('saveCompanyGateway never writes the unexposed default-model settings namespace', async () => {
   const calls = []
   const api = {
     settings: { mutate: async payload => { calls.push(['settings', payload]); return ok } },
@@ -29,16 +39,14 @@ test('saveCompanyGateway writes the first catalog model as the default after the
   }
 
   assert.equal(await gatewayModule.saveCompanyGateway(api, gateway.models, 'sk-secret', 'openai-completions'), undefined)
-  assert.deepEqual(calls.map(([kind]) => kind), ['settings', 'credential', 'settings'])
+  assert.deepEqual(calls.map(([kind]) => kind), ['settings', 'credential'])
   assert.equal(calls[0][1].ns, 'llm-pi-ai')
   assert.equal(calls[1][1].value, 'sk-secret')
-  assert.equal(calls[2][1].ns, 'agent-default-model')
-  assert.equal(calls[2][1].ops[1].value, 'model-a')
   const profile = calls[0][1].ops[0].value
   assert.equal(profile.api, 'openai-completions')
   assert.equal(profile.baseURL, 'https://anapi-uat.annto.com/api-sse-anthropic/v1')
   assert.equal('displayName' in profile, false)
-  assert.doesNotMatch(JSON.stringify([calls[0][1], calls[2][1]]), /sk-secret/)
+  assert.doesNotMatch(JSON.stringify([calls[0][1]]), /sk-secret/)
 })
 
 test('company gateway protocol maps to its corresponding fixed URL', () => {
@@ -109,7 +117,7 @@ test('saveCompanyGateway refuses invalid drafts before any settings or credentia
   assert.deepEqual(calls, [])
 })
 
-test('saveCompanyGateway writes the edited first model id and does not write an invalid empty catalog', async () => {
+test('saveCompanyGateway persists the edited first model id and does not write an invalid empty catalog', async () => {
   const calls = []
   const api = {
     settings: { mutate: async payload => { calls.push(['settings', payload]); return ok } },
@@ -117,9 +125,30 @@ test('saveCompanyGateway writes the edited first model id and does not write an 
   }
 
   assert.equal(await gatewayModule.saveCompanyGateway(api, [{ id: '  edited-first  ' }, { id: 'second' }]), undefined)
-  assert.equal(calls[1][1].ops[1].value, 'edited-first')
+  assert.equal(calls[0][1].ops[0].value.models[0].id, 'edited-first')
 
   calls.length = 0
   assert.equal(await gatewayModule.saveCompanyGateway(api, []), '模型目录不能为空。')
   assert.deepEqual(calls, [])
+})
+
+test('initial model selection uses the public session directory after the profile is saved', async () => {
+  const calls = []
+  const directory = {
+    load: async () => { calls.push('load') },
+    select: async selection => { calls.push(selection) },
+  }
+
+  assert.equal(await gatewayModule.selectCompanyGatewayInitialModel(directory, gateway.models), undefined)
+  assert.deepEqual(calls, ['load', { provider: 'annto-company-gateway', model: 'model-a' }])
+  assert.equal(await gatewayModule.selectCompanyGatewayInitialModel(undefined, gateway.models), undefined)
+})
+
+test('first-run onboarding appears only when no configured active provider has usable credentials', () => {
+  const provider = { active: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'gateway'] }
+  const namespaces = [{ ns: 'llm-pi-ai', value: { providers: { gateway: { apiKeyEnv: 'GATEWAY_KEY' } } } }]
+  assert.equal(onboardingModule.hasUsableModelProvider([provider], namespaces, {}), false)
+  assert.equal(onboardingModule.hasUsableModelProvider([provider], namespaces, { GATEWAY_KEY: { configured: true } }), true)
+  assert.equal(onboardingModule.hasUsableModelProvider([{ ...provider, active: false }], namespaces, { GATEWAY_KEY: { configured: true } }), false)
+  assert.equal(onboardingModule.hasUsableModelProvider([{ ...provider, settingsPath: ['providers', 'native'] }], [{ ns: 'llm-pi-ai', value: { providers: { native: {} } } }], {}), true)
 })

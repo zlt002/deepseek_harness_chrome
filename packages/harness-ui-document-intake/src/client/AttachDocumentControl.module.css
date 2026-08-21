@@ -1,22 +1,21 @@
 .trigger {
-  position: relative;
-  display: inline-flex;
+  display: grid;
+  place-items: center;
+  flex: none;
   width: 28px;
   height: 28px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 50%;
-  background: var(--dsw-alias-bg-base);
-  color: var(--dsw-alias-label-secondary);
+  border: none;
+  border-radius: 999px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
 }
 .trigger:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+.trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .hidden {
   position: absolute;

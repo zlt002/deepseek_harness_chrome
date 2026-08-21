@@ -3,18 +3,25 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 test('Conversation shell is a product presentation plugin, not a second conversation controller', async () => {
-  const [manifest, source, presentation, css, overlayHostSeam] = await Promise.all([
+  const [manifest, source, presentation, css, overlayHostSeam, permissionLabelSeam] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ConversationPresentation.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ConversationPresentation.module.css', import.meta.url), 'utf8'),
     readFile(new URL('../../../upstream-contributions/0013-composer-overlay-host-marker.patch', import.meta.url), 'utf8'),
+    readFile(new URL('../../../upstream-contributions/0019-permission-label-registry.patch', import.meta.url), 'utf8'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-conversation-shell/)
   assert.match(manifest, /@deepseek-ai\/dsh-client-ui-model-selection/)
+  assert.match(source, /'permissionLabels'/)
+  assert.match(source, /permissionLabels\.register\(permissionLabel\)/)
+  assert.match(source, /Chinese permission labels/)
+  assert.match(permissionLabelSeam, /permissionLabels\?: PermissionLabelRegistry/)
+  assert.match(permissionLabelSeam, /labels\?: PermissionLabelRegistry/)
+  assert.match(permissionLabelSeam, /labels = OFFICIAL_PERMISSION_LABELS/)
   // Cordis only exposes a property when it was declared in `inject`. The
   // adapter registers a presentation slot before reading its own services.
-  assert.match(source, /export const inject = \['slots', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions'\]/)
+  assert.match(source, /export const inject = \['slots', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions', 'permissionLabels'\]/)
   assert.match(source, /ctx\.slots\.inject\('conversation\.presentation'/)
   assert.match(source, /select: owner => owner/)
   assert.match(source, /conversationViewState/)
@@ -32,6 +39,11 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(presentation, /owner\.renderComposer\(\)/)
   assert.match(css, /:global\(\[data-composer-seat\]\)/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)/)
+  assert.match(
+    css,
+    /\.root\s*>\s*:global\(\[data-composer-seat\]\)\s+:global\(\[role='status'\]\)\s*\{[\s\S]*?box-sizing:\s*border-box/,
+    'composer status notices must use the same border-box sizing as the input card',
+  )
   // ChatView's sticky back-to-bottom slot still adds the official composer
   // height inside `[data-conversation-scroll]`. The product footer is a
   // sibling of that scrollport, so the scroll body must zero the inherited
@@ -126,8 +138,8 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   )
   assert.match(
     css,
-    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*right:\s*0[\s\S]*left:\s*auto/,
-    'the model menu must attach to the card right edge after its host stops positioning around the tiny trigger',
+    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*right:\s*max\([\s\S]*left:\s*auto/,
+    'the model menu must preserve its card-right alignment after its vertical anchor moves to the composer seat',
   )
   assert.match(
     css,
@@ -138,6 +150,21 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     css,
     /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*height: auto/,
     'the model menu itself carries the generic surface marker, so it must undo the shared zero-height anchor geometry',
+  )
+  // `conversation.composer.above` is between the shared overlay anchor and
+  // the input card.  The model chooser must therefore escape the card's
+  // positioning context and use the composer seat just like the permission
+  // menu: its bottom then lands above the resource strip instead of covering
+  // the "select repository / knowledge scope" row.
+  assert.match(
+    css,
+    /\[data-composer-card\]:has\(\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\]\)[\s\S]*position:\s*static/,
+    'the model menu must not use the input card as its positioning context',
+  )
+  assert.match(
+    css,
+    /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*right:\s*max\(\s*var\(--dsh-composer-side-clearance\),\s*calc\(\(100% - var\(--dsh-composer-card-max-width\)\) \/ 2\)\s*\)/,
+    'after anchoring to the composer seat, the model menu must preserve the input card right edge',
   )
   assert.match(overlayHostSeam, /data-composer-overlay-host=\{overlay\.available \|\| undefined\}/)
   for (const name of ['root', 'headerSeat', 'scrollBody', 'heroTitleSeat']) {

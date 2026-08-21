@@ -13,7 +13,7 @@
   "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
   "dsh": {
     "client": {
-      "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-settings"],
+      "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-model-selection", "@deepseek-ai/dsh-client-ui-primitives", "@deepseek-ai/dsh-client-ui-settings"],
       "platform": "web"
     }
   },

@@ -63,7 +63,37 @@ export function companyGatewayModelDraftFailure(models: readonly CompanyGatewayM
   return undefined
 }
 
-/** Persist connection facts, then the secret, then select the first catalog model. */
+export function companyGatewayApiKeyFailure(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return '请输入公司网关 API Key。'
+  if (trimmed.length > 512 || !/^[\x21-\x7E]+$/.test(trimmed)) return 'API Key 格式无效，请只输入 Key 本身。'
+  return undefined
+}
+
+/** The public per-session selection surface used after a company profile is saved. */
+export interface CompanyGatewayModelDirectory {
+  load(): Promise<unknown>
+  select(selection: { provider: string; model: string }): Promise<void>
+}
+
+/** Select the first configured model through the official session seam, never raw settings. */
+export async function selectCompanyGatewayInitialModel(
+  directory: CompanyGatewayModelDirectory | undefined,
+  models: readonly CompanyGatewayModel[],
+): Promise<string | undefined> {
+  if (directory === undefined) return undefined
+  const failure = companyGatewayModelDraftFailure(models)
+  if (failure !== undefined) return failure
+  try {
+    await directory.load()
+    await directory.select({ provider: COMPANY_GATEWAY_PROVIDER, model: models[0].id.trim() })
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/** Persist connection facts and the secret. Initial selection belongs to session.selectModel. */
 export async function saveCompanyGateway(
   api: GatewayApi,
   models: readonly CompanyGatewayModel[],
@@ -72,7 +102,6 @@ export async function saveCompanyGateway(
 ): Promise<string | undefined> {
   const draftFailure = companyGatewayModelDraftFailure(models)
   if (draftFailure !== undefined) return draftFailure
-  const firstModelId = models[0].id.trim()
   const profile = await api.settings.mutate({
     ns: 'llm-pi-ai',
     ops: [{ op: 'set', path: ['providers', COMPANY_GATEWAY_PROVIDER], value: companyGatewayProfile(models, protocol) }],
@@ -82,13 +111,5 @@ export async function saveCompanyGateway(
     const credential = await api.credentials.set({ ref: COMPANY_GATEWAY_CREDENTIAL_REF, value: apiKey })
     if (!credential.result.ok) return credential.result.error.message
   }
-  const selected = await api.settings.mutate({
-    ns: 'agent-default-model',
-    ops: [
-      { op: 'set', path: ['provider'], value: COMPANY_GATEWAY_PROVIDER },
-      { op: 'set', path: ['model'], value: firstModelId },
-      { op: 'unset', path: ['reasoningEffort'] },
-    ],
-  })
-  return selected.result.ok ? undefined : selected.result.error.message
+  return undefined
 }

@@ -4,15 +4,18 @@ import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { ConversationPresentation } from './ConversationPresentation.tsx'
 import { companyGatewayFirst } from './model-order.ts'
+import { permissionLabel } from './permission-labels.ts'
 
 /**
  * AccrUI's compact header has no room for the stock view tabs.  It uses the
  * official view bridge to change the existing per-session store, rather than
  * maintaining a second selected-view state in the product package.
  */
-export const inject = ['slots', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions']
+export const inject = ['slots', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions', 'permissionLabels']
 
 export function apply(ctx: ClientContext): void {
+  const permissionLabels = ctx.get('permissionLabels')!
+  ctx.effect(() => permissionLabels.register(permissionLabel), 'accrui-conversation-shell: Chinese permission labels')
   ctx.slots.inject('conversation.presentation', () => ctx.slots.register({
     name: 'conversation.presentation',
     id: 'accrui-conversation-presentation',

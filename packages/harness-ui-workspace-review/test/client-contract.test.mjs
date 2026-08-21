@@ -3,15 +3,22 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 const source = path => readFile(new URL(path, import.meta.url), 'utf8')
 
-test('uses a dedicated compact action and opaque extension bridge without a viewer registry', async () => {
+test('opens from the three-dot quick-action menu and keeps the opaque extension bridge without a viewer registry', async () => {
   const [manifest, client, action, bridge, host] = await Promise.all([
     source('../package.json'), source('../src/client/index.ts'), source('../src/client/WorkspaceReviewAction.tsx'), source('../src/client/bridge.ts'), source('../src/index.ts'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-workspace-review/)
+  assert.match(client, /settingsQuickActions/)
+  assert.match(client, /id: 'workspace-markdown-files', label: '工作区'/)
+  assert.match(client, /open\.set\(true\)/)
   assert.match(client, /sidebar\.compact\.action/)
   assert.match(client, /reviewFeedback/)
   assert.match(client, /importWorkspaceMarkdown\(feedback\.harnessSessionId, feedback\)/)
   assert.match(action, /requestOpenReview/)
+  assert.match(action, /useSyncExternalStore/)
+  assert.match(action, /hooks\.open\.set\(false\)/)
+  assert.doesNotMatch(action, /className=\{css\.trigger\}/)
+  assert.doesNotMatch(action, /🗂/)
   assert.match(action, /aria-label="刷新文件树"/)
   assert.match(action, /className=\{css\.tree\}/)
   assert.match(bridge, /markdown-review-open\/v1/)

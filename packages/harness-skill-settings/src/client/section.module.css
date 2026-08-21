@@ -9,6 +9,52 @@
 .section h2,
 .section p { margin: 0; }
 
+.install {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: transparent;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.install[data-drag-over='true'] { border-color: var(--dsw-alias-state-business-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.installCopy { display: flex; flex: 1 1 220px; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.installCopy strong { flex: none; font-size: 14px; line-height: 22px; }
+.installCopy p { min-width: 0; margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.installActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 6px; max-width: 100%; }
+.installButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.installButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.installButton:disabled { opacity: .4; cursor: default; }
+.hiddenInput { display: none; }
+.install > .status,
+.install > .success,
+.install > .warning,
+.install > .error { flex: 1 0 100%; min-width: 0; }
+.success { color: var(--dsw-alias-label-tertiary); font-size: 14px; line-height: 22px; }
+.warning { color: var(--dsw-alias-label-secondary); font-size: 14px; line-height: 22px; }
+.error { color: var(--dsw-alias-label-danger); font-size: 14px; line-height: 22px; }
+
 .intro,
 .row p,
 .row span,
@@ -33,14 +79,14 @@
   border-radius: 12px;
 }
 
-.row div { min-width: 0; }
+.row > div:first-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .row strong { font-size: 14px; line-height: 22px; }
 .row span + span { margin-left: 8px; }
 
 .modeControl {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  min-width: 246px;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(3, max-content);
   padding: 2px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
@@ -50,7 +96,7 @@
 .modeButton {
   min-width: 0;
   height: 30px;
-  padding: 4px 10px;
+  padding: 4px 6px;
   border: 0;
   border-radius: 7px;
   background: transparent;
@@ -70,8 +116,3 @@
 }
 .modeButton:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: -2px; }
 .modeButton:disabled { color: var(--dsw-alias-label-dimmed); cursor: default; }
-
-@media (max-width: 640px) {
-  .row { flex-direction: column; align-items: stretch; gap: 10px; }
-  .modeControl { width: 100%; min-width: 0; }
-}

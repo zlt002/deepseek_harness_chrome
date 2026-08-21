@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Button, HoverCard, IconChevronDownOutline14, IconEditOutline16, IconEllipsisOutline16,
-  IconFolderClose16, IconFolderOpenOutline16, IconNewChatOutline16, IconPlusOutline16, IconTrashOutline16, Menu, Modal,
+  Button, HoverCard, IconArchiveOutline20, IconBranchOutline16, IconChevronDownOutline14, IconDownloadOutline16,
+  IconEditOutline16, IconEllipsisOutline16, IconFolderClose16, IconFolderOpenOutline16, IconNewChatOutline16,
+  IconPlusOutline16, IconTrashOutline16, Menu, Modal,
   StateDot, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
@@ -121,6 +122,73 @@ function WorkspaceRow({
   )
 }
 
+/** Session row: hovering swaps its relative time for a vertical actions menu. */
+function SessionRow({
+  session, selected, owner, menuOpen, onMenuOpenChange, onRename, onArchive, onOpen,
+}: {
+  session: CompactWorkspacePickerWorkspace['sessions'][number]
+  selected: boolean
+  owner: CompactWorkspacePickerOwnerProps
+  menuOpen: boolean
+  onMenuOpenChange: (open: boolean) => void
+  onRename: () => void
+  onArchive: () => void
+  onOpen: () => void
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={classes(css.row, css.sessionRow, selected && css.rowActive, menuOpen && css.rowMenuOpen)}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen()
+        }
+      }}
+    >
+      <IconNewChatOutline16 className={css.sessionGlyph} size={14} />
+      <span className={css.sessionRowTitle}>{session.title}</span>
+      <span className={css.sessionState}><StateDot state={session.state} /></span>
+      {!session.blank && <span className={css.sessionTime}>{session.time}</span>}
+      {!session.blank && <span className={css.sessionRowActions} onClick={event => { event.stopPropagation() }}>
+        <Menu
+          open={menuOpen}
+          onClose={() => { onMenuOpenChange(false) }}
+          items={[
+            { id: 'rename', label: owner.labels.rename, icon: <IconEditOutline16 /> },
+            { id: 'fork', label: owner.labels.fork, icon: <IconBranchOutline16 /> },
+            { id: 'archive', label: owner.labels.archiveSession, icon: <IconArchiveOutline20 size={16} /> },
+          ]}
+          onSelect={(id) => {
+            onMenuOpenChange(false)
+            if (id === 'rename') onRename()
+            if (id === 'fork') owner.forkSession(session.id)
+            if (id === 'archive') onArchive()
+          }}
+          portal
+          closeOnPointerLeave
+          side="right"
+          anchor={(
+            <button
+              type="button"
+              className={css.iconButton}
+              aria-label={owner.sessionActionsAria(session.title)}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={(event) => { event.stopPropagation(); onMenuOpenChange(!menuOpen) }}
+            >
+              <IconEllipsisOutline16 className={css.verticalEllipsis} />
+            </button>
+          )}
+        />
+      </span>}
+    </div>
+  )
+}
+
 /** The e327 compact header and two-column picker, rendered through the public owner contract. */
 export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps & {
   matched?: ClaudeImportController | { claudeImport?: ClaudeImportController }
@@ -130,6 +198,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
   const [open, setOpen] = useState(false)
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(owner.workspaces[0]?.id)
   const [menuWorkspaceId, setMenuWorkspaceId] = useState<string | undefined>()
+  const [menuSessionId, setMenuSessionId] = useState<string | undefined>()
   const [renameTarget, setRenameTarget] = useState<CompactWorkspacePickerWorkspace | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renaming, setRenaming] = useState(false)
@@ -139,6 +208,10 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
   const [deleteCommittedId, setDeleteCommittedId] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
+  const [sessionRenameTarget, setSessionRenameTarget] = useState<CompactWorkspacePickerWorkspace['sessions'][number] | null>(null)
+  const [sessionRenameDraft, setSessionRenameDraft] = useState('')
+  const [sessionRenaming, setSessionRenaming] = useState(false)
+  const [sessionRenameError, setSessionRenameError] = useState<string | null>(null)
   const composingRef = useRef(false)
   const root = useRef<HTMLDivElement>(null)
   const defaultWorkspace = useMemo(
@@ -157,6 +230,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
     if (!open) {
       setSelectedWorkspaceId(defaultWorkspace?.id)
       setMenuWorkspaceId(undefined)
+      setMenuSessionId(undefined)
     }
   }, [defaultWorkspace?.id, open])
   useEffect(() => {
@@ -164,7 +238,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
     const closeOutside = (event: PointerEvent): void => {
       if (!(event.target instanceof Node)) return
       if (root.current?.contains(event.target)) return
-      if (menuWorkspaceId !== undefined) return
+      if (menuWorkspaceId !== undefined || menuSessionId !== undefined) return
       if (renameTarget !== null || deleteTarget !== null) return
       if (event.target instanceof Element) {
         if (event.target.closest('[role="menu"], [role="dialog"], [aria-modal="true"]')) return
@@ -176,7 +250,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
     }
     const closeEscape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      if (renameTarget !== null || deleteTarget !== null || menuWorkspaceId !== undefined) return
+      if (renameTarget !== null || deleteTarget !== null || sessionRenameTarget !== null || menuWorkspaceId !== undefined || menuSessionId !== undefined) return
       setOpen(false)
     }
     document.addEventListener('pointerdown', closeOutside)
@@ -185,7 +259,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
       document.removeEventListener('pointerdown', closeOutside)
       document.removeEventListener('keydown', closeEscape)
     }
-  }, [deleteTarget, menuWorkspaceId, open, owner.labels.copy, renameTarget])
+  }, [deleteTarget, menuSessionId, menuWorkspaceId, open, owner.labels.copy, renameTarget, sessionRenameTarget])
   useEffect(() => {
     if (deleteCommittedId === null || owner.workspaces.some(workspace => workspace.id === deleteCommittedId)) return
     setDeleting(false)
@@ -228,6 +302,24 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
     })
   }
 
+  const closeSessionRename = () => {
+    if (sessionRenaming) return
+    setSessionRenameTarget(null)
+    setSessionRenameError(null)
+  }
+  const confirmSessionRename = () => {
+    if (sessionRenaming || sessionRenameTarget === null || sessionRenameDraft.trim() === '') return
+    setSessionRenaming(true)
+    setSessionRenameError(null)
+    owner.renameSession(sessionRenameTarget.id, sessionRenameDraft.trim()).then(() => {
+      setSessionRenaming(false)
+      setSessionRenameTarget(null)
+    }).catch((reason: unknown) => {
+      setSessionRenaming(false)
+      setSessionRenameError(failureText(reason))
+    })
+  }
+
   return (
     <div ref={root} className={css.root}>
       <button
@@ -264,7 +356,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
                 key={workspace.id}
                 workspace={workspace}
                 selected={workspace.id === selectedWorkspace?.id}
-                onSelect={() => { setSelectedWorkspaceId(workspace.id) }}
+                onSelect={() => { setSelectedWorkspaceId(workspace.id); setMenuSessionId(undefined) }}
                 owner={owner}
                 menuOpen={menuWorkspaceId === workspace.id}
                 onMenuOpenChange={(next) => { setMenuWorkspaceId(next ? workspace.id : undefined) }}
@@ -287,21 +379,73 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
           <section className={classes(css.pane, css.sessionsPane)}>
             <div className={css.paneHeader}>
               <div className={css.paneTitle}>{owner.labels.sessions}</div>
-              <Tooltip label={importController === undefined ? 'Claude Code 导入正在重新连接，请刷新侧边栏' : '从 Claude Code 导入'} side="bottom" delayMs={500}>
-                <button type="button" className={css.addWorkspace} aria-label="从 Claude Code 导入" disabled={importController === undefined} onClick={() => setImportOpen(true)}><IconPlusOutline16 size={16} /></button>
-              </Tooltip>
+              <div className={css.headerActions}>
+                <Tooltip label={owner.labels.newSession} side="bottom" delayMs={500}>
+                  <button
+                    type="button"
+                    className={css.addWorkspace}
+                    aria-label={owner.labels.newSession}
+                    onClick={() => { setMenuSessionId(undefined); owner.startSession(selectedWorkspace?.id); setOpen(false) }}
+                  ><IconNewChatOutline16 size={16} /></button>
+                </Tooltip>
+                <Tooltip label={importController === undefined ? 'Claude Code 导入正在重新连接，请刷新侧边栏' : '从 Claude Code 导入'} side="bottom" delayMs={500}>
+                  <button type="button" className={css.addWorkspace} aria-label="从 Claude Code 导入" disabled={importController === undefined} onClick={() => { setMenuSessionId(undefined); setImportOpen(true) }}><IconDownloadOutline16 size={16} /></button>
+                </Tooltip>
+              </div>
             </div>
             <div className={css.list}>{selectedWorkspace?.sessions.map(session => (
-              <button key={session.id} type="button" className={classes(css.row, session.id === owner.currentSessionId && css.rowActive)} onClick={() => { owner.openSession(session.id); setOpen(false) }}>
-                <IconNewChatOutline16 className={css.sessionGlyph} size={14} /><span className={css.sessionRowTitle}>{session.title}</span>
-                <span className={css.sessionState}><StateDot state={session.state} /></span><span className={css.sessionTime}>{session.time}</span>
-              </button>
+              <SessionRow
+                key={session.id}
+                session={session}
+                selected={session.id === owner.currentSessionId}
+                owner={owner}
+                menuOpen={menuSessionId === session.id}
+                onMenuOpenChange={(next) => { setMenuSessionId(next ? session.id : undefined) }}
+                onRename={() => {
+                  setSessionRenameTarget(session)
+                  setSessionRenameDraft(session.title)
+                  setSessionRenameError(null)
+                }}
+                onArchive={() => {
+                  void owner.archiveSession(session.id).catch((reason: unknown) => console.warn('session archive rejected:', reason))
+                }}
+                onOpen={() => { owner.openSession(session.id); setOpen(false) }}
+              />
             ))}{(selectedWorkspace?.sessions.length ?? 0) === 0 && <div className={css.empty}>{owner.labels.newSession}</div>}</div>
           </section>
         </div>
       )}
       {owner.directoryFlow}
       <ClaudeImportModal open={importOpen} onClose={() => setImportOpen(false)} workspace={selectedWorkspace} controller={importController} />
+      <Modal
+        open={sessionRenameTarget !== null}
+        onClose={closeSessionRename}
+        closeLabel={owner.labels.close}
+        title={owner.labels.sessionRenameTitle}
+        footer={(
+          <>
+            <Button variant="outline" disabled={sessionRenaming} onClick={closeSessionRename}>{owner.labels.cancel}</Button>
+            <Button variant="primary" disabled={sessionRenaming || sessionRenameTarget === null || sessionRenameDraft.trim() === ''} onClick={confirmSessionRename}>{owner.labels.rename}</Button>
+          </>
+        )}
+      >
+        <input
+          className={css.renameInput}
+          value={sessionRenameDraft}
+          aria-label={owner.labels.sessionName}
+          autoFocus
+          disabled={sessionRenaming}
+          onFocus={(event) => { event.target.select() }}
+          onChange={(event) => { setSessionRenameDraft(event.target.value); setSessionRenameError(null) }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              confirmSessionRename()
+            }
+          }}
+        />
+        {sessionRenameError !== null && <div className={css.renameError} role="alert">{sessionRenameError}</div>}
+      </Modal>
       <Modal
         open={renameTarget !== null}
         onClose={closeRename}

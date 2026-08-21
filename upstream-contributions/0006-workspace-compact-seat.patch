@@ -27,7 +27,7 @@ index d0f6835472..10e82d9c02 100644
  import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
  import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
  import { WorkspacePickFlow } from './WorkspacePicker.tsx'
-@@ -38,6 +38,117 @@ const SEARCH_QUERY_MAX_CODE_UNITS = 500
+@@ -38,6 +38,125 @@ const SEARCH_QUERY_MAX_CODE_UNITS = 500
  /** Session rows visible per Workspace before the local overflow control. */
  const COLLAPSED_SESSION_LIMIT = 5
 
@@ -53,7 +53,8 @@ index d0f6835472..10e82d9c02 100644
 +function CompactWorkspaceBrowser(props: WorkspaceBrowserProps) {
 +  const {
 +    useSessions, useWorkspaces, open, startSession, createWorkspace, useDirectoryFlow,
-+    renameWorkspace, deleteWorkspace, openPath, renderSlot, renderSlotChain, t,
++    renameSession, forkSession, renameWorkspace, deleteWorkspace, openPath, archiveSession,
++    renderSlot, renderSlotChain, t,
 +  } = props
 +  const sessions = useSessions(state => state)
 +  const workspaces = useWorkspaces(state => state.items)
@@ -85,6 +86,7 @@ index d0f6835472..10e82d9c02 100644
 +        sessions: visible.filter(session => membership.has(session.id)).map(session => ({
 +          id: session.id,
 +          title: session.title,
++          blank: session.blank,
 +          state: compactState(session),
 +          time: compactTime(session, now, t),
 +        })),
@@ -122,18 +124,24 @@ index d0f6835472..10e82d9c02 100644
 +      workspaces: t('section.workspaces'), sessions: t('section.sessions'),
 +      addWorkspace: t('workspace.add'), newSession: t('session.new'),
 +      rename: t('rename'), deleteWorkspace: t('delete.workspace'), deletePending: t('delete.pending'),
-+      renameTitle: t('rename.workspace.title'), workspaceName: t('field.workspaceName'),
++      renameTitle: t('rename.workspace.title'), sessionRenameTitle: t('rename.session.title'),
++      workspaceName: t('field.workspaceName'), sessionName: t('field.sessionName'),
++      fork: t('menu.fork'), archiveSession: t('menu.archiveSession'),
 +      cancel: t('cancel'), close: t('close'), copied: t('hover.copied'), copy: t('copy'),
 +      openFolder: t('open.folder'),
 +    },
 +    workspaceActionsAria: name => t('actions.workspace.aria', { name }),
++    sessionActionsAria: name => t('actions.session.aria', { name }),
 +    newSessionAria: name => t('actions.newSession.aria', { name }),
 +    createdLabel: createdAt => compactCreatedLabel(createdAt, t),
 +    deleteDesc: name => t('delete.desc', { name }),
 +    conflictNamed: name => t('conflict.named', { name }),
 +    renameWorkspace,
++    renameSession,
++    forkSession,
 +    deleteWorkspace,
 +    openPath,
++    archiveSession,
 +    directoryFlowAvailable,
 +    workspaceAddAnchor,
 +    requestWorkspaceAdd: onWorkspaceAdded => { setWorkspaceAddComplete(() => onWorkspaceAdded) },
@@ -168,7 +176,7 @@ diff --git a/packages/client/ui-workspace/src/client/contract/slots.ts b/package
 index 8027a3623a..7570f55dec 100644
 --- a/packages/client/ui-workspace/src/client/contract/slots.ts
 +++ b/packages/client/ui-workspace/src/client/contract/slots.ts
-@@ -56,9 +56,65 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+@@ -56,9 +56,74 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      'conversation.hero.workspace.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
      /** Directory-flow hole under the sidebar browsing region (declared by the WorkspaceBrowser entry). */
      'sidebar.workspaces.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
@@ -180,6 +188,7 @@ index 8027a3623a..7570f55dec 100644
 +export interface CompactWorkspacePickerSession {
 +  id: SessionId
 +  title: string
++  blank: boolean
 +  state: 'done' | 'warning' | 'ongoing' | 'error'
 +  time: string | undefined
 +}
@@ -210,7 +219,11 @@ index 8027a3623a..7570f55dec 100644
 +    deleteWorkspace: string
 +    deletePending: string
 +    renameTitle: string
++    sessionRenameTitle: string
 +    workspaceName: string
++    sessionName: string
++    fork: string
++    archiveSession: string
 +    cancel: string
 +    close: string
 +    copied: string
@@ -218,13 +231,17 @@ index 8027a3623a..7570f55dec 100644
 +    openFolder: string
 +  }
 +  workspaceActionsAria: (name: string) => string
++  sessionActionsAria: (name: string) => string
 +  newSessionAria: (name: string) => string
 +  createdLabel: (createdAt: number) => string
 +  deleteDesc: (name: string) => string
 +  conflictNamed: (name: string) => string
 +  renameWorkspace: (workspaceId: WorkspaceId, title: string) => Promise<void>
++  renameSession: (sessionId: SessionId, title: string) => Promise<void>
++  forkSession: (sessionId: SessionId) => void
 +  deleteWorkspace: (workspaceId: WorkspaceId) => Promise<void>
 +  openPath: (path: string) => Promise<void>
++  archiveSession: (sessionId: SessionId) => Promise<void>
 +  directoryFlowAvailable: boolean
 +  workspaceAddAnchor: import('react').RefObject<HTMLButtonElement | null>
 +  requestWorkspaceAdd: (onWorkspaceAdded: () => void) => void

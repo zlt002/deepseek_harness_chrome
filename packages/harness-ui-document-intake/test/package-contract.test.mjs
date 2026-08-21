@@ -23,6 +23,29 @@ test('declares an out-of-tree document intake plugin against public composer con
   assert.doesNotMatch(client, /deepseek-harness\/packages\/.*\/src/)
 })
 
+test('does not leave a persistent success notice after a document upload', async () => {
+  const intake = await source('src/client/intake.ts')
+  // The draft already carries the actionable upload feedback. A success
+  // input notice is persistent in the stock composer, so it would survive
+  // the send and leave the attachment bar behind; failures must still notify.
+  assert.doesNotMatch(intake, /input\.notify\('info'/)
+  assert.match(intake, /input\?\.notify\('error'/)
+})
+
+test('uses the public Harness paperclip icon and composer toolbar geometry', async () => {
+  const [manifest, control, styles] = await Promise.all([
+    source('package.json'),
+    source('src/client/AttachDocumentControl.tsx'),
+    source('src/client/AttachDocumentControl.module.css'),
+  ])
+  assert.match(manifest, /"@deepseek-ai\/dsh-client-ui-primitives"/)
+  assert.match(control, /from '@deepseek-ai\/dsh-client-ui-primitives'/)
+  assert.match(control, /<IconPaperclipOutline16 size=\{14\} \/>/)
+  assert.doesNotMatch(control, /📎|paperclip\s*=/i)
+  assert.match(styles, /\.trigger\s*\{[\s\S]*display:\s*grid[\s\S]*width:\s*28px[\s\S]*height:\s*28px[\s\S]*border:\s*none[\s\S]*border-radius:\s*999px[\s\S]*background:\s*var\(--dsw-specific-selector\)[\s\S]*color:\s*var\(--dsw-alias-label-primary\)/)
+  assert.match(styles, /\.trigger:hover\s*\{[\s\S]*background:\s*var\(--dsw-alias-interactive-bg-hover-solid\)/)
+})
+
 test('classifies office and text documents and refuses other files', () => {
   assert.equal(documentKindOf('brief.docx', ''), 'docx')
   assert.equal(documentKindOf('slides.pptx', ''), 'pptx')

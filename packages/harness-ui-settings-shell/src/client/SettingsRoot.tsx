@@ -4,6 +4,7 @@ import {
   IconPersonalizationOutline16, IconSettingsOutline16, IconSkillOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsPresentationOwnerProps, SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
+import { productOnboardingSteps } from './onboarding.ts'
 import css from './SettingsRoot.module.css'
 
 function classes(...values: Array<string | false | undefined>): string {
@@ -115,7 +116,7 @@ export function SettingsPresentation(props: SettingsPresentationOwnerProps) {
   const allRows = useSections(state => state)
   const hasAccount = allRows.some(row => row.id === 'accrui-account')
   const rows = hasAccount ? allRows.filter(row => row.id !== 'models') : allRows
-  const onboardingSteps = useOnboardingSteps(state => state)
+  const onboardingSteps = productOnboardingSteps(useOnboardingSteps(state => state))
   const onboardingActive = useSessions(state =>
     state.phase === 'ready'
     && (state.current === undefined || state.byId[state.current]?.blank === true))

@@ -43,6 +43,10 @@ only after the host accepts that exact transformed prompt.
 identity marker so any client plugin can associate a text Range with exactly
 one durable assistant message without scanning transcript text.
 
+`0019` exposes a reactive, product-neutral permission-label registry. A
+registrant may supply labels for known preset values; unrecognized values keep
+the official display formatting.
+
 Verify against the pinned upstream commit:
 
 ```sh

@@ -62,7 +62,6 @@ async function upload(ctx: ClientContext, sessionId: SessionId, files: readonly 
     const lines = body.files.map(file => documentDraftLine(file.relativePath, file.kind))
     const next = current.trim() === '' ? lines.join('\n') : `${current.replace(/\s+$/u, '')}\n${lines.join('\n')}`
     input.setDraft(next)
-    input.notify('info', `已附加 ${String(body.files.length)} 个文档`)
   } catch (error) {
     input?.notify('error', error instanceof Error ? error.message : String(error))
   }

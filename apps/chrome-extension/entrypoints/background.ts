@@ -12,7 +12,7 @@ const KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY = 'harnessKnowledgeEnabledPrefere
 const KNOWLEDGE_LOGIN_URL = 'https://wb-uat.annto.com/'
 const ACCOUNT_LOCAL_SIGN_OUT_STORAGE_KEY = 'harnessAccountLocalSignOutV1'
 const ACCOUNT_AUTH_COOKIE_NAMES = new Set(['MAS_TGC_UAT', 'midea_auth_uat'])
-const ACCOUNT_AUTH_COOKIE_URLS = [KNOWLEDGE_LOGIN_URL, `${KNOWLEDGE_API_ORIGIN}/`] as const
+const ACCOUNT_AUTH_COOKIE_DOMAIN = 'annto.com'
 const COMPANY_GATEWAY_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-anthropic/v1`
 const COMPANY_GATEWAY_METADATA_STORAGE_KEY = 'harnessCompanyGatewayMetadataV1'
 const COMPANY_GATEWAY_TIMEOUT_MS = 15_000
@@ -1218,11 +1218,45 @@ async function probeCompanyGateway(apiKey: string): Promise<CompanyGatewayMetada
   return metadata
 }
 
-async function companyBrowserAuthentication(): Promise<boolean> {
+function isCompanyAuthenticationCookie(cookie: chrome.cookies.Cookie, now: number): boolean {
+  return ACCOUNT_AUTH_COOKIE_NAMES.has(cookie.name)
+    && (cookie.expirationDate === undefined || cookie.expirationDate > now)
+}
+
+async function companyAuthenticationCookies(): Promise<chrome.cookies.Cookie[]> {
   const now = Date.now() / 1000
-  const groups = await Promise.all(ACCOUNT_AUTH_COOKIE_URLS.map((url) => chrome.cookies.getAll({ url })))
-  return groups.some((cookies) => cookies.some((cookie) => ACCOUNT_AUTH_COOKIE_NAMES.has(cookie.name)
-    && (cookie.expirationDate === undefined || cookie.expirationDate > now)))
+  const cookies = await chrome.cookies.getAll({ domain: ACCOUNT_AUTH_COOKIE_DOMAIN })
+  return cookies.filter((cookie) => isCompanyAuthenticationCookie(cookie, now))
+}
+
+function companyAuthenticationCookieUrl(cookie: chrome.cookies.Cookie): string {
+  const domain = cookie.domain.replace(/^\./, '')
+  const path = cookie.path.startsWith('/') ? cookie.path : `/${cookie.path}`
+  return `${cookie.secure ? 'https' : 'http'}://${domain}${path}`
+}
+
+function companyAuthenticationCookieDescription(cookie: chrome.cookies.Cookie): string {
+  return `${cookie.name} @ ${cookie.domain}${cookie.path}`
+}
+
+async function clearCompanyAuthenticationCookies(): Promise<void> {
+  const cookies = await companyAuthenticationCookies()
+  for (const cookie of cookies) {
+    await chrome.cookies.remove({
+      url: companyAuthenticationCookieUrl(cookie),
+      name: cookie.name,
+      storeId: cookie.storeId,
+      ...(cookie.partitionKey === undefined ? {} : { partitionKey: cookie.partitionKey }),
+    })
+  }
+  const remaining = await companyAuthenticationCookies()
+  if (remaining.length > 0) {
+    throw new Error(`公司账号退出失败：认证 Cookie 仍存在（${remaining.map(companyAuthenticationCookieDescription).join('；')}）。`)
+  }
+}
+
+async function companyBrowserAuthentication(): Promise<boolean> {
+  return (await companyAuthenticationCookies()).length > 0
 }
 
 async function accountAccessSnapshot(): Promise<AccountAccessSnapshot> {
@@ -1268,6 +1302,7 @@ async function assertAccountAccessForProtectedSource(): Promise<void> {
 }
 
 async function locallySignOutAccount(): Promise<AccountAccessSnapshot> {
+  await clearCompanyAuthenticationCookies()
   await setAccountLocallySignedOut(true)
   knowledgeCatalogCache = undefined
   for (const controller of activeKnowledgeQueries.values()) controller.abort()

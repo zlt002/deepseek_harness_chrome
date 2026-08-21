@@ -155,6 +155,11 @@
 }
 .close:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .options { flex: 1; min-height: 0; padding: 0 24px 24px; overflow-y: auto; }
+/* Settings sections are independently-owned slot content. Give every section
+   the complete content-column budget so a section-level desktop max-width
+   cannot leave a dead area beside its controls. `!important` is intentional:
+   slot CSS loads independently from this presentation owner. */
+.options > :global(*) { inline-size: 100% !important; max-width: none !important; }
 .hiddenLabel { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* The owning Harness sidebar knows whether this surface is a side panel.
@@ -189,7 +194,11 @@
   background: var(--dsw-alias-bg-layer-2);
 }
 .panel[data-surface='sidepanel'] .options { grid-column: 1 / -1; grid-row: 2; padding-right: 16px; padding-bottom: 16px; padding-left: 16px; }
-.mergedModels { max-width: 760px; margin-top: 4px; padding-top: 20px; border-top: 1px solid var(--dsw-alias-border-subtle); }
+.mergedModels { inline-size: 100%; max-width: none; margin-top: 4px; padding-top: 20px; border-top: 1px solid var(--dsw-alias-border-subtle); }
+/* Slot outlets add a layout-neutral `data-slot` anchor, so the Models
+   section is not the direct child covered by `.options > *` above. Reach the
+   actual section through that documented anchor and remove its desktop cap. */
+.mergedModels :global([data-slot='settings.section']) > :global(*) { inline-size: 100% !important; max-width: none !important; }
 /* Company Gateway is managed by the account card above. Keep the generic
    provider editor for every other guest-configured provider without exposing
    a second, conflicting editor for the same credential and model catalog. */

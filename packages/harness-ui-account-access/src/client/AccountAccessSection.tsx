@@ -4,6 +4,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import {
   companyGatewayBaseUrl,
+  companyGatewayApiKeyFailure,
   companyGatewayModelDraftFailure,
   companyGatewayProtocolFromNamespaces,
   COMPANY_GATEWAY_CREDENTIAL_REF,
@@ -21,19 +22,13 @@ export interface AccountAccessInjected {
   }
   command: (command: AccountAccessCommand) => void
   probeGateway?: (apiKey: string) => string
+  selectInitialModel?: (models: readonly CompanyGatewayModel[]) => Promise<string | undefined>
   api: Pick<IApiClient, 'settings' | 'credentials'>
 }
 
 type Props = PropsRuntime<'settings.section'> & InjectFace<AccountAccessInjected>
 
 const useMissingGatewayProbe = <T,>(selector: (snapshot: CompanyGatewayProbeSnapshot | undefined) => T): T => selector(undefined)
-
-function apiKeyFailure(value: string): string | undefined {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) return '请输入公司网关 API Key。'
-  if (trimmed.length > 512 || !/^[\x21-\x7E]+$/.test(trimmed)) return 'API Key 格式无效，请只输入 Key 本身。'
-  return undefined
-}
 
 function cycleLabel(value: CompanyGatewayMetadata['quota']['resetCycle']): string {
   if (value === 'daily') return '1 天'
@@ -68,7 +63,7 @@ function Chevron({ open }: { open: boolean }) {
   </svg>
 }
 
-export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe, command, probeGateway, api }: Props) {
+export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe, command, probeGateway, selectInitialModel, api }: Props) {
   const account = useAccountAccess(snapshot => snapshot)
   const useGatewayProbe = useCompanyGatewayProbe ?? useMissingGatewayProbe
   const probe = useGatewayProbe(snapshot => snapshot)
@@ -132,7 +127,7 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const authenticated = account.status === 'authenticated'
   const probeKey = (): void => {
     const key = keyDraft.trim()
-    const invalid = apiKeyFailure(key)
+    const invalid = companyGatewayApiKeyFailure(key)
     if (invalid !== undefined) { setFailure(invalid); return }
     if (probeGateway === undefined) { setFailure('公司网关连接正在刷新，请关闭并重新打开个人中心。'); return }
     setFailure(undefined); setNotice(undefined)
@@ -149,7 +144,12 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     try {
       const error = await saveCompanyGateway(api, modelDrafts, key.length === 0 ? undefined : key, protocol)
       if (error !== undefined) { setFailure(error); return false }
+      const selectionFailure = await selectInitialModel?.(modelDrafts)
       setCredentialConfigured(true); setKeyDraft(''); setRequest(undefined)
+      if (selectionFailure !== undefined) {
+        setFailure(`公司网关已保存，但初始模型未选中：${selectionFailure}`)
+        return false
+      }
       setNotice(`公司网关已保存，新的会话使用 ${modelDrafts[0].id.trim()}。`)
       return true
     } catch (error) {
@@ -210,9 +210,9 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
       <div className={css.actions}>
         {!authenticated ? <button type="button" className={css.primary} onClick={() => command('login')}>登录公司账号</button> : null}
         <button type="button" onClick={() => command('refresh')}>重新检测</button>
-        {authenticated ? <button type="button" className={css.danger} onClick={() => command('logout')}>退出本产品</button> : null}
+        {authenticated ? <button type="button" className={css.danger} onClick={() => command('logout')}>退出公司账号</button> : null}
       </div>
-      {authenticated ? <p className={css.hint}>退出仅切回本产品游客模式，不会退出其他公司网页。</p> : null}
+      {authenticated ? <p className={css.hint}>退出会清除 wb-uat.annto.com 与公司 API 的登录状态。</p> : null}
     </div>
 
     <div className={css.gatewayProvider} data-testid="company-gateway-card">
