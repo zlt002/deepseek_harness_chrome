@@ -8,18 +8,33 @@ import { modesForSelection, refreshAfterDeletedSkill, updateSkillModes } from '.
 import css from './section.module.css'
 
 type Mode = 'enabled' | 'manual-only' | 'disabled'
-type View = { writable: boolean, revision: number, modes: Record<string, Mode>, skills: readonly SkillEntry[] }
+type Origin = 'system' | 'installed' | 'project' | 'user'
+type OriginFilter = 'all' | Origin
+type DisplaySkill = SkillEntry & { origin: Origin, stateEditable: boolean, deletable: boolean }
+type View = { writable: boolean, revision: number, modes: Record<string, Mode>, skills: readonly DisplaySkill[] }
 type InstallNotice = { kind: 'success' | 'warning' | 'error', text: string }
 type ActionNotice = { kind: 'success' | 'warning' | 'error', text: string }
 type UploadFile = { path: string, data: string }
 type FileSystemDropItem = DataTransferItem & { getAsFileSystemHandle?: () => Promise<FileSystemHandle | null> }
 const NS = 'skill-settings'
 const INSTALL_PATH = '/api/settings.skill.install'
+const CATALOG_PATH = '/api/settings.skill.catalog'
 function modesOf(value: unknown): Record<string, Mode> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
   const modes = (value as { modes?: unknown }).modes
   if (modes === null || typeof modes !== 'object' || Array.isArray(modes)) return {}
   return Object.fromEntries(Object.entries(modes).filter((entry): entry is [string, Mode] => entry[1] === 'enabled' || entry[1] === 'manual-only' || entry[1] === 'disabled'))
+}
+
+async function loadOrigins(sessionId: string): Promise<readonly { name: string, origin: Origin }[]> {
+  const response = await fetch(CATALOG_PATH, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId }),
+  })
+  const body = await response.json() as { skills?: unknown, error?: string }
+  if (!response.ok || !Array.isArray(body.skills)) throw new Error(body.error ?? `技能来源加载失败：HTTP ${String(response.status)}`)
+  return body.skills.filter((item): item is { name: string, origin: Origin } => item !== null && typeof item === 'object'
+    && typeof (item as { name?: unknown }).name === 'string'
+    && ((item as { origin?: unknown }).origin === 'system' || (item as { origin?: unknown }).origin === 'installed' || (item as { origin?: unknown }).origin === 'project' || (item as { origin?: unknown }).origin === 'user'))
 }
 
 export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjected): ReactNode {
@@ -29,6 +44,8 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
   const [request, setRequest] = useState(0)
   const [pending, setPending] = useState<string>()
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set())
+  const [originFilter, setOriginFilter] = useState<OriginFilter>('all')
+  const [originMenuOpen, setOriginMenuOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState<string>()
   const [actionNotice, setActionNotice] = useState<ActionNotice>()
   const [installing, setInstalling] = useState(false)
@@ -37,27 +54,32 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
   const zipInput = useRef<HTMLInputElement>(null)
   const folderInput = useRef<HTMLInputElement>(null)
   useEffect(() => {
-    if (menuOpen === undefined) return
+    if (menuOpen === undefined && !originMenuOpen) return
     const closeOutside = (event: PointerEvent): void => {
-      if (event.target instanceof Element && event.target.closest('[data-skill-menu]') !== null) return
-      setMenuOpen(undefined)
+      if (event.target instanceof Element && event.target.closest('[data-skill-menu], [data-origin-filter-menu]') !== null) return
+      setMenuOpen(undefined); setOriginMenuOpen(false)
     }
-    const closeEscape = (event: KeyboardEvent): void => { if (event.key === 'Escape') setMenuOpen(undefined) }
+    const closeEscape = (event: KeyboardEvent): void => { if (event.key === 'Escape') { setMenuOpen(undefined); setOriginMenuOpen(false) } }
     document.addEventListener('pointerdown', closeOutside)
     document.addEventListener('keydown', closeEscape)
     return () => { document.removeEventListener('pointerdown', closeOutside); document.removeEventListener('keydown', closeEscape) }
-  }, [menuOpen])
-  useEffect(() => { setSelected(new Set()) }, [sessionId])
+  }, [menuOpen, originMenuOpen])
+  useEffect(() => { setSelected(new Set()); setOriginFilter('all'); setOriginMenuOpen(false); setMenuOpen(undefined) }, [sessionId])
   useEffect(() => {
     let active = true
     if (sessionId === undefined) { setView(undefined); setFailure(false); return () => { active = false } }
     setFailure(false)
-    void Promise.all([api.skills.list({ sessionId, includeUnavailable: true }), api.settings.describe({})]).then(([skills, settings]) => {
+    void Promise.all([api.skills.list({ sessionId, includeUnavailable: true }), api.settings.describe({}), loadOrigins(sessionId)]).then(([skills, settings, origins]) => {
       if (!active) return
       const section = settings.result.ok ? settings.result.value.namespaces.find(item => item.ns === NS) : undefined
       if (!skills.result.ok || section === undefined) { setFailure(true); return }
-      setView({ writable: settings.result.value.writable, revision: section.revision, modes: modesOf(section.value), skills: skills.result.value.skills })
-      setSelected(current => new Set([...current].filter(name => skills.result.value.skills.some(skill => skill.name === name))))
+      const originByName = new Map(origins.map(skill => [skill.name, skill.origin]))
+      const catalog = skills.result.value.skills.map(skill => {
+        const origin = originByName.get(skill.name) ?? 'user'
+        return { ...skill, origin, stateEditable: origin !== 'system', deletable: origin === 'installed' }
+      })
+      setView({ writable: settings.result.value.writable, revision: section.revision, modes: modesOf(section.value), skills: catalog })
+      setSelected(current => new Set([...current].filter(name => catalog.some(skill => skill.name === name && skill.stateEditable))))
     }, () => { if (active) setFailure(true) })
     return () => { active = false }
   }, [api, request, sessionId])
@@ -72,21 +94,35 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
       error => setActionNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) }),
     ).finally(() => setPending(undefined))
   }
-  const change = (skill: SkillEntry, mode: Mode): void => updateModes({ [skill.name]: mode }, t(mode === 'enabled' ? 'enabling' : mode === 'disabled' ? 'disabling' : 'manualing').replace('{name}', skill.name))
-  const selectedCount = view.skills.filter(skill => selected.has(skill.name)).length
+  const change = (skill: DisplaySkill, mode: Mode): void => {
+    if (!skill.stateEditable) return
+    updateModes({ [skill.name]: mode }, t(mode === 'enabled' ? 'enabling' : mode === 'disabled' ? 'disabling' : 'manualing').replace('{name}', skill.name))
+  }
+  const visibleSkills = originFilter === 'all' ? view.skills : view.skills.filter(skill => skill.origin === originFilter)
+  const selectedCount = visibleSkills.filter(skill => skill.stateEditable && selected.has(skill.name)).length
   const changeSelected = (mode: Mode): void => {
     if (selectedCount === 0) return
-    const modes = modesForSelection(view.skills, selected, mode) as Record<string, Mode>
+    const modes = modesForSelection(visibleSkills, selected, mode) as Record<string, Mode>
     updateModes(modes, t(mode === 'enabled' ? 'enablingAll' : mode === 'disabled' ? 'disablingAll' : 'manualingAll'), true)
   }
-  const toggleSelected = (name: string): void => setSelected(current => {
+  const toggleSelected = (skill: DisplaySkill): void => {
+    if (!skill.stateEditable) return
+    setSelected(current => {
     const next = new Set(current)
-    if (next.has(name)) next.delete(name)
-    else next.add(name)
+    if (next.has(skill.name)) next.delete(skill.name)
+    else next.add(skill.name)
     return next
-  })
-  const remove = (skill: SkillEntry): void => {
-    if (!view.writable || pending !== undefined) return
+    })
+  }
+  const changeOriginFilter = (value: string): void => {
+    if (value !== 'all' && value !== 'system' && value !== 'installed' && value !== 'project' && value !== 'user') return
+    setOriginFilter(value)
+    setSelected(new Set())
+    setOriginMenuOpen(false)
+  }
+  const originFilterLabel = originFilter === 'all' ? t('allSkills') : t(originFilter === 'system' ? 'sourceSystem' : originFilter === 'installed' ? 'sourceInstalled' : originFilter === 'project' ? 'sourceProject' : 'sourceUser')
+  const remove = (skill: DisplaySkill): void => {
+    if (!skill.deletable || !view.writable || pending !== undefined) return
     setMenuOpen(undefined); setPending(`delete:${skill.name}`); setActionNotice({ kind: 'success', text: t('deleting').replace('{name}', skill.name) })
     void fetch('/api/settings.skill.delete', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: String(sessionId), name: skill.name }),
@@ -95,7 +131,8 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
       if (!response.ok || body.name !== skill.name) throw new Error(body.error ?? `技能删除失败：HTTP ${String(response.status)}`)
       setRequest(value => value + 1)
       try {
-        await refreshAfterDeletedSkill(api, NS, skill.name, view.revision)
+        const refreshed = await refreshAfterDeletedSkill(api, NS, view.revision)
+        if (!refreshed.result.ok) throw new Error(refreshed.result.error.message)
         setActionNotice(body.refreshWarning === undefined
           ? { kind: 'success', text: t('deleteSuccess').replace('{name}', skill.name) }
           : { kind: 'warning', text: body.refreshWarning })
@@ -166,7 +203,7 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
     else setInstallNotice({ kind: 'error', text: t('oneItem') })
   }
   return <section className={css.section}><h2>{t('title')}</h2><p className={css.intro}>{t('intro')}</p>
-    <div className={css.toolbar} aria-label={t('bulkActions')}><span className={css.selectedCount}>{t('selectedCount').replace('{count}', String(selectedCount))}</span><button className={css.secondaryButton} type="button" disabled={!view.writable || pending !== undefined || selectedCount === 0} onClick={() => changeSelected('enabled')}>{t('enableAll')}</button><button className={css.secondaryButton} type="button" disabled={!view.writable || pending !== undefined || selectedCount === 0} onClick={() => changeSelected('disabled')}>{t('disableAll')}</button><button className={css.secondaryButton} type="button" disabled={!view.writable || pending !== undefined || selectedCount === 0} onClick={() => changeSelected('manual-only')}>{t('manualAll')}</button></div>
+    <div className={css.toolbar} aria-label={t('bulkActions')}><div className={css.toolbarActions}><span className={css.selectedCount}>{t('selectedCount').replace('{count}', String(selectedCount))}</span><button className={css.secondaryButton} type="button" disabled={!view.writable || pending !== undefined || selectedCount === 0} onClick={() => changeSelected('enabled')}>{t('enableAll')}</button><button className={css.secondaryButton} type="button" disabled={!view.writable || pending !== undefined || selectedCount === 0} onClick={() => changeSelected('disabled')}>{t('disableAll')}</button><button className={css.secondaryButton} type="button" disabled={!view.writable || pending !== undefined || selectedCount === 0} onClick={() => changeSelected('manual-only')}>{t('manualAll')}</button></div><div className={css.originFilter} data-origin-filter-menu><button className={css.originFilterTrigger} type="button" aria-haspopup="listbox" aria-expanded={originMenuOpen} aria-controls="skill-origin-filter-options" onClick={() => { setMenuOpen(undefined); setOriginMenuOpen(open => !open) }}><span className={css.originFilterLabel}>{originFilterLabel}</span><span className={css.originFilterChevron} aria-hidden>▾</span></button>{!originMenuOpen ? null : <div id="skill-origin-filter-options" className={css.originFilterMenu} role="listbox" aria-label={t('filterLabel')}><button className={css.originFilterOption} type="button" role="option" aria-selected={originFilter === 'all'} onClick={() => changeOriginFilter('all')}>{t('allSkills')}</button><button className={css.originFilterOption} type="button" role="option" aria-selected={originFilter === 'system'} onClick={() => changeOriginFilter('system')}>{t('sourceSystem')}</button><button className={css.originFilterOption} type="button" role="option" aria-selected={originFilter === 'installed'} onClick={() => changeOriginFilter('installed')}>{t('sourceInstalled')}</button><button className={css.originFilterOption} type="button" role="option" aria-selected={originFilter === 'project'} onClick={() => changeOriginFilter('project')}>{t('sourceProject')}</button><button className={css.originFilterOption} type="button" role="option" aria-selected={originFilter === 'user'} onClick={() => changeOriginFilter('user')}>{t('sourceUser')}</button></div>}</div></div>
     {actionNotice === undefined ? null : <p className={actionNotice.kind === 'error' ? css.error : actionNotice.kind === 'warning' ? css.warning : css.status} role={actionNotice.kind === 'error' ? 'alert' : 'status'}>{actionNotice.text}</p>}
     <div
       className={css.install}
@@ -186,10 +223,12 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
       {installing ? <p className={css.status}>{t('installing')}</p> : null}
       {installNotice === undefined ? null : <p className={installNotice.kind === 'error' ? css.error : installNotice.kind === 'warning' ? css.warning : css.success} role={installNotice.kind === 'error' ? 'alert' : 'status'}>{installNotice.text}</p>}
     </div>
-    {view.skills.length === 0 ? <p className={css.status}>{t('empty')}</p> : <ul className={css.rows}>{view.skills.map(skill => {
+    {visibleSkills.length === 0 ? <p className={css.status}>{t(view.skills.length === 0 ? 'empty' : 'emptyFiltered')}</p> : <ul className={css.rows}>{visibleSkills.map(skill => {
     const mode = view.modes[skill.name] ?? 'enabled'
-    const disabled = !view.writable || pending !== undefined
-    return <li key={skill.name} className={css.row}><div className={css.skillCopy}><div className={css.cardHeader}><div className={css.skillTitle}><label className={css.selectionControl}><input type="checkbox" checked={selected.has(skill.name)} disabled={disabled} aria-label={t('selectSkill').replace('{name}', skill.name)} onChange={() => toggleSelected(skill.name)} /></label><strong>{skill.name}</strong></div><div className={css.cardActions} data-skill-menu><button className={css.secondaryButton} type="button" disabled={disabled} aria-pressed={mode === 'enabled'} onClick={() => change(skill, 'enabled')}>{t('enabled')}</button><button className={css.secondaryButton} type="button" disabled={disabled} aria-pressed={mode === 'disabled'} onClick={() => change(skill, 'disabled')}>{t('disabled')}</button><button className={css.secondaryButton} type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={menuOpen === skill.name} onClick={() => setMenuOpen(open => open === skill.name ? undefined : skill.name)}>{t('more')}</button>{menuOpen !== skill.name ? null : <div className={css.moreMenu} role="menu" aria-label={`${skill.name} ${t('more')}`}><button type="button" role="menuitem" disabled={disabled} onClick={() => { setMenuOpen(undefined); change(skill, 'manual-only') }}>{t('manual')}</button><button className={css.deleteButton} type="button" role="menuitem" disabled={disabled} onClick={() => remove(skill)}>{t('delete')}</button></div>}</div></div><p>{skill.description}</p>{skill.authoredModelInvocable === false ? <span>{t('authorModel')}</span> : null}{skill.authoredUserInvocable === false ? <span>{t('authorUser')}</span> : null}</div>
+    const disabled = !skill.stateEditable || !view.writable || pending !== undefined
+    const sourceLabel = t(skill.origin === 'system' ? 'sourceSystem' : skill.origin === 'installed' ? 'sourceInstalled' : skill.origin === 'project' ? 'sourceProject' : 'sourceUser')
+    const statusLabel = skill.origin === 'system' ? t('tagSystemDefault') : t(mode === 'enabled' ? 'tagEnabled' : mode === 'disabled' ? 'tagDisabled' : 'tagManual')
+    return <li key={skill.name} className={css.row}><div className={css.skillCopy}><div className={css.cardHeader}><div className={css.skillMeta}><div className={css.skillTitle}>{skill.stateEditable ? <label className={css.selectionControl}><input type="checkbox" checked={selected.has(skill.name)} disabled={disabled} aria-label={t('selectSkill').replace('{name}', skill.name)} onChange={() => toggleSelected(skill)} /></label> : null}<strong>{skill.name}</strong></div><div className={css.skillTags}><span className={`${css.skillTag} ${css.sourceTag}`} data-origin={skill.origin}>{sourceLabel}</span><span className={`${css.skillTag} ${css.statusTag}`} data-status={mode}>{statusLabel}</span>{skill.authoredModelInvocable === false ? <span className={css.skillTag}>{t('tagAuthorModel')}</span> : null}{skill.authoredUserInvocable === false ? <span className={css.skillTag}>{t('tagAuthorUser')}</span> : null}</div></div><div className={css.cardActions} data-skill-menu>{!skill.stateEditable ? null : <><button className={css.secondaryButton} type="button" disabled={disabled} aria-pressed={mode === 'enabled'} onClick={() => change(skill, 'enabled')}>{t('enabled')}</button><button className={css.secondaryButton} type="button" disabled={disabled} aria-pressed={mode === 'disabled'} onClick={() => change(skill, 'disabled')}>{t('disabled')}</button><button className={css.secondaryButton} type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={menuOpen === skill.name} onClick={() => { setOriginMenuOpen(false); setMenuOpen(open => open === skill.name ? undefined : skill.name) }}>{t('more')}</button>{menuOpen !== skill.name ? null : <div className={css.moreMenu} role="menu" aria-label={`${skill.name} ${t('more')}`}><button type="button" role="menuitem" disabled={disabled} onClick={() => { setMenuOpen(undefined); change(skill, 'manual-only') }}>{t('manual')}</button>{!skill.deletable ? null : <button className={css.deleteButton} type="button" role="menuitem" disabled={disabled} onClick={() => remove(skill)}>{t('delete')}</button>}</div>}</>}</div></div><p className={css.skillDescription}>{skill.description}</p></div>
     </li>
   })}</ul>}</section>
 }

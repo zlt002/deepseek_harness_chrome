@@ -196,22 +196,27 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
 
   return <section className={css.section}>
     <div className={css.heading}>
-      <div><h2>个人中心</h2><p>账号、公司网关模型和用量统一在这里管理。</p></div>
-      <span className={authenticated ? css.signedIn : css.guest}>{authenticated ? '已登录' : account.status === 'guest' ? '游客' : '检测失败'}</span>
+      <div className={css.headingCopy}>
+        <div className={css.titleRow}>
+          <h2>个人中心</h2>
+          <span className={authenticated ? css.signedIn : css.guest}>{authenticated ? '已登录' : account.status === 'guest' ? '游客' : '检测失败'}</span>
+        </div>
+        <p>账号、网关与模型统一管理。</p>
+      </div>
+      <div className={css.headingActions}>
+        {!authenticated ? <button type="button" className={css.primary} onClick={() => command('login')}>登录</button> : null}
+        <button type="button" onClick={() => command('refresh')}>检测</button>
+        {authenticated ? <button type="button" className={css.danger} onClick={() => command('logout')}>退出</button> : null}
+      </div>
     </div>
     <div className={css.card}>
-      <strong>{authenticated ? account.displayName ?? '公司账号' : '游客模式'}</strong>
+      {authenticated ? <strong className={css.accountName}>{account.displayName ?? '公司账号'}</strong> : null}
       <dl>
         <div><dt>知识库</dt><dd>{account.knowledgeAccess ? '可使用' : '登录后可用'}</dd></div>
         <div><dt>代码库</dt><dd>{account.codeAccess ? '可使用' : '登录后可用'}</dd></div>
         <div><dt>模型来源</dt><dd>验证 Key 后启用公司网关</dd></div>
       </dl>
       {account.status === 'unavailable' ? <p className={css.error} role="alert">{account.message ?? '账号状态暂时无法验证，请检查网络后重试。'}</p> : null}
-      <div className={css.actions}>
-        {!authenticated ? <button type="button" className={css.primary} onClick={() => command('login')}>登录公司账号</button> : null}
-        <button type="button" onClick={() => command('refresh')}>重新检测</button>
-        {authenticated ? <button type="button" className={css.danger} onClick={() => command('logout')}>退出公司账号</button> : null}
-      </div>
       {authenticated ? <p className={css.hint}>退出会清除 wb-uat.annto.com 与公司 API 的登录状态。</p> : null}
     </div>
 

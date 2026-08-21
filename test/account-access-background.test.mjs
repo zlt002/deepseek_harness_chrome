@@ -30,7 +30,7 @@ async function accountBackground(cookies, {
     for (const listener of navigationListeners) listener({ tabId: portalTab.id, frameId: 0, url })
   }
   const pageLogoutHandler = pageLogout ?? (async (request) => {
-    emitNavigation(request.args[0])
+    emitNavigation(request.args[1])
     return { ok: true }
   })
   globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION = emitNavigation
@@ -119,7 +119,7 @@ test('logout invalidates the portal session before reporting guest mode', async 
       target: { tabId: 42 },
       world: 'MAIN',
       func: background.executions[0].func,
-      args: ['http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'],
+      args: ['https://anapi-uat.annto.com/api-auth/ssoLogout', 'http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'],
     })
   } finally {
     background.cleanup()
@@ -133,14 +133,14 @@ test('logout runs the portal-owned logout contract with the exact single-sign-on
     await background.logout()
     assert.equal(background.executions[0].world, 'MAIN')
     assert.equal(background.executions[0].func.name, 'logoutCompanyPortalInPage')
-    assert.deepEqual(background.executions[0].args, ['http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'])
+    assert.deepEqual(background.executions[0].args, ['https://anapi-uat.annto.com/api-auth/ssoLogout', 'http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'])
   } finally {
     background.cleanup()
   }
 })
 
 test('logout performs the authenticated request in the portal main world and then navigates top-level to SSO logout', () => {
-  assert.match(source, /async function logoutCompanyPortalInPage[\s\S]*fetch\('\/api-auth\/ssoLogout', \{[\s\S]*credentials: 'include'/)
+  assert.match(source, /async function logoutCompanyPortalInPage[\s\S]*fetch\(logoutApiUrl, \{[\s\S]*credentials: 'include'/)
   assert.match(source, /logoutCompanyPortalInPage[\s\S]*window\.location\.assign\(singleSignOnLogoutUrl\)/)
 })
 
@@ -190,12 +190,20 @@ test('injected page logout requires a confirmed response before navigating to si
   const originalFetch = globalThis.fetch
   const originalWindow = globalThis.window
   const navigations = []
+  const requests = []
   globalThis.window = { location: { assign: (url) => { navigations.push(url); globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION(url) } } }
-  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ code: '0' }) })
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, init })
+    return { ok: true, status: 200, headers: { get: () => 'application/json;charset=UTF-8' }, json: async () => ({ code: '0' }) }
+  }
   const background = await accountBackground(cookies, { pageLogout: async (request) => request.func(...request.args) })
   try {
     await background.logout()
     assert.deepEqual(navigations, ['http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'])
+    assert.deepEqual(requests, [{
+      url: 'https://anapi-uat.annto.com/api-auth/ssoLogout',
+      init: { method: 'GET', credentials: 'include', headers: { accept: 'application/json, text/plain, */*' } },
+    }])
   } finally {
     globalThis.fetch = originalFetch
     globalThis.window = originalWindow
@@ -209,10 +217,34 @@ test('injected page logout does not navigate when the portal does not confirm lo
   const originalWindow = globalThis.window
   const navigations = []
   globalThis.window = { location: { assign: (url) => navigations.push(url) } }
-  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ code: '1' }) })
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ code: '1' }) })
   const background = await accountBackground(cookies, { pageLogout: async (request) => request.func(...request.args) })
   try {
     await assert.rejects(background.logout(), /公司账号退出失败：门户会话未退出（服务未确认退出/)
+    assert.deepEqual(navigations, [])
+    assert.equal(await background.isAuthenticated(), true)
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+    background.cleanup()
+  }
+})
+
+test('injected page logout reports an HTML fallback response without navigating', async () => {
+  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const navigations = []
+  globalThis.window = { location: { assign: (url) => navigations.push(url) } }
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'text/html; charset=UTF-8' },
+    json: async () => { throw new SyntaxError("Unexpected token '<'") },
+  })
+  const background = await accountBackground(cookies, { pageLogout: async (request) => request.func(...request.args) })
+  try {
+    await assert.rejects(background.logout(), /公司账号退出失败：门户会话未退出（服务返回 HTML 页面，未进入退出接口。）/)
     assert.deepEqual(navigations, [])
     assert.equal(await background.isAuthenticated(), true)
   } finally {

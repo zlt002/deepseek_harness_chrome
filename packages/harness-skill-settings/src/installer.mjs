@@ -1,6 +1,6 @@
 import { inflateRaw } from 'node:zlib'
 import { promisify } from 'node:util'
-import { lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 
@@ -14,10 +14,35 @@ const INSTALL_MARKER = '.accrui-installed-skill.json'
 
 /** Install one browser-supplied ZIP or folder into the product-owned skill root. */
 export async function installSkill(root, request) {
-  const source = await sourceFiles(request)
-  const skill = validateSkill(source)
-  await writeSkill(resolve(root), skill)
+  const skill = await prepareSkillInstall(request)
+  await writePreparedSkill(root, skill)
   return { name: skill.name, description: skill.description }
+}
+
+/** Parse a browser upload before the Host checks its name against live discovery. */
+export async function prepareSkillInstall(request) {
+  return validateSkill(await sourceFiles(request))
+}
+
+/** Commit one validated Skill after Host-level live catalog collision checks. */
+export async function writePreparedSkill(root, skill) {
+  await writeSkill(resolve(root), skill)
+}
+
+/** Return only directories bearing the product's own installation marker. */
+export async function installedSkillNames(root) {
+  const productRoot = resolve(root)
+  let entries
+  try { entries = await readdir(productRoot, { withFileTypes: true }) } catch (error) {
+    if (error?.code === 'ENOENT') return new Set()
+    throw error
+  }
+  const names = new Set()
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(entry.name)) continue
+    try { await assertInstalledByProduct(join(productRoot, entry.name), entry.name); names.add(entry.name) } catch {}
+  }
+  return names
 }
 
 /** Remove one directory that was previously installed under the product-owned root. */

@@ -5,13 +5,14 @@ import type { SkillInvocationPolicy, SkillSummary } from '@deepseek-ai/dsh-skill
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SKILL_INSTALL_MAX_ARCHIVE_BYTES, SKILL_INSTALL_PATH, deleteInstalledSkill, installSkill, waitForInstalledSkill, waitForRemovedSkill } from './installer.mjs'
+import { SKILL_INSTALL_MAX_ARCHIVE_BYTES, SKILL_INSTALL_PATH, deleteInstalledSkill, installedSkillNames, prepareSkillInstall, waitForInstalledSkill, waitForRemovedSkill, writePreparedSkill } from './installer.mjs'
+import { assertStateModes, installConflictMessage, skillOrigin } from './skill-origin.mjs'
 
 export const name = 'accrui-skill-settings'
 export const inject = ['skills', 'sessions']
 export const SETTINGS_NAMESPACE = 'skill-settings' as SettingsNamespace
 export type SkillSettingMode = 'enabled' | 'manual-only' | 'disabled'
-export interface SkillSettingsConfig { readonly modes: Record<string, SkillSettingMode> }
+export interface SkillSettingsConfig { readonly modes: Record<string, SkillSettingMode>, readonly catalogRevision: number }
 
 export function invocationForMode(mode: SkillSettingMode): SkillInvocationPolicy {
   switch (mode) {
@@ -38,14 +39,27 @@ export async function apply(ctx: Context): Promise<void> {
   const schemastery = process.env.DSH_PRODUCT_SCHEMATERY_URL
   if (schemastery === undefined) throw new Error('DSH_PRODUCT_SCHEMATERY_URL is required for @accrui/harness-skill-settings')
   const z = (await import(schemastery)).default
-  const Config = z.object({ modes: z.dict(z.union(['enabled', 'manual-only', 'disabled'])).default({}) })
-  let settings: SkillSettingsConfig = { modes: {} }
+  const Config = z.object({ modes: z.dict(z.union(['enabled', 'manual-only', 'disabled'])).default({}), catalogRevision: z.number().default(0) })
+  const root = productSkillsRoot()
+  const installedNames = await installedSkillNames(root)
+  const systemNames = new Set((await ctx.skills.listSource()).filter(skill => skillOrigin(skill, root, installedNames) === 'system').map(skill => skill.name))
+  const stateEditable = (skill: SkillSummary): boolean => skillOrigin(skill, root, installedNames) !== 'system'
+  let settings: SkillSettingsConfig = { modes: {}, catalogRevision: 0 }
+  const legacyModes: Record<string, SkillSettingMode> = {}
+  let initializedSettings = false
   ctx.effect(() => ctx.skills.registerInvocationPolicy({
-    resolve(skill) { return invocationForMode(modeFor(settings, skill)) },
+    resolve(skill) { return stateEditable(skill) ? invocationForMode(modeFor(settings, skill)) : { modelInvocable: true, userInvocable: true } },
   }), 'accrui skill invocation policy')
   ctx.inject(['settings'], (settingsCtx) => {
     const scope: SettingsScope<SkillSettingsConfig> = settingsCtx.settings.register(SETTINGS_NAMESPACE, Config, {
       configurationExposed: true,
+      validate(next) {
+        if (!initializedSettings) {
+          for (const [name, mode] of Object.entries(next.modes)) if (systemNames.has(name)) legacyModes[name] = mode
+          initializedSettings = true
+        }
+        assertStateModes(next.modes, systemNames, legacyModes)
+      },
     })
     const publish = (next: SkillSettingsConfig): void => {
       settings = next
@@ -57,16 +71,20 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.inject(['webServer'], (webCtx: Context & { webServer: WebServerLookup }) => {
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact', path: SKILL_INSTALL_PATH,
-      handler: (req, res) => { void handleInstall(ctx as Context & { sessions: SessionLookup }, req, res) },
+      handler: (req, res) => { void handleInstall(ctx as Context & { sessions: SessionLookup }, req, res, root, installedNames) },
     }), 'accrui skill settings: skill install route')
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact', path: '/api/settings.skill.delete',
-      handler: (req, res) => { void handleDelete(ctx as Context & { sessions: SessionLookup }, req, res) },
+      handler: (req, res) => { void handleDelete(ctx as Context & { sessions: SessionLookup }, req, res, root, installedNames, legacyModes, () => settings) },
     }), 'accrui skill settings: skill delete route')
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact', path: '/api/settings.skill.catalog',
+      handler: (req, res) => { void handleCatalog(ctx as Context & { sessions: SessionLookup }, req, res, root, installedNames) },
+    }), 'accrui skill settings: skill catalog route')
   })
 }
 
-async function handleDelete(ctx: Context & { sessions: SessionLookup }, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleDelete(ctx: Context & { sessions: SessionLookup }, req: IncomingMessage, res: ServerResponse, root: string, installedNames: Set<string>, legacyModes: Record<string, SkillSettingMode>, currentSettings: () => SkillSettingsConfig): Promise<void> {
   if (req.method !== 'POST') return json(res, 405, { error: '技能删除仅支持 POST' })
   if (!trusted(req)) return json(res, 403, { error: '技能删除仅允许本机同源请求' })
   try {
@@ -75,7 +93,9 @@ async function handleDelete(ctx: Context & { sessions: SessionLookup }, req: Inc
     const name = typeof request.name === 'string' ? request.name : ''
     const cwd = ctx.sessions.get(sessionId)?.header.cwd
     if (cwd === undefined || cwd === '') throw new Error('技能删除需要一个已打开的项目会话')
-    const deleted = await deleteInstalledSkill(productSkillsRoot(), name)
+    const deleted = await deleteInstalledSkill(root, name)
+    legacyModes[deleted.name] = currentSettings().modes[deleted.name] ?? 'enabled'
+    installedNames.delete(deleted.name)
     // Invalidate before readback so the bounded confirmation does not rely on
     // the filesystem watcher's eventual event alone.
     ctx.skills.invalidateInvocationPolicy()
@@ -93,7 +113,7 @@ async function handleDelete(ctx: Context & { sessions: SessionLookup }, req: Inc
   }
 }
 
-async function handleInstall(ctx: Context & { sessions: SessionLookup }, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleInstall(ctx: Context & { sessions: SessionLookup }, req: IncomingMessage, res: ServerResponse, root: string, installedNames: Set<string>): Promise<void> {
   if (req.method !== 'POST') return json(res, 405, { error: '技能安装仅支持 POST' })
   if (!trusted(req)) return json(res, 403, { error: '技能安装仅允许本机同源请求' })
   try {
@@ -101,7 +121,12 @@ async function handleInstall(ctx: Context & { sessions: SessionLookup }, req: In
     const sessionId = typeof request.sessionId === 'string' ? request.sessionId : ''
     const cwd = ctx.sessions.get(sessionId)?.header.cwd
     if (cwd === undefined || cwd === '') throw new Error('技能安装需要一个已打开的项目会话')
-    const installed = await installSkill(productSkillsRoot(), request)
+    const prepared = await prepareSkillInstall(request)
+    const source = await ctx.skills.listSource({ cwd })
+    const conflict = source.find(skill => skill.name === prepared.name)
+    if (conflict !== undefined) throw new Error(installConflictMessage(prepared.name, skillOrigin(conflict, root, installedNames)))
+    const installed = await writePreparedSkill(root, prepared)
+    installedNames.add(installed.name)
     // This policy seam invalidates the Registry's collect cache synchronously;
     // the following read therefore does not depend solely on Chokidar timing.
     ctx.skills.invalidateInvocationPolicy()
@@ -116,6 +141,22 @@ async function handleInstall(ctx: Context & { sessions: SessionLookup }, req: In
     json(res, 400, { error: error instanceof Error ? error.message : String(error) })
   }
 }
+
+async function handleCatalog(ctx: Context & { sessions: SessionLookup }, req: IncomingMessage, res: ServerResponse, root: string, installedNames: ReadonlySet<string>): Promise<void> {
+  if (req.method !== 'POST') return json(res, 405, { error: '技能目录仅支持 POST' })
+  if (!trusted(req)) return json(res, 403, { error: '技能目录仅允许本机同源请求' })
+  try {
+    const request = JSON.parse(await readBody(req, 16 * 1024)) as { sessionId?: unknown }
+    const sessionId = typeof request.sessionId === 'string' ? request.sessionId : ''
+    const cwd = ctx.sessions.get(sessionId)?.header.cwd
+    if (cwd === undefined || cwd === '') throw new Error('技能目录需要一个已打开的项目会话')
+    const skills = await ctx.skills.listSource({ cwd })
+    json(res, 200, { skills: skills.map(skill => ({ name: skill.name, origin: skillOrigin(skill, root, installedNames) })) })
+  } catch (error) {
+    json(res, 400, { error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 
 function productSkillsRoot(env = process.env): string {
   const configured = env.DSH_PRODUCT_SKILLS_ROOT?.trim()

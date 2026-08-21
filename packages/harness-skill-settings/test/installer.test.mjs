@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import test from 'node:test'
-import { SKILL_INSTALL_MAX_FILE_BYTES, deleteInstalledSkill, installSkill, waitForInstalledSkill, waitForRemovedSkill } from '../src/installer.mjs'
+import { SKILL_INSTALL_MAX_FILE_BYTES, deleteInstalledSkill, installSkill, installedSkillNames, prepareSkillInstall, waitForInstalledSkill, waitForRemovedSkill, writePreparedSkill } from '../src/installer.mjs'
 
 const encode = (text) => new TextEncoder().encode(text)
 const b64 = (bytes) => Buffer.from(bytes).toString('base64')
@@ -20,6 +20,14 @@ test('installs one validated folder into a name-owned skill directory', async (t
   assert.deepEqual(result, { name: 'safe-skill', description: '安全的测试技能' })
   assert.equal(await readFile(join(root, 'safe-skill', 'SKILL.md'), 'utf8'), skill())
   assert.equal(await readFile(join(root, 'safe-skill', 'references', 'checklist.md'), 'utf8'), 'check')
+})
+
+test('prepares uploads before the Host live catalog check while preserving marker ownership', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'accr-skill-install-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const prepared = await prepareSkillInstall({ kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode(skill('prepared-skill'))) }] })
+  await writePreparedSkill(root, prepared)
+  assert.deepEqual(await installedSkillNames(root), new Set(['prepared-skill']))
 })
 
 test('rejects traversal, multiple roots, invalid names, and collisions without replacing data', async (t) => {

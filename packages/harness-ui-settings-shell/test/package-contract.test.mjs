@@ -84,3 +84,10 @@ test('merged model settings give the nested section the complete content width',
     /\.mergedModels :global\(\[data-slot='settings\.section'\]\) > :global\(\*\) \{[^}]*inline-size: 100% !important;[^}]*max-width: none !important;/,
   )
 })
+
+test('settings sections inherit one page-title visual contract', async () => {
+  const css = await readFile(new URL('../src/client/SettingsRoot.module.css', import.meta.url), 'utf8')
+  assert.match(css, /--accrui-settings-page-title-size: 20px;/)
+  assert.match(css, /\.options :global\(\[data-slot='settings\.section'\]\) > :global\(\*\) > :global\(h2\) \{[^}]*font-size: var\(--accrui-settings-page-title-size\) !important;[^}]*line-height: var\(--accrui-settings-page-title-line-height\) !important;[^}]*font-weight: var\(--accrui-settings-page-title-weight\) !important;/)
+  assert.doesNotMatch(css, /\.options :global\(\[data-slot='settings\.section'\] h2\)/)
+})

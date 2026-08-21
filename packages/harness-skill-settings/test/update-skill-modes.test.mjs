@@ -30,19 +30,21 @@ test('bulk mode update describes once then retries a stale revision', async () =
   ])
 })
 
-test('deletion refresh resets only the deleted name to enabled through settings', async () => {
+test('deletion refresh updates only the catalog revision, not a now-unowned Skill mode', async () => {
   const updates = []
   const api = { settings: { async update(request) { updates.push(request); return { result: { ok: true, value: {} } } } } }
-  await refreshAfterDeletedSkill(api, 'skill-settings', 'removed-skill', 5)
-  assert.deepEqual(updates, [{
-    ns: 'skill-settings', patch: { modes: { 'removed-skill': 'enabled' } }, expectedRevision: 5,
-  }])
+  await refreshAfterDeletedSkill(api, 'skill-settings', 5)
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].ns, 'skill-settings')
+  assert.equal(updates[0].expectedRevision, 5)
+  assert.equal(typeof updates[0].patch.catalogRevision, 'number')
+  assert.equal('modes' in updates[0].patch, false)
 })
 
-test('bulk selection writes only selected names, including manual-only', () => {
-  const skills = [{ name: 'first-skill' }, { name: 'second-skill' }, { name: 'third-skill' }]
+test('bulk selection writes only selected state-editable names, including manual-only', () => {
+  const skills = [{ name: 'first-skill', stateEditable: true }, { name: 'second-skill', stateEditable: false }, { name: 'third-skill', stateEditable: true }]
   assert.deepEqual(modesForSelection(skills, new Set(['first-skill', 'third-skill']), 'manual-only'), {
     'first-skill': 'manual-only', 'third-skill': 'manual-only',
   })
-  assert.deepEqual(modesForSelection(skills, new Set(), 'enabled'), {})
+  assert.deepEqual(modesForSelection(skills, new Set(['second-skill']), 'enabled'), {})
 })

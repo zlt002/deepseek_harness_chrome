@@ -155,12 +155,28 @@
   color: var(--dsw-alias-label-primary);
 }
 .close:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.options { flex: 1; min-height: 0; padding: 0 24px 24px; overflow-y: auto; }
+.options {
+  flex: 1;
+  min-height: 0;
+  padding: 0 24px 24px;
+  overflow-y: auto;
+  --accrui-settings-page-title-size: 20px;
+  --accrui-settings-page-title-line-height: 28px;
+  --accrui-settings-page-title-weight: 600;
+}
 /* Settings sections are independently-owned slot content. Give every section
    the complete content-column budget so a section-level desktop max-width
    cannot leave a dead area beside its controls. `!important` is intentional:
    slot CSS loads independently from this presentation owner. */
 .options > :global(*) { inline-size: 100% !important; max-width: none !important; }
+/* Settings sections are independently owned, while their first-level page
+   titles follow one presentation contract supplied by this shell. */
+.options :global([data-slot='settings.section']) > :global(*) > :global(h2) {
+  margin: 0 !important;
+  font-size: var(--accrui-settings-page-title-size) !important;
+  line-height: var(--accrui-settings-page-title-line-height) !important;
+  font-weight: var(--accrui-settings-page-title-weight) !important;
+}
 .hiddenLabel { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* The owning Harness sidebar knows whether this surface is a side panel.

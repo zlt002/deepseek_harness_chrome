@@ -15,6 +15,7 @@ const ACCOUNT_AUTH_COOKIE_NAMES = new Set(['MAS_TGC_UAT', 'midea_auth_uat', 'OAM
 const ACCOUNT_AUTH_COOKIE_DOMAIN = 'annto.com'
 const COMPANY_PORTAL_TAB_URL_PATTERN = 'https://wb-uat.annto.com/*'
 const COMPANY_PORTAL_RETURN_URL = 'https://wb-uat.annto.com'
+const COMPANY_PORTAL_LOGOUT_API_URL = 'https://anapi-uat.annto.com/api-auth/ssoLogout'
 const COMPANY_SSO_LOGIN_URL = `https://signinuat.midea.com/?service=${encodeURI(COMPANY_PORTAL_RETURN_URL)}`
 const COMPANY_SSO_LOGOUT_URL = `http://signinuat.midea.com/logout?service=${encodeURI(COMPANY_SSO_LOGIN_URL)}`
 const COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS = 15_000
@@ -1277,14 +1278,24 @@ function waitForCompanySingleSignOnNavigation(tabId: number): { done: Promise<vo
   return { done, cancel }
 }
 
-async function logoutCompanyPortalInPage(singleSignOnLogoutUrl: string): Promise<CompanyPortalLogoutResult> {
+async function logoutCompanyPortalInPage(logoutApiUrl: string, singleSignOnLogoutUrl: string): Promise<CompanyPortalLogoutResult> {
   try {
-    const response = await fetch('/api-auth/ssoLogout', {
+    const response = await fetch(logoutApiUrl, {
       method: 'GET',
       credentials: 'include',
+      headers: { accept: 'application/json, text/plain, */*' },
     })
     if (!response.ok) return { ok: false, error: `HTTP ${response.status}` }
-    const payload: unknown = await response.json()
+    const contentType = response.headers.get('content-type') ?? ''
+    if (!/\bapplication\/json\b/i.test(contentType)) {
+      return { ok: false, error: /\btext\/html\b/i.test(contentType) ? '服务返回 HTML 页面，未进入退出接口。' : `服务返回非 JSON 响应（${contentType || '无 Content-Type'}）。` }
+    }
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      return { ok: false, error: '服务返回 JSON 解析失败。' }
+    }
     if (typeof payload !== 'object' || payload === null || !('code' in payload) || (payload.code !== '0' && payload.code !== 0)) {
       return { ok: false, error: '服务未确认退出' }
     }
@@ -1306,7 +1317,7 @@ async function invalidateCompanyPortalSession(): Promise<void> {
       target: { tabId: tab.id },
       world: 'MAIN',
       func: logoutCompanyPortalInPage,
-      args: [COMPANY_SSO_LOGOUT_URL],
+      args: [COMPANY_PORTAL_LOGOUT_API_URL, COMPANY_SSO_LOGOUT_URL],
     }))[0]?.result as CompanyPortalLogoutResult | undefined
   } catch (error) {
     navigation.cancel()

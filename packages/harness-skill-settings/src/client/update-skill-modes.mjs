@@ -12,14 +12,14 @@ export async function updateSkillModes(api, namespace, modes, initialRevision) {
   }
 }
 
-/** Clear a deleted Skill's stale local disablement and notify the slash-menu cache. */
-export async function refreshAfterDeletedSkill(api, namespace, name, revision) {
-  return await updateSkillModes(api, namespace, { [name]: 'enabled' }, revision)
+/** Notify the slash-menu cache after deletion without mutating a now-unowned Skill mode. */
+export async function refreshAfterDeletedSkill(api, namespace, revision) {
+  return await api.settings.update({ ns: namespace, patch: { catalogRevision: Date.now() }, expectedRevision: revision })
 }
 
 /** Project one selected subset into the single settings patch for a bulk action. */
 export function modesForSelection(skills, selected, mode) {
   const modes = {}
-  for (const skill of skills) if (selected.has(skill.name)) modes[skill.name] = mode
+  for (const skill of skills) if (skill.stateEditable === true && selected.has(skill.name)) modes[skill.name] = mode
   return modes
 }
