@@ -118,9 +118,12 @@ export async function assertDirectoryPickerWorkerContract({ serverPath, workerPa
  */
 export async function patchBundledWindowsAclRunnerPath(serverPath) {
   const source = await readFile(serverPath, 'utf8')
-  const packageEntry = 'fileURLToPath(import.meta.resolve("@deepseek-ai/dsh-sandbox-windows-acl/runner"))'
+  // esbuild renames imported helpers (for example fileURLToPath2) when the
+  // complete server contains another binding with the same name.
+  const packageEntry = /\bfileURLToPath\d*\(\s*import\.meta\.resolve\((['"])@deepseek-ai\/dsh-sandbox-windows-acl\/runner\1\)\s*\)/g
   const relativeEntry = 'fileURLToPath(new URL("./windows-acl-runner.cjs", import.meta.url))'
-  if (!source.includes(packageEntry)) {
+  const matches = [...source.matchAll(packageEntry)]
+  if (matches.length !== 1) {
     throw new Error('Static server does not resolve the Windows ACL runner from its package entry.')
   }
   await writeFile(serverPath, source.replace(packageEntry, relativeEntry))

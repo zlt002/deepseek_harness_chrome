@@ -389,7 +389,7 @@ test('static runtime carries a self-contained Windows ACL runner and points the 
   const root = await mkdtemp(path.join(tmpdir(), 'windows-acl-runner-contract-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const server = await writeFixture(root, 'harness/apps/cli/lib/server.mjs', `// packages/sandbox/sandbox-local/lib/index.js
-fileURLToPath(import.meta.resolve("@deepseek-ai/dsh-sandbox-windows-acl/runner"))
+fileURLToPath2(import.meta.resolve("@deepseek-ai/dsh-sandbox-windows-acl/runner"))
 `)
   const runner = path.join(root, 'harness/apps/cli/lib/windows-acl-runner.cjs')
   await patchBundledWindowsAclRunnerPath(server)
