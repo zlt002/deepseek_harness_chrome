@@ -11,8 +11,7 @@ import {
   COMPANY_GATEWAY_KEY_PORTAL_URL,
   saveCompanyGateway,
 } from './company-gateway.ts'
-import type { CompanyGatewayProtocol } from './company-gateway.ts'
-import type { AccountAccessCommand, AccountAccessSnapshot, CompanyGatewayMetadata, CompanyGatewayModel, CompanyGatewayProbeSnapshot } from './types.ts'
+import type { AccountAccessCommand, AccountAccessSnapshot, CompanyGatewayMetadata, CompanyGatewayModel, CompanyGatewayProbeSnapshot, CompanyGatewayProtocol } from './types.ts'
 import css from './AccountAccessSection.module.css'
 
 export interface AccountAccessInjected {
@@ -21,7 +20,7 @@ export interface AccountAccessInjected {
     companyGatewayProbe?: SnapshotStore<CompanyGatewayProbeSnapshot | undefined>
   }
   command: (command: AccountAccessCommand) => void
-  probeGateway?: (apiKey: string) => string
+  probeGateway?: (apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string) => string
   selectInitialModel?: (models: readonly CompanyGatewayModel[]) => Promise<string | undefined>
   api: Pick<IApiClient, 'settings' | 'credentials'>
 }
@@ -69,7 +68,7 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const probe = useGatewayProbe(snapshot => snapshot)
   const [keyDraft, setKeyDraft] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [request, setRequest] = useState<{ id: string; key: string }>()
+  const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol; requestedModelId?: string }>()
   const [modelDrafts, setModelDrafts] = useState<CompanyGatewayModel[]>([])
   const [expandedModels, setExpandedModels] = useState<ReadonlySet<number>>(new Set())
   const [editingGateway, setEditingGateway] = useState(false)
@@ -81,9 +80,9 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const [notice, setNotice] = useState<string>()
   const [failure, setFailure] = useState<string>()
 
-  const probedGateway = probe?.status === 'ready' && probe.requestId === request?.id ? probe.gateway : undefined
+  const probedGateway = probe?.status === 'ready' && probe.requestId === request?.id && request?.protocol === protocol && request?.key === keyDraft.trim() ? probe.gateway : undefined
   const gateway = probedGateway ?? account?.gateway
-  const verifiedDraft = probedGateway !== undefined && request?.key === keyDraft.trim()
+  const verifiedDraft = probedGateway !== undefined
   const probing = request !== undefined && probe?.requestId !== request.id
 
   useEffect(() => {
@@ -131,7 +130,8 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     if (invalid !== undefined) { setFailure(invalid); return }
     if (probeGateway === undefined) { setFailure('公司网关连接正在刷新，请关闭并重新打开个人中心。'); return }
     setFailure(undefined); setNotice(undefined)
-    setRequest({ id: probeGateway(key), key })
+    const requestedModelId = modelDrafts[0]?.id.trim() || undefined
+    setRequest({ id: probeGateway(key, protocol, requestedModelId), key, protocol, requestedModelId })
   }
   const save = async (): Promise<boolean> => {
     if (gateway === undefined) return false
@@ -140,6 +140,12 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     const key = keyDraft.trim()
     if (!credentialConfigured && !verifiedDraft) { setFailure('请先验证 API Key。'); return false }
     if (key.length > 0 && !verifiedDraft) { setFailure('Key 已变化，请重新验证后再保存。'); return false }
+    const capability = gateway.capability
+    const currentModelId = modelDrafts[0]?.id.trim()
+    if (capability === undefined || capability.tools !== true || capability.protocol !== protocol || capability.modelId !== currentModelId) {
+      setFailure('当前协议或首个模型尚未完成 Agent 工具验证，请重新验证 API Key。')
+      return false
+    }
     setSaving(true); setFailure(undefined); setNotice(undefined)
     try {
       const error = await saveCompanyGateway(api, modelDrafts, key.length === 0 ? undefined : key, protocol)

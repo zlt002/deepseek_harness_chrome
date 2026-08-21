@@ -17,6 +17,7 @@ import {
   bundleWithHarnessEsbuild,
   copyWebClientPackages,
   copyWithoutSourceMaps,
+  directoryPickerKoffiShimSource,
   patchBundledWorkerPaths,
   shippedPresetConfigs,
   staticBundleAliases,
@@ -111,6 +112,68 @@ export async function assertDirectoryPickerWorkerContract({ serverPath, workerPa
 }
 
 /**
+ * The static server normally resolves this entry from its package tree. The
+ * Windows release deliberately has no Harness node_modules tree, so keep the
+ * resolver pointed at the sibling standalone runner instead.
+ */
+export async function patchBundledWindowsAclRunnerPath(serverPath) {
+  const source = await readFile(serverPath, 'utf8')
+  const packageEntry = 'fileURLToPath(import.meta.resolve("@deepseek-ai/dsh-sandbox-windows-acl/runner"))'
+  const relativeEntry = 'fileURLToPath(new URL("./windows-acl-runner.cjs", import.meta.url))'
+  if (!source.includes(packageEntry)) {
+    throw new Error('Static server does not resolve the Windows ACL runner from its package entry.')
+  }
+  await writeFile(serverPath, source.replace(packageEntry, relativeEntry))
+}
+
+/** Build the upstream ACL runner with its Koffi JS code and the shipped native sidecar. */
+export async function bundleWindowsAclRunner({ harnessRoot = GENERATED_HARNESS_ROOT, outfile } = {}) {
+  if (!outfile) throw new Error('bundleWindowsAclRunner requires outfile')
+  const runner = path.join(harnessRoot, 'packages', 'sandbox', 'sandbox-windows-acl', 'lib', 'runner.js')
+  if (!existsSync(runner)) throw new Error(`Built Windows ACL runner is missing: ${runner}`)
+  const shim = path.join(path.dirname(outfile), '.windows-acl-koffi-shim.cjs')
+  await mkdir(path.dirname(outfile), { recursive: true })
+  await writeFile(shim, directoryPickerKoffiShimSource())
+  const program = `
+import { build } from 'esbuild';
+await build({
+  entryPoints: [process.env.DSH_WINDOWS_ACL_RUNNER],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node22',
+  packages: 'bundle',
+  alias: { koffi: process.env.DSH_WINDOWS_ACL_KOFFI_SHIM },
+  outfile: process.env.DSH_WINDOWS_ACL_OUTFILE,
+});
+`
+  try {
+    run(process.execPath, ['--input-type=module', '-e', program], {
+      cwd: PROJECT_ROOT,
+      env: {
+        ...process.env,
+        DSH_WINDOWS_ACL_RUNNER: runner,
+        DSH_WINDOWS_ACL_KOFFI_SHIM: shim,
+        DSH_WINDOWS_ACL_OUTFILE: outfile,
+      },
+    })
+  } finally {
+    await rm(shim, { force: true })
+  }
+}
+
+/** Ensure the release runner cannot resolve into runtime/harness/node_modules. */
+export async function assertWindowsAclRunnerContract({ serverPath, runnerPath }) {
+  if (!existsSync(runnerPath)) throw new Error(`Static runtime is missing Windows ACL runner: ${runnerPath}`)
+  const [server, runner] = await Promise.all([readFile(serverPath, 'utf8'), readFile(runnerPath, 'utf8')])
+  if (!server.includes('new URL("./windows-acl-runner.cjs", import.meta.url)')) {
+    throw new Error('Static server does not point sandbox-local at windows-acl-runner.cjs.')
+  }
+  if (runner.includes('node_modules')) throw new Error('Static Windows ACL runner must not depend on runtime/harness/node_modules.')
+  if (!runner.includes('native/koffi/koffi.node')) throw new Error('Static Windows ACL runner does not load the shipped Koffi sidecar.')
+}
+
+/**
  * Creates a static Harness closure rooted at outputDir. The profile directory
  * is deliberately external: dsh plugin add writes user-installed plugins
  * there, so upgrades never overwrite plugins or user data.
@@ -171,6 +234,7 @@ export async function buildWindowsStaticHarnessRuntime({
       },
     })
     await patchBundledWorkerPaths(bundlePath, { includeDirectoryPicker: true })
+    await patchBundledWindowsAclRunnerPath(bundlePath)
 
     const nativeServerPath = path.join(temporary, 'native-server.mjs')
     const pluginManagerPath = path.join(temporary, 'plugin-manager.mjs')
@@ -186,6 +250,14 @@ export async function buildWindowsStaticHarnessRuntime({
     await assertDirectoryPickerWorkerContract({
       serverPath: path.join(cliDir, 'lib', 'server.mjs'),
       workerPath: path.join(cliDir, 'lib', 'directory-picker-worker.cjs'),
+    })
+    await bundleWindowsAclRunner({
+      harnessRoot,
+      outfile: path.join(cliDir, 'lib', 'windows-acl-runner.cjs'),
+    })
+    await assertWindowsAclRunnerContract({
+      serverPath: path.join(cliDir, 'lib', 'server.mjs'),
+      runnerPath: path.join(cliDir, 'lib', 'windows-acl-runner.cjs'),
     })
     await cp(pluginManagerPath, path.join(cliDir, 'lib', 'plugin-manager.mjs'))
     for (const worker of [

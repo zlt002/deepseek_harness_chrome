@@ -17,10 +17,19 @@ test('the probe is sidepanel-only, bounded, and never returns the key', () => {
   assert.match(source, /value\.length <= 512/)
   assert.match(source, /sendResponse\(\{ ok: true, requestId, gateway \}\)/)
   assert.doesNotMatch(source, /sendResponse\(\{[^\n]*apiKey/)
+  assert.match(source, /request\.protocol !== 'anthropic-messages' && request\.protocol !== 'openai-completions'/)
+  assert.match(source, /request\.requestedModelId/)
 })
 
 test('safe model and quota metadata is cached without persisting the credential', () => {
   assert.match(source, /COMPANY_GATEWAY_METADATA_STORAGE_KEY/)
   assert.match(source, /chrome\.storage\.local\.set\(\{ \[COMPANY_GATEWAY_METADATA_STORAGE_KEY\]: metadata \}\)/)
   assert.doesNotMatch(source, /chrome\.storage\.[\s\S]{0,80}\bapiKey\b/)
+})
+
+test('tool capability is verified for the requested catalog model within a bounded timeout', () => {
+  assert.match(source, /const modelId = requestedModelId \?\? models\[0\]\.id/)
+  assert.match(source, /models\.some\(\(model\) => model\.id === modelId\)/)
+  assert.match(source, /probeCompanyGatewayToolCapability\(\{ apiKey, protocol, modelId, signal: controller\.signal \}\)/)
+  assert.match(source, /quota\.usagePercent !== null && quota\.usagePercent >= 100/)
 })

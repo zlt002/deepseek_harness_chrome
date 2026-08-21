@@ -87,7 +87,7 @@ export function KnowledgeScopeStrip({ session, useSession, useKnowledgeScope, re
     <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={knowledge === undefined ? '选择知识范围' : `选择知识范围：${knowledge}`} title={knowledge} aria-expanded={knowledgeOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={knowledgeOverlay.toggle}>
       <span aria-hidden>⌘</span><span className={css.scopeLabel}>{knowledge ?? '选择知识范围'}</span><span aria-hidden>⌃</span>
     </button>
-  </div>{serviceState !== 'ready' && <output className={css.notice}>{serviceState === 'checking'
+  </div>{serviceState === 'ready' && snapshot?.notice ? <output className={css.notice} role="status">{snapshot.notice}</output> : null}{serviceState !== 'ready' && <output className={css.notice}>{serviceState === 'checking'
     ? '正在连接知识服务…'
     : serviceState === 'unauthenticated'
       ? <>知识库登录已失效，请<button className={css.login} type="button" onClick={() => request(sessionId, undefined, { action: 'login' })}>重新登录</button></>

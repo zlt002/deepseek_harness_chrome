@@ -6,4 +6,4 @@ export interface Catalog {
 }
 export type ServiceState = 'checking' | 'ready' | 'unauthenticated' | 'unavailable'
 export type ScopeOptions = { enabled?: boolean; remember?: boolean; action?: 'login' | 'retry' }
-export interface ScopeSnapshot { sessionId: string; scope?: Scope; enabled?: boolean; remember?: boolean; serviceState?: ServiceState; error?: string; catalog: Catalog }
+export interface ScopeSnapshot { sessionId: string; scope?: Scope; enabled?: boolean; remember?: boolean; serviceState?: ServiceState; error?: string; notice?: string; catalog: Catalog }

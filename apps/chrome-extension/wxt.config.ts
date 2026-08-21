@@ -61,6 +61,11 @@ export default defineConfig({
         },
       }
     },
+    'vite:build:extendConfig'(_entrypoints, config) {
+      // Chrome extension worlds reject the generated modulepreload cross-world hint.
+      config.build ??= {}
+      config.build.modulePreload = false
+    },
   },
   dev: {
     server: {

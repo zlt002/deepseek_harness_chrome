@@ -12,6 +12,7 @@ function snapshot(value) {
     && (value.enabled === undefined || typeof value.enabled === 'boolean')
     && (value.remember === undefined || typeof value.remember === 'boolean')
     && (value.serviceState === undefined || ['checking', 'ready', 'unauthenticated', 'unavailable'].includes(value.serviceState))
+    && (value.notice === undefined || (typeof value.notice === 'string' && value.notice.length <= 2_000))
     && catalog !== null && typeof catalog === 'object'
     && Array.isArray(catalog.domains) && Array.isArray(catalog.systems) && Array.isArray(catalog.repositories)
 }

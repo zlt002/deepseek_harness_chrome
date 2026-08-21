@@ -22,7 +22,14 @@ import {
 } from '../release/windows-lite/windows-release.mjs'
 import { encodeNativeMessage, smokeNativeMessageChild } from '../release/windows-lite/native-message-smoke.mjs'
 import { EXPECTED_PRODUCT_CLIENT_IDS, verifyProductUiBoot } from '../release/windows-lite/product-ui-smoke.mjs'
-import { assertDirectoryPickerWorkerContract, buildWindowsStaticHarnessRuntime, parseStaticRuntimeArgs } from '../release/windows-lite/build-static-harness-runtime.mjs'
+import {
+  assertDirectoryPickerWorkerContract,
+  assertWindowsAclRunnerContract,
+  buildWindowsStaticHarnessRuntime,
+  bundleWindowsAclRunner,
+  parseStaticRuntimeArgs,
+  patchBundledWindowsAclRunnerPath,
+} from '../release/windows-lite/build-static-harness-runtime.mjs'
 import {
   PRODUCT_UI_PLUGIN_PACKAGES,
   bundleDirectoryPickerWorker,
@@ -345,6 +352,9 @@ test('static Windows runtime uses a bundle, keeps native sidecars, and rejects n
     'product plugins must build before the static server bundle',
   )
   assert.match(builderSource, /path\.join\(koffi, 'win32_x64', 'koffi\.node'\)/)
+  assert.match(builderSource, /patchBundledWindowsAclRunnerPath\(bundlePath\)/)
+  assert.match(builderSource, /bundleWindowsAclRunner\(/)
+  assert.match(builderSource, /assertWindowsAclRunnerContract\(/)
 })
 
 test('Windows bundle aliases use concrete product plugin entries and retain package roots for assets', () => {
@@ -373,6 +383,42 @@ new URL("./worker.cjs", import.meta.url)
   const rewritten = await readFile(server, 'utf8')
   assert.match(rewritten, /directory-picker-worker\.cjs/)
   assert.doesNotMatch(rewritten, /node_modules/)
+})
+
+test('static runtime carries a self-contained Windows ACL runner and points the server at its relative path', { timeout: 60_000 }, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'windows-acl-runner-contract-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const server = await writeFixture(root, 'harness/apps/cli/lib/server.mjs', `// packages/sandbox/sandbox-local/lib/index.js
+fileURLToPath(import.meta.resolve("@deepseek-ai/dsh-sandbox-windows-acl/runner"))
+`)
+  const runner = path.join(root, 'harness/apps/cli/lib/windows-acl-runner.cjs')
+  await patchBundledWindowsAclRunnerPath(server)
+  await bundleWindowsAclRunner({
+    harnessRoot: path.join(process.cwd(), '.generated', 'harness-product'),
+    outfile: runner,
+  })
+  const rewritten = await readFile(server, 'utf8')
+  const bundledRunner = await readFile(runner, 'utf8')
+  assert.match(rewritten, /new URL\("\.\/windows-acl-runner\.cjs", import\.meta\.url\)/)
+  assert.doesNotMatch(rewritten, /dsh-sandbox-windows-acl\/runner/)
+  assert.doesNotMatch(bundledRunner, /node_modules/)
+  assert.match(bundledRunner, /native\/koffi\/koffi\.node/)
+  await assertWindowsAclRunnerContract({ serverPath: server, runnerPath: runner })
+  await assert.rejects(assertWindowsAclRunnerContract({ serverPath: server, runnerPath: path.join(root, 'missing.cjs') }), /missing Windows ACL runner/)
+})
+
+test('Windows acceptance executes the installed ACL runner through Pwsh and retains child failure diagnostics', async () => {
+  const [acceptance, smoke] = await Promise.all([
+    readFile(new URL('../release/windows-lite/acceptance-windows.ps1', import.meta.url), 'utf8'),
+    readFile(new URL('../release/windows-lite/acl-runner-smoke.mjs', import.meta.url), 'utf8'),
+  ])
+  assert.match(acceptance, /function Invoke-WindowsAclRunnerSmoke/)
+  assert.match(acceptance, /acl-runner-smoke\.mjs/)
+  assert.match(acceptance, /Invoke-WindowsAclRunnerSmoke/)
+  assert.match(smoke, /workspace-write/)
+  assert.match(smoke, /read-only/)
+  assert.match(smoke, /ACL-PWSH-DENIED/)
+  assert.match(smoke, /windows-acl-run: unknown mode: invalid/)
 })
 
 test('Windows product UI smoke requires every activated product client bundle', async () => {

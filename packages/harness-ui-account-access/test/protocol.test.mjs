@@ -25,14 +25,22 @@ test('sends only supported account commands with a local sequence', () => {
 test('gateway probes send the key only toward the extension and never accept it in snapshots', () => {
   const sent = []; const parent = { postMessage: (message, origin) => sent.push({ message, origin }) }
   const protocol = createAccountAccessProtocol({ createStore: store, nonce: 'n', parentOrigin: 'chrome-extension://abc' })
-  const requestId = protocol.probeGateway('sk-secret', parent)
+  const requestId = protocol.probeGateway('sk-secret', 'anthropic-messages', undefined, parent)
   assert.equal(sent[0].origin, 'chrome-extension://abc')
-  assert.deepEqual(sent[0].message, { type: 'company-gateway-probe-command/v1', nonce: 'n', sequence: 1, requestId, apiKey: 'sk-secret' })
-  const gateway = { models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }], quota: { usagePercent: 16.8, nextResetTime: '2026-08-21T00:00:00+08:00', resetCycle: 'daily' }, checkedAt: '2026-08-20T00:00:00Z' }
+  assert.deepEqual(sent[0].message, { type: 'company-gateway-probe-command/v1', nonce: 'n', sequence: 1, requestId, apiKey: 'sk-secret', protocol: 'anthropic-messages' })
+  const gateway = { models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }], quota: { usagePercent: 16.8, nextResetTime: '2026-08-21T00:00:00+08:00', resetCycle: 'daily' }, capability: { protocol: 'anthropic-messages', modelId: 'deepseek-v4-flash', tools: true }, checkedAt: '2026-08-20T00:00:00Z' }
   const response = { type: 'company-gateway-probe-snapshot/v1', nonce: 'n', sequence: 1, snapshot: { requestId, status: 'ready', gateway } }
   assert.equal(protocol.accept({ source: parent, origin: 'chrome-extension://abc', data: response }, parent), true)
   assert.deepEqual(protocol.gatewayProbe.value, response.snapshot)
   assert.equal(protocol.accept({ source: parent, origin: 'chrome-extension://abc', data: { ...response, sequence: 2, snapshot: { ...response.snapshot, apiKey: 'must-not-return' } } }, parent), false)
+})
+
+test('gateway probes can target the selected model for a tool-capability check', () => {
+  const sent = []; const parent = { postMessage: (message, origin) => sent.push({ message, origin }) }
+  const protocol = createAccountAccessProtocol({ createStore: store, nonce: 'n', parentOrigin: 'chrome-extension://abc' })
+  protocol.probeGateway('sk-secret', 'openai-completions', 'model-b', parent)
+  assert.equal(sent[0].message.requestedModelId, 'model-b')
+  assert.equal(sent[0].message.protocol, 'openai-completions')
 })
 
 test('requires the chrome extension bridge origin', () => {

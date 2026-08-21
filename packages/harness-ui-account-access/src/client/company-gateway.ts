@@ -1,5 +1,5 @@
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
-import type { CompanyGatewayModel } from './types.ts'
+import type { CompanyGatewayModel, CompanyGatewayProtocol } from './types.ts'
 
 export const COMPANY_GATEWAY_PROVIDER = 'annto-company-gateway'
 export const COMPANY_GATEWAY_CREDENTIAL_REF = 'ANNTO_COMPANY_GATEWAY_API_KEY'
@@ -8,7 +8,6 @@ export const COMPANY_GATEWAY_OPENAI_BASE_URL = 'https://anapi-uat.annto.com/api-
 export const COMPANY_GATEWAY_KEY_PORTAL_URL = 'https://anapi-uat.annto.com/api-key-portal'
 
 type GatewayApi = Pick<IApiClient, 'settings' | 'credentials'>
-export type CompanyGatewayProtocol = 'anthropic-messages' | 'openai-completions'
 
 export function companyGatewayBaseUrl(protocol: CompanyGatewayProtocol): string {
   return protocol === 'anthropic-messages'

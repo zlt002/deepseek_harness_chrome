@@ -5,7 +5,7 @@ import { scopeLabels } from '../src/client/labels.js'
 import { selectKnowledgeDomain, selectKnowledgeSystem } from '../src/client/selection.js'
 
 function store(initial) { return { value: initial, set(value) { this.value = value } } }
-const snapshot = { sessionId: 'session-1', enabled: true, serviceState: 'ready', scope: { domainId: 'd', systemIds: ['s1', 's2'], repositoryIds: ['r1', 'r2'] }, catalog: { domains: [{ id: 'd', name: '供应链' }], systems: [{ id: 's1', name: '订单知识库' }, { id: 's2', name: '结算知识库' }], repositories: [{ id: 'r1', name: 'OTP-后端-中台' }, { id: 'r2', name: 'OTP-前端-1' }] } }
+const snapshot = { sessionId: 'session-1', enabled: true, serviceState: 'ready', notice: '旧版会话包含多个知识领域，请重新确认知识范围；已保留代码库选择。', scope: { domainId: 'd', systemIds: ['s1', 's2'], repositoryIds: ['r1', 'r2'] }, catalog: { domains: [{ id: 'd', name: '供应链' }], systems: [{ id: 's1', name: '订单知识库' }, { id: 's2', name: '结算知识库' }], repositories: [{ id: 'r1', name: 'OTP-后端-中台' }, { id: 'r2', name: 'OTP-前端-1' }] } }
 
 test('preserves all selected repository and knowledge names for wide composer layouts', () => {
   assert.deepEqual(scopeLabels(snapshot.scope, snapshot.catalog), { repositories: 'OTP-后端-中台、OTP-前端-1', knowledge: '订单知识库、结算知识库' })
@@ -58,6 +58,14 @@ test('accepts only an exact parent, nonce, and increasing knowledge snapshot seq
   assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: message }, parent), true)
   assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: message }, parent), false)
   assert.equal(bridge.source.value.sessionId, 'session-1')
+})
+
+test('accepts a bounded legacy-scope migration notice while the service is ready', () => {
+  const bridge = createScopeProtocol({ createStore: store, nonce: 'nonce', parentOrigin: 'chrome-extension://abc' }); const parent = {}
+  const message = { type: 'knowledge-scope-snapshot/v1', nonce: 'nonce', sequence: 1, snapshot }
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: message }, parent), true)
+  assert.equal(bridge.source.value.notice, snapshot.notice)
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { ...message, sequence: 2, snapshot: { ...snapshot, notice: 'x'.repeat(2_001) } } }, parent), false)
 })
 
 test('accepts bounded live search content only from the exact iframe parent', () => {

@@ -6,8 +6,11 @@ const source = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8'
 
 test('knowledge scope state follows the AccrUI session and remember precedence', async () => {
   const background = await source('apps/chrome-extension/entrypoints/background.ts')
-  assert.match(background, /interface KnowledgeScopeRecord \{ scope: KnowledgeScope; enabled: boolean \}/)
-  assert.match(background, /chrome\.storage\.local\.get\(KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY\)/)
+  assert.match(background, /interface KnowledgeScopeRecord \{ scope: KnowledgeScope; enabled: boolean; notice\?: string \}/)
+  assert.match(background, /legacyKnowledgeScopeKey/)
+  assert.match(background, /migrateLegacyKnowledgeScope/)
+  assert.match(background, /notice: record\?\.notice/)
+  assert.match(background, /chrome\.storage\.local\.get\(\[KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY, 'knowledge-query:enabled-preference'\]\)/)
   assert.match(background, /function knowledgeSessionStorage/)
   assert.match(background, /knowledgeSessionStorage\(\)\?\.get\(KNOWLEDGE_SESSION_STORAGE_KEY\)/)
   assert.match(background, /knowledgeSessionStorage\(\)\?\.set\(\{ \[KNOWLEDGE_SESSION_STORAGE_KEY\]: sessions \}\)/)
@@ -75,4 +78,12 @@ test('selected-source SSE content flows into dedicated Tool call rows', async ()
   assert.match(toolRow, /远程检索流中断，请重试一次/)
   assert.match(sidepanel, /typeof value\.process === 'string'/)
   assert.doesNotMatch(strip, /已返回/)
+})
+
+test('the extension waits for the nonce-bound Harness frame readiness signal before replaying state', async () => {
+  const sidepanel = await source('apps/chrome-extension/entrypoints/sidepanel/main.tsx')
+  assert.match(sidepanel, /frameReadyRef\.current/)
+  assert.match(sidepanel, /value\.type === 'browser-target-ready\/v1'[\s\S]*frameReadyRef\.current = true[\s\S]*sendBrowserTargetSnapshot\(\)[\s\S]*replaySearchProgress\(\)/)
+  assert.match(sidepanel, /if \(frameOrigin === undefined \|\| !frameReadyRef\.current\) return/)
+  assert.doesNotMatch(sidepanel, /onLoad=\{\(\) => \{ sendBrowserTargetSnapshot\(\); replaySearchProgress\(\) \}\}/)
 })

@@ -1,5 +1,5 @@
-// Kept self-contained because the extension's background test harness imports this
-// file as a data URL. The focused adapter test evaluates this exact source block.
+// Kept self-contained because focused background adapters evaluate this source
+// as a data URL and production WXT bundles it as a single service worker.
 const KNOWLEDGE_API_ORIGIN = 'https://anapi-uat.annto.com'
 const KNOWLEDGE_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-kd`
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
@@ -37,7 +37,37 @@ interface AccountAccessSnapshot {
 }
 interface CompanyGatewayModel { id: string; name: string; description?: string }
 interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
-interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; checkedAt: string }
+type CompanyGatewayProtocol = 'anthropic-messages' | 'openai-completions'
+interface CompanyGatewayCapability { protocol: CompanyGatewayProtocol; modelId: string; tools: true }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability: CompanyGatewayCapability; checkedAt: string }
+
+const LEGACY_KNOWLEDGE_SCOPE_PREFIX = 'knowledge-query:scope:session:'
+function legacyKnowledgeScopeKey(sessionId: string): string { return `${LEGACY_KNOWLEDGE_SCOPE_PREFIX}${sessionId}` }
+function migrateLegacyKnowledgeScope(value: unknown): { enabled: boolean; scope: KnowledgeScope; notice?: string } | undefined {
+  const isRecord = (item: unknown): item is Record<string, unknown> => item !== null && typeof item === 'object' && !Array.isArray(item)
+  const stringList = (item: unknown): item is string[] => Array.isArray(item) && item.every(entry => typeof entry === 'string')
+  const state = isRecord(value) && 'scope' in value ? value : { enabled: true, scope: value }
+  if (!isRecord(state.scope) || typeof state.scope.hasCommon !== 'boolean' || !isRecord(state.scope.domains)
+    || (state.scope.repoKeys !== undefined && !stringList(state.scope.repoKeys))
+    || (state.enabled !== undefined && typeof state.enabled !== 'boolean')) return undefined
+  for (const selection of Object.values(state.scope.domains)) {
+    if (!isRecord(selection) || typeof selection.self !== 'boolean' || !stringList(selection.systems)) return undefined
+  }
+  const unique = (items: string[]): string[] => [...new Set(items.map(item => item.trim()).filter(Boolean))]
+  const selectedDomains = Object.entries(state.scope.domains)
+    .filter(([, raw]) => (raw as { self: boolean; systems: string[] }).self || (raw as { systems: string[] }).systems.length > 0)
+    .sort(([left], [right]) => left.localeCompare(right)) as [string, { self: boolean; systems: string[] }][]
+  const repositoryIds = unique((state.scope.repoKeys as string[] | undefined) ?? [])
+  if (selectedDomains.length > 1) return {
+    enabled: (state.enabled as boolean | undefined) ?? true,
+    scope: { domainId: '', systemIds: [], repositoryIds },
+    notice: '旧版会话包含多个知识领域，请重新确认知识范围；已保留代码库选择。',
+  }
+  return {
+    enabled: (state.enabled as boolean | undefined) ?? true,
+    scope: { domainId: selectedDomains[0]?.[0] ?? '', systemIds: unique(selectedDomains[0]?.[1].systems ?? []), repositoryIds },
+  }
+}
 
 function validSessionIdentity(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value) }
 const SIDE_PANEL_HANDOFF_TTL_MS = 60_000
@@ -849,7 +879,7 @@ interface SelectedSourceScopeRequest {
   harnessParentSessionId?: string
 }
 
-interface KnowledgeScopeRecord { scope: KnowledgeScope; enabled: boolean }
+interface KnowledgeScopeRecord { scope: KnowledgeScope; enabled: boolean; notice?: string }
 interface KnowledgeEnabledPreference { remember: boolean; enabled: boolean }
 interface KnowledgeSessionRecord { sessionId: string; fingerprint: string }
 interface SearchProgressSnapshot { type: 'search-progress/v1'; requestId: string; harnessSessionId: string; harnessParentSessionId?: string; tool: 'knowledge_search' | 'code_search'; question: string; phase: 'querying' | 'streaming' | 'done' | 'error'; chars: number; content: string; eventType?: string; process?: string }
@@ -1106,16 +1136,35 @@ function knowledgeSessionStorage(): chrome.storage.StorageArea | undefined {
 async function knowledgeScopes(): Promise<Record<string, KnowledgeScopeRecord>> {
   const values = await targetStorage()?.get(KNOWLEDGE_SCOPE_STORAGE_KEY)
   const candidate = values?.[KNOWLEDGE_SCOPE_STORAGE_KEY]
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return {}
-  return Object.fromEntries(Object.entries(candidate as Record<string, unknown>).flatMap(([sessionId, value]) =>
+  const scopes = !candidate || typeof candidate !== 'object' || Array.isArray(candidate) ? {} : Object.fromEntries(Object.entries(candidate as Record<string, unknown>).flatMap(([sessionId, value]) =>
     validSessionIdentity(sessionId) && typeof value === 'object' && value !== null && validScope((value as KnowledgeScopeRecord).scope)
-      ? [[sessionId, { scope: normalizeScope((value as KnowledgeScopeRecord).scope), enabled: typeof (value as KnowledgeScopeRecord).enabled === 'boolean' ? (value as KnowledgeScopeRecord).enabled : true }]] : [],
+      ? [[sessionId, { scope: normalizeScope((value as KnowledgeScopeRecord).scope), enabled: typeof (value as KnowledgeScopeRecord).enabled === 'boolean' ? (value as KnowledgeScopeRecord).enabled : true, ...(typeof (value as KnowledgeScopeRecord).notice === 'string' ? { notice: (value as KnowledgeScopeRecord).notice } : {}) }]] : [],
   ))
+  const legacyValues = await chrome.storage.local.get(null)
+  let changed = false
+  for (const [key, value] of Object.entries(legacyValues)) {
+    const prefix = legacyKnowledgeScopeKey('')
+    if (!key.startsWith(prefix)) continue
+    const sessionId = key.slice(prefix.length)
+    if (!validSessionIdentity(sessionId) || scopes[sessionId] !== undefined) continue
+    const migrated = migrateLegacyKnowledgeScope(value)
+    if (migrated === undefined) continue
+    scopes[sessionId] = { scope: normalizeScope(migrated.scope), enabled: migrated.enabled, ...(migrated.notice === undefined ? {} : { notice: migrated.notice }) }
+    changed = true
+  }
+  if (changed) await targetStorage()?.set({ [KNOWLEDGE_SCOPE_STORAGE_KEY]: scopes })
+  return scopes
 }
 
 async function knowledgeEnabledPreference(): Promise<KnowledgeEnabledPreference> {
-  const value = (await chrome.storage.local.get(KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY))?.[KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY] as Partial<KnowledgeEnabledPreference> | undefined
-  return typeof value?.remember === 'boolean' && typeof value.enabled === 'boolean' ? { remember: value.remember, enabled: value.enabled } : { remember: false, enabled: true }
+  const values = await chrome.storage.local.get([KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY, 'knowledge-query:enabled-preference'])
+  const value = values?.[KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY] as Partial<KnowledgeEnabledPreference> | undefined
+  if (typeof value?.remember === 'boolean' && typeof value.enabled === 'boolean') return { remember: value.remember, enabled: value.enabled }
+  const legacy = values?.['knowledge-query:enabled-preference'] as Partial<KnowledgeEnabledPreference> | undefined
+  if (typeof legacy?.remember !== 'boolean' || typeof legacy.enabled !== 'boolean') return { remember: false, enabled: true }
+  const migrated = { remember: legacy.remember, enabled: legacy.enabled }
+  await chrome.storage.local.set({ [KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY]: migrated })
+  return migrated
 }
 
 async function saveKnowledgeScope(sessionId: string, scope: KnowledgeScope, enabled?: boolean, remember?: boolean): Promise<KnowledgeScopeRecord> {
@@ -1178,9 +1227,12 @@ function companyGatewayModels(value: unknown): CompanyGatewayModel[] | undefined
 
 function validCompanyGatewayMetadata(value: unknown): value is CompanyGatewayMetadata {
   if (!isKnowledgeRecord(value) || !Array.isArray(value.models) || typeof value.checkedAt !== 'string') return false
+  const capability = value.capability
   return companyGatewayQuota(value.quota) !== undefined && value.models.every((model) => isKnowledgeRecord(model)
     && typeof model.id === 'string' && typeof model.name === 'string'
     && (model.description === undefined || typeof model.description === 'string'))
+    && isKnowledgeRecord(capability) && (capability.protocol === 'anthropic-messages' || capability.protocol === 'openai-completions')
+    && typeof capability.modelId === 'string' && capability.tools === true
 }
 
 async function companyGatewayMetadata(): Promise<CompanyGatewayMetadata | undefined> {
@@ -1210,7 +1262,42 @@ async function companyGatewayJson(path: '/models' | '/key/quota', apiKey: string
   }
 }
 
-async function probeCompanyGateway(apiKey: string): Promise<CompanyGatewayMetadata> {
+const COMPANY_GATEWAY_CAPABILITY_TOOL = 'accrui_capability_probe'
+async function probeCompanyGatewayToolCapability(options: { apiKey: string; protocol: CompanyGatewayProtocol; modelId: string; signal?: AbortSignal }): Promise<CompanyGatewayCapability> {
+  const endpoint = options.protocol === 'anthropic-messages'
+    ? `${COMPANY_GATEWAY_BASE_URL}/messages`
+    : `${COMPANY_GATEWAY_BASE_URL}/chat/completions`
+  const headers: Record<string, string> = options.protocol === 'anthropic-messages'
+    ? { 'content-type': 'application/json', 'x-api-key': options.apiKey, 'anthropic-version': '2023-06-01' }
+    : { 'content-type': 'application/json', authorization: `Bearer ${options.apiKey}` }
+  const tool = options.protocol === 'anthropic-messages'
+    ? { name: COMPANY_GATEWAY_CAPABILITY_TOOL, description: 'Verifies Agent tool-call support.', input_schema: { type: 'object', properties: {}, additionalProperties: false } }
+    : { type: 'function', function: { name: COMPANY_GATEWAY_CAPABILITY_TOOL, description: 'Verifies Agent tool-call support.', parameters: { type: 'object', properties: {}, additionalProperties: false } } }
+  const toolChoice = options.protocol === 'anthropic-messages'
+    ? { type: 'tool', name: COMPANY_GATEWAY_CAPABILITY_TOOL }
+    : { type: 'function', function: { name: COMPANY_GATEWAY_CAPABILITY_TOOL } }
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    signal: options.signal,
+    body: JSON.stringify({ model: options.modelId, max_tokens: 32, messages: [{ role: 'user', content: 'Call the capability probe tool exactly once.' }], tools: [tool], tool_choice: toolChoice }),
+  })
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 1_000)
+    throw new Error(`当前模型或协议不支持 Agent 工具调用：${detail || `HTTP ${String(response.status)}`}`)
+  }
+  const value = await response.json() as Record<string, unknown>
+  const returned = options.protocol === 'anthropic-messages'
+    ? Array.isArray(value.content) && value.content.some(block => isKnowledgeRecord(block) && block.type === 'tool_use' && block.name === COMPANY_GATEWAY_CAPABILITY_TOOL)
+    : Array.isArray(value.choices) && value.choices.some((choice) => {
+        if (!isKnowledgeRecord(choice) || !isKnowledgeRecord(choice.message) || !Array.isArray(choice.message.tool_calls)) return false
+        return choice.message.tool_calls.some(call => isKnowledgeRecord(call) && isKnowledgeRecord(call.function) && call.function.name === COMPANY_GATEWAY_CAPABILITY_TOOL)
+      })
+  if (!returned) throw new Error('当前模型没有返回测试工具，不能作为 Agent 模型。')
+  return { protocol: options.protocol, modelId: options.modelId, tools: true }
+}
+
+async function probeCompanyGateway(apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string): Promise<CompanyGatewayMetadata> {
   const [rawModels, rawQuota] = await Promise.all([
     companyGatewayJson('/models', apiKey),
     companyGatewayJson('/key/quota', apiKey),
@@ -1219,7 +1306,21 @@ async function probeCompanyGateway(apiKey: string): Promise<CompanyGatewayMetada
   const quota = companyGatewayQuota(rawQuota)
   if (models === undefined || models.length === 0) throw new Error('公司网关没有返回可用模型。')
   if (quota === undefined) throw new Error('公司网关返回了无法识别的用量信息。')
-  const metadata = { models, quota, checkedAt: new Date().toISOString() }
+  if (quota.usagePercent !== null && quota.usagePercent >= 100) throw new Error('公司网关额度已经耗尽，请补充额度或更换 Key。')
+  const modelId = requestedModelId ?? models[0].id
+  if (!models.some((model) => model.id === modelId)) throw new Error('所选模型不在公司网关返回的可用模型中。')
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), COMPANY_GATEWAY_TIMEOUT_MS)
+  let capability: CompanyGatewayCapability
+  try {
+    capability = await probeCompanyGatewayToolCapability({ apiKey, protocol, modelId, signal: controller.signal })
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('公司网关工具能力检测超时，请稍后重试。')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+  const metadata = { models, quota, capability, checkedAt: new Date().toISOString() }
   await chrome.storage.local.set({ [COMPANY_GATEWAY_METADATA_STORAGE_KEY]: metadata })
   return metadata
 }
@@ -3785,7 +3886,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -3924,13 +4025,17 @@ export default defineBackground(() => {
       return false
     }
     if (request.type === 'company-gateway-probe/v1') {
-      if (!isSidePanelSender(sender) || typeof request.requestId !== 'string' || request.requestId.length === 0 || request.requestId.length > 160 || !usableCompanyGatewayKey(request.apiKey)) {
+      if (!isSidePanelSender(sender) || typeof request.requestId !== 'string' || request.requestId.length === 0 || request.requestId.length > 160 || !usableCompanyGatewayKey(request.apiKey)
+        || (request.protocol !== 'anthropic-messages' && request.protocol !== 'openai-completions')
+        || (request.requestedModelId !== undefined && (typeof request.requestedModelId !== 'string' || request.requestedModelId.length === 0 || request.requestedModelId.length > 160))) {
         sendResponse({ ok: false, error: 'Invalid company gateway probe.' })
         return false
       }
       const requestId = request.requestId
       const apiKey = request.apiKey
-      void probeCompanyGateway(apiKey)
+      const protocol = request.protocol
+      const modelId = request.requestedModelId as string | undefined
+      void probeCompanyGateway(apiKey, protocol, modelId)
         .then((gateway) => sendResponse({ ok: true, requestId, gateway }))
         .catch((error: unknown) => sendResponse({ ok: false, requestId, error: asError(error) }))
       return true
@@ -3981,10 +4086,10 @@ export default defineBackground(() => {
         try {
           const catalog = await loadKnowledgeCatalog()
           const scope = savedScope === undefined ? savedScope : pruneScope(savedScope, catalog)
-          sendResponse({ ok: true, scope, enabled: record?.enabled ?? (preference.remember ? preference.enabled : true), remember: preference.remember, serviceState: 'ready', catalog })
+          sendResponse({ ok: true, scope, enabled: record?.enabled ?? (preference.remember ? preference.enabled : true), remember: preference.remember, notice: record?.notice, serviceState: 'ready', catalog })
         } catch (error) {
           const text = asError(error)
-          sendResponse({ ok: false, scope: savedScope, enabled: record?.enabled, remember: preference.remember, serviceState: knowledgeServiceState(error), error: text })
+          sendResponse({ ok: false, scope: savedScope, enabled: record?.enabled, remember: preference.remember, notice: record?.notice, serviceState: knowledgeServiceState(error), error: text })
         }
       })().catch(async (error: unknown) => {
         const record = (await knowledgeScopes())[sessionId]
@@ -3994,6 +4099,7 @@ export default defineBackground(() => {
           scope: record?.scope,
           enabled: record?.enabled ?? (preference.remember ? preference.enabled : true),
           remember: preference.remember,
+          notice: record?.notice,
           serviceState: knowledgeServiceState(error),
           error: asError(error),
         })

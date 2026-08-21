@@ -50,6 +50,8 @@ test('scope pickers use the shared upward overlay and preserve the accepted e327
   assert.equal(control.match(/useSession\(s => s\.subagent\)/g)?.length, 2)
   assert.match(control, /KnowledgeScopeStrip\(\{ session, useSession, useKnowledgeScope, request \}/)
   assert.match(control, /if \(shouldShowKnowledgeScope\(subagent\)\) request\(sessionId\)/)
+  assert.match(control, /serviceState === 'ready' && snapshot\?\.notice/)
+  assert.match(control, /role="status"/)
   assert.match(control, /useComposerOverlay\('repository-scope'/)
   assert.match(control, /useComposerOverlay\('knowledge-scope'/)
   assert.match(control, /catalog\.systems\.filter\(system => system\.domainId === domain\.id\)/)

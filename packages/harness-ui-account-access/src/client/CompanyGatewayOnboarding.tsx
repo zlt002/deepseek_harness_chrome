@@ -10,15 +10,14 @@ import {
   companyGatewayProtocolFromNamespaces,
   saveCompanyGateway,
 } from './company-gateway.ts'
-import type { CompanyGatewayProtocol } from './company-gateway.ts'
 import { hasUsableModelProvider, type OnboardingNamespace, type OnboardingProvider } from './onboarding.ts'
-import type { CompanyGatewayModel, CompanyGatewayProbeSnapshot } from './types.ts'
+import type { CompanyGatewayModel, CompanyGatewayProbeSnapshot, CompanyGatewayProtocol } from './types.ts'
 import css from './AccountAccessSection.module.css'
 
 export interface CompanyGatewayOnboardingInjected {
   hooks: { companyGatewayProbe: SnapshotStore<CompanyGatewayProbeSnapshot | undefined> }
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
-  probeGateway: (apiKey: string) => string
+  probeGateway: (apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string) => string
   selectInitialModel: (models: readonly CompanyGatewayModel[]) => Promise<string | undefined>
 }
 
@@ -48,7 +47,7 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
   const [readiness, setReadiness] = useState<Readiness>('loading')
   const [keyDraft, setKeyDraft] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [request, setRequest] = useState<{ id: string; key: string }>()
+  const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol; requestedModelId?: string }>()
   const [protocol, setProtocol] = useState<CompanyGatewayProtocol>('anthropic-messages')
   const [selectedModel, setSelectedModel] = useState<string>()
   const [saving, setSaving] = useState(false)
@@ -99,10 +98,12 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
     return () => { appRoot.inert = previous }
   }, [readiness])
 
-  const gateway = probe?.status === 'ready' && probe.requestId === request?.id ? probe.gateway : undefined
+  const gateway = probe?.status === 'ready' && probe.requestId === request?.id && request?.protocol === protocol ? probe.gateway : undefined
   const probing = request !== undefined && probe?.requestId !== request.id
   useEffect(() => {
-    if (gateway !== undefined && selectedModel === undefined) setSelectedModel(gateway.models[0]?.id)
+    if (gateway !== undefined) {
+      setSelectedModel(current => current !== undefined && gateway.models.some(model => model.id === current) ? current : gateway.models[0]?.id)
+    }
   }, [gateway, selectedModel])
   useEffect(() => {
     if (probe?.status === 'error' && probe.requestId === request?.id) {
@@ -118,7 +119,8 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
     const invalid = companyGatewayApiKeyFailure(key)
     if (invalid !== undefined) { setFailure(invalid); return }
     setFailure(undefined)
-    setRequest({ id: probeGateway(key), key })
+    const requestedModelId = selectedModel?.trim() || undefined
+    setRequest({ id: probeGateway(key, protocol, requestedModelId), key, protocol, requestedModelId })
   }
   const save = async (): Promise<void> => {
     if (gateway === undefined || request?.key !== keyDraft.trim()) {
@@ -126,6 +128,11 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
       return
     }
     const models = firstModel(gateway.models, selectedModel)
+    const capability = gateway.capability
+    if (capability === undefined || capability.tools !== true || capability.protocol !== protocol || capability.modelId !== models[0]?.id.trim()) {
+      setFailure('当前协议或所选模型尚未完成 Agent 工具验证，请重新验证 API Key。')
+      return
+    }
     setSaving(true); setFailure(undefined)
     try {
       const error = await saveCompanyGateway(api, models, keyDraft.trim(), protocol)

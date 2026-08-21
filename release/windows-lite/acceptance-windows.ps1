@@ -51,6 +51,14 @@ function Invoke-DirectoryPickerSmoke {
   if ($LASTEXITCODE -ne 0) { throw "Directory-picker worker smoke failed with exit code $LASTEXITCODE." }
 }
 
+function Invoke-WindowsAclRunnerSmoke {
+  $nodeExecutable = (Get-Content -LiteralPath (Join-Path $installRoot 'runtime\node-path.txt') -Raw).Trim()
+  $runner = Join-Path $installRoot 'runtime\harness\apps\cli\lib\windows-acl-runner.cjs'
+  $outside = Join-Path $acceptanceRoot 'acl-outside'
+  & node (Join-Path $PSScriptRoot 'acl-runner-smoke.mjs') --node $nodeExecutable --runner $runner --workspace (Join-Path $installRoot 'workspace') --outside $outside
+  if ($LASTEXITCODE -ne 0) { throw "Windows ACL runner Pwsh smoke failed with exit code $LASTEXITCODE." }
+}
+
 function Invoke-InstallerUiSmoke {
   $probePath = Join-Path $env:RUNNER_TEMP 'accrui-harness-installer-ui-visible.txt'
   Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
@@ -291,6 +299,7 @@ try {
   Invoke-NativeMessageSmoke
   Invoke-ProductUiSmoke
   Invoke-DirectoryPickerSmoke
+  Invoke-WindowsAclRunnerSmoke
 
   $manager = Join-Path $installRoot 'manage-install.ps1'
   & $manager -Rollback

@@ -21,11 +21,13 @@ interface ActiveTabResponse { ok: boolean; epoch?: string; sequence?: number; ta
 interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
 type KnowledgeServiceState = 'checking' | 'ready' | 'unauthenticated' | 'unavailable'
 type KnowledgeScopeOptions = { enabled?: boolean; remember?: boolean; action?: 'login' | 'retry' }
-interface KnowledgeScopeResponse { ok: boolean; scope?: KnowledgeScope; enabled?: boolean; remember?: boolean; serviceState?: KnowledgeServiceState; catalog?: unknown; error?: string }
+interface KnowledgeScopeResponse { ok: boolean; scope?: KnowledgeScope; enabled?: boolean; remember?: boolean; serviceState?: KnowledgeServiceState; catalog?: unknown; notice?: string; error?: string }
 type AccountAccessStatus = 'guest' | 'authenticated' | 'unavailable'
+type CompanyGatewayProtocol = 'anthropic-messages' | 'openai-completions'
 interface CompanyGatewayModel { id: string; name: string; description?: string }
 interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
-interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; checkedAt: string }
+interface CompanyGatewayCapability { protocol: CompanyGatewayProtocol; modelId: string; tools: true }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability: CompanyGatewayCapability; checkedAt: string }
 interface AccountAccessSnapshot { status: AccountAccessStatus; displayName?: string; knowledgeAccess: boolean; codeAccess: boolean; modelMode: 'manual' | 'company-pending'; gateway?: CompanyGatewayMetadata; message?: string }
 interface AccountAccessResponse { ok: boolean; snapshot?: AccountAccessSnapshot; error?: string }
 interface CompanyGatewayProbeResponse { ok: boolean; requestId?: string; gateway?: CompanyGatewayMetadata; error?: string }
@@ -165,9 +167,9 @@ function requestAccountAccess(command: 'refresh' | 'login' | 'logout'): Promise<
   })
 }
 
-function requestCompanyGatewayProbe(requestId: string, apiKey: string): Promise<CompanyGatewayProbeResponse> {
+function requestCompanyGatewayProbe(requestId: string, apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string): Promise<CompanyGatewayProbeResponse> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'company-gateway-probe/v1', requestId, apiKey }, (response: CompanyGatewayProbeResponse | undefined) => {
+    chrome.runtime.sendMessage({ type: 'company-gateway-probe/v1', requestId, apiKey, protocol, ...(requestedModelId === undefined ? {} : { requestedModelId }) }, (response: CompanyGatewayProbeResponse | undefined) => {
       const runtimeError = chrome.runtime.lastError
       resolve(runtimeError === undefined ? response ?? { ok: false, requestId, error: 'Background did not return company gateway data.' } : { ok: false, requestId, error: runtimeError.message })
     })
@@ -233,6 +235,7 @@ function App(): React.JSX.Element {
   const [targetError, setTargetError] = useState<string>()
   const [activeTab, setActiveTab] = useState<{ epoch: string; sequence: number; tab: ActiveTab }>()
   const frameRef = useRef<HTMLIFrameElement>(null)
+  const frameReadyRef = useRef(false)
   const bridgeSequenceRef = useRef(0)
   const targetSettingsRef = useRef(targetSettings)
   const availableTabsRef = useRef(availableTabs)
@@ -262,6 +265,8 @@ function App(): React.JSX.Element {
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
   const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, ...(activeHarnessSessionId === undefined ? {} : { sessionId: activeHarnessSessionId }) }), [activeHarnessSessionId, frameNonce, surface, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
+
+  useEffect(() => { frameReadyRef.current = false }, [frameNonce])
 
   useEffect(() => {
     if (surface !== 'sidepanel') return
@@ -304,7 +309,7 @@ function App(): React.JSX.Element {
   }, [connect, loadTargetSettings, sidePanelHandoff.ready])
 
   const replaySearchProgress = useCallback(() => {
-    if (frameOrigin === undefined) return
+    if (frameOrigin === undefined || !frameReadyRef.current) return
     chrome.runtime.sendMessage({ type: 'search-progress-snapshot/v1' }, (response: { ok?: boolean; progress?: unknown[] } | undefined) => {
       if (chrome.runtime.lastError !== undefined || response?.ok !== true || !Array.isArray(response.progress)) return
       for (const item of response.progress) {
@@ -365,7 +370,7 @@ function App(): React.JSX.Element {
       if (value.type === 'harness-disconnected') { void connect() }
       // Relay live selected-source search progress into the Harness iframe,
       // guarded by the same nonce as every other bridge message.
-      if (value.type === 'search-progress/v1' && typeof value.requestId === 'string' && typeof value.harnessSessionId === 'string' && (value.harnessParentSessionId === undefined || typeof value.harnessParentSessionId === 'string') && (value.tool === 'code_search' || value.tool === 'knowledge_search') && typeof value.question === 'string' && (value.phase === 'querying' || value.phase === 'streaming' || value.phase === 'done' || value.phase === 'error') && typeof value.chars === 'number' && typeof value.content === 'string' && frameOrigin !== undefined && frameRef.current?.contentWindow !== null) {
+      if (value.type === 'search-progress/v1' && typeof value.requestId === 'string' && typeof value.harnessSessionId === 'string' && (value.harnessParentSessionId === undefined || typeof value.harnessParentSessionId === 'string') && (value.tool === 'code_search' || value.tool === 'knowledge_search') && typeof value.question === 'string' && (value.phase === 'querying' || value.phase === 'streaming' || value.phase === 'done' || value.phase === 'error') && typeof value.chars === 'number' && typeof value.content === 'string' && frameOrigin !== undefined && frameReadyRef.current && frameRef.current?.contentWindow !== null) {
         searchProgressSequenceRef.current += 1
         frameRef.current?.contentWindow?.postMessage({
           type: 'search-progress/v1', nonce: frameNonce, sequence: searchProgressSequenceRef.current,
@@ -378,7 +383,7 @@ function App(): React.JSX.Element {
   }, [connect, frameNonce, frameOrigin])
 
   const sendBrowserTargetSnapshot = useCallback(() => {
-    if (frameOrigin === undefined) return
+    if (frameOrigin === undefined || !frameReadyRef.current) return
     const target = frameRef.current?.contentWindow
     if (target === null || target === undefined) return
     bridgeSequenceRef.current += 1
@@ -443,8 +448,8 @@ function App(): React.JSX.Element {
 
   useEffect(() => { accountCommandHandlerRef.current = handleAccountAccessCommand }, [handleAccountAccessCommand])
 
-  const handleCompanyGatewayProbe = useCallback(async (requestId: string, apiKey: string) => {
-    const response = await requestCompanyGatewayProbe(requestId, apiKey)
+  const handleCompanyGatewayProbe = useCallback(async (requestId: string, apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string) => {
+    const response = await requestCompanyGatewayProbe(requestId, apiKey, protocol, requestedModelId)
     if (frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
     gatewaySnapshotSequenceRef.current += 1
     frameRef.current.contentWindow.postMessage({
@@ -474,6 +479,7 @@ function App(): React.JSX.Element {
         remember: response.remember,
         serviceState,
         catalog: response.catalog ?? { domains: [], systems: [], repositories: [] },
+        ...(response.notice === undefined ? {} : { notice: response.notice }),
         ...(response.error === undefined ? {} : { error: response.error }),
       },
     }, frameOrigin)
@@ -510,7 +516,7 @@ function App(): React.JSX.Element {
   useLayoutEffect(() => {
     const onFrameMessage = (event: MessageEvent<unknown>): void => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
-      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; apiKey?: unknown }
+      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown }
       if (value.nonce !== frameNonce) return
       if (value.type === 'markdown-review-feedback-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = reviewFeedbackRef.current.get(value.deliveryId)
@@ -553,7 +559,13 @@ function App(): React.JSX.Element {
         })
         return
       }
-      if (value.type === 'browser-target-ready/v1') { commandSequenceRef.current = 0; sendBrowserTargetSnapshot(); return }
+      if (value.type === 'browser-target-ready/v1') {
+        frameReadyRef.current = true
+        commandSequenceRef.current = 0
+        sendBrowserTargetSnapshot()
+        replaySearchProgress()
+        return
+      }
       if (value.type === 'account-access-ready/v1') { accountCommandSequenceRef.current = 0; void handleAccountAccessCommand('refresh'); return }
       if (value.type === 'account-access-command/v1') {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= accountCommandSequenceRef.current || (value.command !== 'refresh' && value.command !== 'login' && value.command !== 'logout')) return
@@ -564,9 +576,11 @@ function App(): React.JSX.Element {
       if (value.type === 'company-gateway-probe-command/v1') {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= gatewayCommandSequenceRef.current
           || typeof value.requestId !== 'string' || value.requestId.length === 0 || value.requestId.length > 160
-          || typeof value.apiKey !== 'string' || value.apiKey.length === 0 || value.apiKey.length > 512 || !/^[\x21-\x7E]+$/.test(value.apiKey)) return
+          || typeof value.apiKey !== 'string' || value.apiKey.length === 0 || value.apiKey.length > 512 || !/^[\x21-\x7E]+$/.test(value.apiKey)
+          || (value.protocol !== 'anthropic-messages' && value.protocol !== 'openai-completions')
+          || (value.requestedModelId !== undefined && (typeof value.requestedModelId !== 'string' || value.requestedModelId.length === 0 || value.requestedModelId.length > 160))) return
         gatewayCommandSequenceRef.current = value.sequence
-        void handleCompanyGatewayProbe(value.requestId, value.apiKey)
+        void handleCompanyGatewayProbe(value.requestId, value.apiKey, value.protocol, value.requestedModelId as string | undefined)
         return
       }
       if (value.type === 'knowledge-scope-command/v1') {
@@ -582,12 +596,12 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
+  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (
       <section className="harness-frame-shell">
-        <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="ACCRUI Web UI" allow="clipboard-read; clipboard-write" onLoad={() => { sendBrowserTargetSnapshot(); replaySearchProgress() }} />
+        <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="ACCRUI Web UI" allow="clipboard-read; clipboard-write" />
         {surface === 'fullscreen-tab' && <button
           className="fullscreen-collapse"
           type="button"

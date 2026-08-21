@@ -17,12 +17,22 @@ function quota(value) {
     && ['daily', 'weekly', 'monthly', 'unlimited'].includes(value.resetCycle)
 }
 
+function capability(value) {
+  if (value === undefined) return true
+  return value !== null && typeof value === 'object'
+    && (value.protocol === 'anthropic-messages' || value.protocol === 'openai-completions')
+    && typeof value.modelId === 'string' && value.modelId.length > 0 && value.modelId.length <= 160
+    && value.tools === true
+    && (value.verifiedAt === undefined || typeof value.verifiedAt === 'string')
+}
+
 function gateway(value) {
   return value !== null && typeof value === 'object' && typeof value.checkedAt === 'string'
     && value.apiKey === undefined
     && Array.isArray(value.models) && value.models.length <= 200
     && value.models.every(model => model !== null && typeof model === 'object' && typeof model.id === 'string' && typeof model.name === 'string' && (model.description === undefined || typeof model.description === 'string'))
     && quota(value.quota)
+    && capability(value.capability)
 }
 
 function gatewayProbe(value) {
@@ -64,10 +74,12 @@ export function createAccountAccessProtocol({ createStore, nonce, parentOrigin }
       parent.postMessage({ type: 'account-access-command/v1', nonce, sequence: outgoing, command }, parentOrigin)
       return true
     },
-    probeGateway(apiKey, parent) {
+    probeGateway(apiKey, protocol, requestedModelId, parent) {
+      if (protocol !== 'anthropic-messages' && protocol !== 'openai-completions') throw new Error('Unsupported company gateway protocol.')
+      if (requestedModelId !== undefined && (typeof requestedModelId !== 'string' || requestedModelId.trim().length === 0 || requestedModelId.length > 160)) throw new Error('Invalid company gateway model.')
       gatewayOutgoing += 1
       const requestId = crypto.randomUUID()
-      parent.postMessage({ type: 'company-gateway-probe-command/v1', nonce, sequence: gatewayOutgoing, requestId, apiKey }, parentOrigin)
+      parent.postMessage({ type: 'company-gateway-probe-command/v1', nonce, sequence: gatewayOutgoing, requestId, apiKey, protocol, ...(requestedModelId === undefined ? {} : { requestedModelId: requestedModelId.trim() }) }, parentOrigin)
       return requestId
     },
   }
