@@ -15,15 +15,26 @@ function cookieMatchesUrl(cookie, rawUrl) {
 
 async function accountBackground(cookies, {
   remove = undefined,
-  fetch = async () => new Response(JSON.stringify({ code: '0' }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  pageLogout = undefined,
+  logoutNavigationTimeoutMs = undefined,
 } = {}) {
   const end = source.lastIndexOf('\nexport default defineBackground')
   assert.notEqual(end, -1, 'account adapter source must remain before background bootstrap')
   const adapterSource = `${source.slice(0, end)}\nexport { locallySignOutAccount, companyBrowserAuthentication }\n`
   const compiled = ts.transpileModule(adapterSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   const local = {}
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = fetch
+  const portalTab = { id: 42, active: true, url: 'https://wb-uat.annto.com/index' }
+  const executions = []
+  const navigationListeners = new Set()
+  const emitNavigation = (url) => {
+    for (const listener of navigationListeners) listener({ tabId: portalTab.id, frameId: 0, url })
+  }
+  const pageLogoutHandler = pageLogout ?? (async (request) => {
+    emitNavigation(request.args[0])
+    return { ok: true }
+  })
+  globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION = emitNavigation
+  if (logoutNavigationTimeoutMs !== undefined) globalThis.__ACCRUI_COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS = logoutNavigationTimeoutMs
   globalThis.chrome = {
     storage: {
       local: {
@@ -45,13 +56,27 @@ async function accountBackground(cookies, {
         return { name: removed.name, domain: removed.domain, path: removed.path, storeId: removed.storeId }
       },
     },
+    tabs: {
+      query: async () => [portalTab],
+    },
+    scripting: {
+      executeScript: async (request) => {
+        executions.push(request)
+        return [{ result: await pageLogoutHandler(request) }]
+      },
+    },
+    webNavigation: {
+      onCommitted: { addListener: (listener) => navigationListeners.add(listener), removeListener: (listener) => navigationListeners.delete(listener) },
+    },
   }
   const module = await import(`data:text/javascript,${encodeURIComponent(compiled)}#account-access-${Date.now()}`)
   return {
     logout: module.locallySignOutAccount,
     isAuthenticated: module.companyBrowserAuthentication,
+    executions,
     cleanup: () => {
-      globalThis.fetch = originalFetch
+      delete globalThis.__ACCRUI_COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS
+      delete globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION
       delete globalThis.chrome
     },
   }
@@ -81,85 +106,100 @@ test('logout removes every company authentication cookie before reporting guest 
 test('logout invalidates the portal session before reporting guest mode', async () => {
   const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
   let portalSessionAuthenticated = true
-  const requests = []
-  const background = await accountBackground(cookies, { fetch: async (url, init) => {
-    requests.push({ url: String(url), init })
-    if (url === 'https://wb-uat.annto.com/api-auth/ssoLogout') {
-      portalSessionAuthenticated = false
-      return new Response(JSON.stringify({ code: '0' }), { status: 200, headers: { 'content-type': 'application/json' } })
-    }
-    if (url === 'http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com/index') {
-      return new Response(null, { status: 204 })
-    }
-    throw new Error(`unexpected logout request: ${url}`)
+  const background = await accountBackground(cookies, { pageLogout: async () => {
+    portalSessionAuthenticated = false
+    globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION('http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com')
+    return { ok: true }
   } })
   try {
     const snapshot = await background.logout()
     assert.equal(portalSessionAuthenticated, false, 'portal must not remain authenticated after the side panel becomes guest')
     assert.equal(snapshot.status, 'guest')
-    assert.deepEqual(requests[0], {
-      url: 'https://wb-uat.annto.com/api-auth/ssoLogout',
-      init: { method: 'GET', credentials: 'include', redirect: 'manual' },
+    assert.deepEqual(background.executions[0], {
+      target: { tabId: 42 },
+      world: 'MAIN',
+      func: background.executions[0].func,
+      args: ['http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'],
     })
   } finally {
     background.cleanup()
   }
 })
 
-test('logout completes the portal single-sign-on logout before clearing local credentials', async () => {
+test('logout runs the portal-owned logout contract with the exact single-sign-on return service', async () => {
   const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
-  const requests = []
-  const background = await accountBackground(cookies, { fetch: async (url, init) => {
-    requests.push({ url: String(url), init })
-    if (url === 'https://wb-uat.annto.com/api-auth/ssoLogout') {
-      return new Response(JSON.stringify({ code: '0' }), { status: 200, headers: { 'content-type': 'application/json' } })
-    }
-    if (url === 'http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com/index') {
-      return new Response(null, { status: 204 })
-    }
-    throw new Error(`unexpected logout request: ${url}`)
-  } })
+  const background = await accountBackground(cookies)
   try {
     await background.logout()
-    assert.deepEqual(requests.map(({ url, init }) => ({ url, init })), [
-      {
-        url: 'https://wb-uat.annto.com/api-auth/ssoLogout',
-        init: { method: 'GET', credentials: 'include', redirect: 'manual' },
-      },
-      {
-        url: 'http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com/index',
-        init: { method: 'GET', credentials: 'include', redirect: 'manual' },
-      },
-    ])
+    assert.equal(background.executions[0].world, 'MAIN')
+    assert.equal(background.executions[0].func.name, 'logoutCompanyPortalInPage')
+    assert.deepEqual(background.executions[0].args, ['http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'])
   } finally {
+    background.cleanup()
+  }
+})
+
+test('logout performs the authenticated request in the portal main world and then navigates top-level to SSO logout', () => {
+  assert.match(source, /async function logoutCompanyPortalInPage[\s\S]*fetch\('\/api-auth\/ssoLogout', \{[\s\S]*credentials: 'include'/)
+  assert.match(source, /logoutCompanyPortalInPage[\s\S]*window\.location\.assign\(singleSignOnLogoutUrl\)/)
+})
+
+test('logout waits for the same tab to commit the single-sign-on navigation before reporting guest mode', async () => {
+  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
+  const background = await accountBackground(cookies, { pageLogout: async () => ({ ok: true }), logoutNavigationTimeoutMs: 0 })
+  try {
+    await assert.rejects(background.logout(), /公司账号退出失败：统一登录状态未退出（统一登录退出跳转未发生/)
+    assert.equal(await background.isAuthenticated(), true, 'an unobserved SSO redirect must not turn the side panel into guest mode')
+    assert.equal(cookies.length, 1, 'local authentication cookies must remain when the SSO redirect does not commit')
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('injected page logout requires a confirmed response before navigating to single-sign-on logout', async () => {
+  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const navigations = []
+  globalThis.window = { location: { assign: (url) => { navigations.push(url); globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION(url) } } }
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ code: '0' }) })
+  const background = await accountBackground(cookies, { pageLogout: async (request) => request.func(...request.args) })
+  try {
+    await background.logout()
+    assert.deepEqual(navigations, ['http://signinuat.midea.com/logout?service=https://signinuat.midea.com/?service=https://wb-uat.annto.com'])
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+    background.cleanup()
+  }
+})
+
+test('injected page logout does not navigate when the portal does not confirm logout', async () => {
+  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const navigations = []
+  globalThis.window = { location: { assign: (url) => navigations.push(url) } }
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ code: '1' }) })
+  const background = await accountBackground(cookies, { pageLogout: async (request) => request.func(...request.args) })
+  try {
+    await assert.rejects(background.logout(), /公司账号退出失败：门户会话未退出（服务未确认退出/)
+    assert.deepEqual(navigations, [])
+    assert.equal(await background.isAuthenticated(), true)
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
     background.cleanup()
   }
 })
 
 test('logout preserves the authenticated state when portal session invalidation fails', async () => {
   const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
-  const background = await accountBackground(cookies, { fetch: async () => { throw new Error('network unavailable') } })
+  const background = await accountBackground(cookies, { pageLogout: async () => ({ ok: false, error: 'network unavailable' }) })
   try {
     await assert.rejects(background.logout(), /公司账号退出失败：门户会话未退出/)
     assert.equal(await background.isAuthenticated(), true, 'a failed portal logout must not turn the side panel into guest mode')
     assert.equal(cookies.length, 1, 'local authentication cookies must remain for a retry after portal logout fails')
-  } finally {
-    background.cleanup()
-  }
-})
-
-test('logout preserves the authenticated state when single-sign-on invalidation fails', async () => {
-  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
-  const background = await accountBackground(cookies, { fetch: async (url) => {
-    if (url === 'https://wb-uat.annto.com/api-auth/ssoLogout') {
-      return new Response(JSON.stringify({ code: '0' }), { status: 200, headers: { 'content-type': 'application/json' } })
-    }
-    throw new Error('single-sign-on unavailable')
-  } })
-  try {
-    await assert.rejects(background.logout(), /公司账号退出失败：统一登录状态未退出/)
-    assert.equal(await background.isAuthenticated(), true, 'a failed single-sign-on logout must not turn the side panel into guest mode')
-    assert.equal(cookies.length, 1, 'local authentication cookies must remain for a retry after single-sign-on logout fails')
   } finally {
     background.cleanup()
   }

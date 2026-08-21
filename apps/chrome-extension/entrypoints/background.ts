@@ -13,10 +13,11 @@ const KNOWLEDGE_LOGIN_URL = 'https://wb-uat.annto.com/'
 const ACCOUNT_LOCAL_SIGN_OUT_STORAGE_KEY = 'harnessAccountLocalSignOutV1'
 const ACCOUNT_AUTH_COOKIE_NAMES = new Set(['MAS_TGC_UAT', 'midea_auth_uat', 'OAM_ID'])
 const ACCOUNT_AUTH_COOKIE_DOMAIN = 'annto.com'
-const COMPANY_PORTAL_LOGOUT_URL = 'https://wb-uat.annto.com/api-auth/ssoLogout'
-const COMPANY_PORTAL_RETURN_URL = 'https://wb-uat.annto.com/index'
+const COMPANY_PORTAL_TAB_URL_PATTERN = 'https://wb-uat.annto.com/*'
+const COMPANY_PORTAL_RETURN_URL = 'https://wb-uat.annto.com'
 const COMPANY_SSO_LOGIN_URL = `https://signinuat.midea.com/?service=${encodeURI(COMPANY_PORTAL_RETURN_URL)}`
 const COMPANY_SSO_LOGOUT_URL = `http://signinuat.midea.com/logout?service=${encodeURI(COMPANY_SSO_LOGIN_URL)}`
+const COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS = 15_000
 const COMPANY_GATEWAY_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-anthropic/v1`
 const COMPANY_GATEWAY_METADATA_STORAGE_KEY = 'harnessCompanyGatewayMetadataV1'
 const COMPANY_GATEWAY_TIMEOUT_MS = 15_000
@@ -1243,44 +1244,82 @@ function companyAuthenticationCookieDescription(cookie: chrome.cookies.Cookie): 
   return `${cookie.name} @ ${cookie.domain}${cookie.path}`
 }
 
-async function invalidateCompanyPortalSession(): Promise<void> {
-  let response: Response
+type CompanyPortalLogoutResult = { ok: boolean; error?: string }
+
+function companyLogoutNavigationTimeoutMs(): number {
+  const value = (globalThis as { __ACCRUI_COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS?: unknown }).__ACCRUI_COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS
+}
+
+function waitForCompanySingleSignOnNavigation(tabId: number): { done: Promise<void>; cancel: () => void } {
+  let cancel = () => {}
+  const done = new Promise<void>((resolve, reject) => {
+    let settled = false
+    const cleanup = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      chrome.webNavigation.onCommitted.removeListener(listener)
+    }
+    const succeed = () => { cleanup(); resolve() }
+    const fail = (error: Error) => { cleanup(); reject(error) }
+    const listener = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
+      if (details.tabId !== tabId || details.frameId !== 0) return
+      try {
+        const url = new URL(details.url)
+        if (url.hostname === 'signinuat.midea.com' && (url.pathname === '/logout' || url.pathname === '/')) succeed()
+      } catch { /* unrelated malformed navigation detail */ }
+    }
+    const timer = setTimeout(() => fail(new Error('统一登录退出跳转未发生，请保留安得工作台页面后重试。')), companyLogoutNavigationTimeoutMs())
+    cancel = cleanup
+    chrome.webNavigation.onCommitted.addListener(listener)
+  })
+  return { done, cancel }
+}
+
+async function logoutCompanyPortalInPage(singleSignOnLogoutUrl: string): Promise<CompanyPortalLogoutResult> {
   try {
-    response = await fetch(COMPANY_PORTAL_LOGOUT_URL, {
+    const response = await fetch('/api-auth/ssoLogout', {
       method: 'GET',
       credentials: 'include',
-      redirect: 'manual',
     })
+    if (!response.ok) return { ok: false, error: `HTTP ${response.status}` }
+    const payload: unknown = await response.json()
+    if (typeof payload !== 'object' || payload === null || !('code' in payload) || (payload.code !== '0' && payload.code !== 0)) {
+      return { ok: false, error: '服务未确认退出' }
+    }
+    window.location.assign(singleSignOnLogoutUrl)
+    return { ok: true }
   } catch (error) {
-    throw new Error(`公司账号退出失败：门户会话未退出（${asError(error)}）。`)
-  }
-  if (!response.ok) {
-    throw new Error(`公司账号退出失败：门户会话未退出（HTTP ${response.status}）。`)
-  }
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch {
-    throw new Error('公司账号退出失败：门户会话未退出（服务未返回有效结果）。')
-  }
-  if (typeof payload !== 'object' || payload === null || !('code' in payload) || (payload.code !== '0' && payload.code !== 0)) {
-    throw new Error('公司账号退出失败：门户会话未退出（服务未确认退出）。')
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }
 }
 
-async function invalidateCompanySingleSignOnSession(): Promise<void> {
-  let response: Response
+async function invalidateCompanyPortalSession(): Promise<void> {
+  const tabs = await chrome.tabs.query({ url: [COMPANY_PORTAL_TAB_URL_PATTERN] })
+  const tab = tabs.find((candidate) => candidate.active) ?? tabs[0]
+  if (tab?.id === undefined) throw new Error('公司账号退出失败：请先打开已登录的安得工作台页面。')
+  const navigation = waitForCompanySingleSignOnNavigation(tab.id)
+  let result: CompanyPortalLogoutResult | undefined
   try {
-    response = await fetch(COMPANY_SSO_LOGOUT_URL, {
-      method: 'GET',
-      credentials: 'include',
-      redirect: 'manual',
-    })
+    result = (await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: logoutCompanyPortalInPage,
+      args: [COMPANY_SSO_LOGOUT_URL],
+    }))[0]?.result as CompanyPortalLogoutResult | undefined
+  } catch (error) {
+    navigation.cancel()
+    throw new Error(`公司账号退出失败：门户会话未退出（${asError(error)}）。`)
+  }
+  if (result?.ok !== true) {
+    navigation.cancel()
+    throw new Error(`公司账号退出失败：门户会话未退出（${result?.error ?? '页面未确认退出'}）。`)
+  }
+  try {
+    await navigation.done
   } catch (error) {
     throw new Error(`公司账号退出失败：统一登录状态未退出（${asError(error)}）。`)
-  }
-  if (response.type !== 'opaqueredirect' && !response.ok) {
-    throw new Error(`公司账号退出失败：统一登录状态未退出（HTTP ${response.status}）。`)
   }
 }
 
@@ -1348,7 +1387,6 @@ async function assertAccountAccessForProtectedSource(): Promise<void> {
 
 async function locallySignOutAccount(): Promise<AccountAccessSnapshot> {
   await invalidateCompanyPortalSession()
-  await invalidateCompanySingleSignOnSession()
   await clearCompanyAuthenticationCookies()
   await setAccountLocallySignedOut(true)
   knowledgeCatalogCache = undefined
