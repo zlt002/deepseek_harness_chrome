@@ -13,6 +13,11 @@ test('returns the Harness Web URL for repeated start requests and exits on close
   let starts = 0
   let stops = 0
   const exited = []
+  const runtimeIdentity = {
+    format: 'accrui-harness-runtime-identity-v1', upstreamRevision: 'a'.repeat(40),
+    productHash: 'b'.repeat(64), assetHash: 'c'.repeat(64), assetFileCount: 3,
+    pluginHash: 'd'.repeat(64), pluginFileCount: 2, bootEntries: ['@accrui/example'], productBootEntries: ['@accrui/example'],
+  }
   const host = new NativeHost({
     processFactory: () => ({
       start: async () => {
@@ -22,6 +27,7 @@ test('returns the Harness Web URL for repeated start requests and exits on close
       stop: async () => { stops += 1 },
     }),
     exit: (code) => exited.push(code),
+    runtimeIdentity,
   })
   const messages = []
   host.send = (message) => messages.push(message)
@@ -33,6 +39,7 @@ test('returns the Harness Web URL for repeated start requests and exits on close
     assert.equal(messages[0].type, 'server_started')
     assert.equal(messages[0].payload.url, harnessUrl)
     assert.equal(typeof messages[0].payload.runId, 'string')
+    assert.deepEqual(messages[0].payload.runtimeIdentity, runtimeIdentity)
     assert.equal(messages[1].payload.url, harnessUrl)
   } finally {
     await host.close('stop requested')

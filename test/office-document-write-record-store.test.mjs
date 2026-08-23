@@ -34,3 +34,19 @@ test('reopening a pending record atomically marks it uncertain and never grants 
     assert.equal((await reopened.load('pending-1')).state, 'uncertain')
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
+
+test('only a pending checkpoint can be discarded after a peer-attested pre-mutation rejection', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-office-document-store-'))
+  const recordPath = join(directory, 'writes.json')
+  const input = { idempotencyIdentity: 'preflight-1', targetFingerprint: 'target', resourceFingerprint: 'resource', operation: 'replace', payloadHash: 'payload' }
+  try {
+    const store = new OfficeDocumentWriteRecordStore({ recordPath })
+    await store.create(input)
+    assert.equal(await store.discardPending('preflight-1'), true)
+    assert.equal(await store.load('preflight-1'), null)
+    await store.create(input)
+    await store.setState('preflight-1', 'uncertain')
+    assert.equal(await store.discardPending('preflight-1'), false)
+    assert.equal((await store.load('preflight-1')).state, 'uncertain')
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})

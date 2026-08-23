@@ -5,6 +5,8 @@ import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { HarnessWebProcess } from '../apps/native-server/src/harness-process.mjs'
+import { PRODUCT_UI_PLUGIN_DIRECTORIES, PRODUCT_UI_PLUGIN_PACKAGE_NAMES } from '../apps/native-server/src/product-plugin-manifest.mjs'
+import { createRuntimeIdentity } from './runtime-identity.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const generatedHarness = join(projectRoot, '.generated', 'harness-product')
@@ -141,5 +143,13 @@ await mkdir(join(outputRoot, 'harness'), { recursive: true })
 await writeFile(join(outputRoot, 'harness/boot.js'), `window.__DSH_BOOT__ = ${manifestMatch[1]};\n`, 'utf8')
 await writeFile(join(outputRoot, 'harness/theme.js'), `${themeMatch[1]}\n`, 'utf8')
 await writeFile(join(outputRoot, 'harness/index.html'), extensionIndex, 'utf8')
+const runtimeIdentity = await createRuntimeIdentity({
+  harnessRoot,
+  bootEntries: boot.entries,
+  productBootEntries: PRODUCT_UI_PLUGIN_PACKAGE_NAMES,
+  assetRoots: [join(outputRoot, 'assets'), join(outputRoot, 'plugins'), join(outputRoot, 'harness')],
+  pluginRoots: PRODUCT_UI_PLUGIN_DIRECTORIES.map((directory) => join(projectRoot, 'packages', directory, 'lib')),
+})
+await writeFile(join(outputRoot, 'harness/runtime-manifest.json'), `${JSON.stringify(runtimeIdentity, null, 2)}\n`, 'utf8')
 
-console.log(`Synced ${boot.entries.length} Harness client bundles into ${pathToFileURL(outputRoot).pathname}`)
+console.log(`Synced ${boot.entries.length} Harness client bundles into ${pathToFileURL(outputRoot).pathname} (${runtimeIdentity.assetHash.slice(0, 12)})`)

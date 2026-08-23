@@ -12,6 +12,7 @@ import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promi
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
+import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -26,22 +27,7 @@ export const STATIC_REGISTRY_PACKAGE_OVERRIDES = [
   '@deepseek-ai/dsh-client-ui-browser-target',
   '@deepseek-ai/dsh-client-ui-knowledge-scope',
 ]
-export const PRODUCT_UI_PACKAGE_NAMES = [
-  'harness-ui-agent-preset',
-  'harness-ui-browser-target',
-  'harness-ui-conversation-shell',
-  'harness-ui-message-annotations',
-  'harness-ui-responsive-sidebar',
-  'harness-ui-workspace-picker',
-  'harness-ui-account-access',
-  'harness-ui-knowledge-scope',
-  'harness-ui-subagent-compact',
-  'harness-ui-session-log-copy',
-  'harness-ui-settings-shell',
-  'harness-ui-document-intake',
-  'harness-ui-workspace-review',
-  'harness-skill-settings',
-]
+export const PRODUCT_UI_PACKAGE_NAMES = [...PRODUCT_UI_PLUGIN_DIRECTORIES]
 export const PRODUCT_UI_PLUGIN_PACKAGES = PRODUCT_UI_PACKAGE_NAMES.map(name => `@accrui/${name}`)
 export const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
   '@deepseek-ai/dsh-host-directory-picker-native',

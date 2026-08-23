@@ -39,6 +39,7 @@ export type BrowserTargetCommand =
   | { command: 'set-mode'; mode: BrowserTargetMode }
   | { command: 'toggle-pinned-tab'; tabId: number; checked: boolean }
   | { command: 'set-primary'; tabId: number }
+  | { command: 'capture-design-reference'; tabId: number; sessionId?: string }
 
 interface BrowserTargetSnapshotMessage extends BrowserTargetSnapshot {
   type: 'browser-target-snapshot/v1'

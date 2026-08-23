@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { extensionIdsFromManifest, extensionIdsFromManifests, harnessBuildSteps, isGracefulProcessTermination, processTree } from '../scripts/restart-dev.mjs'
+import { devServerCommand, extensionIdsFromManifest, extensionIdsFromManifests, harnessBuildSteps, isGracefulProcessTermination, processTree } from '../scripts/restart-dev.mjs'
+
+test('fast refresh reuses its completed plugin and asset build when starting WXT', () => {
+  assert.deepEqual(devServerCommand(true), { command: 'pnpm', args: ['--dir', 'apps/chrome-extension', 'run', 'dev'] })
+  assert.deepEqual(devServerCommand(false), { command: 'pnpm', args: ['dev'] })
+})
 
 test('builds the Harness Web app when restart finds its dist missing', () => {
   assert.deepEqual(harnessBuildSteps({ skipHarnessBuild: false, webDistExists: false }), [

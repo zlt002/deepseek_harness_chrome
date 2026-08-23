@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -55,4 +55,86 @@ test('returns a bounded read-only snapshot while fingerprinting the admitted fil
   assert.equal(snapshot.truncated, true)
   assert.equal(Buffer.byteLength(snapshot.content), MAX_SNAPSHOT_BYTES)
   assert.equal(snapshot.resource.fingerprint.length, 64)
+})
+
+test('registers a fingerprint-bound selection and queues a session-bound visual proposal', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  const selection = await runtime.registerSelection(opened.reviewId, opened.capability, {
+    id: 'selection-1', startUtf16: 7, endUtf16: 14, quote: 'content', prefix: '# Safe\n', suffix: '', sourceFingerprint: opened.fingerprint,
+  })
+  assert.equal(selection.quote, 'content')
+  await assert.rejects(runtime.proposeEdit('session-b', opened.reviewId, selection.id, 'better'), /calling Harness session/)
+  const queued = await runtime.proposeEdit('session-a', opened.reviewId, selection.id, '**better**', 'Improve the sentence')
+  assert.equal(queued.status, 'queued')
+  const proposals = runtime.proposals(opened.reviewId, opened.capability, 0)
+  assert.equal(proposals.proposals.length, 1)
+  assert.equal(proposals.proposals[0].kind, 'document')
+  assert.equal(proposals.proposals[0].candidateMarkdown, '# Safe\n**better**')
+  assert.equal(runtime.proposals(opened.reviewId, opened.capability, proposals.proposals[0].sequence).proposals.length, 0)
+})
+
+test('queues visual draft selections without pretending ProseMirror positions are Markdown offsets', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  await runtime.registerSelection(opened.reviewId, opened.capability, {
+    id: 'visual-1', version: 2, editorRevision: 3, from: 2, to: 18, quote: 'Safe\ncontent',
+    blocks: [{ kind: 'heading', text: 'Safe' }, { kind: 'paragraph', text: 'content' }], sourceFingerprint: opened.fingerprint,
+  })
+  await runtime.proposeEdit('session-a', opened.reviewId, 'visual-1', '# Better\n\nNew paragraph', 'Rewrite selected blocks')
+  const proposal = runtime.proposals(opened.reviewId, opened.capability, 0).proposals[0]
+  assert.deepEqual({ kind: proposal.kind, editorRevision: proposal.editorRevision, from: proposal.from, to: proposal.to }, { kind: 'selection', editorRevision: 3, from: 2, to: 18 })
+  assert.equal(proposal.replacementMarkdown, '# Better\n\nNew paragraph')
+  assert.equal('candidateMarkdown' in proposal, false)
+})
+
+test('refuses stale selection proposals after the workspace file changes', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  await runtime.registerSelection(opened.reviewId, opened.capability, {
+    id: 'selection-1', startUtf16: 7, endUtf16: 14, quote: 'content', prefix: '# Safe\n', suffix: '', sourceFingerprint: opened.fingerprint,
+  })
+  await writeFile(join(root, 'README.md'), '# Safe\nexternal')
+  await assert.rejects(runtime.proposeEdit('session-a', opened.reviewId, 'selection-1', 'better'), /changed after the selection/)
+})
+
+test('writes only through a one-time approval and verifies same-resource readback', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  const prepared = await runtime.prepareWrite(opened.reviewId, opened.capability, {
+    resourceId: opened.resourceId, revision: opened.revision, fingerprint: opened.fingerprint,
+  }, '# Safe\nbetter')
+  assert.equal(prepared.status, 'prepared')
+  const result = await runtime.commitWrite(opened.reviewId, opened.capability, prepared.approval, 'write-1', '# Safe\nbetter')
+  assert.equal(result.status, 'verified_write')
+  assert.equal(await readFile(join(root, 'README.md'), 'utf8'), '# Safe\nbetter')
+  const replay = await runtime.commitWrite(opened.reviewId, opened.capability, prepared.approval, 'write-1', '# Safe\nbetter')
+  assert.deepEqual(replay, result)
+  await assert.rejects(runtime.commitWrite(opened.reviewId, opened.capability, prepared.approval, 'write-2', '# Safe\nother'), /approval/)
+})
+
+test('prepare and commit report conflicts instead of overwriting external changes', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  await writeFile(join(root, 'README.md'), '# Safe\nexternal')
+  const conflict = await runtime.prepareWrite(opened.reviewId, opened.capability, {
+    resourceId: opened.resourceId, revision: opened.revision, fingerprint: opened.fingerprint,
+  }, '# Safe\nours')
+  assert.equal(conflict.status, 'conflict')
+  assert.equal(conflict.latest.content, '# Safe\nexternal')
+  assert.equal(await readFile(join(root, 'README.md'), 'utf8'), '# Safe\nexternal')
+})
+
+test('concurrent retries with one idempotency key share one verified result', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  const prepared = await runtime.prepareWrite(opened.reviewId, opened.capability, {
+    resourceId: opened.resourceId, revision: opened.revision, fingerprint: opened.fingerprint,
+  }, '# Safe\nconcurrent')
+  const [first, second] = await Promise.all([
+    runtime.commitWrite(opened.reviewId, opened.capability, prepared.approval, 'same-write', '# Safe\nconcurrent'),
+    runtime.commitWrite(opened.reviewId, opened.capability, prepared.approval, 'same-write', '# Safe\nconcurrent'),
+  ])
+  assert.deepEqual(second, first)
+  assert.equal(first.status, 'verified_write')
 })

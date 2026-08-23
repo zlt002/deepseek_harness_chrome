@@ -115,8 +115,15 @@ async function waitForDevServer(child, timeoutMs = 60_000) {
   throw new Error('Timed out waiting for the WXT dev server on 127.0.0.1:3001.')
 }
 
-function startDevServer() {
-  const child = spawn('pnpm', ['dev'], { cwd: projectRoot, stdio: 'inherit' })
+export function devServerCommand(skipExtensionPrebuild = false) {
+  return skipExtensionPrebuild
+    ? { command: 'pnpm', args: ['--dir', 'apps/chrome-extension', 'run', 'dev'] }
+    : { command: 'pnpm', args: ['dev'] }
+}
+
+function startDevServer(skipExtensionPrebuild = false) {
+  const launch = devServerCommand(skipExtensionPrebuild)
+  const child = spawn(launch.command, launch.args, { cwd: projectRoot, stdio: 'inherit' })
   const closed = new Promise((resolvePromise, reject) => {
     child.once('error', reject)
     child.once('close', (code, signal) => {
@@ -165,6 +172,7 @@ export async function stopInstalledHost(installRoot) {
 
 export async function main(args = process.argv.slice(2)) {
   const skipHarnessBuild = args.includes('--skip-harness-build')
+  const skipExtensionPrebuild = args.includes('--skip-extension-prebuild')
   const { installRoot, extensionIds } = await installedPaths()
 
   if (!explicitHarnessRoot && !explicitHarnessCli && !existsSync(join(generatedHarnessRoot, '.harness-product.json'))) {
@@ -198,7 +206,7 @@ export async function main(args = process.argv.slice(2)) {
     console.log('3/4 WXT dev server is already running on 127.0.0.1:3001.')
   } else {
     console.log('3/4 Starting the WXT dev server on 127.0.0.1:3001...')
-    ownedDevServer = startDevServer()
+    ownedDevServer = startDevServer(skipExtensionPrebuild)
     await waitForDevServer(ownedDevServer.child)
   }
 

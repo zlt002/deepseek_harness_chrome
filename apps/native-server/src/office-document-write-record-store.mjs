@@ -73,4 +73,16 @@ export class OfficeDocumentWriteRecordStore {
       const next = normalize({ ...current, state, updatedAt: this.now().toISOString() }); data.writes[idempotencyIdentity] = next; await this.#write(data); return clone(next)
     })
   }
+  /** A peer-attested pre-mutation rejection did not dispatch a write.  Only
+   * discard the still-pending checkpoint; uncertain and verified records must
+   * remain fences across retries and process restarts. */
+  async discardPending(idempotencyIdentity) {
+    return this.#serial(async () => {
+      const data = await this.#read(); const current = data.writes?.[idempotencyIdentity]
+      if (!current || current.state !== 'pending') return false
+      delete data.writes[idempotencyIdentity]
+      await this.#write(data)
+      return true
+    })
+  }
 }

@@ -56,4 +56,4 @@ console.log('4/4 Restarting WXT and Native Host...')
 // Releasing port 3001 guarantees that the next dev boot copies the freshly
 // synchronized Harness assets instead of leaving an old iframe bundle served.
 await run(process.execPath, ['scripts/prepare-dev-port.mjs'])
-await run('pnpm', ['run', 'dev:restart', '--', '--skip-harness-build'])
+await run('pnpm', ['run', 'dev:restart', '--', '--skip-harness-build', '--skip-extension-prebuild'])

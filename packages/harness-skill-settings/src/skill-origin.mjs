@@ -35,4 +35,5 @@ export function assertStateModes(modes, systemNames, legacyModes = {}) {
   }
 }
 
-export function statePermissions(origin) { return { stateEditable: origin !== 'system', deletable: origin === 'installed' } }
+/** Deletion capability is Host-computed from a live source record, never from origin. */
+export function statePermissions(origin) { return { stateEditable: origin !== 'system' } }

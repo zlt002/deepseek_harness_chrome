@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import ts from 'typescript'
+import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
 const READ_RESULT = { status: 'ok', resource: { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: 'Budget', fingerprint: 'doc-1' }, document: { blockCount: 1 } }
 
 async function compileBackground() {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  return ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+  return bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
 }
 
 const DEFAULT_FRAMES = [

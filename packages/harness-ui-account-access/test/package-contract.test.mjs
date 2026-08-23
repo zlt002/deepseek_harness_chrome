@@ -94,15 +94,15 @@ test('account, gateway, and onboarding styles use the settings design tokens', a
   assert.match(css, /:focus-visible[^}]*box-shadow: 0 0 0 2px var\(--dsw-alias-border-l3\)/)
 })
 
-test('is registered in every product plugin manifest', async () => {
-  const files = await Promise.all([
-    source('../../scripts/register-native-host.mjs'),
-    source('../../scripts/build-harness-client-plugins.mjs'),
-    source('../../apps/native-server/src/harness-process.mjs'),
+test('is registered in the product plugin manifest and release closure', async () => {
+  const [productPluginManifest, macRelease, windowsRelease, productUiSmoke] = await Promise.all([
+    source('../../apps/native-server/src/product-plugin-manifest.mjs'),
     source('../../release/mac-lite/build-mac-production.mjs'),
     source('../../release/windows-lite/windows-release.mjs'),
     source('../../release/windows-lite/product-ui-smoke.mjs'),
-    source('../../package.json'),
   ])
-  for (const contents of files) assert.match(contents, /harness-ui-account-access/)
+  assert.match(productPluginManifest, /harness-ui-account-access/)
+  assert.match(macRelease, /PRODUCT_UI_PLUGIN_DIRECTORIES/)
+  assert.match(windowsRelease, /PRODUCT_UI_PLUGIN_DIRECTORIES/)
+  assert.match(productUiSmoke, /PRODUCT_UI_PLUGIN_PACKAGE_NAMES/)
 })

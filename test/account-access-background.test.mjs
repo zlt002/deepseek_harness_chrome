@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFile } from 'node:fs/promises'
-import ts from 'typescript'
+import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
 const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
 
@@ -21,7 +21,7 @@ async function accountBackground(cookies, {
   const end = source.lastIndexOf('\nexport default defineBackground')
   assert.notEqual(end, -1, 'account adapter source must remain before background bootstrap')
   const adapterSource = `${source.slice(0, end)}\nexport { locallySignOutAccount, companyBrowserAuthentication }\n`
-  const compiled = ts.transpileModule(adapterSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+  const compiled = await bundleTypescript(adapterSource, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   const local = {}
   const portalTab = { id: 42, active: true, url: 'https://wb-uat.annto.com/index' }
   const executions = []

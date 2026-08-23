@@ -11,7 +11,7 @@ index 9714831..86a436e 100644
  import { InputBar } from './skeleton/InputBar.tsx'
  import { EnterBehaviorRow } from './settings/EnterBehaviorRow.tsx'
 @@ -185,7 +186,9 @@ export function apply(ctx: Context): void {
- 
+
    // The per-session input machine registry (SessionInputResolver face; published as
    // ctx.conversation.input by the service below sharing this one instance).
 -  const inputHub = new InputHub(ctx, t)
@@ -21,6 +21,27 @@ index 9714831..86a436e 100644
  
    // The composer-block registry: a plugin that knows a session cannot send —
    // ui-model-selection, when no adapter serves the session's route — raises a block
+@@ -326,7 +329,12 @@ export function apply(ctx: Context): void {
+           toggleCommandMenu: undefined,
+           stop: undefined,
+           command: undefined,
+-          hooks: { notices: ABSENT_NOTICES, lexicon: ABSENT_LEXICON, menuLauncher: ABSENT_MENU_LAUNCHER },
++          hooks: {
++            notices: ABSENT_NOTICES,
++            emptySubmission: { getSnapshot: () => false, subscribe: () => () => {} },
++            lexicon: ABSENT_LEXICON,
++            menuLauncher: ABSENT_MENU_LAUNCHER,
++          },
+         }
+       }
+       const conversation = concreteConversation(ctx)
+@@ -393,5 +401,6 @@ export function apply(ctx: Context): void {
+         hooks: {
+           notices: shell.notices,
++          emptySubmission: submissionTransforms.emptySubmission(sessionId),
+           lexicon: shell.lexicon,
+           menuLauncher: inputTriggers?.launcher ?? ABSENT_MENU_LAUNCHER,
+         },
 diff --git a/packages/client/ui-conversation/src/client/index.ts b/packages/client/ui-conversation/src/client/index.ts
 index f700218..c34fe10 100644
 --- a/packages/client/ui-conversation/src/client/index.ts
@@ -65,11 +86,20 @@ index 54e0920..51c4fdb 100644
    ) {}
  
    /**
-@@ -154,9 +156,12 @@ export class InputHub implements SessionInputResolver {
+@@ -80,6 +82,7 @@ export class InputHub implements SessionInputResolver {
+       inputTriggers: () => this.controller(actx),
+       popup: () => this.popup(actx),
+       queue: queueReadFaceOf(session),
++      allowEmptySubmission: () => this.submissionTransforms.hasEmptySubmission(id),
+       defaultSink: (text, imageIds, mode) => { this.sink(session, text, imageIds, mode) },
+       steerQueue: () => { void this.steerQueue(session, shell) },
+     })
+@@ -154,9 +157,12 @@ export class InputHub implements SessionInputResolver {
    ): void {
-     if (text === '' && imageIds.length === 0) return
+-    if (text === '' && imageIds.length === 0) return
      const shell = this.shells.get(session.sessionId)
 +    const prepared = this.submissionTransforms.prepare(session.sessionId, text)
++    if (prepared.text === '' && imageIds.length === 0) return
      // Commit, not an editable clear: undo must not resurrect sent content.
      shell?.commitSend(imageIds)
 -    void this.conversation().sendSession(session, text, imageIds, mode).catch(() => {
@@ -84,8 +114,9 @@ new file mode 100644
 index 0000000..7f19b2e
 --- /dev/null
 +++ b/packages/client/ui-conversation/src/client/input/submission-transforms.ts
-@@ -0,0 +1,43 @@
-+import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+@@ -0,0 +1,90 @@
++import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
++import type { ObservableSnapshot, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 +
 +/** One product-neutral transformation performed immediately before prompt delivery. */
 +export interface ComposerSubmissionTransform {
@@ -93,6 +124,8 @@ index 0000000..7f19b2e
 +  readonly id: string
 +  /** Return the text that should enter the ordinary conversation send path. */
 +  prepare(sessionId: SessionId, text: string): ComposerSubmissionPreparation
++  /** A live session-scoped signal that this transform can turn an empty draft into a non-empty submission. */
++  readonly emptySubmission?: (sessionId: SessionId) => ObservableSnapshot<boolean>
 +}
 +
 +/** One transformed prompt plus the exact successful-delivery acknowledgement. */
@@ -105,13 +138,53 @@ index 0000000..7f19b2e
 +/** Registry for independently owned prompt enrichments at the composer boundary. */
 +export class ComposerSubmissionTransforms {
 +  private readonly transforms = new Map<string, ComposerSubmissionTransform>()
++  private readonly changes = createSnapshotStore(0)
 +
 +  register(transform: ComposerSubmissionTransform): () => void {
 +    if (this.transforms.has(transform.id)) {
 +      throw new Error(`composer submission transform already registered: ${transform.id}`)
 +    }
 +    this.transforms.set(transform.id, transform)
-+    return () => { this.transforms.delete(transform.id) }
++    this.changed()
++    let active = true
++    return () => {
++      if (!active) return
++      active = false
++      this.transforms.delete(transform.id)
++      this.changed()
++    }
++  }
++
++  /** Whether any transform currently makes an empty draft sendable for this session. */
++  hasEmptySubmission(sessionId: SessionId): boolean {
++    return [...this.transforms.values()].some(transform => transform.emptySubmission?.(sessionId).getSnapshot() === true)
++  }
++
++  /** Combined live availability for the composer; changes when membership or a transform source changes. */
++  emptySubmission(sessionId: SessionId): ObservableSnapshot<boolean> {
++    return {
++      getSnapshot: () => this.hasEmptySubmission(sessionId),
++      subscribe: (listener) => {
++        let stops: (() => void)[] = []
++        const bind = () => {
++          for (const stop of stops) stop()
++          stops = []
++          for (const transform of this.transforms.values()) {
++            const source = transform.emptySubmission?.(sessionId)
++            if (source !== undefined) stops.push(source.subscribe(listener))
++          }
++        }
++        const stopChanges = this.changes.subscribe(() => {
++          bind()
++          listener()
++        })
++        bind()
++        return () => {
++          stopChanges()
++          for (const stop of stops) stop()
++        }
++      },
++    }
 +  }
 +
 +  prepare(sessionId: SessionId, text: string): ComposerSubmissionPreparation {
@@ -127,14 +200,19 @@ index 0000000..7f19b2e
 +      ...(accepted.length === 0 ? {} : { accept: () => { for (const acknowledge of accepted) acknowledge() } }),
 +    }
 +  }
++
++  private changed(): void {
++    this.changes.set(this.changes.getSnapshot() + 1)
++  }
 +}
 diff --git a/packages/client/ui-conversation/tests/submission-transforms.client.spec.ts b/packages/client/ui-conversation/tests/submission-transforms.client.spec.ts
 new file mode 100644
 index 0000000..88a2025
 --- /dev/null
 +++ b/packages/client/ui-conversation/tests/submission-transforms.client.spec.ts
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,41 @@
 +import { describe, expect, it } from 'vitest'
++import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 +import { ComposerSubmissionTransforms } from '../src/client/input/submission-transforms.ts'
 +
 +describe('ComposerSubmissionTransforms', () => {
@@ -155,4 +233,174 @@ index 0000000..88a2025
 +    transforms.register({ id: 'same', prepare: (_session, text) => ({ text }) })
 +    expect(() => transforms.register({ id: 'same', prepare: (_session, text) => ({ text }) })).toThrow('same')
 +  })
++
++  it('exposes live session-scoped empty-submission availability', () => {
++    const transforms = new ComposerSubmissionTransforms()
++    const availability = createSnapshotStore(false)
++    transforms.register({
++      id: 'review-feedback',
++      prepare: (_session, text) => ({ text }),
++      emptySubmission: () => availability,
++    })
++    const source = transforms.emptySubmission('session-1' as never)
++    const observed: boolean[] = []
++    const stop = source.subscribe(() => { observed.push(source.getSnapshot()) })
++    expect(source.getSnapshot()).toBe(false)
++    availability.set(true)
++    expect(source.getSnapshot()).toBe(true)
++    expect(observed).toEqual([true])
++    stop()
++  })
 +})
+diff --git a/packages/client/ui-conversation/src/client/input/facade.ts b/packages/client/ui-conversation/src/client/input/facade.ts
+index aaaaaaa..bbbbbbb 100644
+--- a/packages/client/ui-conversation/src/client/input/facade.ts
++++ b/packages/client/ui-conversation/src/client/input/facade.ts
+@@ -43,7 +43,9 @@ export interface SessionInputDeps {
+    * Steer every still-pending queued message into the running turn, in FIFO
+    * order (the empty-draft accelerated-Enter gesture); absent = unsupported.
+    */
+   steerQueue?: (() => void) | undefined
++  /** Whether a registered transform currently turns an empty draft into a message. */
++  allowEmptySubmission?: (() => boolean) | undefined
+   /** The plain-message sink (send choreography / materialize fork — the hub owns it). */
+   defaultSink(text: string, imageIds: readonly DraftAttachmentId[], mode: InputSubmitMode): void
+ }
+@@ -196,7 +198,7 @@ export class SessionInputShell implements SessionInput {
+    * dismisses and the menu tracks frozen.
+    */
+   submit(mode: InputSubmitMode = 'queue'): void {
+-    if (this.snapshot.draft.trim() === '' && this.imageIds.length > 0) {
++    if (this.snapshot.draft.trim() === '' && (this.imageIds.length > 0 || this.deps.allowEmptySubmission?.() === true)) {
+       if (this.snapshot.phase === 'plain') this.deps.defaultSink('', [...this.imageIds], mode)
+       return
+     }
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+index ccccccc..ddddddd 100644
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -550,6 +550,8 @@ export interface ComposerBarInjected {
+   hooks: {
+     /** Latest surfaced notice (null after none; seq keys re-render of repeats). */
+     notices: ObservableSnapshot<InputNotice | null>
++    /** Whether a registered transform currently turns this session's empty draft into a submission. */
++    emptySubmission: ObservableSnapshot<boolean>
+     /** Hot plain-text reference lexicon for the decoration scan (plain-text-reference decision;
+      *  see .agents/notes/implemented/architecture/2026-07-25-web-input-machine-and-slash-pipeline.md). */
+     lexicon: ObservableSnapshot<ReadonlyMap<'/' | '@', readonly string[]>>
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+index eeeeeee..fffffff 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+@@ -46,11 +46,12 @@ export type InputBarProps = ComposerBarProps
+ export function InputBar({
+   useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages,
+   resolveSubmitMode, toggleCommandMenu, stop, command, t,
+-  renderSlot, useNotices, useLexicon, useMenuLauncher,
++  renderSlot, useNotices, useEmptySubmission, useLexicon, useMenuLauncher,
+   useProjection, sessionId, variant, disabled: inert = false, blocked,
+   workspacePickerOpen = false, onRequestWorkspace,
+   placeholder, accessory, heroModeControl, leftItems, rightItems, footer,
+ }: InputBarProps) {
+   const input = useInput(s => s)
+   const notice = useNotices(s => s)
++  const emptySubmission = useEmptySubmission(value => value)
+   const lexicon = useLexicon(s => s)
+@@ -72,5 +73,6 @@ export function InputBar({
+     [draftImages, input?.imageIds],
+   )
+   const empty = draft.trim() === '' && attachments.length === 0
++  const sendable = !empty || emptySubmission
+   const [preview, setPreview] = useState<ComposerAttachment | null>(null)
+   const [dragActive, setDragActive] = useState(false)
+@@ -550,6 +552,6 @@ export function InputBar({
+       return
+     }
+     if (inputActions === undefined) return // absent machine: the button is disabled
+-    /* v8 ignore next -- defensive: the primary button is disabled while empty||disabled, so a click cannot reach the false arm. */
+-    if (!empty && !disabled && !machineBusy) inputActions.submit()
++    /* v8 ignore next -- defensive: the primary button is disabled while !sendable||disabled, so a click cannot reach the false arm. */
++    if (sendable && !disabled && !machineBusy) inputActions.submit()
+   }
+@@ -776,7 +778,7 @@ export function InputBar({
+                 type="button"
+                 className={css.primary}
+                 aria-label={primaryLabel}
+-                disabled={primaryStops ? stop === undefined : empty || disabled || machineBusy}
++                disabled={primaryStops ? stop === undefined : !sendable || disabled || machineBusy}
+                 onMouseDown={keepFocus}
+                 onClick={onPrimary}
+               >
+diff --git a/packages/client/ui-conversation/tests/input-bar.client.spec.tsx b/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
+index aaaaaaa..bbbbbbb 100644
+--- a/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
+@@ -76,6 +76,8 @@ interface BenchOptions {
+   /** Authoritative queue rows served to the machine overlay (empty = none). */
+   queue?: ConversationSnapshot['queue']
+   /** The hub's steer-all face (empty-draft accelerated Enter). */
+   steerQueue?: () => void
++  /** A transform-owned non-text submission, such as pending review feedback. */
++  emptySubmission?: boolean
+   variant?: 'hero' | 'composer'
+   placeholder?: string
+@@ -115,8 +117,9 @@ function bench(over?: BenchOptions) {
+   const shell = new SessionInputShell({
+     actx: SCTX,
+     defaultSink: sink,
+     queue: {
+       getSnapshot: () => session.getSnapshot().queue,
+       subscribe: fn => session.subscribe(fn),
+     },
++    allowEmptySubmission: () => over?.emptySubmission === true,
+     ...(over?.steerQueue !== undefined ? { steerQueue: over.steerQueue } : {}),
+@@ -175,5 +178,6 @@ function bench(over?: BenchOptions) {
+     },
+     toggleCommandMenu: over?.toggleCommandMenu ?? vi.fn(),
+     useNotices: bindSnapshotSelector(shell.notices),
++    useEmptySubmission: bindSnapshotSelector(createSnapshotStore(over?.emptySubmission ?? false)),
+     useLexicon: bindSnapshotSelector(shell.lexicon),
+     useMenuLauncher: bindSnapshotSelector(menuLauncher),
+@@ -736,6 +740,10 @@ describe('input bar', () => {
+-  it('idle primary sends and disables on empty draft', () => {
++  it('idle primary sends text or transform-owned empty submissions and disables when truly empty', () => {
+     const { button, sink } = bench({ draft: 'go' })
+     fireEvent.click(button)
+     expect(sink).toHaveBeenCalledWith('go', [], 'queue')
++    const transformed = bench({ emptySubmission: true })
++    expect(transformed.button.disabled).toBe(false)
++    fireEvent.click(transformed.button)
++    expect(transformed.sink).toHaveBeenCalledWith('', [], 'queue')
+     const empty = bench()
+     expect(empty.button.disabled).toBe(true)
+diff --git a/packages/client/ui-conversation/tests/input-matrix.client.spec.tsx b/packages/client/ui-conversation/tests/input-matrix.client.spec.tsx
+index ccccccc..ddddddd 100644
+--- a/packages/client/ui-conversation/tests/input-matrix.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/input-matrix.client.spec.tsx
+@@ -57,4 +57,5 @@ function mountBar(shell: SessionInputShell, over?: { running?: boolean; disabled?: boolean }) {
+     toggleCommandMenu: vi.fn(),
+     useNotices: bindSnapshotSelector(shell.notices),
++    useEmptySubmission: bindSnapshotSelector(createSnapshotStore(false)),
+     useLexicon: bindSnapshotSelector(shell.lexicon),
+     useMenuLauncher: bindSnapshotSelector(createSnapshotStore<string | null>(null)),
+diff --git a/packages/client/ui-conversation/tests/input-scenarios.client.spec.tsx b/packages/client/ui-conversation/tests/input-scenarios.client.spec.tsx
+index eeeeeee..fffffff 100644
+--- a/packages/client/ui-conversation/tests/input-scenarios.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/input-scenarios.client.spec.tsx
+@@ -151,4 +151,5 @@ async function scopedBench(register?: (service: InputTriggerService) => void) {
+     },
+     useNotices: bindSnapshotSelector(shell.notices),
++    useEmptySubmission: bindSnapshotSelector(createSnapshotStore(false)),
+     useLexicon: bindSnapshotSelector(shell.lexicon),
+     useMenuLauncher: bindSnapshotSelector(controller.launcher),
+diff --git a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
+index 1111111..2222222 100644
+--- a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
+@@ -206,5 +206,6 @@ function bench(options: BenchOptions = {}) {
+           resolveSubmitMode={() => 'queue'}
+           toggleCommandMenu={vi.fn()}
+           useNotices={bindSnapshotSelector(wiring.notices)}
++          useEmptySubmission={bindSnapshotSelector(createSnapshotStore(false))}
+           useLexicon={bindSnapshotSelector(wiring.lexicon)}
+           useMenuLauncher={bindSnapshotSelector(createSnapshotStore<string | null>(null))}

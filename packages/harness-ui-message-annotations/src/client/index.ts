@@ -14,6 +14,10 @@ export function apply(ctx: ClientContext): void {
   const injected = () => ({ hooks: { annotations: annotations.snapshot }, annotations })
   ctx.effect(() => transforms.register({
     id: 'review-feedback',
+    emptySubmission: (sessionId) => ({
+      getSnapshot: () => annotations.feedback(String(sessionId)).length > 0,
+      subscribe: listener => annotations.snapshot.subscribe(listener),
+    }),
     prepare: (sessionId, text) => {
       const items = annotations.feedback(String(sessionId))
       if (items.length === 0) return { text }
@@ -33,6 +37,6 @@ export function apply(ctx: ClientContext): void {
 }
 
 export { AnnotationStore, ReviewFeedbackStore } from './AnnotationStore.ts'
-export type { MarkdownSelectionAnchor, MessageAnnotation, ReviewFeedback, ReviewFeedbackSnapshot, WorkspaceMarkdownFeedback, WorkspaceMarkdownFeedbackInput } from './AnnotationStore.ts'
+export type { MarkdownSelectionAnchor, VisualMarkdownSelectionAnchor, WorkspaceMarkdownAnchor, MessageAnnotation, ReviewFeedback, ReviewFeedbackSnapshot, WorkspaceMarkdownFeedback, WorkspaceMarkdownFeedbackInput, SourceWorkspaceMarkdownFeedbackInput, VisualWorkspaceMarkdownFeedbackInput } from './AnnotationStore.ts'
 export { annotationsPrompt } from './annotation-format.js'
 export { reviewFeedbackPrompt } from './review-feedback-format.js'

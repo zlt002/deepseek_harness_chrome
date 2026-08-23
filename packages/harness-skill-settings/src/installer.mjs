@@ -1,6 +1,7 @@
 import { inflateRaw } from 'node:zlib'
 import { promisify } from 'node:util'
-import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 
@@ -67,6 +68,68 @@ export async function deleteInstalledSkill(root, name) {
   await assertInstalledByProduct(destination, skillName)
   await rm(destination, { recursive: true, force: false, maxRetries: 2 })
   return { name: skillName }
+}
+
+/** The only global user Skill roots this product configures or Harness discovers by default. */
+export function userSkillRoots(home = homedir()) {
+  const userHome = resolve(home)
+  return [
+    { source: 'user-dsh', root: join(userHome, '.dsh', 'skills') },
+    { source: 'user-agents', root: join(userHome, '.agents', 'skills') },
+    { source: 'custom', root: join(userHome, '.claude', 'skills') },
+  ]
+}
+
+/**
+ * Return a deletion target only when a live Registry record proves exact ownership.
+ * The browser never supplies a path: source, resourceBase, and filesystem identity
+ * must all agree on one direct child of an allowed root.
+ */
+export async function deletionTargetForSkill(skill, productRoot, installedNames, { home = homedir() } = {}) {
+  const name = skillNameOf(skill)
+  if (name === undefined || skill?.resourceBase?.kind !== 'directory' || typeof skill.resourceBase.path !== 'string') return undefined
+  const resourcePath = resolve(skill.resourceBase.path)
+  const product = resolve(productRoot)
+  if (skill.source === 'custom' && installedNames.has(name) && resourcePath === join(product, name)) {
+    return await safeOwnedChild(product, name, 'installed', true)
+  }
+  for (const candidate of userSkillRoots(home)) {
+    if (skill.source === candidate.source && resourcePath === join(resolve(candidate.root), name)) {
+      return await safeOwnedChild(candidate.root, name, 'user', false)
+    }
+  }
+  return undefined
+}
+
+/** Delete only a target that was resolved from a current Host discovery record. */
+export async function deleteDiscoveredSkill(skill, productRoot, installedNames, options = {}) {
+  const target = await deletionTargetForSkill(skill, productRoot, installedNames, options)
+  const name = skillNameOf(skill)
+  if (target === undefined || name === undefined) throw new Error(`技能 /${typeof skill?.name === 'string' ? skill.name : ''} 不在受管理的用户技能根目录，不能删除`)
+  // Repeat the exact lstat before removal so a changed child cannot be followed.
+  const info = await lstat(target.path)
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`技能 /${target.name} 的目录已变化，拒绝删除`)
+  await rm(target.path, { recursive: true, force: false, maxRetries: 2 })
+  return { name: target.name }
+}
+
+async function safeOwnedChild(root, name, kind, markerRequired) {
+  const allowedRoot = resolve(root)
+  const target = join(allowedRoot, name)
+  try {
+    const rootInfo = await lstat(allowedRoot)
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) return undefined
+    const targetInfo = await lstat(target)
+    if (!targetInfo.isDirectory() || targetInfo.isSymbolicLink()) return undefined
+    const [realRoot, realTarget] = await Promise.all([realpath(allowedRoot), realpath(target)])
+    if (realTarget !== join(realRoot, name)) return undefined
+    if (markerRequired) await assertInstalledByProduct(target, name)
+    return { name, path: target, kind }
+  } catch { return undefined }
+}
+
+function skillNameOf(skill) {
+  try { return validateSkillName(skill?.name) } catch { return undefined }
 }
 
 async function sourceFiles(request) {

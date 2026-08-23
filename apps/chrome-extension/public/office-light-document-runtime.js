@@ -253,6 +253,12 @@
     const fragments = distinctiveFragments(payload.blocks.map((item) => Array.isArray(item.items) ? item.items.join('\n') : Array.isArray(item.rows) ? item.rows.flat().join('\n') : item.text ?? item.markdown ?? item.html ?? '').join('\n'))
     return fragments.length ? { blocks: payload.blocks, expectedSelectionFingerprint: payload.expectedSelectionFingerprint, fragments } : null
   }
+  const selectionDeletePayload = (payload) => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || !validSelectionFingerprint(payload.expectedSelectionFingerprint)
+      || !Object.keys(payload).every((key) => key === 'expectedSelectionFingerprint')) return null
+    return { expectedSelectionFingerprint: payload.expectedSelectionFingerprint }
+  }
   const distinctiveFragments = (value) => {
     const plain = String(value ?? '').replace(/```[\w-]*\n?/g, ' ').replace(/\[[ xX]\]/g, ' ').replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/<[^>]*>/g, ' ').replace(/[`*_#>~\-|:]/g, ' ')
     return [...new Set(normalizedSelectionText(plain).split(/[^\p{L}\p{N}]+/u).filter((part) => part.length >= 2))].slice(0, 100)
@@ -294,6 +300,20 @@
       offset = beforeText.indexOf(selectedText, offset + 1)
     }
     return matches ? { ...inserted, replacedSelectionText: selectedText, verifiedTextAfter: afterText } : null
+  }
+  const verifySelectionDeletion = (beforeXml, afterXml, snapshot) => {
+    const selectedSource = snapshot?.content?.text ?? snapshot?.content?.markdown ?? snapshot?.content?.html
+    const selectedKind = typeof snapshot?.content?.text === 'string' ? 'text' : typeof snapshot?.content?.markdown === 'string' ? 'markdown' : 'html'
+    const selectedText = plainSelectionText(selectedSource, selectedKind)
+    const beforeText = documentPlainText(beforeXml); const afterText = documentPlainText(afterXml)
+    if (!selectedText || !beforeText || afterXml === beforeXml) return null
+    let offset = beforeText.indexOf(selectedText)
+    while (offset >= 0) {
+      const expected = normalizedSelectionText(`${beforeText.slice(0, offset)}${beforeText.slice(offset + selectedText.length)}`)
+      if (expected === afterText) return { deletedSelectionText: selectedText, verifiedTextAfter: afterText }
+      offset = beforeText.indexOf(selectedText, offset + 1)
+    }
+    return null
   }
   const structuredBlockXml = (item, preserveId = null) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return null
@@ -549,6 +569,21 @@
       replacedTagIds: invariant.selectedTagIds, writeStrategy: 'full_canvas_patch', idsRegenerated, verified: true,
     }
   }
+  const verifySelectionBlocksDelete = (afterXml, invariant) => {
+    const after = editableBlocks(afterXml)
+    if (!after || after.list.length !== invariant.outsideBefore.length + invariant.outsideAfter.length) return null
+    const observedBefore = after.list.slice(0, invariant.outsideBefore.length).map(blockInvariant)
+    const observedAfter = after.list.slice(invariant.outsideBefore.length).map(blockInvariant)
+    if (!invariant.outsideBefore.every((block, index) => sameBlockInvariant(block, observedBefore[index]))
+      || !invariant.outsideAfter.every((block, index) => sameBlockInvariant(block, observedAfter[index]))) return null
+    const remainingIds = after.list.map((block) => block.id).filter(Boolean)
+    if (invariant.selectedTagIds.some((id) => remainingIds.includes(id))) return null
+    return {
+      deletedTagIds: invariant.selectedTagIds,
+      outsideSelectionBlocks: [...observedBefore, ...observedAfter].map((block, index) => ({ index, type: block.type, language: block.language, text: block.text.slice(0, 500) })),
+      writeStrategy: 'full_canvas_patch', verified: true,
+    }
+  }
   const insertPosition = (parsed, payload) => {
     const position = payload?.position ?? 'end'
     if (!['start', 'end', 'before', 'after'].includes(position)) return null
@@ -746,15 +781,17 @@
       }
       return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload, count: items.length }, observed: { verifiedBlocks, verified: true } } }
     }
-    if (input.operation === 'selection_insert' || input.operation === 'selection_replace' || input.operation === 'selection_content_replace' || input.operation === 'selection_blocks_replace') {
-      const requested = input.operation === 'selection_blocks_replace' ? selectionBlocksPayload(input.payload) : selectionPayload(input.payload)
+    if (input.operation === 'selection_insert' || input.operation === 'selection_replace' || input.operation === 'selection_content_replace' || input.operation === 'selection_blocks_replace' || input.operation === 'selection_delete') {
+      const requested = input.operation === 'selection_blocks_replace' ? selectionBlocksPayload(input.payload)
+        : input.operation === 'selection_delete' ? selectionDeletePayload(input.payload) : selectionPayload(input.payload)
       const selection = selectionApi(current)
-      const mutate = input.operation === 'selection_replace' || input.operation === 'selection_content_replace' && typeof selection?.replaceContent === 'function' ? 'replaceContent' : 'insertContent'
+      const mutate = input.operation === 'selection_delete' || input.operation === 'selection_replace' || input.operation === 'selection_content_replace' && typeof selection?.replaceContent === 'function' ? 'replaceContent' : 'insertContent'
       if (!requested || !selection) return fail('unsupported', `Light-document ${input.operation} requires one bounded content format and a stable selection fingerprint`)
       const snapshot = await readSelection(current, 20_000)
       if (!snapshot.supported || snapshot.truncated || !snapshot.stable || !snapshot.anchor) return fail('invalid_range', `Light-document ${input.operation} requires a complete, stable selection or cursor snapshot`)
-      if ((input.operation === 'selection_replace' || input.operation === 'selection_content_replace' || input.operation === 'selection_blocks_replace') && snapshot.isCollapsed) return fail('invalid_range', `${input.operation} requires a non-collapsed selection; use selection_insert at a caret`)
+      if ((input.operation === 'selection_replace' || input.operation === 'selection_content_replace' || input.operation === 'selection_blocks_replace' || input.operation === 'selection_delete') && snapshot.isCollapsed) return fail('invalid_range', `${input.operation} requires a non-collapsed selection; use selection_insert at a caret`)
       if (snapshot.selectionFingerprint !== requested.expectedSelectionFingerprint) return fail('fingerprint_mismatch', 'The light-document selection changed since inspect_write')
+      if (input.operation === 'selection_delete' && singleTableMatrix(snapshot?.content?.html) !== null) return fail('unsupported', 'Selected table cells cannot be deleted as a partial selection. Select the whole stable table block, or delete it by stable block id')
       if (input.operation === 'selection_content_replace' && singleTableMatrix(snapshot?.content?.html) !== null) {
         const scope = selectedContainingTable(beforeXml, snapshot)
         const replacementBlocks = requested.kind === 'markdown' ? markdownBlocks(requested.value) : null
@@ -793,6 +830,22 @@
         if (!observed) return fail('readback_mismatch', 'WebEdit selection_blocks_replace did not return matching block structure and fragments')
         return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed } }
       }
+      if (input.operation === 'selection_delete' && wholeBlockReplaceable(beforeXml, snapshot)) {
+        const parsed = editableBlocks(beforeXml)
+        const selectedIds = Array.isArray(snapshot.selectedTagIds) ? snapshot.selectedTagIds : []
+        const selected = selectedIds.map((id) => parsed?.list.find((block) => block.id === id)).filter(Boolean)
+        if (!snapshot.selectionIdsValid || !parsed || selected.length !== selectedIds.length || selected.length === 0) return fail('unsupported', 'selection_delete requires valid unique selectedTagIds for whole public blocks')
+        const ordered = selected.slice().sort((left, right) => parsed.list.indexOf(left) - parsed.list.indexOf(right))
+        const indexes = ordered.map((block) => parsed.list.indexOf(block))
+        if (indexes.some((index, position) => position > 0 && index !== indexes[position - 1] + 1) || !selectionMatchesWholeBlocks(snapshot, ordered)) return fail('unsupported', 'selection_delete requires one contiguous complete whole-block selection')
+        const invariant = selectionReplaceInvariant(parsed, ordered)
+        const first = ordered[0]; const last = ordered[ordered.length - 1]
+        const patched = await patchXml(current, beforeXml, `${parsed.inner.slice(0, first.start)}${parsed.inner.slice(last.end)}`)
+        if (!patched.ok) return patched
+        const observed = verifySelectionBlocksDelete(patched.xml, invariant)
+        if (!observed) return fail('readback_mismatch', 'WebEdit selection_delete did not remove exactly the selected blocks and preserve surrounding blocks')
+        return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed } }
+      }
       if (typeof selection[mutate] !== 'function') {
         // Some WebEdit builds expose a stable whole-block selection but omit
         // selection.replaceContent. Patch all selected blocks in one Canvas
@@ -817,7 +870,7 @@
         return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, replacedTagIds: selectedIds, verified: true } } }
       }
       const content = {
-        [requested.kind]: requested.value,
+        ...(input.operation === 'selection_delete' ? { text: '' } : { [requested.kind]: requested.value }),
         // WebEdit builds have only ever been observed accepting `insertBlow`
         // (sic). Send both spellings until the public API contract is
         // confirmed against a live editor target; an ignored extra key is
@@ -827,7 +880,9 @@
       try { await selection[mutate](content) } catch { return fail('runtime_error', `WebEdit rejected the light-document ${input.operation}`) }
       let afterXml = await current.openApi.editor.canvas.getDocXml(); const deadline = Date.now() + 3_000
       while (afterXml === beforeXml && Date.now() < deadline) { await sleep(50); afterXml = await current.openApi.editor.canvas.getDocXml() }
-      const observed = input.operation === 'selection_insert' ? verifySelectionInsert(beforeXml, afterXml, requested) : verifySelectionReplacement(beforeXml, afterXml, snapshot, requested)
+      const observed = input.operation === 'selection_insert' ? verifySelectionInsert(beforeXml, afterXml, requested)
+        : input.operation === 'selection_delete' ? verifySelectionDeletion(beforeXml, afterXml, snapshot)
+          : verifySelectionReplacement(beforeXml, afterXml, snapshot, requested)
       if (!observed) return fail('readback_mismatch', `WebEdit ${input.operation} did not produce matching XML content and structural evidence`)
       return { ok: true, result: { status: 'verified_write', resource: await documentResource(afterXml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, verified: true } } }
     }

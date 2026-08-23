@@ -139,8 +139,8 @@ index 0e0158e..87c10b3 100644
  export function InputBar({
    useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages,
    resolveSubmitMode, toggleCommandMenu, stop, command, t,
--  renderSlot, useNotices, useLexicon, useMenuLauncher,
-+  renderSlot, useNotices, useLexicon, useMenuLauncher, permissionLabels,
+-  renderSlot, useNotices, useEmptySubmission, useLexicon, useMenuLauncher,
++  renderSlot, useNotices, useEmptySubmission, useLexicon, useMenuLauncher, permissionLabels,
    useProjection, sessionId, variant, disabled: inert = false, blocked,
    workspacePickerOpen = false, onRequestWorkspace,
    placeholder, accessory, heroModeControl, leftItems, rightItems, footer,

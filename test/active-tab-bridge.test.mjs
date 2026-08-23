@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFile } from 'node:fs/promises'
-import ts from 'typescript'
+import { bundleTypescript } from './helpers/bundle-typescript.mjs'
+
+async function compiledBackground() {
+  const sourceUrl = new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url)
+  const source = await readFile(sourceUrl, 'utf8')
+  return bundleTypescript(source, sourceUrl)
+}
 
 test('forwards Browser Target snapshots to the Harness iframe through the strict bridge', async () => {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/sidepanel/main.tsx', import.meta.url), 'utf8')
@@ -22,10 +28,7 @@ test('accepts a Harness reconnect only from the nonce-bound loopback iframe', as
 })
 
 test('publishes only read-only active-tab snapshots and serves the initial snapshot', async () => {
-  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  }).outputText
+  const compiled = await compiledBackground()
   let runtimeListener
   let activatedListener
   const runtimeMessages = []
@@ -88,10 +91,7 @@ test('publishes only read-only active-tab snapshots and serves the initial snaps
 })
 
 test('publishes only the latest activation when Chrome tab lookups resolve out of order', async () => {
-  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  }).outputText
+  const compiled = await compiledBackground()
   let activatedListener
   const runtimeMessages = []
   const pendingQueries = []
@@ -139,10 +139,7 @@ test('publishes only the latest activation when Chrome tab lookups resolve out o
 })
 
 test('an update in a background window republishes the active tab from the focused window', async () => {
-  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  }).outputText
+  const compiled = await compiledBackground()
   let updatedListener
   const runtimeMessages = []
   const foreground = { id: 31, windowId: 1, active: true, title: '前台窗口', url: 'https://foreground.example/' }

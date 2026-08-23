@@ -1,13 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import ts from 'typescript'
+import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
 async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  }).outputText
+  const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
   let activatedListener
   let createdListener

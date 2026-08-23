@@ -20,9 +20,11 @@ test('emits extension commands with its own increasing sequence', () => {
   const parent = { postMessage: (message, origin) => sent.push({ message, origin }) }
   bridge.send({ command: 'refresh' }, parent)
   bridge.send({ command: 'set-mode', mode: 'none' }, parent)
+  bridge.send({ command: 'capture-design-reference', tabId: 2 }, parent)
   assert.deepEqual(sent, [
     { message: { type: 'browser-target-command/v1', nonce: 'nonce', sequence: 1, command: { command: 'refresh' } }, origin: 'chrome-extension://abc' },
     { message: { type: 'browser-target-command/v1', nonce: 'nonce', sequence: 2, command: { command: 'set-mode', mode: 'none' } }, origin: 'chrome-extension://abc' },
+    { message: { type: 'browser-target-command/v1', nonce: 'nonce', sequence: 3, command: { command: 'capture-design-reference', tabId: 2 } }, origin: 'chrome-extension://abc' },
   ])
 })
 

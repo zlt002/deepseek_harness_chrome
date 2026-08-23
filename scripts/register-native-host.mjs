@@ -5,6 +5,8 @@ import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from './bundle-harness-runtime-plugin.mjs'
+import { PRODUCT_UI_PLUGIN_DIRECTORIES, PRODUCT_UI_PLUGIN_PACKAGE_NAMES } from '../apps/native-server/src/product-plugin-manifest.mjs'
+import { createRuntimeIdentity } from './runtime-identity.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const extensionIds = [...new Set(
@@ -16,22 +18,6 @@ const extensionIds = [...new Set(
 const nativeServerSource = resolve(projectRoot, 'apps', 'native-server')
 const skillsSource = resolve(projectRoot, 'skills')
 const productPluginsSource = resolve(projectRoot, 'packages')
-const productPluginNames = [
-  'harness-ui-agent-preset',
-  'harness-ui-browser-target',
-  'harness-ui-conversation-shell',
-  'harness-ui-message-annotations',
-  'harness-ui-responsive-sidebar',
-  'harness-ui-workspace-picker',
-  'harness-ui-account-access',
-  'harness-ui-knowledge-scope',
-  'harness-ui-subagent-compact',
-  'harness-ui-session-log-copy',
-  'harness-ui-settings-shell',
-  'harness-ui-document-intake',
-  'harness-ui-workspace-review',
-  'harness-skill-settings',
-]
 const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined
 const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim() || undefined
 const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
@@ -178,7 +164,7 @@ async function replaceDirectory(source, destination, prepare) {
 }
 
 async function installProductPlugins(destination) {
-  for (const packageName of productPluginNames) {
+  for (const packageName of PRODUCT_UI_PLUGIN_DIRECTORIES) {
     const source = resolve(productPluginsSource, packageName)
     for (const required of ['package.json', 'lib/index.js', 'lib/client.js']) {
       if (!existsSync(resolve(source, required))) {
@@ -197,6 +183,16 @@ await replaceDirectory(nativeServerSource, nativeServer, async (staging) => {
   await bundleHarnessRuntimePlugin({ outfile: join(staging, 'harness-runtime.mjs'), projectRoot })
   await bundleHarnessTrackingPlugin({ outfile: join(staging, 'harness-tracking.mjs'), projectRoot })
   await installProductPlugins(join(staging, 'product-plugins'))
+  if (activeHarnessRoot !== undefined && existsSync(join(activeHarnessRoot, '.harness-product.json'))) {
+    const runtimeIdentity = await createRuntimeIdentity({
+      harnessRoot: activeHarnessRoot,
+      assetRoots: [staging],
+      pluginRoots: PRODUCT_UI_PLUGIN_DIRECTORIES.map((directory) => join(staging, 'product-plugins', directory, 'lib')),
+      bootEntries: PRODUCT_UI_PLUGIN_PACKAGE_NAMES.map((id) => ({ id })),
+      productBootEntries: PRODUCT_UI_PLUGIN_PACKAGE_NAMES,
+    })
+    await writeFile(join(staging, 'runtime-manifest.json'), `${JSON.stringify({ ...runtimeIdentity, installRoot }, null, 2)}\n`, 'utf8')
+  }
 })
 await replaceDirectory(skillsSource, skills)
 await writeFile(launcher, `${launcherLines.join('\n')}\n`, 'utf8')

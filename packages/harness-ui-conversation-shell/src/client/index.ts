@@ -3,6 +3,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { ConversationPresentation } from './ConversationPresentation.tsx'
+import { ComposerFullscreenControl } from './ComposerFullscreenControl.tsx'
+import { ComposerFullscreen } from './composer-fullscreen.ts'
+import { ProcessVisibilitySettingsRow } from './ProcessVisibilitySettingsRow.tsx'
+import { ProcessVisibility } from './process-visibility.ts'
+import { CONVERSATION_PRESENTATION_SETTINGS_NAMESPACE, type ConversationPresentationSettings } from '../presentation-settings.ts'
 import { companyGatewayFirst } from './model-order.ts'
 import { permissionLabel } from './permission-labels.ts'
 
@@ -11,9 +16,13 @@ import { permissionLabel } from './permission-labels.ts'
  * official view bridge to change the existing per-session store, rather than
  * maintaining a second selected-view state in the product package.
  */
-export const inject = ['slots', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions', 'permissionLabels']
+export const inject = ['slots', 'connection', 'remote', 'settingsScope', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions', 'permissionLabels']
 
 export function apply(ctx: ClientContext): void {
+  const composerFullscreen = new ComposerFullscreen()
+  const processVisibility = new ProcessVisibility(ctx.settingsScope.bind<ConversationPresentationSettings>({
+    namespace: CONVERSATION_PRESENTATION_SETTINGS_NAMESPACE,
+  }))
   const permissionLabels = ctx.get('permissionLabels')!
   ctx.effect(() => permissionLabels.register(permissionLabel), 'accrui-conversation-shell: Chinese permission labels')
   ctx.slots.inject('conversation.presentation', () => ctx.slots.register({
@@ -21,7 +30,27 @@ export function apply(ctx: ClientContext): void {
     id: 'accrui-conversation-presentation',
     order: 0,
     select: owner => owner,
+    inject: () => ({ hooks: { showProcess: processVisibility.showProcess, composerFullscreen: composerFullscreen.active } }),
   }, ConversationPresentation))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'composer-fullscreen-control',
+    order: 5,
+    inject: () => ({
+      hooks: { composerFullscreen: composerFullscreen.active },
+      toggleComposerFullscreen: () => { composerFullscreen.toggle() },
+      exitComposerFullscreen: () => { composerFullscreen.exit() },
+    }),
+  }, ComposerFullscreenControl))
+  ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+    name: 'settings.general.item',
+    id: 'process-visibility',
+    order: 21,
+    inject: () => ({
+      hooks: { showProcess: processVisibility.showProcess },
+      setShowProcess: (showProcess: boolean) => { processVisibility.setShowProcess(showProcess) },
+    }),
+  }, ProcessVisibilitySettingsRow))
   const views = ctx.get('conversationViewState')!
   const quickActions = ctx.get('settingsQuickActions')!
   ctx.effect(() => quickActions.register({

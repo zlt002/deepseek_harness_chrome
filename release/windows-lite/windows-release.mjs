@@ -12,6 +12,8 @@ import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
+
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
 
@@ -503,20 +505,12 @@ export async function buildWindowsRelease({
   }
   await writeFile(manifestPath, `${JSON.stringify(packagedManifest, null, 2)}\n`, 'utf8')
 
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-agent-preset'), path.join(runtimeDir, 'product-plugins', 'harness-ui-agent-preset'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-browser-target'), path.join(runtimeDir, 'product-plugins', 'harness-ui-browser-target'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-conversation-shell'), path.join(runtimeDir, 'product-plugins', 'harness-ui-conversation-shell'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-message-annotations'), path.join(runtimeDir, 'product-plugins', 'harness-ui-message-annotations'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-responsive-sidebar'), path.join(runtimeDir, 'product-plugins', 'harness-ui-responsive-sidebar'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-workspace-picker'), path.join(runtimeDir, 'product-plugins', 'harness-ui-workspace-picker'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-account-access'), path.join(runtimeDir, 'product-plugins', 'harness-ui-account-access'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-knowledge-scope'), path.join(runtimeDir, 'product-plugins', 'harness-ui-knowledge-scope'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-subagent-compact'), path.join(runtimeDir, 'product-plugins', 'harness-ui-subagent-compact'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-session-log-copy'), path.join(runtimeDir, 'product-plugins', 'harness-ui-session-log-copy'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-settings-shell'), path.join(runtimeDir, 'product-plugins', 'harness-ui-settings-shell'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-document-intake'), path.join(runtimeDir, 'product-plugins', 'harness-ui-document-intake'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-ui-workspace-review'), path.join(runtimeDir, 'product-plugins', 'harness-ui-workspace-review'))
-  await copyDereferenced(path.join(projectRoot, 'packages', 'harness-skill-settings'), path.join(runtimeDir, 'product-plugins', 'harness-skill-settings'))
+  for (const directory of PRODUCT_UI_PLUGIN_DIRECTORIES) {
+    await copyDereferenced(
+      path.join(projectRoot, 'packages', directory),
+      path.join(runtimeDir, 'product-plugins', directory),
+    )
+  }
   await copyDereferenced(path.join(projectRoot, 'skills'), path.join(runtimeDir, 'skills'))
   await rm(path.join(runtimeDir, 'native-server'), { recursive: true, force: true })
   await copyDereferenced(path.join(runtimeSource, 'native-server'), path.join(runtimeDir, 'native-server'))

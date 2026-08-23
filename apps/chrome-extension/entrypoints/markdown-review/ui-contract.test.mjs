@@ -4,30 +4,38 @@ import test from 'node:test'
 
 const root = new URL('.', import.meta.url)
 const main = await readFile(new URL('./main.tsx', root), 'utf8')
-const mermaid = await readFile(new URL('./mermaid-diagram.tsx', root), 'utf8')
 const style = await readFile(new URL('./style.css', root), 'utf8')
 
-test('review workspace keeps one canvas and supports source and preview selection anchoring', () => {
-  assert.match(main, /useState<'preview' \| 'source'>\('preview'\)/)
-  assert.match(main, /view === 'source' \? <SourceEditor/)
-  assert.match(main, /: <SafeMarkdownPreview content=\{draft\}/)
-  assert.match(main, /onPreviewSelection/)
-  assert.match(main, /browserSelection\.rangeCount !== 1 \|\| browserSelection\.isCollapsed/)
-  assert.match(main, /选择预览文本后即可添加批注/)
+test('review workspace uses one visual Milkdown canvas rather than source and preview panes', () => {
+  assert.match(main, /<VisualMarkdownEditor/)
+  assert.match(main, /在排版后的正文中直接编辑/)
+  assert.doesNotMatch(main, /SourceEditor|SafeMarkdownPreview|ReactMarkdown/)
+  assert.match(style, /\.visual-markdown-editor/)
 })
 
-test('preview uses a sanitized GFM renderer and isolated Mermaid fallback', () => {
-  assert.match(main, /from 'react-markdown'/)
-  assert.match(main, /from 'remark-gfm'/)
-  assert.match(main, /from 'rehype-sanitize'/)
-  assert.match(main, /<MermaidDiagram/)
-  assert.match(mermaid, /securityLevel: 'strict'/)
-  assert.match(mermaid, /Mermaid 图表无法安全渲染，已显示源码。/)
-  assert.match(mermaid, /sandbox=""/)
-  assert.match(main, /data-source-start/)
-  assert.match(main, /data-source-end/)
-  assert.match(style, /\.preview table/)
-  assert.match(style, /\.mermaid-diagram/)
+test('visual surface states the safe HTML and Mermaid downgrade', () => {
+  assert.match(main, /HTML 和 Mermaid 保留为安全文本\/代码块，不执行。/)
+  assert.doesNotMatch(main, /data-source-start|data-source-end/)
+})
+
+test('active AI diffs have visible accept and reject controls', () => {
+  assert.match(main, /candidateReviewActive/)
+  assert.match(main, /拒绝修改/)
+  assert.match(main, /接受修改/)
+  assert.match(main, /acceptCandidate/)
+  assert.match(main, /rejectCandidate/)
+  assert.match(style, /\.candidate-actions/)
+})
+
+test('dirty visual drafts use a captured selection and explicit verified-write confirmation', () => {
+  assert.match(main, /annotationSelectionsRef/)
+  assert.match(main, /reviewSelectionReplacement\(saved, proposal\.replacementMarkdown\)/)
+  assert.match(main, /编辑版本、范围或选中文本已变化/)
+  assert.match(main, /markdown-review-prepare-write-request/)
+  assert.match(main, /确认写入/)
+  assert.match(main, /markdown-review-commit-write-request/)
+  assert.match(main, /同一资源回读验证/)
+  assert.match(main, /不会自动重试/)
 })
 
 test('review panel is collapsible and stacks below the canvas on narrow widths', () => {

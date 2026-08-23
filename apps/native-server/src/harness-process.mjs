@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
 import { redactSensitiveDiagnostic } from './redact.mjs'
+import { PRODUCT_UI_PLUGIN_PACKAGE_NAMES } from './product-plugin-manifest.mjs'
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -263,22 +264,7 @@ export function productUiPatch() {
 }
 
 function productUiPackages() {
-  return [
-    '@accrui/harness-ui-agent-preset',
-    '@accrui/harness-ui-browser-target',
-    '@accrui/harness-ui-conversation-shell',
-    '@accrui/harness-ui-message-annotations',
-    '@accrui/harness-ui-responsive-sidebar',
-    '@accrui/harness-ui-workspace-picker',
-    '@accrui/harness-ui-account-access',
-    '@accrui/harness-ui-subagent-compact',
-    '@accrui/harness-ui-session-log-copy',
-    '@accrui/harness-ui-settings-shell',
-    '@accrui/harness-ui-knowledge-scope',
-    '@accrui/harness-ui-document-intake',
-    '@accrui/harness-ui-workspace-review',
-    '@accrui/harness-skill-settings',
-  ]
+  return PRODUCT_UI_PLUGIN_PACKAGE_NAMES
 }
 
 /**

@@ -32,8 +32,8 @@ test('legacy system modes survive a user Skill update but cannot be changed', ()
 })
 
 test('state and deletion permissions remain separate for every origin', () => {
-  assert.deepEqual(statePermissions('system'), { stateEditable: false, deletable: false })
-  assert.deepEqual(statePermissions('user'), { stateEditable: true, deletable: false })
-  assert.deepEqual(statePermissions('project'), { stateEditable: true, deletable: false })
-  assert.deepEqual(statePermissions('installed'), { stateEditable: true, deletable: true })
+  assert.deepEqual(statePermissions('system'), { stateEditable: false })
+  assert.deepEqual(statePermissions('user'), { stateEditable: true })
+  assert.deepEqual(statePermissions('project'), { stateEditable: true })
+  assert.deepEqual(statePermissions('installed'), { stateEditable: true })
 })

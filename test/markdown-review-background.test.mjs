@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import ts from 'typescript'
+import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
 async function loadBackground() {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+  const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener; let connectListener
   const created = []; const forwarded = []; const fetches = []; const storage = { harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }
   const page = { id: 42, windowId: 7, url: 'https://docs.example.test/source', title: 'Source' }
@@ -13,11 +13,22 @@ async function loadBackground() {
   const nativeListeners = new Set()
   globalThis.fetch = async (url, init) => {
     fetches.push({ url: String(url), init })
-    return new Response(JSON.stringify({
+    const pathname = new URL(String(url)).pathname
+    const snapshot = {
       v: 1, type: 'markdown-review-snapshot', reviewId: 'review-1',
       resource: { resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1' },
       content: '# Review me', truncated: false, readOnly: true,
-    }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const payload = pathname.endsWith('/proposals')
+      ? { v: 1, reviewId: 'review-1', proposals: [{ proposalId: 'proposal-1', selectionId: 'annotation-1', sequence: 1, baseFingerprint: 'fingerprint-1', kind: 'document', candidateMarkdown: '# Better', summary: '更明确' }] }
+      : pathname.endsWith('/prepare-write')
+        ? { status: 'prepared', approval: 'approval-1', contentHash: 'content-hash-1', expiresAt: Date.now() + 60_000 }
+        : pathname.endsWith('/commit-write')
+          ? { status: 'verified_write', resource: { resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-2', fingerprint: 'fingerprint-2' }, contentHash: 'fingerprint-2' }
+          : pathname.endsWith('/selection')
+            ? JSON.parse(init.body).selection
+            : snapshot
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } },
@@ -86,7 +97,8 @@ test('opens a capability-free review URL, proxies a bounded snapshot, and delive
     const snapshot = background.responses.find(message => message.requestId === 'snapshot-1')
     assert.equal(snapshot.ok, true, JSON.stringify(snapshot))
     assert.equal(snapshot.snapshot.harnessSessionId, 'session-1')
-    assert.equal(background.fetches[0].init.headers.authorization, `Bearer ${openReview.capability}`)
+    const snapshotFetch = background.fetches.find(({ url }) => new URL(url).pathname.endsWith('/snapshot'))
+    assert.equal(snapshotFetch.init.headers.authorization, `Bearer ${openReview.capability}`)
 
     background.portMessage({
       v: 1, type: 'markdown-review-deliver-request', requestId: 'deliver-1', reviewId: 'review-1', harnessSessionId: 'session-1', deliveryId: 'annotation-1',
@@ -97,5 +109,40 @@ test('opens a capability-free review URL, proxies a bounded snapshot, and delive
     assert.deepEqual({ ok: delivered.ok, deliveryId: delivered.deliveryId }, { ok: true, deliveryId: 'annotation-1' })
     assert.equal(background.forwarded[0].feedback.harnessSessionId, 'session-1')
     assert.equal(background.forwarded[0].feedback.displayPath, 'README.md')
+    assert.equal(background.forwarded[0].feedback.selectionId, 'annotation-1')
+
+    background.portMessage({ v: 1, type: 'markdown-review-proposals-request', requestId: 'proposals-1', reviewId: 'review-1', afterSequence: 0 })
+    background.portMessage({
+      v: 1, type: 'markdown-review-prepare-write-request', requestId: 'prepare-1', reviewId: 'review-1',
+      expected: { resourceId: 'resource-1', revision: 'rev-1', fingerprint: 'fingerprint-1' }, content: '# Better',
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.responses.find(message => message.requestId === 'proposals-1').proposals[0].candidateMarkdown, '# Better')
+    const preparation = background.responses.find(message => message.requestId === 'prepare-1').preparation
+    assert.equal(preparation.status, 'prepared')
+    background.portMessage({
+      v: 1, type: 'markdown-review-commit-write-request', requestId: 'commit-1', reviewId: 'review-1',
+      approval: preparation.approval, idempotencyKey: 'write-1', content: '# Better',
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.responses.find(message => message.requestId === 'commit-1').result.status, 'verified_write')
+  } finally { background.cleanup() }
+})
+
+test('forwards a bounded dirty visual selection with structure rather than fake Markdown offsets', async () => {
+  const background = await loadBackground()
+  try {
+    await background.open(openReview); background.connect()
+    background.portMessage({
+      v: 1, type: 'markdown-review-deliver-request', requestId: 'visual-deliver-1', reviewId: 'review-1', harnessSessionId: 'session-1', deliveryId: 'visual-annotation-1',
+      annotation: { id: 'visual-annotation-1', anchor: { version: 2, editorRevision: 4, from: 8, to: 31, quote: 'Paragraph\nCell', blocks: [{ kind: 'paragraph', text: 'Paragraph' }, { kind: 'table_cell', text: 'Cell' }], sourceFingerprint: 'fingerprint-1' }, comment: '缩短并更清楚' },
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const delivered = background.responses.find(message => message.requestId === 'visual-deliver-1')
+    assert.equal(delivered.ok, true, JSON.stringify(delivered))
+    const feedback = background.forwarded[0].feedback
+    assert.equal(feedback.anchorKind, 'visual')
+    assert.deepEqual([feedback.editorRevision, feedback.from, feedback.to], [4, 8, 31])
+    assert.equal('startUtf16' in feedback, false)
   } finally { background.cleanup() }
 })

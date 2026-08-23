@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { CompactWorkspacePicker } from './CompactWorkspacePicker.tsx'
 import type { ClaudeImportController } from './ClaudeImportModal.tsx'
 import { claudeImportRequest, type PreparedImport } from './claude-import-api.ts'
+import { createWorkspaceHeaderClaudeImportAction } from './WorkspaceSurfaceActions.tsx'
 
 export const inject = ['slots', 'sessions', 'workspaces']
 
@@ -41,6 +42,11 @@ export function apply(ctx: ClientContext): void {
     order: 0,
     select: _owner => claudeImport,
   }, CompactWorkspacePicker))
+  ctx.slots.inject('sidebar.workspaces.header.action', () => ctx.slots.register({
+    name: 'sidebar.workspaces.header.action',
+    id: 'accrui-claude-code-import',
+    order: 0,
+  }, createWorkspaceHeaderClaudeImportAction(claudeImport)))
 }
 
 export { CompactWorkspacePicker } from './CompactWorkspacePicker.tsx'

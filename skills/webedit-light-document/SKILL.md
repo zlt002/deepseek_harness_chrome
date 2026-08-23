@@ -14,14 +14,14 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 选区改写只走一次清晰序列：
 
 1. `mcp__chrome__light_document_selection_read({})`：检查 `hasSelection`、`hasCaret`、`isCollapsed` 和 `replaceStrategy`。
-2. 任意稳定的非折叠选区（`hasSelection=true`、`isCollapsed=false`）都调用 `mcp__chrome__light_document_selection_replace_preview({ blocks })`；段落内部分文字、跨段落和任意层级列表均可。
+2. 任意稳定的非折叠选区（`hasSelection=true`、`isCollapsed=false`）都调用 `mcp__chrome__light_document_selection_replace_preview({ blocks })`；段落内部分文字、跨段落和任意层级列表均可。只删除选区时传 `{ blocks: [] }`，不要把删除改成文末插入或换一种写工具。
 3. 获得用户确认后，调用 `mcp__chrome__light_document_selection_replace_commit({ challenge })`。
 
 表格多单元格选区可能定位到所属整张表。若 preview 返回 `action=selection_table_replace_preview` 或 `replacementScope.kind=containing_table`，明确告诉用户“将替换所属整张表（行数 × 列数）”后再等待确认；commit 会原子替换该表，不会在原表下方追加新表。`replaceStrategy=unavailable` 时不发起 preview，请用户选中更完整或更容易唯一定位的表格范围。
 
 选区未变化时不要重复 `selection_read`；只有 `fingerprint_mismatch` 或用户重新选择后才重新读取。`hasCaret=true` 且 `isCollapsed=true` 是光标，不是选区。完整块优先使用结构化 CanvasPatch；字符级或跨块局部选区使用 WebEdit 公开 selection API，并要求选区外正文不变的回读证据。
 
-`preview` 只读且不变更文档；`commit` 不传正文、区块、operation 或 idempotency identity。失败时返回实际错误并停止；`fingerprint_mismatch` 后重新读取并再次确认。不得把编辑器 range 猜成 XML 偏移；局部替换只走公开 selection API。
+`preview` 只读且不变更文档；`commit` 不传正文、区块、operation 或 idempotency identity。失败时返回实际错误并停止；`fingerprint_mismatch` 代表写入前文档或选区已变化，重新读取、重新 preview 并再次确认后可安全继续。超时或回读不确定时不得自动重试。不得把编辑器 range 猜成 XML 偏移；局部替换只走公开 selection API。
 
 ## 契约
 
@@ -46,6 +46,7 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 
 - 改当前选中内容：使用上方三步选区优化流程。
 - 改已读到的稳定块：`replace` / `blocks_replace` / `blocks_batch_edit`，用公开 `id`。
+- 删除已读到的完整稳定块：`blocks_delete`，payload 使用公开 `id`；没有稳定 id 不删除。
 - 只改标题：`set_title`。
 
 ## 不要做

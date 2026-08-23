@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import ts from 'typescript'
+import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
 const target = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://doc.midea.com/teamKnowledge/catalog/9007199254740993' }
 const parent = { parentId: '9007199254740993', bookId: '9007199254740994', parentName: 'Root', canRead: true, canCreate: true, fingerprint: 'team-doc-parent-v1-abc12345' }
@@ -30,7 +30,7 @@ function assertBusinessSystemHeader(options) {
 
 async function loadBackground({ execute = async ({ func }) => func.name === 'inspectTeamDocParentInPage' ? { ok: true, parent } : null, sendMessage, initialTab = target, webeditLightDocument = false, webeditFrames, webeditProbeReadyAfter = 0, teamDocProbeWaitMs = 0, responseWaitAttempts = 200 } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+  const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener; const nativeMessages = []; const nativeListeners = new Set(); const executions = []
   const tab = { id: initialTab.tabId, windowId: initialTab.windowId, url: initialTab.url, title: 'Team Knowledge', status: 'complete' }
   const tabUpdates = []

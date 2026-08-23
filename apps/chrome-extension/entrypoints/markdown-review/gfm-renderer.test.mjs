@@ -1,19 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import React from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
-import ReactMarkdown from 'react-markdown'
-import rehypeSanitize from 'rehype-sanitize'
-import remarkGfm from 'remark-gfm'
+import { readFile } from 'node:fs/promises'
 
-test('the preview renderer emits GFM tables while leaving raw HTML inert', () => {
-  const html = renderToStaticMarkup(React.createElement(ReactMarkdown, {
-    remarkPlugins: [remarkGfm],
-    rehypePlugins: [rehypeSanitize],
-  }, '| Owner | Status |\n| --- | --- |\n| Ada | ready |\n\n<script>window.bad = true</script>'))
+const root = new URL('.', import.meta.url)
+const visualEditor = await readFile(new URL('./visual-markdown-editor.tsx', root), 'utf8')
+const main = await readFile(new URL('./main.tsx', root), 'utf8')
 
-  assert.match(html, /<table>/)
-  assert.match(html, /<th>Owner<\/th>/)
-  assert.match(html, /<td>ready<\/td>/)
-  assert.doesNotMatch(html, /window\.bad/)
+test('visual surface uses only bundled Milkdown assets and does not re-enable executable Mermaid', () => {
+  assert.match(visualEditor, /from '@milkdown\/crepe'/)
+  assert.match(visualEditor, /@milkdown\/crepe\/theme\/classic\.css/)
+  assert.doesNotMatch(visualEditor, /https?:\/\//)
+  assert.doesNotMatch(main, /MermaidDiagram|mermaid\.render/)
 })

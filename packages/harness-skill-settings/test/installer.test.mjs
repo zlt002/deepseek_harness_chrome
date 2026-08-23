@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import test from 'node:test'
-import { SKILL_INSTALL_MAX_FILE_BYTES, deleteInstalledSkill, installSkill, installedSkillNames, prepareSkillInstall, waitForInstalledSkill, waitForRemovedSkill, writePreparedSkill } from '../src/installer.mjs'
+import { SKILL_INSTALL_MAX_FILE_BYTES, deleteDiscoveredSkill, deleteInstalledSkill, deletionTargetForSkill, installSkill, installedSkillNames, prepareSkillInstall, waitForInstalledSkill, waitForRemovedSkill, writePreparedSkill } from '../src/installer.mjs'
 
 const encode = (text) => new TextEncoder().encode(text)
 const b64 = (bytes) => Buffer.from(bytes).toString('base64')
@@ -87,6 +87,8 @@ test('deletes only a real product-managed name directory and waits for the regis
   t.after(() => rm(root, { recursive: true, force: true }))
   await installSkill(root, { kind: 'folder', files: [{ path: 'SKILL.md', data: b64(encode(skill('removable-skill'))) }] })
 
+  const discovered = { name: 'removable-skill', source: 'custom', resourceBase: { kind: 'directory', path: join(root, 'removable-skill') } }
+  assert.deepEqual(await deletionTargetForSkill(discovered, root, await installedSkillNames(root), { home: join(root, 'unused-home') }), { name: 'removable-skill', path: join(root, 'removable-skill'), kind: 'installed' })
   assert.deepEqual(await deleteInstalledSkill(root, 'removable-skill'), { name: 'removable-skill' })
   await assert.rejects(lstat(join(root, 'removable-skill')), { code: 'ENOENT' })
   let reads = 0
@@ -113,6 +115,44 @@ test('refuses deletion outside a product-managed directory without following lin
   await assert.rejects(deleteInstalledSkill(root, 'not-a-directory'), /不是产品管理的技能目录/)
   await assert.rejects(deleteInstalledSkill(root, 'bundled-skill'), /不是由本产品安装/)
   await assert.rejects(deleteInstalledSkill(root, 'missing-skill'), /不是产品安装的技能/)
+  assert.equal(await readFile(join(outside, 'SKILL.md'), 'utf8'), skill('outside-skill'))
+})
+
+test('deletes only exact live user Skill directories in the supported global roots', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'accr-skill-user-home-'))
+  const productRoot = join(home, 'product-skills')
+  const outside = join(home, 'outside')
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const roots = [
+    ['user-dsh', join(home, '.dsh/skills'), 'dsh-skill'],
+    ['user-agents', join(home, '.agents/skills'), 'agents-skill'],
+    ['custom', join(home, '.claude/skills'), 'claude-skill'],
+  ]
+  for (const [source, root, name] of roots) {
+    await mkdir(join(root, name), { recursive: true })
+    await writeFile(join(root, name, 'SKILL.md'), skill(name))
+    const discovered = { name, source, resourceBase: { kind: 'directory', path: join(root, name) } }
+    assert.deepEqual(await deletionTargetForSkill(discovered, productRoot, new Set(), { home }), { name, path: join(root, name), kind: 'user' })
+    assert.deepEqual(await deleteDiscoveredSkill(discovered, productRoot, new Set(), { home }), { name })
+    await assert.rejects(lstat(join(root, name)), { code: 'ENOENT' })
+  }
+  await mkdir(outside, { recursive: true })
+  await writeFile(join(outside, 'SKILL.md'), skill('outside-skill'))
+  await mkdir(join(home, '.dsh/skills/linked-skill'), { recursive: true })
+  await rm(join(home, '.dsh/skills/linked-skill'), { recursive: true })
+  await symlink(outside, join(home, '.dsh/skills/linked-skill'))
+  await writeFile(join(home, '.dsh/skills/file-skill'), 'not a directory')
+  const rejected = [
+    { name: 'project-skill', source: 'project-dsh', resourceBase: { kind: 'directory', path: join(home, 'project/.dsh/skills/project-skill') } },
+    { name: 'custom-skill', source: 'custom', resourceBase: { kind: 'directory', path: join(home, 'custom/skills/custom-skill') } },
+    { name: 'forged-source', source: 'custom', resourceBase: { kind: 'directory', path: join(home, '.dsh/skills/forged-source') } },
+    { name: 'linked-skill', source: 'user-dsh', resourceBase: { kind: 'directory', path: join(home, '.dsh/skills/linked-skill') } },
+    { name: 'file-skill', source: 'user-dsh', resourceBase: { kind: 'directory', path: join(home, '.dsh/skills/file-skill') } },
+    { name: 'outside-skill', source: 'user-dsh', resourceBase: { kind: 'directory', path: outside } },
+    { name: 'dsh-root', source: 'user-dsh', resourceBase: { kind: 'directory', path: join(home, '.dsh/skills') } },
+    { name: 'escape-skill', source: 'user-dsh', resourceBase: { kind: 'directory', path: join(home, '.dsh/skills/../outside') } },
+  ]
+  for (const discovered of rejected) assert.equal(await deletionTargetForSkill(discovered, productRoot, new Set(), { home }), undefined)
   assert.equal(await readFile(join(outside, 'SKILL.md'), 'utf8'), skill('outside-skill'))
 })
 

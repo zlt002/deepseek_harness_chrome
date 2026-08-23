@@ -296,7 +296,7 @@ test('never dispatches a historical pending checkpoint or two concurrent writes 
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '演示文档', fingerprint: 'before' }
   const store = writeStore()
   const payload = { markdown: 'historical' }
-  const historicalIdentity = `light-write:${sha256(canonicalJson({ operation: 'title', payload })).slice(0, 48)}`
+  const historicalIdentity = `light-write:${sha256(canonicalJson([resource.fingerprint, 'title', payload])).slice(0, 48)}`
   await store.create({ idempotencyIdentity: historicalIdentity, targetFingerprint: sha256(canonicalJson(target)), resourceFingerprint: resource.fingerprint, operation: 'title', payloadHash: sha256(canonicalJson({ operation: 'title', payload })) })
   let writes = 0
   const connector = new BrowserConnector({ officeDocumentWriteStore: store, requestExtension: (request) => {
@@ -381,6 +381,79 @@ test('selection_insert requires a stable fingerprint and attests payload-bound X
     assert.equal(rejected.result.isError, true); assert.equal(writes, 2)
     const replay = await write('selection-invalid', 6)
     assert.equal(replay.result.isError, true); assert.match(replay.result.content[0].text, /uncertain/i); assert.equal(writes, 2)
+  } finally { await connector.stop() }
+})
+
+test('a fingerprint mismatch before mutation releases its pending fence so reread and re-preview of the same payload can succeed', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 24, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/111?id=111' }
+  const payload = { markdown: '同一份待写内容' }
+  let fingerprint = 'before-one'; let writes = 0
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '版本变化文档', fingerprint }
+    if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [] } } })
+    writes += 1
+    if (writes === 1) return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, error: { code: 'fingerprint_mismatch', message: 'The light document changed before mutation' } })
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true } } })
+  }) })
+  connector.bindBrowserTarget('light-doc-fingerprint-recovery-run', target); const endpoint = await connector.start()
+  try {
+    const first = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload }, 1)
+    const rejected = await call(endpoint, 'light_document_write_commit', { challenge: first.result.structuredContent.challenge }, 2)
+    assert.equal(rejected.result.isError, true)
+    assert.match(rejected.result.content[0].text, /fingerprint_mismatch.*before any write/i)
+    assert.equal(writes, 1)
+    fingerprint = 'before-two'
+    const second = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload }, 3)
+    const committed = await call(endpoint, 'light_document_write_commit', { challenge: second.result.structuredContent.challenge }, 4)
+    assert.equal(committed.result.structuredContent.status, 'verified_write')
+    assert.equal(writes, 2)
+  } finally { await connector.stop() }
+})
+
+test('flat selected-content preview uses the same preview and commit tools for safe deletion', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 25, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/112?id=112' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '选区删除文档', fingerprint: 'before' }
+  let writes = 0
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    if (request.action === 'write') {
+      writes += 1
+      return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, deletedSelectionText: '要删除的内容', verifiedTextAfter: '保留内容' } } })
+    }
+    const selection = { supported: true, stable: true, truncated: false, hasSelection: true, isCollapsed: false, wholeBlockReplaceable: false, replaceStrategy: 'public_replace_content', selectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', content: { text: '要删除的内容' } }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [], selection } } })
+  }) })
+  connector.bindBrowserTarget('light-doc-selection-delete-run', target); const endpoint = await connector.start()
+  try {
+    const preview = await call(endpoint, 'light_document_selection_replace_preview', { blocks: [] }, 1)
+    assert.equal(preview.result.structuredContent.action, 'selection_delete_preview')
+    const grant = connector.officeDocumentChallenges.get(preview.result.structuredContent.challenge)
+    assert.equal(grant.operation, 'selection_delete')
+    const committed = await call(endpoint, 'light_document_selection_replace_commit', { challenge: preview.result.structuredContent.challenge }, 2)
+    assert.equal(committed.result.structuredContent.status, 'verified_write')
+    assert.equal(writes, 1)
+  } finally { await connector.stop() }
+})
+
+test('flat selected-content preview commits a whole-block deletion only with stable-id and surrounding-block readback', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 26, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/113?id=113' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '整块删除文档', fingerprint: 'before' }
+  let writes = 0
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    if (request.action === 'write') {
+      writes += 1
+      return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, deletedTagIds: ['one', 'two'], outsideSelectionBlocks: [{ index: 0, type: 'p', language: null, text: '保留正文' }], writeStrategy: 'full_canvas_patch' } } })
+    }
+    const selection = { supported: true, stable: true, truncated: false, hasSelection: true, isCollapsed: false, wholeBlockReplaceable: true, selectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', selectedTagIds: ['one', 'two'], content: { text: '第一段 第二段' } }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 3, offset: 0, limit: 3, hasMore: false, blocks: [], selection } } })
+  }) })
+  connector.bindBrowserTarget('light-doc-whole-selection-delete-run', target); const endpoint = await connector.start()
+  try {
+    const preview = await call(endpoint, 'light_document_selection_replace_preview', { blocks: [] }, 1)
+    assert.equal(preview.result.structuredContent.action, 'selection_delete_preview')
+    const committed = await call(endpoint, 'light_document_selection_replace_commit', { challenge: preview.result.structuredContent.challenge }, 2)
+    assert.equal(committed.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(committed.result.structuredContent.observed.deletedTagIds, ['one', 'two'])
+    assert.equal(writes, 1)
   } finally { await connector.stop() }
 })
 
@@ -505,5 +578,7 @@ test('WebEdit light-document Skill prescribes one selection read and supports ar
   assert.equal((skill.match(/mcp__chrome__light_document_selection_read/g) ?? []).length, 1)
   assert.match(skill, /任意稳定的非折叠选区/)
   assert.match(skill, /选区未变化时不要重复 `selection_read`/)
+  assert.match(skill, /`\{ blocks: \[\] \}`/)
+  assert.match(skill, /超时或回读不确定时不得自动重试/)
   assert.doesNotMatch(skill, /局部或歧义选区请用户重新选择完整块/)
 })

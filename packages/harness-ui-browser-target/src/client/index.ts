@@ -50,7 +50,11 @@ export function apply(ctx: ClientContext): void {
   const panel = createSnapshotStore(false)
   const injected = (): BrowserTargetInjected => ({
     hooks: { browserTarget: bridge.source, browserTargetPanel: panel },
-    onBrowserTargetCommand: command => bridge.send(command, window.parent),
+    onBrowserTargetCommand: command => {
+      if (command.command !== 'capture-design-reference') { bridge.send(command, window.parent); return }
+      const sessionId = ctx.sessions.list.getSnapshot().current
+      bridge.send({ ...command, ...(sessionId === undefined ? {} : { sessionId: String(sessionId) }) }, window.parent)
+    },
     onBrowserTargetPanelChange: open => panel.set(open),
   })
   const reconnectInjected = (): HarnessReconnectActionInjected => ({

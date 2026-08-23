@@ -36,7 +36,8 @@ export function apply(ctx: ClientContext): void {
     }
     window.addEventListener('message', receive); return () => window.removeEventListener('message', receive)
   }, 'accrui-workspace-review: feedback bridge')
-  const injected = (): WorkspaceReviewActionInjected => ({ bridge, hooks: { open } })
+  const close = (): void => { open.set(false) }
+  const injected = (): WorkspaceReviewActionInjected => ({ bridge, hooks: { open }, close })
   ctx.slots.inject('sidebar.compact.action', () => ctx.slots.register({ name: 'sidebar.compact.action', id: 'workspace-markdown-files', order: 15, inject: injected }, WorkspaceReviewAction))
 }
 

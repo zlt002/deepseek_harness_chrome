@@ -1,12 +1,39 @@
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
 import { randomUUID } from 'node:crypto'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { decodeNativeFrames, encodeNativeFrame } from './protocol.mjs'
 import { BrowserConnector } from './connector.mjs'
+import { CONNECTOR_RESPONSE, sameBrowserTarget, validBrowserTarget, validBrowserTargetBinding } from './connector-protocol.mjs'
+import { validRuntimeIdentitySummary } from './runtime-identity-contract.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
 import { redactSensitiveDiagnostic } from './redact.mjs'
 
 const nativeLogPath = process.env.DSH_NATIVE_LOG?.trim()
+const runtimeManifestPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime-manifest.json')
+
+function installedRuntimeIdentity() {
+  if (!existsSync(runtimeManifestPath)) return undefined
+  try {
+    const value = JSON.parse(readFileSync(runtimeManifestPath, 'utf8'))
+    if (!validRuntimeIdentitySummary(value)) return undefined
+    return Object.freeze({
+      format: value.format,
+      upstreamRevision: value.upstreamRevision,
+      productHash: value.productHash,
+      assetHash: value.assetHash,
+      assetFileCount: value.assetFileCount,
+      pluginHash: value.pluginHash,
+      pluginFileCount: value.pluginFileCount,
+      bootEntries: value.bootEntries,
+      productBootEntries: value.productBootEntries,
+      installRoot: value.installRoot,
+    })
+  } catch {
+    return undefined
+  }
+}
 
 function nativeLog(message) {
   if (!nativeLogPath) return
@@ -32,41 +59,6 @@ function harnessWebUrl(value) {
   return url.toString().replace(/\/$/, '')
 }
 
-function validBrowserTarget(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  return Object.keys(value).length === 4
-    && value.browser === 'chrome'
-    && Number.isInteger(value.windowId) && value.windowId >= 0
-    && Number.isInteger(value.tabId) && value.tabId >= 0
-    && typeof value.url === 'string' && value.url.length > 0
-}
-
-function sameBrowserTarget(left, right) {
-  return validBrowserTarget(left)
-    && validBrowserTarget(right)
-    && left.browser === right.browser
-    && left.windowId === right.windowId
-    && left.tabId === right.tabId
-    && left.url === right.url
-}
-
-function validUnavailableBrowserTarget(value) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).length === 2
-    && value.reason === 'closed_or_changed'
-    && validBrowserTarget(value.browserTarget)
-}
-
-function validBrowserTargetBinding(browserTarget, browserTargets, unavailableBrowserTargets) {
-  const targets = browserTargets ?? (validBrowserTarget(browserTarget) ? [browserTarget] : [])
-  const unavailable = unavailableBrowserTargets ?? []
-  return validBrowserTarget(browserTarget)
-    && Array.isArray(targets) && targets.length > 0 && targets.every(validBrowserTarget)
-    && targets.some((target) => sameBrowserTarget(target, browserTarget))
-    && new Set(targets.map((target) => `${target.windowId}:${target.tabId}:${target.url}`)).size === targets.length
-    && Array.isArray(unavailable) && unavailable.every(validUnavailableBrowserTarget)
-}
-
 process.on('uncaughtException', (error) => {
   nativeLog(`uncaughtException ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
 })
@@ -79,7 +71,7 @@ process.on('unhandledRejection', (error) => {
  * to stderr so Chrome never sees an unframed byte.
  */
 export class NativeHost {
-  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string } }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void }} [options] */
+  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string } }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object }} [options] */
   constructor(options = {}) {
     this.processFactory = options.processFactory ?? ((processOptions) => new HarnessWebProcess(processOptions))
     this.connectorFactory = options.connectorFactory ?? ((connectorOptions) => new BrowserConnector(connectorOptions))
@@ -95,6 +87,7 @@ export class NativeHost {
     this.closePromise = undefined
     this.buffer = Buffer.alloc(0)
     this.closed = false
+    this.runtimeIdentity = options.runtimeIdentity ?? installedRuntimeIdentity()
   }
 
   /** Attach stdin/stdout and start consuming frames. */
@@ -148,7 +141,7 @@ export class NativeHost {
       this.transferBrowserTarget(message.requestId, message.runId, message.browserTarget, message.browserTargets, message.unavailableBrowserTargets)
       return
     }
-    if (type === 'connector_response') {
+    if (type === CONNECTOR_RESPONSE) {
       if (this.connector?.acceptExtensionResponse(message) !== true) {
         this.send({ type: 'error', error: 'Unrecognized Connector response.' })
       }
@@ -178,7 +171,7 @@ export class NativeHost {
       return
     }
     if (this.serverUrl !== undefined) {
-      this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token } })
+      this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token, ...(this.runtimeIdentity === undefined ? {} : { runtimeIdentity: this.runtimeIdentity }) } })
       return
     }
     if (this.startPromise === undefined) {
@@ -188,7 +181,7 @@ export class NativeHost {
     }
     try {
       const url = await this.startPromise
-      this.send({ type: 'server_started', payload: { url, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token } })
+      this.send({ type: 'server_started', payload: { url, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token, ...(this.runtimeIdentity === undefined ? {} : { runtimeIdentity: this.runtimeIdentity }) } })
     } catch (error) {
       this.send({ type: 'error', error: error instanceof Error ? error.message : String(error) })
     }

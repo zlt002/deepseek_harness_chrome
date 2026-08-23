@@ -59,9 +59,26 @@ export interface SelectionAnchor {
   sourceFingerprint: string
 }
 
+/**
+ * An editor-native anchor. `from`/`to` are ProseMirror positions, never
+ * Markdown character offsets. This is what keeps a dirty visual draft and a
+ * cross-block/table/code selection addressable without inventing a mapping.
+ */
+export interface VisualSelectionAnchor {
+  version: 2
+  editorRevision: number
+  from: number
+  to: number
+  quote: string
+  blocks: Array<{ kind: string; text: string }>
+  sourceFingerprint: string
+}
+
+export type MarkdownSelectionAnchor = SelectionAnchor | VisualSelectionAnchor
+
 export interface MarkdownReviewAnnotation {
   id: string
-  anchor: SelectionAnchor
+  anchor: MarkdownSelectionAnchor
   comment: string
 }
 
@@ -82,7 +99,34 @@ export interface DeliverRequest {
   annotation: MarkdownReviewAnnotation
 }
 
-export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest
+export interface ProposalsRequest {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-proposals-request'
+  requestId: string
+  reviewId: string
+  afterSequence: number
+}
+
+export interface PrepareWriteRequest {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-prepare-write-request'
+  requestId: string
+  reviewId: string
+  expected: Pick<ReviewResourceIdentity, 'resourceId' | 'revision' | 'fingerprint'>
+  content: string
+}
+
+export interface CommitWriteRequest {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-commit-write-request'
+  requestId: string
+  reviewId: string
+  approval: string
+  idempotencyKey: string
+  content: string
+}
+
+export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest | ProposalsRequest | PrepareWriteRequest | CommitWriteRequest
 
 export interface SnapshotResponse {
   v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
@@ -102,6 +146,72 @@ export interface DeliverResponse {
   error?: MarkdownReviewError
 }
 
+interface MarkdownReviewProposalBase {
+  proposalId: string
+  selectionId: string
+  sequence: number
+  baseFingerprint: string
+  summary: string
+}
+export interface MarkdownReviewDocumentProposal extends MarkdownReviewProposalBase {
+  kind: 'document'
+  candidateMarkdown: string
+}
+export interface MarkdownReviewSelectionProposal extends MarkdownReviewProposalBase {
+  kind: 'selection'
+  replacementMarkdown: string
+  editorRevision: number
+  from: number
+  to: number
+}
+export type MarkdownReviewProposal = MarkdownReviewDocumentProposal | MarkdownReviewSelectionProposal
+
+export interface ProposalsResponse {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-proposals-response'
+  requestId: string
+  ok: boolean
+  reviewId?: string
+  proposals?: MarkdownReviewProposal[]
+  error?: MarkdownReviewError
+}
+
+export interface PreparedWrite {
+  status: 'prepared'
+  approval: string
+  contentHash: string
+  expiresAt: number
+}
+export interface WriteConflict {
+  status: 'conflict'
+  latest: Omit<MarkdownReviewSnapshot, 'harnessSessionId'>
+}
+export type PrepareWriteResult = PreparedWrite | WriteConflict
+export interface VerifiedWrite {
+  status: 'verified_write'
+  resource: ReviewResourceIdentity
+  contentHash: string
+}
+export interface UncertainWrite { status: 'uncertain'; message: string }
+export type CommitWriteResult = VerifiedWrite | WriteConflict | UncertainWrite
+
+export interface PrepareWriteResponse {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-prepare-write-response'
+  requestId: string
+  ok: boolean
+  preparation?: PrepareWriteResult
+  error?: MarkdownReviewError
+}
+export interface CommitWriteResponse {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-commit-write-response'
+  requestId: string
+  ok: boolean
+  result?: CommitWriteResult
+  error?: MarkdownReviewError
+}
+
 /** Sent when background reuses a live Tab after Host refreshed its target. */
 export interface TargetUpdatedNotification {
   v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
@@ -110,7 +220,7 @@ export interface TargetUpdatedNotification {
   reviewId: string
 }
 
-export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | TargetUpdatedNotification
+export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | ProposalsResponse | PrepareWriteResponse | CommitWriteResponse | TargetUpdatedNotification
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -140,17 +250,61 @@ export function isSelectionAnchor(value: unknown): value is SelectionAnchor {
     && isMarkdownReviewId(value.sourceFingerprint)
 }
 
+export function isVisualSelectionAnchor(value: unknown): value is VisualSelectionAnchor {
+  if (!isRecord(value)) return false
+  return value.version === 2
+    && Number.isSafeInteger(value.editorRevision) && (value.editorRevision as number) >= 0
+    && Number.isSafeInteger(value.from) && Number.isSafeInteger(value.to)
+    && (value.from as number) >= 0 && (value.to as number) > (value.from as number)
+    && boundedText(value.quote, MAX_QUOTE_LENGTH)
+    && Array.isArray(value.blocks) && value.blocks.length <= 24 && value.blocks.every(block => isRecord(block)
+      && Object.keys(block).every(key => ['kind', 'text'].includes(key))
+      && boundedText(block.kind, 32) && boundedText(block.text, 2_000, true))
+    && isMarkdownReviewId(value.sourceFingerprint)
+    && Object.keys(value).every(key => ['version', 'editorRevision', 'from', 'to', 'quote', 'blocks', 'sourceFingerprint'].includes(key))
+}
+
+export function isMarkdownSelectionAnchor(value: unknown): value is MarkdownSelectionAnchor {
+  return isSelectionAnchor(value) || isVisualSelectionAnchor(value)
+}
+
 export function isMarkdownReviewAnnotation(value: unknown): value is MarkdownReviewAnnotation {
   return isRecord(value)
     && Object.keys(value).every((key) => ['id', 'anchor', 'comment'].includes(key))
     && isMarkdownReviewId(value.id)
-    && isSelectionAnchor(value.anchor)
+    && isMarkdownSelectionAnchor(value.anchor)
     && boundedText(value.comment, MAX_COMMENT_LENGTH)
+}
+
+function isMarkdownReviewProposal(value: unknown): value is MarkdownReviewProposal {
+  return isRecord(value)
+    && isMarkdownReviewId(value.proposalId)
+    && isMarkdownReviewId(value.selectionId)
+    && Number.isSafeInteger(value.sequence) && (value.sequence as number) > 0
+    && isMarkdownReviewId(value.baseFingerprint)
+    && boundedText(value.summary, 1_000, true)
+    && ((value.kind === 'document'
+      && Object.keys(value).every(key => ['proposalId', 'selectionId', 'sequence', 'baseFingerprint', 'kind', 'candidateMarkdown', 'summary'].includes(key))
+      && boundedText(value.candidateMarkdown, MAX_CONTENT_LENGTH, true))
+      || (value.kind === 'selection'
+        && Object.keys(value).every(key => ['proposalId', 'selectionId', 'sequence', 'baseFingerprint', 'kind', 'replacementMarkdown', 'editorRevision', 'from', 'to', 'summary'].includes(key))
+        && boundedText(value.replacementMarkdown, 100_000, true)
+        && Number.isSafeInteger(value.editorRevision) && (value.editorRevision as number) >= 0
+        && Number.isSafeInteger(value.from) && Number.isSafeInteger(value.to)
+        && (value.from as number) >= 0 && (value.to as number) > (value.from as number)))
 }
 
 export function isMarkdownReviewPortRequest(value: unknown): value is MarkdownReviewPortRequest {
   if (!isRecord(value) || value.v !== MARKDOWN_REVIEW_PROTOCOL_VERSION || !isRequestId(value.requestId) || !isMarkdownReviewId(value.reviewId)) return false
   if (value.type === 'markdown-review-snapshot-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId'].includes(key))
+  if (value.type === 'markdown-review-proposals-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'afterSequence'].includes(key))
+    && Number.isSafeInteger(value.afterSequence) && (value.afterSequence as number) >= 0
+  if (value.type === 'markdown-review-prepare-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'expected', 'content'].includes(key))
+    && isExpectedResourceIdentity(value.expected)
+    && boundedText(value.content, MAX_CONTENT_LENGTH, true)
+  if (value.type === 'markdown-review-commit-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'approval', 'idempotencyKey', 'content'].includes(key))
+    && isMarkdownReviewId(value.approval) && isMarkdownReviewId(value.idempotencyKey)
+    && boundedText(value.content, MAX_CONTENT_LENGTH, true)
   return value.type === 'markdown-review-deliver-request'
     && Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'deliveryId', 'annotation'].includes(key))
     && isMarkdownReviewId(value.harnessSessionId)
@@ -166,6 +320,11 @@ function isResourceIdentity(value: unknown): value is ReviewResourceIdentity {
     && isMarkdownReviewId(value.fingerprint)
 }
 
+function isExpectedResourceIdentity(value: unknown): value is Pick<ReviewResourceIdentity, 'resourceId' | 'revision' | 'fingerprint'> {
+  return isRecord(value) && Object.keys(value).every(key => ['resourceId', 'revision', 'fingerprint'].includes(key))
+    && isMarkdownReviewId(value.resourceId) && isMarkdownReviewId(value.revision) && isMarkdownReviewId(value.fingerprint)
+}
+
 export function isMarkdownReviewSnapshot(value: unknown): value is MarkdownReviewSnapshot {
   return isRecord(value)
     && value.v === MARKDOWN_REVIEW_PROTOCOL_VERSION
@@ -176,6 +335,31 @@ export function isMarkdownReviewSnapshot(value: unknown): value is MarkdownRevie
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
     && typeof value.truncated === 'boolean'
     && typeof value.readOnly === 'boolean'
+}
+
+function isHostSnapshot(value: unknown): value is Omit<MarkdownReviewSnapshot, 'harnessSessionId'> {
+  return isRecord(value)
+    && Object.keys(value).every(key => ['v', 'type', 'reviewId', 'resource', 'content', 'truncated', 'readOnly'].includes(key))
+    && value.v === MARKDOWN_REVIEW_PROTOCOL_VERSION && value.type === 'markdown-review-snapshot'
+    && isMarkdownReviewId(value.reviewId) && isResourceIdentity(value.resource)
+    && boundedText(value.content, MAX_CONTENT_LENGTH, true)
+    && typeof value.truncated === 'boolean' && value.readOnly === true
+}
+function isWriteConflict(value: unknown): value is WriteConflict {
+  return isRecord(value) && Object.keys(value).every(key => ['status', 'latest'].includes(key))
+    && value.status === 'conflict' && isHostSnapshot(value.latest)
+}
+function isPrepareWriteResult(value: unknown): value is PrepareWriteResult {
+  return isWriteConflict(value) || (isRecord(value)
+    && Object.keys(value).every(key => ['status', 'approval', 'contentHash', 'expiresAt'].includes(key))
+    && value.status === 'prepared' && isMarkdownReviewId(value.approval) && isMarkdownReviewId(value.contentHash)
+    && Number.isSafeInteger(value.expiresAt) && (value.expiresAt as number) > 0)
+}
+function isCommitWriteResult(value: unknown): value is CommitWriteResult {
+  return isWriteConflict(value) || (isRecord(value) && value.status === 'verified_write'
+    && Object.keys(value).every(key => ['status', 'resource', 'contentHash'].includes(key))
+    && isResourceIdentity(value.resource) && isMarkdownReviewId(value.contentHash)) || (isRecord(value) && value.status === 'uncertain'
+    && Object.keys(value).every(key => ['status', 'message'].includes(key)) && boundedText(value.message, 4_000))
 }
 
 export function isMarkdownReviewError(value: unknown): value is MarkdownReviewError {
@@ -198,6 +382,20 @@ export function isMarkdownReviewPortResponse(value: unknown): value is MarkdownR
   if (value.type === 'markdown-review-deliver-response') {
     return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'deliveryId', 'error'].includes(key))
       && (value.ok ? isMarkdownReviewId(value.deliveryId) && value.error === undefined : isMarkdownReviewError(value.error) && value.deliveryId === undefined)
+  }
+  if (value.type === 'markdown-review-proposals-response') {
+    return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'reviewId', 'proposals', 'error'].includes(key))
+      && (value.ok
+        ? isMarkdownReviewId(value.reviewId) && Array.isArray(value.proposals) && value.proposals.every(isMarkdownReviewProposal) && value.error === undefined
+        : isMarkdownReviewError(value.error) && value.reviewId === undefined && value.proposals === undefined)
+  }
+  if (value.type === 'markdown-review-prepare-write-response') {
+    return Object.keys(value).every(key => ['v', 'type', 'requestId', 'ok', 'preparation', 'error'].includes(key))
+      && (value.ok ? isPrepareWriteResult(value.preparation) && value.error === undefined : isMarkdownReviewError(value.error) && value.preparation === undefined)
+  }
+  if (value.type === 'markdown-review-commit-write-response') {
+    return Object.keys(value).every(key => ['v', 'type', 'requestId', 'ok', 'result', 'error'].includes(key))
+      && (value.ok ? isCommitWriteResult(value.result) && value.error === undefined : isMarkdownReviewError(value.error) && value.result === undefined)
   }
   return false
 }

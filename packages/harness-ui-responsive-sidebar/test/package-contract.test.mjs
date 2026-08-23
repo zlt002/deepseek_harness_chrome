@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 test('responsive sidebar uses the public compact presentation seam without owning runtime stores', async () => {
-  const [manifest, source, presentation, styles, buildScript, nativeRegistration] = await Promise.all([
+  const [manifest, source, presentation, styles, productPluginManifest, buildScript, nativeRegistration] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ResponsiveSidebarPresentation.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ResponsiveSidebarPresentation.module.css', import.meta.url), 'utf8'),
+    readFile(new URL('../../../apps/native-server/src/product-plugin-manifest.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../../../scripts/build-harness-client-plugins.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../../../scripts/register-native-host.mjs', import.meta.url), 'utf8'),
   ])
@@ -38,6 +39,7 @@ test('responsive sidebar uses the public compact presentation seam without ownin
     'settings must remain adjacent to compact actions instead of consuming a second auto margin',
   )
   assert.match(styles, /\.actions\s*\{[\s\S]*?margin-left:\s*auto;[\s\S]*?\}/)
-  assert.match(buildScript, /'harness-ui-responsive-sidebar'/)
-  assert.match(nativeRegistration, /'harness-ui-responsive-sidebar'/)
+  assert.match(productPluginManifest, /'harness-ui-responsive-sidebar'/)
+  assert.match(buildScript, /PRODUCT_UI_PLUGIN_DIRECTORIES/)
+  assert.match(nativeRegistration, /PRODUCT_UI_PLUGIN_DIRECTORIES/)
 })

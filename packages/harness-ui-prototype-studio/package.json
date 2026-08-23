@@ -1,0 +1,29 @@
+{
+  "name": "@accrui/harness-ui-prototype-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Trusted, schema-driven product prototype runtime for the AccrUI Harness client",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-prototype-studio",
+    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-prototype-studio",
+    "test": "node --test test/*.test.mjs"
+  }
+}

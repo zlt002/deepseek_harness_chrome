@@ -1,5 +1,51 @@
 // Kept self-contained because focused background adapters evaluate this source
 // as a data URL and production WXT bundles it as a single service worker.
+import {
+  CONNECTOR_CANCEL,
+  CONNECTOR_REQUEST,
+  CONNECTOR_RESPONSE,
+  sameBrowserTarget,
+  sameBrowserTargetList,
+  sameUnavailableBrowserTargetList,
+  validBrowserTarget as isBrowserTarget,
+  validUnavailableBrowserTarget as isUnavailableBrowserTarget,
+} from '../../native-server/src/connector-protocol.mjs'
+import type {
+  BrowserTarget,
+  ConnectorCorrelation,
+  UnavailableBrowserTarget,
+} from '../../native-server/src/connector-protocol.mjs'
+import { sameRuntimeReleaseIdentity, validRuntimeIdentitySummary } from '../../native-server/src/runtime-identity-contract.mjs'
+import type { RuntimeIdentitySummary } from '../../native-server/src/runtime-identity-contract.mjs'
+import {
+  samePinnedTab,
+  settingsFromUnknown,
+} from './background/browser-target-state'
+import type { BrowserTargetSettings } from './background/browser-target-state'
+import { BrowserTargetRuntime } from './background/browser-target-runtime'
+import type { BrowserTargetBinding, BrowserTargetTab } from './background/browser-target-runtime'
+import {
+  isLightDocumentResourceIdentity,
+  isListWorkTabsRequest as isConnectorRequest,
+  isOfficeDocumentRequest,
+  isReadWorkTabRequest,
+} from './background/office-request-contract'
+import { MARKDOWN_REVIEW_PORT, isMarkdownReviewPortRequest } from './markdown-review/protocol'
+import type { CommitWriteRequest, DeliverRequest, MarkdownReviewPortRequest, PrepareWriteRequest } from './markdown-review/protocol'
+import type {
+  LightDocumentResourceIdentity,
+  ListWorkTabsRequest as ConnectorRequest,
+  OfficeDocumentRequest,
+  OfficeReadFailure,
+  ReadWorkTabRequest,
+} from './background/office-request-contract'
+import {
+  PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY,
+  retainedPrototypeStudioAuthorizations,
+  storedPrototypeStudioAuthorizations,
+  validPrototypeStudioAuthorization,
+} from '../src/prototype-studio-authorization'
+import type { PrototypeStudioAuthorization } from '../src/prototype-studio-authorization'
 const KNOWLEDGE_API_ORIGIN = 'https://anapi-uat.annto.com'
 const KNOWLEDGE_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-kd`
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
@@ -72,8 +118,11 @@ function migrateLegacyKnowledgeScope(value: unknown): { enabled: boolean; scope:
 function validSessionIdentity(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value) }
 const SIDE_PANEL_HANDOFF_TTL_MS = 60_000
 const pendingSidePanelHandoffs = new Map<number, { sessionId: string; tabId: number; expiresAt: number }>()
-const MARKDOWN_REVIEW_PORT = 'markdown-review/v1'
 const WORKSPACE_REVIEW_SNAPSHOT_PATH = '/api/workspace-review/snapshot'
+const WORKSPACE_REVIEW_SELECTION_PATH = '/api/workspace-review/selection'
+const WORKSPACE_REVIEW_PROPOSALS_PATH = '/api/workspace-review/proposals'
+const WORKSPACE_REVIEW_PREPARE_WRITE_PATH = '/api/workspace-review/prepare-write'
+const WORKSPACE_REVIEW_COMMIT_WRITE_PATH = '/api/workspace-review/commit-write'
 const MARKDOWN_REVIEW_STORAGE_KEY = 'harnessMarkdownReviewIdentitiesV1'
 
 interface OpenMarkdownReview {
@@ -92,27 +141,6 @@ interface MarkdownReviewRecord extends OpenMarkdownReview {
   windowId: number
 }
 type PersistedMarkdownReview = Omit<MarkdownReviewRecord, 'capability' | 'v'>
-
-interface MarkdownReviewAnchor {
-  version: 1
-  startUtf16: number
-  endUtf16: number
-  quote: string
-  prefix: string
-  suffix: string
-  sourceFingerprint: string
-}
-
-interface MarkdownReviewAnnotation { id: string; anchor: MarkdownReviewAnchor; comment: string }
-interface MarkdownReviewPortRequest {
-  v: 1
-  type: 'markdown-review-snapshot-request' | 'markdown-review-deliver-request'
-  requestId: string
-  reviewId: string
-  harnessSessionId?: string
-  deliveryId?: string
-  annotation?: MarkdownReviewAnnotation
-}
 
 const markdownReviews = new Map<string, MarkdownReviewRecord>()
 const markdownReviewKeys = new Map<string, string>()
@@ -135,35 +163,6 @@ function isOpenMarkdownReview(value: unknown): value is OpenMarkdownReview {
     && boundedReviewText(review.capability, 512)
 }
 
-function isMarkdownReviewAnchor(value: unknown): value is MarkdownReviewAnchor {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const anchor = value as Record<string, unknown>
-  return anchor.version === 1
-    && Number.isSafeInteger(anchor.startUtf16) && (anchor.startUtf16 as number) >= 0
-    && Number.isSafeInteger(anchor.endUtf16) && (anchor.endUtf16 as number) > (anchor.startUtf16 as number)
-    && boundedReviewText(anchor.quote, 8_000)
-    && boundedReviewText(anchor.prefix, 512, true)
-    && boundedReviewText(anchor.suffix, 512, true)
-    && reviewId(anchor.sourceFingerprint)
-}
-
-function isMarkdownReviewPortRequest(value: unknown): value is MarkdownReviewPortRequest {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const request = value as Record<string, unknown>
-  if (request.v !== 1 || !reviewId(request.requestId) || !reviewId(request.reviewId)) return false
-  if (request.type === 'markdown-review-snapshot-request') {
-    return Object.keys(request).every(key => ['v', 'type', 'requestId', 'reviewId'].includes(key))
-  }
-  if (request.type !== 'markdown-review-deliver-request'
-    || !reviewId(request.harnessSessionId) || !reviewId(request.deliveryId)
-    || typeof request.annotation !== 'object' || request.annotation === null) return false
-  const annotation = request.annotation as Record<string, unknown>
-  return Object.keys(request).every(key => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'deliveryId', 'annotation'].includes(key))
-    && Object.keys(annotation).every(key => ['id', 'anchor', 'comment'].includes(key))
-    && reviewId(annotation.id) && annotation.id === request.deliveryId
-    && isMarkdownReviewAnchor(annotation.anchor)
-    && boundedReviewText(annotation.comment, 8_000)
-}
 function validScope(value: unknown): value is KnowledgeScope {
   return typeof value === 'object' && value !== null && ((value as KnowledgeScope).domainId === '' || validSessionIdentity((value as KnowledgeScope).domainId))
     && Array.isArray((value as KnowledgeScope).systemIds) && (value as KnowledgeScope).systemIds.every(validSessionIdentity)
@@ -629,7 +628,10 @@ function selectedSourceScopeEcho(record: { scope: KnowledgeScope; enabled: boole
 
 const NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
 const START_TIMEOUT_MS = 30_000
-const TARGET_SETTINGS_KEY = 'harnessBrowserTargetSettings'
+const MAX_STORED_PROTOTYPE_REFERENCES = 3
+const PROTOTYPE_STUDIO_OPEN_PATH = '/api/prototype-studio/open'
+const PROTOTYPE_STUDIO_SNAPSHOT_PATH = '/api/prototype-studio/snapshot'
+const PROTOTYPE_STUDIO_RESTORE_PATH = '/api/prototype-studio/restore'
 const TRANSFER_TIMEOUT_MS = 15_000
 const TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY = 'teamKnowledgeCreateCheckpointsV1'
 
@@ -670,6 +672,7 @@ interface NativeStartPayload {
   runId?: unknown
   knowledgeProxyUrl?: unknown
   knowledgeProxyToken?: unknown
+  runtimeIdentity?: unknown
 }
 
 interface NativeTransferPayload {
@@ -679,36 +682,46 @@ interface NativeTransferPayload {
   unavailableBrowserTargets?: unknown
 }
 
-type BrowserTargetMode = 'follow-active-tab' | 'pinned-tabs' | 'none'
-
 let nativePort: chrome.runtime.Port | undefined
 let nativeUrl: string | undefined
+let nativeRuntimeIdentity: RuntimeIdentitySummary | undefined
 let startPromise: Promise<string> | undefined
-interface UnavailableBrowserTarget {
-  browserTarget: BrowserTarget
-  reason: 'closed_or_changed'
-}
-
-interface BrowserTargetBinding {
-  browserTarget: BrowserTarget
-  browserTargets: BrowserTarget[]
-  unavailableBrowserTargets: UnavailableBrowserTarget[]
-}
-
 const boundBrowserTargets = new Map<string, BrowserTargetBinding>()
 const pendingTargetTransfers = new Map<string, { resolve: () => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
-let settingsMutation: Promise<void> = Promise.resolve()
+
+function runtimeIdentitySummary(value: unknown): RuntimeIdentitySummary | undefined {
+  return validRuntimeIdentitySummary(value) ? value : undefined
+}
+
+async function publishHarnessReady(url: string): Promise<void> {
+  let extensionIdentity: RuntimeIdentitySummary | undefined
+  try {
+    const response = await fetch(chrome.runtime.getURL('/harness/runtime-manifest.json'), { cache: 'no-store' })
+    if (response.ok) extensionIdentity = runtimeIdentitySummary(await response.json())
+  } catch { /* an unpacked development shell may not have synced Harness assets yet */ }
+  const nativeIdentity = nativeRuntimeIdentity
+  const mismatch = nativeIdentity !== undefined && extensionIdentity !== undefined
+    && !sameRuntimeReleaseIdentity(nativeIdentity, extensionIdentity)
+  if (mismatch && nativeIdentity !== undefined && extensionIdentity !== undefined) {
+    await chrome.runtime.sendMessage({
+      type: 'harness-runtime-mismatch',
+      error: `Loaded Native Host product/plugins ${nativeIdentity.productHash.slice(0, 8)}/${nativeIdentity.pluginHash?.slice(0, 8) ?? 'missing'} do not match extension product/plugins ${extensionIdentity.productHash.slice(0, 8)}/${extensionIdentity.pluginHash?.slice(0, 8) ?? 'missing'}. Run pnpm dev:refresh -- --fast, then reopen the side panel.`,
+      nativeRuntimeIdentity: nativeIdentity,
+      extensionRuntimeIdentity: extensionIdentity,
+    }).catch(() => {})
+    return
+  }
+  await chrome.runtime.sendMessage({
+    type: 'harness-ready', url, nativeRuntimeIdentity: nativeIdentity, extensionRuntimeIdentity: extensionIdentity,
+    identityStatus: nativeIdentity !== undefined && extensionIdentity !== undefined ? 'verified' : 'unavailable',
+  }).catch(() => {})
+}
 let nativeLifecycle: Promise<void> = Promise.resolve()
+const prototypeStudioAuthorizations = new Map<string, PrototypeStudioAuthorization>()
+let prototypeStudioAuthorizationMutation: Promise<void> = Promise.resolve()
 
 function asError(value: unknown): string {
   return errorChain(value)
-}
-
-interface BrowserTarget {
-  browser: 'chrome'
-  windowId: number
-  tabId: number
-  url: string
 }
 
 /** Read-only Chrome tab metadata shown by the embedded Harness composer. */
@@ -720,85 +733,10 @@ interface ActiveTabSnapshot {
   favIconUrl?: string
 }
 
-/** Read-only tab summary used by the Harness iframe target picker. */
-interface BrowserTargetTab extends BrowserTarget {
-  title: string
-  favIconUrl?: string
-}
-
 const activeTabEpoch = crypto.randomUUID()
 let activeTabSequence = 0
 let activeTabSnapshot: ActiveTabSnapshot | undefined
 let activeTabRefreshGeneration = 0
-
-interface BrowserTargetSettings {
-  mode: BrowserTargetMode
-  pinnedTabs: BrowserTarget[]
-  primaryTabId?: number
-  candidate?: BrowserTarget
-}
-
-const defaultBrowserTargetSettings: BrowserTargetSettings = {
-  mode: 'follow-active-tab',
-  pinnedTabs: [],
-}
-
-interface ConnectorRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  browserTarget: BrowserTarget
-  browserTargets?: BrowserTarget[]
-  unavailableBrowserTargets?: UnavailableBrowserTarget[]
-  tool: 'list_work_tabs'
-}
-
-interface ReadWorkTabRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  browserTarget: BrowserTarget
-  browserTargets?: BrowserTarget[]
-  unavailableBrowserTargets?: UnavailableBrowserTarget[]
-  tool: 'read_work_tab'
-  tab: number
-  offset?: number
-  limit?: number
-}
-
-type OfficeDocumentAction = 'read' | 'search' | 'selection' | 'inspect_write' | 'write'
-type OfficeDocumentOperation = 'replace' | 'delete' | 'format' | 'title' | 'set_title' | 'blocks_replace' | 'blocks_batch_replace' | 'blocks_batch_edit' | 'blocks_delete' | 'blocks_format' | 'blocks_insert' | 'insert_drawing' | 'selection_insert' | 'selection_replace' | 'selection_content_replace' | 'selection_blocks_replace'
-const OFFICE_DOCUMENT_OPERATIONS: readonly OfficeDocumentOperation[] = ['replace', 'delete', 'format', 'title', 'set_title', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format', 'blocks_insert', 'insert_drawing', 'selection_insert', 'selection_replace', 'selection_content_replace', 'selection_blocks_replace']
-
-interface LightDocumentResourceIdentity {
-  kind: 'webedit_light_document'
-  origin: 'https://webedit.midea.com'
-  documentName: string | null
-  fingerprint: string
-}
-
-interface OfficeDocumentRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
-  browserTarget: BrowserTarget
-  tool: 'light_document'
-  action: OfficeDocumentAction
-  offset?: number
-  limit?: number
-  query?: string
-  operation?: OfficeDocumentOperation
-  payload?: Record<string, unknown>
-  resource?: LightDocumentResourceIdentity
-}
-
-interface OfficeReadFailure {
-  code: 'unsupported' | 'preview' | 'readonly' | 'invalid_range' | 'navigation' | 'iframe_replaced' | 'timeout' | 'cancelled' | 'fingerprint_mismatch' | 'readback_mismatch' | 'runtime_error'
-  message: string
-}
 
 interface TeamDocParent {
   parentId: string
@@ -820,11 +758,8 @@ interface TeamKnowledgeUserConfirmation {
 
 interface TeamKnowledgeParent extends TeamDocParent { parentType: string }
 
-interface TeamKnowledgeItemRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
+interface TeamKnowledgeItemRequest extends ConnectorCorrelation {
+  type: typeof CONNECTOR_REQUEST
   browserTarget: BrowserTarget
   tool: 'team_knowledge_batch'
   action: TeamKnowledgeItemAction
@@ -858,22 +793,16 @@ interface TeamDocPartialDelivery {
 
 const resourceWriteQueues = new Map<string, Promise<void>>()
 
-interface KnowledgeQueryRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
+interface KnowledgeQueryRequest extends ConnectorCorrelation {
+  type: typeof CONNECTOR_REQUEST
   tool: 'knowledge_search' | 'code_search'
   harnessSessionId: string
   harnessParentSessionId?: string
   question: string
 }
 
-interface SelectedSourceScopeRequest {
-  type: 'connector_request'
-  requestId: string
-  runId: string
-  generation: string
+interface SelectedSourceScopeRequest extends ConnectorCorrelation {
+  type: typeof CONNECTOR_REQUEST
   tool: 'selected_source_scope'
   harnessSessionId: string
   harnessParentSessionId?: string
@@ -885,66 +814,6 @@ interface KnowledgeSessionRecord { sessionId: string; fingerprint: string }
 interface SearchProgressSnapshot { type: 'search-progress/v1'; requestId: string; harnessSessionId: string; harnessParentSessionId?: string; tool: 'knowledge_search' | 'code_search'; question: string; phase: 'querying' | 'streaming' | 'done' | 'error'; chars: number; content: string; eventType?: string; process?: string }
 const activeKnowledgeQueries = new Map<string, AbortController>()
 const searchProgressSnapshots = new Map<string, SearchProgressSnapshot>()
-
-function isConnectorRequest(message: NativeMessage): message is ConnectorRequest {
-  const target = message.browserTarget
-  return message.type === 'connector_request'
-    && typeof message.requestId === 'string'
-    && typeof message.runId === 'string'
-    && typeof message.generation === 'string'
-    && message.tool === 'list_work_tabs'
-    && typeof target === 'object' && target !== null
-    && (target as BrowserTarget).browser === 'chrome'
-    && Number.isInteger((target as BrowserTarget).windowId) && (target as BrowserTarget).windowId >= 0
-    && Number.isInteger((target as BrowserTarget).tabId) && (target as BrowserTarget).tabId >= 0
-    && typeof (target as BrowserTarget).url === 'string'
-    && (message.browserTargets === undefined || (Array.isArray(message.browserTargets) && message.browserTargets.every(isBrowserTarget)))
-    && (message.unavailableBrowserTargets === undefined || (Array.isArray(message.unavailableBrowserTargets)
-      && message.unavailableBrowserTargets.every(isUnavailableBrowserTarget)))
-}
-
-function isReadWorkTabRequest(message: NativeMessage): message is ReadWorkTabRequest {
-  return message.type === 'connector_request'
-    && typeof message.requestId === 'string'
-    && typeof message.runId === 'string'
-    && typeof message.generation === 'string'
-    && message.tool === 'read_work_tab'
-    && isBrowserTarget(message.browserTarget)
-    && Number.isInteger(message.tab) && (message.tab as number) >= 1 && (message.tab as number) <= 20
-    && (message.offset === undefined || (Number.isInteger(message.offset) && (message.offset as number) >= 0 && (message.offset as number) <= 100000))
-    && (message.limit === undefined || (Number.isInteger(message.limit) && (message.limit as number) >= 1 && (message.limit as number) <= 200))
-    && (message.browserTargets === undefined || (Array.isArray(message.browserTargets) && message.browserTargets.every(isBrowserTarget)))
-    && (message.unavailableBrowserTargets === undefined || (Array.isArray(message.unavailableBrowserTargets)
-      && message.unavailableBrowserTargets.every(isUnavailableBrowserTarget)))
-}
-
-function isLightDocumentResourceIdentity(value: unknown): value is LightDocumentResourceIdentity {
-  return typeof value === 'object' && value !== null
-    && (value as LightDocumentResourceIdentity).kind === 'webedit_light_document'
-    && (value as LightDocumentResourceIdentity).origin === 'https://webedit.midea.com'
-    && (typeof (value as LightDocumentResourceIdentity).documentName === 'string' || (value as LightDocumentResourceIdentity).documentName === null)
-    && typeof (value as LightDocumentResourceIdentity).fingerprint === 'string' && (value as LightDocumentResourceIdentity).fingerprint.length > 0
-}
-
-function isOfficeDocumentRequest(message: NativeMessage): message is OfficeDocumentRequest {
-  if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
-    && typeof message.generation === 'string' && message.tool === 'light_document' && isBrowserTarget(message.browserTarget))) return false
-  if (!['read', 'search', 'selection', 'inspect_write', 'write'].includes(String(message.action))) return false
-  const action = message.action as OfficeDocumentAction
-  const validPayload = message.payload === undefined || (message.payload !== null && typeof message.payload === 'object' && !Array.isArray(message.payload) && JSON.stringify(message.payload).length <= 100000)
-  if (action === 'read') return (message.offset === undefined || (Number.isInteger(message.offset) && (message.offset as number) >= 0 && (message.offset as number) <= 100000))
-    && (message.limit === undefined || (Number.isInteger(message.limit) && (message.limit as number) >= 1 && (message.limit as number) <= 200)) && validPayload
-  if (action === 'search') return typeof message.query === 'string' && message.query.trim().length > 0 && message.query.length <= 500
-    && (message.offset === undefined || (Number.isInteger(message.offset) && (message.offset as number) >= 0 && (message.offset as number) <= 100000))
-    && (message.limit === undefined || (Number.isInteger(message.limit) && (message.limit as number) >= 1 && (message.limit as number) <= 200))
-  if (action === 'selection') return message.offset === undefined && message.limit === undefined && message.query === undefined && validPayload
-  if (action === 'inspect_write') return message.offset === undefined && message.limit === undefined && message.query === undefined
-    && OFFICE_DOCUMENT_OPERATIONS.includes(message.operation as OfficeDocumentOperation)
-    && message.payload !== null && typeof message.payload === 'object' && !Array.isArray(message.payload) && JSON.stringify(message.payload).length <= 100000
-  return OFFICE_DOCUMENT_OPERATIONS.includes(message.operation as OfficeDocumentOperation)
-    && message.payload !== null && typeof message.payload === 'object' && !Array.isArray(message.payload)
-    && JSON.stringify(message.payload).length <= 100000 && isLightDocumentResourceIdentity(message.resource)
-}
 
 function isTeamDocParent(value: unknown): value is TeamDocParent {
   if (!value || typeof value !== 'object') return false
@@ -962,7 +831,7 @@ function isTeamKnowledgeParent(value: unknown): value is TeamKnowledgeParent {
 
 function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnowledgeItemRequest {
   const candidate = message as NativeMessage & Partial<TeamKnowledgeItemRequest>
-  if (!(message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
+  if (!(message.type === CONNECTOR_REQUEST && typeof message.requestId === 'string' && typeof message.runId === 'string'
     && typeof message.generation === 'string' && message.tool === 'team_knowledge_batch' && isBrowserTarget(message.browserTarget)
     && ['inspect_parent', 'create', 'readback'].includes(String(candidate.action)))) return false
   if (candidate.action === 'inspect_parent') return candidate.parent === undefined && candidate.kind === undefined && candidate.name === undefined && candidate.body === undefined && candidate.catalogId === undefined && candidate.userConfirmation === undefined
@@ -979,31 +848,20 @@ function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnow
 }
 
 function isKnowledgeQueryRequest(message: NativeMessage): message is KnowledgeQueryRequest {
-  return message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
+  return message.type === CONNECTOR_REQUEST && typeof message.requestId === 'string' && typeof message.runId === 'string'
     && typeof message.generation === 'string' && (message.tool === 'knowledge_search' || message.tool === 'code_search')
     && validSessionIdentity(message.harnessSessionId) && (message.harnessParentSessionId === undefined || validSessionIdentity(message.harnessParentSessionId))
     && typeof message.question === 'string' && message.question.trim().length > 0 && message.question.length <= 4000
 }
 
 function isSelectedSourceScopeRequest(message: NativeMessage): message is SelectedSourceScopeRequest {
-  return message.type === 'connector_request' && typeof message.requestId === 'string' && typeof message.runId === 'string'
+  return message.type === CONNECTOR_REQUEST && typeof message.requestId === 'string' && typeof message.runId === 'string'
     && typeof message.generation === 'string' && message.tool === 'selected_source_scope'
     && validSessionIdentity(message.harnessSessionId) && (message.harnessParentSessionId === undefined || validSessionIdentity(message.harnessParentSessionId))
 }
 
-function isKnowledgeCancel(message: NativeMessage): message is NativeMessage & { type: 'connector_cancel'; requestId: string; runId: string; generation: string } {
-  return message.type === 'connector_cancel' && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
-}
-
-function sameBrowserTarget(left: BrowserTarget, right: BrowserTarget): boolean {
-  return left.browser === right.browser
-    && left.windowId === right.windowId
-    && left.tabId === right.tabId
-    && left.url === right.url
-}
-
-function samePinnedTab(left: BrowserTarget, right: BrowserTarget): boolean {
-  return left.browser === right.browser && left.tabId === right.tabId
+function isKnowledgeCancel(message: NativeMessage): message is NativeMessage & { type: typeof CONNECTOR_CANCEL; requestId: string; runId: string; generation: string } {
+  return message.type === CONNECTOR_CANCEL && typeof message.requestId === 'string' && typeof message.runId === 'string' && typeof message.generation === 'string'
 }
 
 function isInternalHarnessPage(url: string): boolean {
@@ -1066,29 +924,6 @@ async function refreshCurrentActiveTab(broadcast = true): Promise<ActiveTabSnaps
   return setActiveTabSnapshot(tab, broadcast)
 }
 
-function isBrowserTarget(value: unknown): value is BrowserTarget {
-  return typeof value === 'object' && value !== null
-    && (value as BrowserTarget).browser === 'chrome'
-    && Number.isInteger((value as BrowserTarget).windowId) && (value as BrowserTarget).windowId >= 0
-    && Number.isInteger((value as BrowserTarget).tabId) && (value as BrowserTarget).tabId >= 0
-    && typeof (value as BrowserTarget).url === 'string' && (value as BrowserTarget).url.length > 0
-}
-
-function isUnavailableBrowserTarget(value: unknown): value is UnavailableBrowserTarget {
-  return typeof value === 'object' && value !== null
-    && (value as UnavailableBrowserTarget).reason === 'closed_or_changed'
-    && isBrowserTarget((value as UnavailableBrowserTarget).browserTarget)
-}
-
-function sameBrowserTargetList(left: BrowserTarget[], right: BrowserTarget[]): boolean {
-  return left.length === right.length && left.every((target, index) => sameBrowserTarget(target, right[index]!))
-}
-
-function sameUnavailableBrowserTargetList(left: UnavailableBrowserTarget[], right: UnavailableBrowserTarget[]): boolean {
-  return left.length === right.length && left.every((item, index) => item.reason === right[index]?.reason
-    && sameBrowserTarget(item.browserTarget, right[index]!.browserTarget))
-}
-
 function isNativeTransferPayload(value: unknown): value is { runId: string; browserTarget: BrowserTarget; browserTargets?: BrowserTarget[]; unavailableBrowserTargets?: UnavailableBrowserTarget[] } {
   const payload = value as NativeTransferPayload
   return typeof value === 'object' && value !== null
@@ -1098,31 +933,6 @@ function isNativeTransferPayload(value: unknown): value is { runId: string; brow
       && payload.browserTargets.every(isBrowserTarget)))
     && (payload.unavailableBrowserTargets === undefined || (Array.isArray(payload.unavailableBrowserTargets)
       && payload.unavailableBrowserTargets.every(isUnavailableBrowserTarget)))
-}
-
-function isBrowserTargetMode(value: unknown): value is BrowserTargetMode {
-  return value === 'follow-active-tab' || value === 'pinned-tabs' || value === 'none'
-}
-
-function uniqueBrowserTargets(targets: BrowserTarget[]): BrowserTarget[] {
-  const seen = new Set<number>()
-  return targets.filter((target) => {
-    if (seen.has(target.tabId)) return false
-    seen.add(target.tabId)
-    return true
-  })
-}
-
-function settingsFromUnknown(value: unknown): BrowserTargetSettings {
-  if (!value || typeof value !== 'object') return { ...defaultBrowserTargetSettings }
-  const settings = value as Partial<BrowserTargetSettings>
-  const mode = isBrowserTargetMode(settings.mode) ? settings.mode : 'follow-active-tab'
-  const pinnedTabs = Array.isArray(settings.pinnedTabs) ? uniqueBrowserTargets(settings.pinnedTabs.filter(isBrowserTarget)) : []
-  const primaryTabId = Number.isInteger(settings.primaryTabId) && pinnedTabs.some((target) => target.tabId === settings.primaryTabId)
-    ? settings.primaryTabId
-    : undefined
-  const candidate = isBrowserTarget(settings.candidate) ? settings.candidate : undefined
-  return { mode, pinnedTabs, ...(primaryTabId === undefined ? {} : { primaryTabId }), ...(candidate === undefined ? {} : { candidate }) }
 }
 
 function targetStorage(): chrome.storage.StorageArea | undefined {
@@ -1525,9 +1335,9 @@ async function respondToSelectedSourceScope(port: chrome.runtime.Port, request: 
       catalog = await loadKnowledgeCatalog()
       scope = pruneScope(scope, catalog)
     } catch { /* names fall back to stored ids when the catalog is unavailable */ }
-    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, result: selectedSourceScopeEcho({ scope, enabled }, catalog) })
+    port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, result: selectedSourceScopeEcho({ scope, enabled }, catalog) })
   } catch (error) {
-    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: asError(error) })
+    port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, error: asError(error) })
   }
 }
 
@@ -1573,113 +1383,26 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
       await knowledgeSessionStorage()?.set({ [KNOWLEDGE_SESSION_STORAGE_KEY]: sessions })
     }
     broadcast('done', executed.result.answer.length, executed.result.answer, 'done', lastProcess)
-    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, result: executed.result })
+    port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, result: executed.result })
   } catch (error) {
     const text = asError(error)
     broadcast('error', text.length, text, 'error', lastProcess)
-    port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, error: text })
+    port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, error: text })
   } finally {
     if (keepAlive !== undefined) clearInterval(keepAlive)
     activeKnowledgeQueries.delete(request.requestId)
   }
 }
 
-async function readBrowserTargetSettings(): Promise<BrowserTargetSettings> {
-  const storage = targetStorage()
-  if (storage === undefined) return { ...defaultBrowserTargetSettings }
-  const values = await storage.get(TARGET_SETTINGS_KEY)
-  return settingsFromUnknown(values[TARGET_SETTINGS_KEY])
-}
-
-async function saveBrowserTargetSettings(settings: BrowserTargetSettings): Promise<BrowserTargetSettings> {
-  return updateBrowserTargetSettings((latest) => ({
-    ...settings,
-    ...(settings.candidate === undefined && latest.candidate !== undefined ? { candidate: latest.candidate } : {}),
-  }))
-}
-
-function updateBrowserTargetSettings(mutator: (latest: BrowserTargetSettings) => BrowserTargetSettings): Promise<BrowserTargetSettings> {
-  const operation = settingsMutation.then(async () => {
-    const latest = await readBrowserTargetSettings()
-    const updated = settingsFromUnknown(mutator(latest))
-    await targetStorage()?.set({ [TARGET_SETTINGS_KEY]: updated })
-    return updated
-  })
-  settingsMutation = operation.then(() => undefined, () => undefined)
-  return operation
-}
-
-async function activeBrowserTarget(windowId?: number): Promise<BrowserTarget> {
-  const window = windowId === undefined ? await chrome.windows.getLastFocused() : { id: windowId }
-  if (window.id === undefined) throw new Error('No Chrome window is available for the next Harness Run.')
-  const [tab] = await chrome.tabs.query({ active: true, windowId: window.id })
-  const target = tab === undefined ? undefined : targetFromActionTab(tab)
-  if (target !== undefined) return target
-
-  // Product-owned extension Tabs (the Harness full-screen surface and the
-  // Markdown Review surface) must be transparent to follow-active-tab. Re-read
-  // the last eligible candidate so a foreground review UI never becomes the
-  // Run's Browser Target and never makes an otherwise valid Run fail.
-  await settingsMutation
-  const candidate = (await readBrowserTargetSettings()).candidate
-  if (candidate !== undefined && candidate.windowId === window.id) {
-    try {
-      const live = targetFromActionTab(await chrome.tabs.get(candidate.tabId))
-      if (live !== undefined && samePinnedTab(live, candidate) && live.windowId === window.id) return live
-    } catch { /* candidate closed while the product Tab was active */ }
-  }
-  throw new Error('The active Chrome tab cannot be used as a Browser Target. Return to an ordinary page or select one again.')
-}
-
-function bindingForTarget(browserTarget: BrowserTarget): BrowserTargetBinding {
-  return { browserTarget, browserTargets: [browserTarget], unavailableBrowserTargets: [] }
-}
-
-function nativeBindingFields(binding: BrowserTargetBinding): Partial<Pick<BrowserTargetBinding, 'browserTargets' | 'unavailableBrowserTargets'>> {
-  return binding.browserTargets.length > 1 || binding.unavailableBrowserTargets.length > 0
-    ? { browserTargets: binding.browserTargets, unavailableBrowserTargets: binding.unavailableBrowserTargets }
-    : {}
-}
-
-async function pinnedBrowserTargets(settings: BrowserTargetSettings): Promise<BrowserTargetBinding> {
-  if (settings.pinnedTabs.length === 0) throw new Error('Select at least one pinned tab before starting a browser-bound Harness Run.')
-  const available: BrowserTarget[] = []
-  const unavailable: UnavailableBrowserTarget[] = []
-  const nextPins: BrowserTarget[] = []
-  let pinsChanged = false
-  for (const target of settings.pinnedTabs) {
-    try {
-      const tab = await chrome.tabs.get(target.tabId)
-      const refreshed = targetFromActionTab(tab)
-      // Pinned mode follows the checked tab, not the URL saved when it was checked.
-      // A same-tab navigation (Team Knowledge child document) stays available and
-      // is transferred on the next Connector turn with the live URL.
-      if (refreshed !== undefined && samePinnedTab(refreshed, target)) {
-        available.push(refreshed)
-        nextPins.push(refreshed)
-        if (!sameBrowserTarget(refreshed, target)) pinsChanged = true
-      } else {
-        unavailable.push({ browserTarget: target, reason: 'closed_or_changed' })
-        nextPins.push(target)
-      }
-    } catch {
-      unavailable.push({ browserTarget: target, reason: 'closed_or_changed' })
-      nextPins.push(target)
-    }
-  }
-  if (pinsChanged) {
-    await saveBrowserTargetSettings({ ...settings, pinnedTabs: nextPins })
-  }
-  const browserTarget = available.find((target) => target.tabId === settings.primaryTabId) ?? available[0]
-  if (browserTarget === undefined) throw new Error('None of the pinned Browser Targets is still available. Select it again before starting.')
-  return { browserTarget, browserTargets: available, unavailableBrowserTargets: unavailable }
-}
-
-async function resolveBrowserTarget(settings: BrowserTargetSettings, preferredTarget?: BrowserTarget): Promise<BrowserTargetBinding | undefined> {
-  if (settings.mode === 'none') return undefined
-  if (settings.mode === 'pinned-tabs') return pinnedBrowserTargets(settings)
-  return bindingForTarget(preferredTarget ?? await activeBrowserTarget())
-}
+const browserTargetRuntime = new BrowserTargetRuntime({ storage: targetStorage, targetFromTab: targetFromActionTab })
+const readBrowserTargetSettings = (): Promise<BrowserTargetSettings> => browserTargetRuntime.readSettings()
+const saveBrowserTargetSettings = (settings: BrowserTargetSettings): Promise<BrowserTargetSettings> => browserTargetRuntime.saveSettings(settings)
+const updateBrowserTargetSettings = (mutator: (latest: BrowserTargetSettings) => BrowserTargetSettings): Promise<BrowserTargetSettings> => browserTargetRuntime.updateSettings(mutator)
+const activeBrowserTarget = (windowId?: number): Promise<BrowserTarget> => browserTargetRuntime.active(windowId)
+const bindingForTarget = (target: BrowserTarget): BrowserTargetBinding => browserTargetRuntime.binding(target)
+const nativeBindingFields = (binding: BrowserTargetBinding): Partial<Pick<BrowserTargetBinding, 'browserTargets' | 'unavailableBrowserTargets'>> => browserTargetRuntime.nativeFields(binding)
+const pinnedBrowserTargets = (settings: BrowserTargetSettings): Promise<BrowserTargetBinding> => browserTargetRuntime.pinned(settings)
+const resolveBrowserTarget = (settings: BrowserTargetSettings, preferredTarget?: BrowserTarget): Promise<BrowserTargetBinding | undefined> => browserTargetRuntime.resolve(settings, preferredTarget)
 
 async function startHarnessForSettings(preferredTarget?: BrowserTarget): Promise<string> {
   const settings = await readBrowserTargetSettings()
@@ -1689,7 +1412,7 @@ async function startHarnessForSettings(preferredTarget?: BrowserTarget): Promise
 
 async function restartHarnessForSettings(): Promise<string> {
   return queueNativeLifecycle(async () => {
-    await settingsMutation
+    await browserTargetRuntime.settled()
     const port = nativePort
     if (port !== undefined) {
       try {
@@ -1699,6 +1422,7 @@ async function restartHarnessForSettings(): Promise<string> {
       }
     }
     nativeUrl = undefined
+    nativeRuntimeIdentity = undefined
     boundBrowserTargets.clear()
     return startHarnessForSettings()
   })
@@ -1710,14 +1434,124 @@ function queueNativeLifecycle<T>(operation: () => Promise<T>): Promise<T> {
   return queued
 }
 
-async function availableTabs(): Promise<BrowserTargetTab[]> {
-  const window = await chrome.windows.getLastFocused()
-  if (window.id === undefined) return []
-  const tabs = await chrome.tabs.query({ windowId: window.id })
-  return tabs.flatMap((tab): BrowserTargetTab[] => {
-    const target = targetFromActionTab(tab)
-    return target === undefined ? [] : [{ ...target, title: tab.title ?? '', ...(typeof tab.favIconUrl === 'string' && tab.favIconUrl.length > 0 ? { favIconUrl: tab.favIconUrl } : {}) }]
+const availableTabs = (): Promise<BrowserTargetTab[]> => browserTargetRuntime.availableTabs()
+
+interface StoredPrototypeReferences {
+  v: 1
+  references: Record<string, unknown>
+}
+
+function storedPrototypeReferences(value: unknown): StoredPrototypeReferences {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return { v: 1, references: {} }
+  const record = value as Partial<StoredPrototypeReferences>
+  return record.v === 1 && typeof record.references === 'object' && record.references !== null && !Array.isArray(record.references)
+    ? { v: 1, references: record.references as Record<string, unknown> }
+    : { v: 1, references: {} }
+}
+
+async function prototypeHostRequest(authorization: PrototypeStudioAuthorization, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const base = nativeUrl ?? await startHarnessForSettings()
+  const response = await fetch(new URL(path, base), { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${authorization.capability}` }, body: JSON.stringify({ projectId: authorization.projectId, ...body }) })
+  const payload = await response.json() as Record<string, unknown>
+  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `Prototype Studio request failed: HTTP ${String(response.status)}`)
+  return payload
+}
+
+function replaceRememberedPrototypeStudios(authorizations: Iterable<unknown>, now = Date.now()): PrototypeStudioAuthorization[] {
+  const retained = retainedPrototypeStudioAuthorizations(authorizations, now)
+  prototypeStudioAuthorizations.clear()
+  for (const item of retained) prototypeStudioAuthorizations.set(item.projectId, item)
+  return retained
+}
+
+function queuePrototypeStudioAuthorizationMutation(operation: () => Promise<void>): Promise<void> {
+  const queued = prototypeStudioAuthorizationMutation.then(operation)
+  prototypeStudioAuthorizationMutation = queued.then(() => undefined, () => undefined)
+  return queued
+}
+
+async function rememberPrototypeStudio(authorization: PrototypeStudioAuthorization): Promise<void> {
+  await queuePrototypeStudioAuthorizationMutation(async () => {
+    const storage = chrome.storage?.session
+    const persisted = storage === undefined
+      ? []
+      : Object.values(storedPrototypeStudioAuthorizations((await storage.get(PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY))[PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY]).authorizations)
+    const retained = replaceRememberedPrototypeStudios([...prototypeStudioAuthorizations.values(), ...persisted, authorization])
+    if (storage !== undefined) {
+      await storage.set({ [PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY]: { v: 1, authorizations: Object.fromEntries(retained.map(item => [item.projectId, item])) } })
+    }
   })
+}
+
+async function prototypeStudioAuthorization(projectId: string): Promise<PrototypeStudioAuthorization | undefined> {
+  const remembered = prototypeStudioAuthorizations.get(projectId)
+  if (remembered !== undefined && validPrototypeStudioAuthorization(remembered)) return remembered
+  const storage = chrome.storage?.session
+  if (storage === undefined) return undefined
+  let restored: PrototypeStudioAuthorization | undefined
+  await queuePrototypeStudioAuthorizationMutation(async () => {
+    const stored = storedPrototypeStudioAuthorizations((await storage.get(PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY))[PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY])
+    const retained = replaceRememberedPrototypeStudios([...prototypeStudioAuthorizations.values(), ...Object.values(stored.authorizations)])
+    // Remove malformed, expired, and surplus records as part of recovery so a
+    // hostile session-store value cannot be selected on a later restart.
+    await storage.set({ [PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY]: { v: 1, authorizations: Object.fromEntries(retained.map(item => [item.projectId, item])) } })
+    restored = prototypeStudioAuthorizations.get(projectId)
+  })
+  return restored
+}
+
+async function captureDesignReference(browserTarget: BrowserTarget, sessionId: string): Promise<{ referenceId: string; projectId: string }> {
+  const before = await chrome.tabs.get(browserTarget.tabId)
+  const liveBefore = targetFromActionTab(before)
+  if (liveBefore === undefined || !sameBrowserTarget(liveBefore, browserTarget)) {
+    throw new Error('The selected reference page changed or closed. Refresh Browser Target and try again.')
+  }
+  if (before.status !== 'complete') throw new Error('The selected reference page is still loading. Wait for it to finish and try again.')
+  await chrome.tabs.update(browserTarget.tabId, { active: true })
+  const [active] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
+  const activeTarget = active === undefined ? undefined : targetFromActionTab(active)
+  if (activeTarget === undefined || !sameBrowserTarget(activeTarget, browserTarget)) {
+    throw new Error('Chrome could not make the selected reference page active for visual capture.')
+  }
+
+  const captureModule = await import('../src/design-reference-capture')
+  const executions = await chrome.scripting.executeScript({
+    target: { tabId: browserTarget.tabId },
+    world: 'ISOLATED',
+    func: captureModule.captureDesignReferencePage,
+  })
+  const raw = executions[0]?.result
+  const screenshotDataUrl = await chrome.tabs.captureVisibleTab(browserTarget.windowId, { format: 'jpeg', quality: 60 })
+  const after = await chrome.tabs.get(browserTarget.tabId)
+  const liveAfter = targetFromActionTab(after)
+  if (liveAfter === undefined || !sameBrowserTarget(liveAfter, browserTarget)) {
+    throw new Error('The reference page changed during capture. Nothing was saved; try again on the stable page.')
+  }
+  const evidence = await captureModule.buildReferenceEvidence(raw, screenshotDataUrl)
+  const storageKey = captureModule.PROTOTYPE_REFERENCE_STORAGE_KEY
+  const current = storedPrototypeReferences((await chrome.storage.local.get(storageKey))[storageKey])
+  const references = { ...current.references, [evidence.id]: evidence }
+  const retained = Object.entries(references)
+    .sort((left, right) => {
+      const leftTime = Date.parse(((left[1] as { source?: { capturedAt?: unknown } }).source?.capturedAt as string | undefined) ?? '') || 0
+      const rightTime = Date.parse(((right[1] as { source?: { capturedAt?: unknown } }).source?.capturedAt as string | undefined) ?? '') || 0
+      return rightTime - leftTime
+    })
+    .slice(0, MAX_STORED_PROTOTYPE_REFERENCES)
+  await chrome.storage.local.set({ [storageKey]: { v: 1, references: Object.fromEntries(retained) } })
+  const readback = storedPrototypeReferences((await chrome.storage.local.get(storageKey))[storageKey]).references[evidence.id] as { fingerprint?: unknown; screenshotFingerprint?: unknown } | undefined
+  if (readback?.fingerprint !== evidence.fingerprint || readback.screenshotFingerprint !== evidence.screenshotFingerprint) {
+    throw new Error('Chrome could not verify the saved design reference.')
+  }
+  const authorization: PrototypeStudioAuthorization = { projectId: `prototype-${crypto.randomUUID()}`, referenceId: evidence.id, sessionId, capability: `${crypto.randomUUID()}${crypto.randomUUID()}`, openedAt: Date.now() }
+  const { screenshotDataUrl: _screenshot, ...hostEvidence } = evidence
+  await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId, evidence: [hostEvidence] })
+  await rememberPrototypeStudio(authorization)
+  const studioUrl = new URL(chrome.runtime.getURL('prototype-studio.html'))
+  studioUrl.searchParams.set('referenceId', evidence.id)
+  studioUrl.searchParams.set('projectId', authorization.projectId)
+  await chrome.tabs.create({ windowId: browserTarget.windowId, active: true, url: studioUrl.toString() })
+  return { referenceId: evidence.id, projectId: authorization.projectId }
 }
 
 async function readOfficeContext(request: ConnectorRequest): Promise<Record<string, unknown>> {
@@ -1762,7 +1596,7 @@ async function readOfficeContext(request: ConnectorRequest): Promise<Record<stri
 async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<BrowserTargetBinding> {
   // Tab-update candidate persistence and Connector dispatch can arrive in the
   // same event turn. Read settings only after that serialized update settles.
-  await settingsMutation
+  await browserTargetRuntime.settled()
   const settings = await readBrowserTargetSettings()
   if (settings.mode === 'none') throw new Error('Browser use is disabled for the next Office turn.')
   const binding = settings.mode === 'pinned-tabs'
@@ -1883,7 +1717,7 @@ async function readVisiblePageText(tabId: number): Promise<{ content: string; tr
 
 async function readWorkTabContent(request: ReadWorkTabRequest): Promise<Record<string, unknown>> {
   const binding = await resolveOfficeBrowserTarget({
-    type: 'connector_request',
+    type: CONNECTOR_REQUEST,
     requestId: request.requestId,
     runId: request.runId,
     generation: request.generation,
@@ -1927,7 +1761,7 @@ function respondToReadWorkTab(port: chrome.runtime.Port, request: ReadWorkTabReq
   void (async () => {
     if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
     const binding = await resolveOfficeBrowserTarget({
-      type: 'connector_request',
+      type: CONNECTOR_REQUEST,
       requestId: request.requestId,
       runId: request.runId,
       generation: request.generation,
@@ -1941,7 +1775,7 @@ function respondToReadWorkTab(port: chrome.runtime.Port, request: ReadWorkTabReq
     return { ...binding, result }
   })().then(({ browserTarget, browserTargets, unavailableBrowserTargets, result }) => {
     port.postMessage({
-      type: 'connector_response',
+      type: CONNECTOR_RESPONSE,
       requestId: request.requestId,
       runId: request.runId,
       generation: request.generation,
@@ -1952,7 +1786,7 @@ function respondToReadWorkTab(port: chrome.runtime.Port, request: ReadWorkTabReq
     })
   }).catch((error: unknown) => {
     port.postMessage({
-      type: 'connector_response',
+      type: CONNECTOR_RESPONSE,
       requestId: request.requestId,
       runId: request.runId,
       generation: request.generation,
@@ -1973,7 +1807,7 @@ function respondToConnector(port: chrome.runtime.Port, request: ConnectorRequest
   })()
     .then(({ browserTarget, browserTargets, unavailableBrowserTargets, result }) => {
       port.postMessage({
-        type: 'connector_response',
+        type: CONNECTOR_RESPONSE,
         requestId: request.requestId,
         runId: request.runId,
         generation: request.generation,
@@ -1985,7 +1819,7 @@ function respondToConnector(port: chrome.runtime.Port, request: ConnectorRequest
     })
     .catch((error: unknown) => {
       port.postMessage({
-        type: 'connector_response',
+        type: CONNECTOR_RESPONSE,
         requestId: request.requestId,
         runId: request.runId,
         generation: request.generation,
@@ -2355,8 +2189,8 @@ function respondToOfficeDocument(port: chrome.runtime.Port, request: OfficeDocum
     return result
   }
   const respond = (settled: Promise<Record<string, unknown>>) => settled
-    .then((result) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
-    .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
+    .then((result) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
+    .catch((error: unknown) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
   if (request.action === 'write' && request.resource) void respond(execute())
   else void respond(queueNativeLifecycle(execute))
 }
@@ -3439,8 +3273,8 @@ function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnow
     const result = await runTeamKnowledgeItemRequest(resolvedRequest)
     if (nativePort !== port) throw new Error('Team Knowledge item request became stale before completion.')
     return { browserTarget: binding.browserTarget, result }
-  }).then(({ browserTarget, result }) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget, result }))
-    .catch((error: unknown) => port.postMessage({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
+  }).then(({ browserTarget, result }) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget, result }))
+    .catch((error: unknown) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
 }
 
 function settleTargetTransfer(requestId: unknown, payload: NativeTransferPayload): void {
@@ -3481,6 +3315,7 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   const error = runtimeError?.message ?? 'Native server disconnected.'
   console.error('[deepseek-harness] Native Messaging disconnected:', error)
   nativeUrl = undefined
+  nativeRuntimeIdentity = undefined
   knowledgeProxyConfig = undefined
   nativePort = undefined
   boundBrowserTargets.clear()
@@ -3536,8 +3371,9 @@ function connectNativePort(): chrome.runtime.Port {
     const payload = message.payload as NativeStartPayload | undefined
     if (typeof payload?.url !== 'string') return
     if (validKnowledgeProxyConfig(payload.knowledgeProxyUrl, payload.knowledgeProxyToken)) knowledgeProxyConfig = { url: payload.knowledgeProxyUrl, token: payload.knowledgeProxyToken as string }
+    nativeRuntimeIdentity = runtimeIdentitySummary(payload.runtimeIdentity)
     nativeUrl = payload.url
-    void chrome.runtime.sendMessage({ type: 'harness-ready', url: nativeUrl }).catch(() => {})
+    void publishHarnessReady(nativeUrl)
   })
   nativePort = port
   return port
@@ -3602,6 +3438,7 @@ function startHarness(binding?: BrowserTargetBinding): Promise<string> {
             return
           }
           nativeUrl = payload.url
+          nativeRuntimeIdentity = runtimeIdentitySummary(payload.runtimeIdentity)
           if (validKnowledgeProxyConfig(payload.knowledgeProxyUrl, payload.knowledgeProxyToken)) knowledgeProxyConfig = { url: payload.knowledgeProxyUrl, token: payload.knowledgeProxyToken as string }
           if (binding !== undefined) boundBrowserTargets.set(payload.runId, binding)
           settled = true
@@ -3662,6 +3499,15 @@ function isSidePanelSender(sender: chrome.runtime.MessageSender): boolean {
     const actual = new URL(sender.url)
     const expected = new URL(chrome.runtime.getURL('sidepanel.html'))
     return actual.origin === expected.origin && actual.pathname === expected.pathname
+  } catch { return false }
+}
+
+function isPrototypeStudioSender(sender: chrome.runtime.MessageSender, projectId?: string): boolean {
+  if (sender.tab?.id === undefined || typeof sender.url !== 'string') return false
+  try {
+    const actual = new URL(sender.url); const expected = new URL(chrome.runtime.getURL('prototype-studio.html'))
+    return actual.origin === expected.origin && actual.pathname === expected.pathname
+      && (projectId === undefined || actual.searchParams.get('projectId') === projectId)
   } catch { return false }
 }
 
@@ -3788,22 +3634,97 @@ async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ 
   }
 }
 
+async function workspaceReviewHostRequest(record: MarkdownReviewRecord, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const base = nativeUrl ?? await startHarnessForSettings()
+  const response = await fetch(new URL(path, base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${record.capability}` },
+    body: JSON.stringify({ reviewId: record.reviewId, ...body }),
+  })
+  const payload = await response.json() as Record<string, unknown>
+  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `workspace review request failed: HTTP ${String(response.status)}`)
+  return payload
+}
+
+async function workspaceReviewProposals(record: MarkdownReviewRecord, afterSequence: number): Promise<Record<string, unknown>> {
+  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_PROPOSALS_PATH, { afterSequence })
+  if (payload.v !== 1 || payload.reviewId !== record.reviewId || !Array.isArray(payload.proposals) || payload.proposals.length > 20) throw new Error('Harness returned invalid Markdown proposals.')
+  for (const raw of payload.proposals) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Harness returned an invalid Markdown proposal.')
+    const proposal = raw as Record<string, unknown>
+    const document = proposal.kind === 'document' && boundedReviewText(proposal.candidateMarkdown, 2_000_000, true)
+      && Object.keys(proposal).every(key => ['proposalId', 'selectionId', 'sequence', 'baseFingerprint', 'kind', 'candidateMarkdown', 'summary'].includes(key))
+    const selection = proposal.kind === 'selection' && boundedReviewText(proposal.replacementMarkdown, 100_000, true)
+      && Number.isSafeInteger(proposal.editorRevision) && (proposal.editorRevision as number) >= 0 && Number.isSafeInteger(proposal.from) && Number.isSafeInteger(proposal.to)
+      && (proposal.from as number) >= 0 && (proposal.to as number) > (proposal.from as number)
+      && Object.keys(proposal).every(key => ['proposalId', 'selectionId', 'sequence', 'baseFingerprint', 'kind', 'replacementMarkdown', 'editorRevision', 'from', 'to', 'summary'].includes(key))
+    if (!reviewId(proposal.proposalId) || !reviewId(proposal.selectionId) || !Number.isSafeInteger(proposal.sequence) || (proposal.sequence as number) <= afterSequence
+      || !reviewId(proposal.baseFingerprint) || !boundedReviewText(proposal.summary, 1_000, true) || (!document && !selection)) {
+      throw new Error('Harness returned an invalid Markdown proposal.')
+    }
+  }
+  return payload
+}
+
+async function prepareMarkdownWrite(record: MarkdownReviewRecord, request: PrepareWriteRequest): Promise<Record<string, unknown>> {
+  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_PREPARE_WRITE_PATH, { expected: request.expected, content: request.content })
+  const prepared = payload.status === 'prepared' && Object.keys(payload).every(key => ['status', 'approval', 'contentHash', 'expiresAt'].includes(key))
+    && reviewId(payload.approval) && reviewId(payload.contentHash) && Number.isSafeInteger(payload.expiresAt) && (payload.expiresAt as number) > Date.now()
+  if (!prepared && !(payload.status === 'conflict' && Object.keys(payload).every(key => ['status', 'latest'].includes(key)) && isHostMarkdownSnapshot(payload.latest, record))) {
+    throw new Error('Harness returned an invalid Markdown write preparation.')
+  }
+  return payload
+}
+
+async function commitMarkdownWrite(record: MarkdownReviewRecord, request: CommitWriteRequest): Promise<Record<string, unknown>> {
+  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_COMMIT_WRITE_PATH, {
+    approval: request.approval, idempotencyKey: request.idempotencyKey, content: request.content,
+  })
+  const verified = payload.status === 'verified_write' && Object.keys(payload).every(key => ['status', 'resource', 'contentHash'].includes(key))
+    && reviewId(payload.contentHash) && validWriteResource(payload.resource, record)
+  const conflict = payload.status === 'conflict' && Object.keys(payload).every(key => ['status', 'latest'].includes(key)) && isHostMarkdownSnapshot(payload.latest, record)
+  const uncertain = payload.status === 'uncertain' && Object.keys(payload).every(key => ['status', 'message'].includes(key)) && boundedReviewText(payload.message, 4_000)
+  if (!verified && !conflict && !uncertain) throw new Error('Harness returned an invalid Markdown write result.')
+  if (payload.status === 'verified_write') {
+    const resource = payload.resource as Record<string, unknown> | undefined
+    if (resource === undefined || resource.resourceId !== record.resourceId || !reviewId(resource.revision) || !reviewId(resource.fingerprint)) throw new Error('Harness returned an invalid Markdown readback identity.')
+    record.revision = resource.revision as string; record.fingerprint = resource.fingerprint as string
+    await persistMarkdownReview(record)
+  }
+  return payload
+}
+
+function validWriteResource(value: unknown, record: MarkdownReviewRecord): value is { resourceId: string; displayPath: string; revision: string; fingerprint: string } {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const resource = value as Record<string, unknown>
+  return Object.keys(resource).every(key => ['resourceId', 'displayPath', 'revision', 'fingerprint'].includes(key))
+    && resource.resourceId === record.resourceId && resource.displayPath === record.displayPath
+    && reviewId(resource.revision) && reviewId(resource.fingerprint)
+}
+
+function isHostMarkdownSnapshot(value: unknown, record: MarkdownReviewRecord): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const snapshot = value as Record<string, unknown>
+  return Object.keys(snapshot).every(key => ['v', 'type', 'reviewId', 'resource', 'content', 'truncated', 'readOnly'].includes(key))
+    && snapshot.v === 1 && snapshot.type === 'markdown-review-snapshot' && snapshot.reviewId === record.reviewId
+    && validWriteResource(snapshot.resource, record) && boundedReviewText(snapshot.content, 2_000_000, true)
+    && typeof snapshot.truncated === 'boolean' && snapshot.readOnly === true
+}
+
 function markdownReviewError(error: unknown, code: 'snapshot_unavailable' | 'delivery_rejected'): { code: string; message: string; reopenRequired?: boolean } {
   const message = asError(error)
   const reopenRequired = /capability|authorization|reopen|not found|unavailable/i.test(message)
   return { code, message, ...(reopenRequired ? { reopenRequired: true } : {}) }
 }
 
-async function deliverMarkdownReview(record: MarkdownReviewRecord, request: MarkdownReviewPortRequest): Promise<string> {
-  if (request.type !== 'markdown-review-deliver-request' || request.harnessSessionId !== record.harnessSessionId
-    || request.deliveryId === undefined || request.annotation === undefined || request.annotation.id !== request.deliveryId) {
+async function deliverMarkdownReview(record: MarkdownReviewRecord, request: DeliverRequest): Promise<string> {
+  if (request.harnessSessionId !== record.harnessSessionId || request.annotation.id !== request.deliveryId) {
     throw new Error('Markdown review delivery does not match its bound Harness session.')
   }
   const snapshot = await workspaceReviewSnapshot(record)
   const anchor = request.annotation.anchor
-  if (anchor.sourceFingerprint !== snapshot.resource.fingerprint
-    || anchor.endUtf16 > snapshot.content.length
-    || snapshot.content.slice(anchor.startUtf16, anchor.endUtf16) !== anchor.quote) {
+  if (anchor.sourceFingerprint !== snapshot.resource.fingerprint || (anchor.version === 1
+    && (anchor.endUtf16 > snapshot.content.length || snapshot.content.slice(anchor.startUtf16, anchor.endUtf16) !== anchor.quote))) {
     throw new Error('Markdown selection is stale. Re-read the file and select the text again.')
   }
   const feedback = {
@@ -3814,13 +3735,15 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Mark
     displayPath: record.displayPath,
     revision: snapshot.resource.revision,
     fingerprint: snapshot.resource.fingerprint,
-    startUtf16: anchor.startUtf16,
-    endUtf16: anchor.endUtf16,
+    anchorKind: anchor.version === 2 ? 'visual' : 'source',
     quote: anchor.quote,
-    prefix: anchor.prefix,
-    suffix: anchor.suffix,
     comment: request.annotation.comment,
+    selectionId: request.annotation.id,
+    ...(anchor.version === 1
+      ? { startUtf16: anchor.startUtf16, endUtf16: anchor.endUtf16, prefix: anchor.prefix, suffix: anchor.suffix }
+      : { editorRevision: anchor.editorRevision, from: anchor.from, to: anchor.to, blocks: anchor.blocks }),
   }
+  await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_SELECTION_PATH, { selection: { id: request.annotation.id, ...anchor } })
   const response = await chrome.runtime.sendMessage({ type: 'markdown-review-feedback-forward/v1', feedback }) as { ok?: boolean; error?: string } | undefined
   if (response?.ok !== true) throw new Error(response?.error ?? 'The bound Harness Side Panel is unavailable. Reopen it and resend the annotation.')
   return request.annotation.id
@@ -3842,7 +3765,7 @@ export default defineBackground(() => {
         const current = markdownReviews.get(message.reviewId)
         const record = current?.tabId === tabId ? current : await recoverMarkdownReview(message.reviewId, tabId)
         if (record === undefined) {
-          port.postMessage({ v: 1, type: message.type === 'markdown-review-snapshot-request' ? 'markdown-review-snapshot-response' : 'markdown-review-deliver-response', requestId: message.requestId, ok: false, error: { code: 'review_not_found', message: '审阅授权已失效。请从文件树重新打开。', reopenRequired: true } })
+          port.postMessage({ v: 1, type: `${message.type.replace(/-request$/, '')}-response`, requestId: message.requestId, ok: false, error: { code: 'review_not_found', message: '审阅授权已失效。请从文件树重新打开。', reopenRequired: true } })
           return
         }
         if (message.type === 'markdown-review-snapshot-request') {
@@ -3850,11 +3773,26 @@ export default defineBackground(() => {
           port.postMessage({ v: 1, type: 'markdown-review-snapshot-response', requestId: message.requestId, ok: true, snapshot })
           return
         }
+        if (message.type === 'markdown-review-proposals-request') {
+          const proposals = await workspaceReviewProposals(record, message.afterSequence as number)
+          port.postMessage({ v: 1, type: 'markdown-review-proposals-response', requestId: message.requestId, ok: true, ...proposals })
+          return
+        }
+        if (message.type === 'markdown-review-prepare-write-request') {
+          const preparation = await prepareMarkdownWrite(record, message)
+          port.postMessage({ v: 1, type: 'markdown-review-prepare-write-response', requestId: message.requestId, ok: true, preparation })
+          return
+        }
+        if (message.type === 'markdown-review-commit-write-request') {
+          const result = await commitMarkdownWrite(record, message)
+          port.postMessage({ v: 1, type: 'markdown-review-commit-write-response', requestId: message.requestId, ok: true, result })
+          return
+        }
         const deliveryId = await deliverMarkdownReview(record, message)
         port.postMessage({ v: 1, type: 'markdown-review-deliver-response', requestId: message.requestId, ok: true, deliveryId })
       })().catch(error => port.postMessage({
         v: 1,
-        type: message.type === 'markdown-review-snapshot-request' ? 'markdown-review-snapshot-response' : 'markdown-review-deliver-response',
+        type: `${message.type.replace(/-request$/, '')}-response`,
         requestId: message.requestId,
         ok: false,
         error: markdownReviewError(error, message.type === 'markdown-review-snapshot-request' ? 'snapshot_unavailable' : 'delivery_rejected'),
@@ -3886,7 +3824,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown; projectId?: unknown; prompt?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -4116,6 +4054,49 @@ export default defineBackground(() => {
       void Promise.all([readBrowserTargetSettings(), availableTabs()])
         .then(([settings, tabs]) => sendResponse({ ok: true, settings, tabs }))
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'capture-design-reference/v1') {
+      if (!isSidePanelSender(sender) || !isBrowserTarget(request.browserTarget) || !validSessionIdentity(request.sessionId)) {
+        sendResponse({ ok: false, error: 'A trusted Side Panel, Harness session, and explicit Browser Target are required.' })
+        return false
+      }
+      void captureDesignReference(request.browserTarget, request.sessionId)
+        .then(({ referenceId, projectId }) => sendResponse({ ok: true, referenceId, projectId }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-snapshot/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId)) { sendResponse({ ok: false, error: 'Invalid Prototype Studio snapshot request.' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(authorization => {
+        if (authorization === undefined) throw new Error('Prototype Studio authorization expired. Capture the reference page again.')
+        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+      })
+        .then(snapshot => sendResponse({ ok: true, snapshot }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-restore/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.targetRevisionId !== 'string' || typeof request.expectedCurrentRevisionId !== 'string') { sendResponse({ ok: false, error: 'Invalid Prototype Studio restore request.' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(authorization => {
+        if (authorization === undefined) throw new Error('Prototype Studio authorization expired. Capture the reference page again.')
+        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_RESTORE_PATH, { targetRevisionId: request.targetRevisionId, expectedCurrentRevisionId: request.expectedCurrentRevisionId })
+      }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-prompt/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.prompt !== 'string' || request.prompt.trim().length === 0 || request.prompt.length > 4_000) { sendResponse({ ok: false, error: 'Invalid Prototype Studio AI request.' }); return false }
+      const selection = request.selection === undefined ? undefined : request.selection
+      if (selection !== undefined && (typeof selection !== 'object' || selection === null || Array.isArray(selection))) { sendResponse({ ok: false, error: 'Invalid Prototype Studio selection.' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(async authorization => {
+        if (authorization === undefined) throw new Error('Prototype Studio authorization expired. Capture the reference page again.')
+        const snapshot = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+        const payload = { projectId: authorization.projectId, sessionId: authorization.sessionId, request: request.prompt, ...(selection === undefined ? {} : { selection }), evidence: snapshot.evidence, revisions: snapshot.revisions, currentRevisionId: snapshot.currentRevisionId, designSpec: snapshot.designSpec, document: snapshot.document }
+        if (JSON.stringify(payload).length > 260_000) throw new Error('Prototype Studio AI request is too large.')
+        const response = await chrome.runtime.sendMessage({ type: 'prototype-studio-prompt-forward/v1', payload }) as { ok?: boolean; error?: string } | undefined
+        if (response?.ok !== true) throw new Error(response?.error ?? 'The Harness Workspace did not accept the prototype request.')
+        return response
+      }).then(() => sendResponse({ ok: true })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
     if (request.type === 'save-browser-target-settings') {

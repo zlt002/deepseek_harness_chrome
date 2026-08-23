@@ -16,6 +16,7 @@ interface BrowserTarget { browser: 'chrome'; windowId: number; tabId: number; ur
 interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: string }
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
 interface BrowserTargetSettingsResponse { ok: boolean; settings?: BrowserTargetSettings; tabs?: BrowserTargetTab[]; error?: string }
+interface DesignReferenceCaptureResponse { ok: boolean; referenceId?: string; error?: string }
 interface ActiveTab extends BrowserTargetTab {}
 interface ActiveTabResponse { ok: boolean; epoch?: string; sequence?: number; tab?: ActiveTab; error?: string }
 interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
@@ -58,12 +59,14 @@ interface WorkspaceMarkdownFeedback {
   comment: string
 }
 interface MarkdownReviewIdentity { reviewId: string; harnessSessionId: string; resourceId: string }
+interface PrototypePromptPayload { projectId: string; sessionId: string; request: string; selection?: { elementId?: unknown; type?: unknown; label?: unknown }; evidence: unknown[]; revisions: unknown[]; currentRevisionId?: unknown; designSpec?: unknown; document?: unknown }
 
 type BrowserTargetCommand =
   | { command: 'refresh' }
   | { command: 'set-mode'; mode: BrowserTargetMode }
   | { command: 'toggle-pinned-tab'; tabId: number; checked: boolean }
   | { command: 'set-primary'; tabId: number }
+  | { command: 'capture-design-reference'; tabId: number; sessionId?: string }
 
 function isActiveTab(value: unknown): value is ActiveTab {
   return typeof value === 'object' && value !== null
@@ -76,10 +79,11 @@ function isActiveTab(value: unknown): value is ActiveTab {
 
 function isBrowserTargetCommand(value: unknown): value is BrowserTargetCommand {
   if (!value || typeof value !== 'object') return false
-  const command = value as { command?: unknown; mode?: unknown; tabId?: unknown; checked?: unknown }
+  const command = value as { command?: unknown; mode?: unknown; tabId?: unknown; checked?: unknown; sessionId?: unknown }
   if (command.command === 'refresh') return true
   if (command.command === 'set-mode') return command.mode === 'follow-active-tab' || command.mode === 'pinned-tabs' || command.mode === 'none'
   if (command.command === 'toggle-pinned-tab') return Number.isInteger(command.tabId) && typeof command.checked === 'boolean'
+  if (command.command === 'capture-design-reference') return Number.isInteger(command.tabId) && (command.sessionId === undefined || boundedString(command.sessionId, 160))
   return command.command === 'set-primary' && Number.isInteger(command.tabId)
 }
 
@@ -122,6 +126,14 @@ function isWorkspaceMarkdownFeedback(value: unknown): value is WorkspaceMarkdown
     && Number.isSafeInteger(item.endUtf16) && (item.endUtf16 as number) > (item.startUtf16 as number)
 }
 
+function isPrototypePromptPayload(value: unknown): value is PrototypePromptPayload {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const item = value as Record<string, unknown>
+  if (typeof item.projectId !== 'string' || !/^prototype-[a-z0-9-]{8,72}$/.test(item.projectId) || !boundedString(item.sessionId, 160) || !boundedString(item.request, 4_000) || !Array.isArray(item.evidence) || item.evidence.length !== 1 || !Array.isArray(item.revisions) || item.revisions.length > 20) return false
+  if (item.selection !== undefined && (typeof item.selection !== 'object' || item.selection === null || Array.isArray(item.selection))) return false
+  try { return JSON.stringify(item).length <= 260_000 } catch { return false }
+}
+
 function requestHarness(message: unknown = { type: 'ensure-harness' }): Promise<HarnessResponse> {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(message, (response: HarnessResponse | undefined) => {
@@ -136,6 +148,15 @@ function requestTargetSettings(message: unknown): Promise<BrowserTargetSettingsR
     chrome.runtime.sendMessage(message, (response: BrowserTargetSettingsResponse | undefined) => {
       const runtimeError = chrome.runtime.lastError
       resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return target settings.' } : { ok: false, error: runtimeError.message })
+    })
+  })
+}
+
+function requestDesignReferenceCapture(browserTarget: BrowserTarget, sessionId: string): Promise<DesignReferenceCaptureResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'capture-design-reference/v1', browserTarget, sessionId }, (response: DesignReferenceCaptureResponse | undefined) => {
+      const runtimeError = chrome.runtime.lastError
+      resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return the captured reference.' } : { ok: false, error: runtimeError.message })
     })
   })
 }
@@ -251,6 +272,7 @@ function App(): React.JSX.Element {
   const searchProgressSequenceRef = useRef(0)
   const reviewRehydrateRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
   const reviewFeedbackRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
+  const prototypePromptRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
   const knowledgeLoginTimerRef = useRef<number | undefined>(undefined)
@@ -330,7 +352,16 @@ function App(): React.JSX.Element {
     void requestActiveTab().then((response) => { if (response.ok) accept(response.epoch, response.sequence, response.tab) })
     const onMessage = (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void): boolean | void => {
       if (!message || typeof message !== 'object') return
-      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown; feedback?: unknown; review?: unknown }
+      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown; feedback?: unknown; review?: unknown; payload?: unknown }
+      if (value.type === 'prototype-studio-prompt-forward/v1') {
+        const target = frameRef.current?.contentWindow
+        if (!isPrototypePromptPayload(value.payload) || frameOrigin === undefined || target === null || target === undefined) { sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' }); return false }
+        const deliveryId = crypto.randomUUID()
+        const timeout = window.setTimeout(() => { const pending = prototypePromptRef.current.get(deliveryId); if (pending === undefined) return; prototypePromptRef.current.delete(deliveryId); pending.sendResponse({ ok: false, error: 'Timed out sending the prototype request to Harness.' }) }, 5_000)
+        prototypePromptRef.current.set(deliveryId, { sendResponse, timeout })
+        target.postMessage({ type: 'prototype-studio-prompt/v1', nonce: frameNonce, deliveryId, payload: value.payload }, frameOrigin)
+        return true
+      }
       if (value.type === 'markdown-review-rehydrate-forward/v1') {
         const target = frameRef.current?.contentWindow
         if (!boundedString(value.requestId, 160) || !isMarkdownReviewIdentity(value.review) || frameOrigin === undefined || target === null || target === undefined) {
@@ -367,6 +398,7 @@ function App(): React.JSX.Element {
       }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
       if (value.type === 'harness-ready' && typeof value.url === 'string') { setUrl(value.url); setStatus('ready'); setError(undefined) }
+      if (value.type === 'harness-runtime-mismatch' && typeof value.error === 'string') { setStatus('error'); setError(value.error) }
       if (value.type === 'harness-disconnected') { void connect() }
       // Relay live selected-source search progress into the Harness iframe,
       // guarded by the same nonce as every other bridge message.
@@ -402,6 +434,13 @@ function App(): React.JSX.Element {
     const tab = availableTabsRef.current.find((item) => item.tabId === command.tabId)
       ?? (command.command === 'toggle-pinned-tab' && !command.checked ? settings.pinnedTabs.find((item) => item.tabId === command.tabId) : undefined)
     if (tab === undefined) { setTargetError('The selected Chrome tab is no longer available.'); return }
+    if (command.command === 'capture-design-reference') {
+      setTargetError(undefined)
+      if (command.sessionId === undefined) { setTargetError('请先打开一个 Harness 对话，再采集参考网页。'); return }
+      const response = await requestDesignReferenceCapture({ browser: 'chrome', windowId: tab.windowId, tabId: tab.tabId, url: tab.url }, command.sessionId)
+      if (!response.ok) setTargetError(response.error ?? '无法采集这个参考网页。')
+      return
+    }
     if (command.command === 'toggle-pinned-tab') {
       const pinnedTabs = command.checked
         ? [...settings.pinnedTabs.filter((item) => item.tabId !== tab.tabId), { browser: 'chrome' as const, windowId: tab.windowId, tabId: tab.tabId, url: tab.url }]
@@ -509,6 +548,8 @@ function App(): React.JSX.Element {
     reviewRehydrateRef.current.clear()
     for (const pending of reviewFeedbackRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed before accepting Markdown feedback.' }) }
     reviewFeedbackRef.current.clear()
+    for (const pending of prototypePromptRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed before accepting the prototype request.' }) }
+    prototypePromptRef.current.clear()
   }, [])
 
   // This listener must exist before the iframe can finish booting: its ready
@@ -518,6 +559,13 @@ function App(): React.JSX.Element {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
       const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown }
       if (value.nonce !== frameNonce) return
+      if (value.type === 'prototype-studio-prompt-accepted/v1' && boundedString(value.deliveryId, 160)) {
+        const pending = prototypePromptRef.current.get(value.deliveryId)
+        if (pending === undefined) return
+        prototypePromptRef.current.delete(value.deliveryId); window.clearTimeout(pending.timeout)
+        pending.sendResponse(value.accepted === true ? { ok: true } : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness rejected the prototype request.' })
+        return
+      }
       if (value.type === 'markdown-review-feedback-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = reviewFeedbackRef.current.get(value.deliveryId)
         if (pending === undefined) return

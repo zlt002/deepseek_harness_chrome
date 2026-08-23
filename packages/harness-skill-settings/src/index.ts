@@ -5,7 +5,7 @@ import type { SkillInvocationPolicy, SkillSummary } from '@deepseek-ai/dsh-skill
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SKILL_INSTALL_MAX_ARCHIVE_BYTES, SKILL_INSTALL_PATH, deleteInstalledSkill, installedSkillNames, prepareSkillInstall, waitForInstalledSkill, waitForRemovedSkill, writePreparedSkill } from './installer.mjs'
+import { SKILL_INSTALL_MAX_ARCHIVE_BYTES, SKILL_INSTALL_PATH, deleteDiscoveredSkill, deletionTargetForSkill, installedSkillNames, prepareSkillInstall, waitForInstalledSkill, waitForRemovedSkill, writePreparedSkill } from './installer.mjs'
 import { assertStateModes, installConflictMessage, skillOrigin } from './skill-origin.mjs'
 
 export const name = 'accrui-skill-settings'
@@ -93,9 +93,19 @@ async function handleDelete(ctx: Context & { sessions: SessionLookup }, req: Inc
     const name = typeof request.name === 'string' ? request.name : ''
     const cwd = ctx.sessions.get(sessionId)?.header.cwd
     if (cwd === undefined || cwd === '') throw new Error('技能删除需要一个已打开的项目会话')
-    const deleted = await deleteInstalledSkill(root, name)
+    const source = await ctx.skills.listSource({ cwd })
+    const live = source.find(skill => skill.name === name)
+    if (live === undefined) throw new Error(`技能 /${name} 当前未发现，不能删除`)
+    const target = await deletionTargetForSkill(live, root, installedNames)
+    if (target === undefined) {
+      const origin = skillOrigin(live, root, installedNames)
+      if (origin === 'system') throw new Error(`系统内置技能 /${name} 不能删除`)
+      if (origin === 'project') throw new Error(`项目技能 /${name} 不能在此处删除`)
+      throw new Error(`技能 /${name} 不在受管理的用户技能根目录，不能删除`)
+    }
+    const deleted = await deleteDiscoveredSkill(live, root, installedNames)
     legacyModes[deleted.name] = currentSettings().modes[deleted.name] ?? 'enabled'
-    installedNames.delete(deleted.name)
+    if (target.kind === 'installed') installedNames.delete(deleted.name)
     // Invalidate before readback so the bounded confirmation does not rely on
     // the filesystem watcher's eventual event alone.
     ctx.skills.invalidateInvocationPolicy()
@@ -151,7 +161,11 @@ async function handleCatalog(ctx: Context & { sessions: SessionLookup }, req: In
     const cwd = ctx.sessions.get(sessionId)?.header.cwd
     if (cwd === undefined || cwd === '') throw new Error('技能目录需要一个已打开的项目会话')
     const skills = await ctx.skills.listSource({ cwd })
-    json(res, 200, { skills: skills.map(skill => ({ name: skill.name, origin: skillOrigin(skill, root, installedNames) })) })
+    json(res, 200, { skills: await Promise.all(skills.map(async skill => ({
+      name: skill.name,
+      origin: skillOrigin(skill, root, installedNames),
+      deletable: await deletionTargetForSkill(skill, root, installedNames) !== undefined,
+    }))) })
   } catch (error) {
     json(res, 400, { error: error instanceof Error ? error.message : String(error) })
   }

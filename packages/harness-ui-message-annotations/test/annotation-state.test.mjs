@@ -27,14 +27,29 @@ test('successful delivery clears only the submitted snapshot and preserves annot
 
 test('serializes workspace Markdown evidence through the shared review transform without embedding the document', () => {
   const prompt = reviewFeedbackPrompt('请继续优化', [{
-    id: 'workspace-1', source: 'workspace-markdown', reviewId: 'review-1', resourceId: 'resource-1',
+    id: 'workspace-1', selectionId: 'selection-1', source: 'workspace-markdown', reviewId: 'review-1', resourceId: 'resource-1',
     displayPath: 'docs/guide.md', revision: 'revision-1', fingerprint: 'fingerprint-1', comment: '这里需要补充依据',
     anchor: { version: 1, startUtf16: 4, endUtf16: 8, quote: '原文', prefix: '# ', suffix: '\n下一段', sourceFingerprint: 'fingerprint-1' },
   }])
   assert.match(prompt, /<workspace_markdown_annotations>/)
   assert.match(prompt, /docs\/guide\.md/)
-  assert.match(prompt, /先按相对路径重读真实文件/)
+  assert.match(prompt, /propose_workspace_markdown_edit/)
+  assert.match(prompt, /"review_id": "review-1"/)
+  assert.match(prompt, /"selection_id": "selection-1"/)
   assert.doesNotMatch(prompt, /完整文档内容/)
+})
+
+test('serializes a dirty visual cross-block selection without inventing UTF-16 source positions', () => {
+  const prompt = reviewFeedbackPrompt('', [{
+    id: 'workspace-2', selectionId: 'selection-2', source: 'workspace-markdown', reviewId: 'review-2', resourceId: 'resource-2',
+    displayPath: 'docs/table.md', revision: 'revision-2', fingerprint: 'fingerprint-2', comment: '合并这两处',
+    anchor: { version: 2, editorRevision: 7, from: 12, to: 46, quote: '段落\n单元格', blocks: [{ kind: 'paragraph', text: '段落' }, { kind: 'table_cell', text: '单元格' }], sourceFingerprint: 'fingerprint-2' },
+  }])
+  const payload = JSON.parse(prompt.match(/<workspace_markdown_annotations>\n([\s\S]*?)\n<\/workspace_markdown_annotations>/)?.[1] ?? '')
+  assert.deepEqual(payload.annotations[0].anchor_kind, 'visual')
+  assert.deepEqual(payload.annotations[0].prose_mirror_range, [12, 46])
+  assert.deepEqual(payload.annotations[0].blocks.map(block => block.kind), ['paragraph', 'table_cell'])
+  assert.equal('range_utf16' in payload.annotations[0], false)
 })
 
 test('accepts a range only when both boundaries are inside the same assistant message marker', () => {

@@ -1,0 +1,213 @@
+diff --git a/packages/client/ui-workspace/src/client/contract/slots.ts b/packages/client/ui-workspace/src/client/contract/slots.ts
+index 26398ea..3465777 100644
+--- a/packages/client/ui-workspace/src/client/contract/slots.ts
++++ b/packages/client/ui-workspace/src/client/contract/slots.ts
+@@ -58,6 +58,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+     'sidebar.workspaces.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
+     /** Optional compact presentation while the workspace browser owns directory adoption. */
+     'sidebar.workspaces.compact': { kind: 'chain'; scope: 'root'; owner: CompactWorkspacePickerOwnerProps }
++    /** Additive actions at the column workspace browser's header. */
++    'sidebar.workspaces.header.action': { kind: 'list'; scope: 'root'; owner: WorkspaceHeaderActionOwnerProps }
+   }
+ }
+ 
+@@ -78,6 +80,18 @@ export interface CompactWorkspacePickerWorkspace {
+   sessions: readonly CompactWorkspacePickerSession[]
+ }
+ 
++/** Stable Workspace facts shared with additive actions; no browser view state crosses the seam. */
++export interface WorkspaceActionWorkspace {
++  id: WorkspaceId
++  title: string
++  path: string
++}
++
++/** The default Workspace target for an additive header action. */
++export interface WorkspaceHeaderActionOwnerProps {
++  workspace: WorkspaceActionWorkspace | undefined
++}
++
+ /** Product renderers receive only data and actions, never private view state. */
+ export interface CompactWorkspacePickerOwnerProps {
+   openSession: (sessionId: SessionId) => void
+@@ -207,7 +221,11 @@ export type WorkspaceBrowserInjected = DirectoryPickingInjected & {
+ /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */
+ export type WorkspaceBrowserProps =
+   PropsRuntime<'sidebar.workspaces'>
+-  & PropsRenderSlots<'sidebar.workspaces.directoryFlow' | 'sidebar.workspaces.compact'>
++  & PropsRenderSlots<
++    'sidebar.workspaces.directoryFlow'
++    | 'sidebar.workspaces.compact'
++    | 'sidebar.workspaces.header.action'
++  >
+   & PropsStore<ReturnType<typeof createWorkspaceViewStore>>
+   & Omit<WorkspaceBrowserInjected, 'hooks'>
+   & DirectoryPickingHooks
+diff --git a/packages/client/ui-workspace/src/client/index.ts b/packages/client/ui-workspace/src/client/index.ts
+index a625e0c..8cff2e4 100644
+--- a/packages/client/ui-workspace/src/client/index.ts
++++ b/packages/client/ui-workspace/src/client/index.ts
+@@ -21,6 +21,7 @@ import { en, zh, type WorkspaceKey } from './locales.ts'
+ export type {
+   DirectoryFlowOwnerProps, DirectoryFlowSlotName, DirectoryPickingHooks, DirectoryPickingInjected,
+   CompactWorkspacePickerOwnerProps, CompactWorkspacePickerSession, CompactWorkspacePickerWorkspace,
++  WorkspaceActionWorkspace, WorkspaceHeaderActionOwnerProps,
+   WorkspaceBrowserInjected, WorkspaceBrowserProps, WorkspacePickerInjected, WorkspacePickerProps,
+ } from './contract/slots.ts'
+ export type { WorkspaceKey } from './locales.ts'
+@@ -115,6 +116,7 @@ export function apply(ctx: ClientContext): void {
+       children: {
+         'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
+         'sidebar.workspaces.compact': { kind: 'chain', scope: 'root' },
++        'sidebar.workspaces.header.action': { kind: 'list', scope: 'root' },
+       },
+       store: createWorkspaceViewStore(),
+       inject: browserInjected,
+diff --git a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
+index aad024a..d037337 100644
+--- a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
++++ b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
+@@ -18,7 +18,10 @@ import {
+ import type {
+   SessionId, SessionListState, SessionSearchResultItem, WorkspaceId, WorkspaceView,
+ } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { CompactWorkspacePickerOwnerProps, CompactWorkspacePickerSession, WorkspaceBrowserProps } from './contract/slots.ts'
++import type {
++  CompactWorkspacePickerOwnerProps, CompactWorkspacePickerSession, WorkspaceActionWorkspace,
++  WorkspaceBrowserProps,
++} from './contract/slots.ts'
+ import type { SessionNode, SessionOrderBy } from './tree.ts'
+ import { deriveFlat, deriveGroups, deriveSearchResults, relativeTime, UNGROUPED_KEY } from './tree.ts'
+ import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
+@@ -334,7 +337,7 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
+ 
+ type SessionTreeProps = Pick<
+   WorkspaceBrowserProps,
+-  'useSessions' | 'startSession' | 'open' | 'forkSession'
++  'useSessions' | 'startSession' | 'open' | 'openPath' | 'forkSession'
+   | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't'
+ > & {
+   workspaces: readonly WorkspaceView[]
+@@ -366,7 +369,7 @@ type SessionTreeProps = Pick<
+ 
+ /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
+ function SessionTree({
+-  useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
++  useSessions, startSession, open, openPath, forkSession, workspaces, archivedSessionIds,
+   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
+   insertWorkspaceBefore, insertSessionBefore, orderBy,
+   groupExpansion, setGroupExpanded,
+@@ -590,6 +593,11 @@ function SessionTree({
+                     /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+                       if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
+                     },
++                    openPath: () => {
++                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
++                      const workspace = workspaces.find(item => item.workspaceId === group.workspaceId)
++                      if (workspace !== undefined) void openPath(workspace.path)
++                    },
+                     delete: () => {
+                     /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+                       if (group.workspaceId !== undefined) onDeleteRequest(group.workspaceId, group.label)
+@@ -878,11 +886,23 @@ function ColumnWorkspaceBrowser({
+   searchResultLimit,
+   useDirectoryFlow,
+   renderSlot,
++  openPath,
+   t,
+ }: WorkspaceBrowserProps) {
++  const sessions = useSessions(state => state)
+   const workspaces = useWorkspaces(state => state.items)
+   const workspacePhase = useWorkspaces(state => state.phase)
+   const archivedSessionIds = useWorkspaces(state => state.archivedSessionIds)
++  const recentWorkspaceId = useWorkspaces(state => state.recentWorkspaceId)
++  const currentWorkspace = sessions.current === undefined
++    ? undefined
++    : workspaces.find(workspace => workspace.sessionIds.includes(sessions.current!))
++  const defaultWorkspace = currentWorkspace
++    ?? workspaces.find(workspace => workspace.workspaceId === recentWorkspaceId)
++    ?? workspaces[0]
++  const actionWorkspace: WorkspaceActionWorkspace | undefined = defaultWorkspace === undefined
++    ? undefined
++    : { id: defaultWorkspace.workspaceId, title: defaultWorkspace.title, path: defaultWorkspace.path }
+   // Live occupancy of this surface's directory-flow hole (the same source the
+   // flow reads): a composition without a picking affordance can add nothing.
+   const directoryFlowAvailable = useDirectoryFlow(occupied => occupied)
+@@ -1166,6 +1186,7 @@ function ColumnWorkspaceBrowser({
+               t={t}
+             />
+           )}
++          {wide && renderSlot('sidebar.workspaces.header.action', { workspace: actionWorkspace })}
+           {/* Adding is the button's one action, so a composition with no
+               picking affordance has nothing to offer here: the region hides the
+               button rather than leaving a dead one in the header. */}
+@@ -1272,6 +1293,7 @@ function ColumnWorkspaceBrowser({
+                 insertSessionBefore={insertSessionBefore}
+                 orderBy={orderBy}
+                 t={t}
++                openPath={openPath}
+                 onRenameRequest={(workspaceId, currentTitle) => {
+                   setRenameTarget({ workspaceId, currentTitle })
+                   setRenameDraft(currentTitle)
+diff --git a/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css b/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css
+index 4d19163..046a987 100644
+--- a/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css
++++ b/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css
+@@ -110,7 +110,7 @@
+   display: flex;
+   align-items: center;
+   gap: 4px;
+-  max-width: 60px;
++  max-width: none;
+   opacity: 1;
+   overflow: hidden;
+   visibility: visible;
+diff --git a/packages/client/ui-workspace/src/client/rows/Rows.tsx b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+index 481e0f0..4da133f 100644
+--- a/packages/client/ui-workspace/src/client/rows/Rows.tsx
++++ b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+@@ -112,7 +112,7 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, t }:
+   onToggle: () => void
+   onCreate: () => void
+   /** Real-Workspace actions; absent for the ungrouped bucket (no menu shown). */
+-  actions?: { rename: () => void; delete: () => void } | undefined
++  actions?: { openPath: () => void; rename: () => void; delete: () => void } | undefined
+   /** Present only for real Workspace rows in the grouped view. */
+   drag?: WorkspaceRowDragProps | undefined
+   t: RowTranslate
+@@ -123,6 +123,7 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, t }:
+   const active = group.expanded && group.containsCurrent
+   const [menuOpen, setMenuOpen] = useState(false)
+   const workspaceMenuItems = [
++    { id: 'open', label: t('open.folder'), icon: <IconFolderOpen16 /> },
+     { id: 'rename', label: t('rename'), icon: <IconEditOutline16 /> },
+     { id: 'delete', label: t('delete.workspace'), icon: <IconTrashOutline16 />, danger: true },
+   ]
+@@ -161,10 +162,11 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, t }:
+               setMenuOpen(false)
+               // Unknown ids leave before the dispatch: a future menu row must
+               // not inherit the destructive branch as an else fallback.
+-              /* v8 ignore next -- workspaceMenuItems carries exactly these two rows today. */
+-              if (id !== 'rename' && id !== 'delete') return
++              /* v8 ignore next -- workspaceMenuItems carries exactly these three rows today. */
++              if (id !== 'open' && id !== 'rename' && id !== 'delete') return
++              if (id === 'open') actions.openPath()
+               if (id === 'rename') actions.rename()
+-              else actions.delete()
++              if (id === 'delete') actions.delete()
+             }}
+             portal
+             closeOnPointerLeave
+diff --git a/packages/client/ui-workspace/tests/rows.client.spec.tsx b/packages/client/ui-workspace/tests/rows.client.spec.tsx
+index c7a153f..c3ecafd 100644
+--- a/packages/client/ui-workspace/tests/rows.client.spec.tsx
++++ b/packages/client/ui-workspace/tests/rows.client.spec.tsx
+@@ -259,7 +259,7 @@ describe('workspace browser rows', () => {
+     }
+     render(<ProjectRowItem
+       group={group} onToggle={onToggle} onCreate={vi.fn()}
+-      actions={{ rename: onRename, delete: onDelete }} t={t}
++      actions={{ openPath: vi.fn(), rename: onRename, delete: onDelete }} t={t}
+     />)
+     fireEvent.click(screen.getByRole('button', { name: '工作区“Project”的操作' }))
+     // Opening the menu neither toggles the group nor renames yet.

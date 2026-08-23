@@ -26,14 +26,15 @@ function modesOf(value: unknown): Record<string, Mode> {
   return Object.fromEntries(Object.entries(modes).filter((entry): entry is [string, Mode] => entry[1] === 'enabled' || entry[1] === 'manual-only' || entry[1] === 'disabled'))
 }
 
-async function loadOrigins(sessionId: string): Promise<readonly { name: string, origin: Origin }[]> {
+async function loadOrigins(sessionId: string): Promise<readonly { name: string, origin: Origin, deletable: boolean }[]> {
   const response = await fetch(CATALOG_PATH, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId }),
   })
   const body = await response.json() as { skills?: unknown, error?: string }
   if (!response.ok || !Array.isArray(body.skills)) throw new Error(body.error ?? `技能来源加载失败：HTTP ${String(response.status)}`)
-  return body.skills.filter((item): item is { name: string, origin: Origin } => item !== null && typeof item === 'object'
+  return body.skills.filter((item): item is { name: string, origin: Origin, deletable: boolean } => item !== null && typeof item === 'object'
     && typeof (item as { name?: unknown }).name === 'string'
+    && typeof (item as { deletable?: unknown }).deletable === 'boolean'
     && ((item as { origin?: unknown }).origin === 'system' || (item as { origin?: unknown }).origin === 'installed' || (item as { origin?: unknown }).origin === 'project' || (item as { origin?: unknown }).origin === 'user'))
 }
 
@@ -73,10 +74,11 @@ export function SkillSettingsSection({ api, t, useSessions }: SkillSettingsInjec
       if (!active) return
       const section = settings.result.ok ? settings.result.value.namespaces.find(item => item.ns === NS) : undefined
       if (!skills.result.ok || section === undefined) { setFailure(true); return }
-      const originByName = new Map(origins.map(skill => [skill.name, skill.origin]))
+      const originByName = new Map(origins.map(skill => [skill.name, skill]))
       const catalog = skills.result.value.skills.map(skill => {
-        const origin = originByName.get(skill.name) ?? 'user'
-        return { ...skill, origin, stateEditable: origin !== 'system', deletable: origin === 'installed' }
+        const catalogEntry = originByName.get(skill.name)
+        const origin = catalogEntry?.origin ?? 'user'
+        return { ...skill, origin, stateEditable: origin !== 'system', deletable: catalogEntry?.deletable === true }
       })
       setView({ writable: settings.result.value.writable, revision: section.revision, modes: modesOf(section.value), skills: catalog })
       setSelected(current => new Set([...current].filter(name => catalog.some(skill => skill.name === name && skill.stateEditable))))

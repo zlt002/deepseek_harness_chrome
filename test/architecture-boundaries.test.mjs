@@ -3,6 +3,7 @@ import { access, readFile, readdir } from 'node:fs/promises'
 import { dirname, extname, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { PRODUCT_PLUGINS, PRODUCT_TYPECHECK_PLUGIN_PACKAGE_NAMES, PRODUCT_UI_PLUGIN_DIRECTORIES, PRODUCT_UI_PLUGIN_PACKAGE_NAMES } from '../apps/native-server/src/product-plugin-manifest.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -71,36 +72,70 @@ test('Harness product checkout pins LF before applying portable patches', async 
   assert.ok(clone < autocrlf && autocrlf < eol && eol < checkout && checkout < apply)
 })
 
-test('Harness client plugins execute the portable tsdown JavaScript entrypoint', async () => {
+test('product plugin manifest drives portable client builds and root quality commands', async () => {
   const script = await readFile(resolve(root, 'scripts/build-harness-client-plugins.mjs'), 'utf8')
+  const nativeInstall = await readFile(resolve(root, 'scripts/register-native-host.mjs'), 'utf8')
+  const harnessProcess = await readFile(resolve(root, 'apps/native-server/src/harness-process.mjs'), 'utf8')
+  const commandRunner = await readFile(resolve(root, 'scripts/run-product-plugin-command.mjs'), 'utf8')
   const rootManifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
-  const typecheckPlugins = rootManifest.scripts['typecheck:plugins']
 
   assert.match(script, /node_modules', 'tsdown', 'dist', 'run\.mjs'/)
   assert.match(script, /spawnSync\(process\.execPath, \[tsdown/)
   assert.match(script, /DSH_ROOT: harnessRoot/)
   assert.doesNotMatch(script, /tsdown\.cmd/)
+  assert.match(script, /PRODUCT_UI_PLUGIN_DIRECTORIES/)
+  assert.match(nativeInstall, /PRODUCT_UI_PLUGIN_DIRECTORIES/)
+  assert.match(harnessProcess, /PRODUCT_UI_PLUGIN_PACKAGE_NAMES/)
+  assert.match(commandRunner, /PRODUCT_PLUGIN_PACKAGE_NAMES/)
+  assert.match(commandRunner, /PRODUCT_TYPECHECK_PLUGIN_PACKAGE_NAMES/)
+  assert.equal(rootManifest.scripts['typecheck:plugins'], 'node scripts/run-product-plugin-command.mjs typecheck')
+  assert.equal(rootManifest.scripts['test:plugins'], 'node scripts/run-product-plugin-command.mjs test')
+  assert.equal(rootManifest.scripts.test, 'node --test test/*.test.mjs && pnpm test:plugins')
 
-  for (const name of [
+  assert.deepEqual(PRODUCT_UI_PLUGIN_DIRECTORIES, [
     'harness-ui-agent-preset',
     'harness-ui-browser-target',
     'harness-ui-conversation-shell',
+    'harness-ui-message-annotations',
+    'harness-ui-responsive-sidebar',
+    'harness-ui-workspace-picker',
     'harness-ui-account-access',
     'harness-ui-knowledge-scope',
-    'harness-ui-responsive-sidebar',
     'harness-ui-subagent-compact',
     'harness-ui-session-log-copy',
     'harness-ui-settings-shell',
-    'harness-ui-workspace-picker',
     'harness-ui-document-intake',
     'harness-ui-workspace-review',
+    'harness-ui-prototype-studio',
     'harness-skill-settings',
-  ]) {
+  ])
+  assert.equal(PRODUCT_UI_PLUGIN_PACKAGE_NAMES.length, 15)
+  assert.equal(PRODUCT_TYPECHECK_PLUGIN_PACKAGE_NAMES.length, 15)
+  assert.deepEqual(PRODUCT_UI_PLUGIN_PACKAGE_NAMES.slice(7, 11), [
+    '@accrui/harness-ui-subagent-compact',
+    '@accrui/harness-ui-session-log-copy',
+    '@accrui/harness-ui-settings-shell',
+    '@accrui/harness-ui-knowledge-scope',
+  ])
+
+  for (const name of PRODUCT_UI_PLUGIN_DIRECTORIES) {
     const config = await readFile(resolve(root, 'packages', name, 'tsdown.config.ts'), 'utf8')
     assert.match(config, /loadHarnessClientBundle/)
     assert.doesNotMatch(config, /upstream\/deepseek-harness/)
-    assert.match(typecheckPlugins, new RegExp(`@accrui/${name}`), `${name} is missing from typecheck:plugins`)
   }
+
+  for (const plugin of PRODUCT_PLUGINS) {
+    const manifest = JSON.parse(await readFile(resolve(root, 'packages', plugin.directory, 'package.json'), 'utf8'))
+    assert.equal(manifest.name, plugin.packageName)
+    assert.equal(typeof manifest.scripts?.test, 'string', `${plugin.directory} is missing its package test command`)
+    if (plugin.typecheck) assert.equal(typeof manifest.scripts?.typecheck, 'string', `${plugin.directory} is missing its package typecheck command`)
+  }
+})
+
+test('Windows release workflow retains upstream, typecheck, and complete test gates', async () => {
+  const workflow = await readFile(resolve(root, '.github/workflows/build-windows-lite.yml'), 'utf8')
+  assert.match(workflow, /run: pnpm verify:upstream/)
+  assert.match(workflow, /pnpm typecheck\r?\n\s+pnpm typecheck:plugins\r?\n\s+pnpm test/)
 })
 
 test('product commands never silently fall back to the clean upstream checkout', async () => {

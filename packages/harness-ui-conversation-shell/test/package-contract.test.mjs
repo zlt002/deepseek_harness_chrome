@@ -3,11 +3,18 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 test('Conversation shell is a product presentation plugin, not a second conversation controller', async () => {
-  const [manifest, source, presentation, css, overlayHostSeam, permissionLabelSeam] = await Promise.all([
+  const [manifest, hostSource, source, presentation, css, fullscreenControl, fullscreenStore, fullscreenCss, visibilityRow, visibilityStore, settings, overlayHostSeam, permissionLabelSeam] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
+    readFile(new URL('../src/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ConversationPresentation.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ConversationPresentation.module.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/ComposerFullscreenControl.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/composer-fullscreen.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/ComposerFullscreenControl.module.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/ProcessVisibilitySettingsRow.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/process-visibility.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/presentation-settings.ts', import.meta.url), 'utf8'),
     readFile(new URL('../../../upstream-contributions/0013-composer-overlay-host-marker.patch', import.meta.url), 'utf8'),
     readFile(new URL('../../../upstream-contributions/0019-permission-label-registry.patch', import.meta.url), 'utf8'),
   ])
@@ -21,8 +28,29 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(permissionLabelSeam, /labels = OFFICIAL_PERMISSION_LABELS/)
   // Cordis only exposes a property when it was declared in `inject`. The
   // adapter registers a presentation slot before reading its own services.
-  assert.match(source, /export const inject = \['slots', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions', 'permissionLabels'\]/)
+  assert.match(source, /export const inject = \['slots', 'connection', 'remote', 'settingsScope', 'settingsQuickActions', 'conversationViewState', 'modelDirectories', 'sessions', 'permissionLabels'\]/)
+  assert.match(hostSource, /CONVERSATION_PRESENTATION_SETTINGS_NAMESPACE as SettingsNamespace/)
+  assert.match(hostSource, /settingsCtx\.settings\.register\(/)
+  assert.match(hostSource, /z\.object\(\{ showProcess: z\.boolean\(\)\.default\(true\) \}\)/)
+  assert.match(hostSource, /configurationExposed: true/)
+  assert.match(settings, /CONVERSATION_PRESENTATION_SETTINGS_NAMESPACE = 'accrui-conversation-presentation'/)
+  assert.match(settings, /showProcess: true/)
+  assert.match(source, /ctx\.settingsScope\.bind<ConversationPresentationSettings>/)
+  assert.match(source, /name: 'settings\.general\.item'/)
+  assert.match(source, /id: 'process-visibility'/)
+  assert.match(visibilityRow, /显示会话过程/)
+  assert.match(visibilityRow, /type="checkbox"/)
+  assert.match(visibilityRow, /\{ useShowProcess, setShowProcess \}/)
+  assert.match(visibilityRow, /useShowProcess\(state => state\)/)
+  assert.doesNotMatch(visibilityRow, /hooks\.showProcess/)
+  assert.match(visibilityStore, /void this\.settings\.set\(SHOW_PROCESS_FIELD, showProcess\)/)
+  assert.match(visibilityStore, /createSnapshotStore\(DEFAULT_CONVERSATION_PRESENTATION_SETTINGS\.showProcess\)/)
   assert.match(source, /ctx\.slots\.inject\('conversation\.presentation'/)
+  assert.match(source, /ctx\.slots\.inject\('conversation\.input\.right'/)
+  assert.match(source, /id: 'composer-fullscreen-control'/)
+  assert.match(source, /hooks: \{ composerFullscreen: composerFullscreen\.active \}/)
+  assert.match(source, /toggleComposerFullscreen: \(\) => \{ composerFullscreen\.toggle\(\) \}/)
+  assert.match(source, /exitComposerFullscreen: \(\) => \{ composerFullscreen\.exit\(\) \}/)
   assert.match(source, /select: owner => owner/)
   assert.match(source, /conversationViewState/)
   assert.match(source, /settingsQuickActions/)
@@ -37,7 +65,33 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(presentation, /owner\.renderHero\(\)/)
   assert.match(presentation, /owner\.renderSession\(\)/)
   assert.match(presentation, /owner\.renderComposer\(\)/)
+  assert.match(presentation, /data-show-process=\{showProcess\}/)
+  assert.match(presentation, /data-composer-fullscreen=\{composerFullscreen\}/)
+  assert.match(fullscreenControl, /IconFullscreenOutline16/)
+  assert.match(fullscreenControl, /IconCloseOutline16/)
+  assert.match(fullscreenControl, /event\.key === 'Escape'/)
+  assert.match(fullscreenControl, /exitComposerFullscreen\(\)/)
+  assert.match(fullscreenControl, /aria-pressed=\{fullscreen\}/)
+  assert.match(fullscreenStore, /readonly active: SnapshotStore<boolean> = createSnapshotStore\(false\)/)
+  assert.match(fullscreenStore, /toggle\(\)/)
+  assert.match(fullscreenStore, /exit\(\)/)
+  assert.match(fullscreenCss, /position: absolute/)
+  assert.match(css, /\[data-composer-fullscreen='true'\] > :global\(\[data-composer-seat\]\)/)
+  assert.match(css, /\[data-composer-fullscreen='true'\] :global\(\[data-composer-card\]\)/)
+  assert.match(css, /\[data-composer-fullscreen='true'\] :global\(\[data-input-scroll\]\)/)
   assert.match(css, /:global\(\[data-composer-seat\]\)/)
+  assert.match(css, /\[data-show-process='false'\]\s+:global\(\[data-chat-flow-kind='context'\]\),/)
+  // A tool-call ChatNode is the stable outer seat for its Read, question,
+  // error, and named-tool subrows. Its inner ToolRow publishes the running
+  // state, so this hides settled history but leaves the active final call
+  // visible until it settles.
+  assert.match(
+    css,
+    /\[data-show-process='false'\]\s+:global\(\[data-chat-flow-kind='tool-call'\]:not\(:has\(\[data-state='running'\]\)\)\)\s*\{/,
+  )
+  assert.doesNotMatch(css, /\[data-show-process='false'\][\s\S]*\[data-chat-flow-kind='tool-call'\]\)\s*\{/)
+  assert.doesNotMatch(css, /data-chat-flow-kind='assistant-step'/)
+  assert.doesNotMatch(css, /data-chat-flow-kind='user'/)
   assert.match(css, /:global\(\[data-composer-overlay-surface\]\)/)
   assert.match(
     css,

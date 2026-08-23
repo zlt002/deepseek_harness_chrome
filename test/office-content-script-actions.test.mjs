@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { LIGHT_DOCUMENT_OPERATIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
 
 /**
  * Cross-layer contract: every spreadsheet/document action the MCP surface
@@ -35,7 +36,7 @@ test('the content script still accepts used_range for read_work_tab spreadsheet 
 
 test('the content script accepts every light-document action the MCP surface advertises', async () => {
   const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
-  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background/office-request-contract.ts', import.meta.url), 'utf8')
   const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
 
   const advertised = [
@@ -49,13 +50,11 @@ test('the content script accepts every light-document action the MCP surface adv
 })
 
 test('the Extension background accepts every light-document operation the Native Connector can send', async () => {
-  const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
-  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background/office-request-contract.ts', import.meta.url), 'utf8')
 
-  const connectorOperations = assignedArrayOnFirstMatchingLine(connectorSource, (line) => line.includes('const LIGHT_DOCUMENT_OPERATIONS ='), 'the Native Connector light-document operations')
   const backgroundOperations = assignedArrayOnFirstMatchingLine(backgroundSource, (line) => line.includes('const OFFICE_DOCUMENT_OPERATIONS:'), 'the Extension background light-document operations')
 
-  for (const operation of connectorOperations) {
+  for (const operation of LIGHT_DOCUMENT_OPERATIONS) {
     assert.ok(backgroundOperations.includes(operation), `Native light-document operation '${operation}' must be accepted by the Extension background`)
   }
 })

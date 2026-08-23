@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import ts from 'typescript'
+import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
 const parentUrl = 'https://doc.midea.com/teamKnowledge/catalog/9007199254740993'
 const createdUrl = 'https://doc.midea.com/teamKnowledge/detail/docOnline/9007199254740995?id=9007199254740995'
@@ -10,7 +10,7 @@ const parent = { parentId: '9007199254740993', bookId: '9007199254740994', paren
 
 async function loadBackground() {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+  const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
   const nativeListeners = new Set(); const nativeMessages = []; const executions = []; const navigations = []
   const tab = { id: target.tabId, windowId: target.windowId, url: target.url, title: 'Team Knowledge', status: 'complete' }

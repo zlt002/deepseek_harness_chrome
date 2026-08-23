@@ -1,11 +1,14 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { lstat, open, readdir, realpath, stat } from 'node:fs/promises'
-import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { chmod, lstat, open, readdir, realpath, rename, stat, unlink } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024
 export const MAX_SNAPSHOT_BYTES = 1024 * 1024
 export const MAX_DIRECTORY_ENTRIES = 200
 export const CAPABILITY_TTL_MS = 5 * 60 * 1000
+export const APPROVAL_TTL_MS = 60 * 1000
+export const MAX_REPLACEMENT_CHARS = 100_000
+const MAX_PROPOSALS_PER_REVIEW = 20
 
 const markdownExtensions = new Set(['.md', '.markdown'])
 
@@ -92,6 +95,7 @@ async function fileSnapshot(root, displayPath) {
       revision: revisionOf(current),
       fingerprint: digest(bytes),
       size: current.size,
+      mode: current.mode,
     }
   } finally {
     await file.close()
@@ -102,6 +106,8 @@ async function fileSnapshot(root, displayPath) {
 export class WorkspaceReviewRuntime {
   #reviews = new Map()
   #byResource = new Map()
+  #writeFences = new Map()
+  #proposalSequence = 0
 
   async list(cwd, requestedPath = undefined) {
     const root = await canonicalRoot(cwd)
@@ -133,6 +139,7 @@ export class WorkspaceReviewRuntime {
     const existing = this.#byResource.get(resourceKey)
     const record = existing === undefined ? {
       reviewId: opaqueId(), sessionId, root, resourceId, displayPath: snapshot.displayPath,
+      selections: new Map(), proposals: [], approvals: new Map(), writeResults: new Map(),
     } : existing
     record.canonical = snapshot.canonical
     record.revision = snapshot.revision
@@ -171,6 +178,153 @@ export class WorkspaceReviewRuntime {
     return this.#openResponse(record)
   }
 
+  async registerSelection(reviewId, capability, selection) {
+    const record = this.#authorize(reviewId, capability)
+    if (!selection || typeof selection !== 'object') throw new Error('workspace review selection is required')
+    const id = boundedId(selection.id, 'selection id')
+    const quote = boundedText(selection.quote, 8_000, 'selection quote')
+    const sourceFingerprint = boundedId(selection.sourceFingerprint, 'selection fingerprint')
+    const snapshot = await fileSnapshot(record.root, record.displayPath)
+    if (snapshot.truncated) throw new Error('truncated Markdown snapshots cannot create AI edit selections')
+    if (snapshot.canonical !== record.canonical || sourceFingerprint !== snapshot.fingerprint) {
+      throw new Error('Markdown selection is stale; re-read the file and select the text again')
+    }
+    let registered
+    if (selection.version === 2) {
+      const editorRevision = selection.editorRevision; const from = selection.from; const to = selection.to
+      if (!Number.isSafeInteger(editorRevision) || editorRevision < 0 || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from) throw new Error('visual Markdown selection range is invalid')
+      if (!Array.isArray(selection.blocks) || selection.blocks.length > 24) throw new Error('visual Markdown selection blocks are invalid')
+      const blocks = selection.blocks.map(block => {
+        if (!block || typeof block !== 'object') throw new Error('visual Markdown selection block is invalid')
+        return { kind: boundedText(block.kind, 32, 'selection block kind'), text: boundedText(block.text, 2_000, 'selection block text', true) }
+      })
+      registered = { id, version: 2, quote, sourceFingerprint, editorRevision, from, to, blocks, createdAt: Date.now() }
+    } else {
+      const start = selection.startUtf16; const end = selection.endUtf16
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > snapshot.content.length || snapshot.content.slice(start, end) !== quote) {
+        throw new Error('workspace review selection range is invalid or stale')
+      }
+      const prefix = boundedText(selection.prefix, 512, 'selection prefix', true)
+      const suffix = boundedText(selection.suffix, 512, 'selection suffix', true)
+      registered = { id, version: 1, startUtf16: start, endUtf16: end, quote, prefix, suffix, sourceFingerprint, createdAt: Date.now() }
+    }
+    record.selections.set(id, registered)
+    while (record.selections.size > 50) record.selections.delete(record.selections.keys().next().value)
+    return registered
+  }
+
+  async proposeEdit(sessionId, reviewId, selectionId, replacementMarkdown, summary = '') {
+    const record = this.#reviews.get(boundedId(reviewId, 'review id'))
+    if (record === undefined || record.sessionId !== sessionId) throw new Error('Markdown review is not bound to the calling Harness session')
+    const selection = record.selections.get(boundedId(selectionId, 'selection id'))
+    if (selection === undefined) throw new Error('Markdown review selection is unavailable; ask the user to select and send it again')
+    const replacement = boundedText(replacementMarkdown, MAX_REPLACEMENT_CHARS, 'replacement Markdown', true)
+    const safeSummary = boundedText(summary, 1_000, 'proposal summary', true)
+    const snapshot = await fileSnapshot(record.root, record.displayPath)
+    if (snapshot.truncated || snapshot.fingerprint !== selection.sourceFingerprint) throw new Error('Markdown file changed after the selection was sent; no proposal was queued')
+    const base = {
+      proposalId: opaqueId(),
+      selectionId: selection.id,
+      sequence: ++this.#proposalSequence,
+      baseFingerprint: snapshot.fingerprint,
+      summary: safeSummary,
+      createdAt: Date.now(),
+    }
+    const proposal = selection.version === 2
+      ? { ...base, kind: 'selection', replacementMarkdown: replacement, editorRevision: selection.editorRevision, from: selection.from, to: selection.to }
+      : snapshot.content.slice(selection.startUtf16, selection.endUtf16) !== selection.quote
+        ? (() => { throw new Error('Markdown file changed after the selection was sent; no proposal was queued') })()
+        : { ...base, kind: 'document', candidateMarkdown: `${snapshot.content.slice(0, selection.startUtf16)}${replacement}${snapshot.content.slice(selection.endUtf16)}` }
+    record.proposals.push(proposal)
+    if (record.proposals.length > MAX_PROPOSALS_PER_REVIEW) record.proposals.splice(0, record.proposals.length - MAX_PROPOSALS_PER_REVIEW)
+    return { status: 'queued', proposalId: proposal.proposalId, reviewId: record.reviewId, selectionId: selection.id }
+  }
+
+  proposals(reviewId, capability, afterSequence = 0) {
+    const record = this.#authorize(reviewId, capability)
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error('proposal sequence must be a non-negative integer')
+    return {
+      v: 1,
+      reviewId: record.reviewId,
+      proposals: record.proposals
+        .filter(proposal => proposal.sequence > afterSequence)
+        .map(({ createdAt: _createdAt, ...proposal }) => proposal),
+    }
+  }
+
+  async prepareWrite(reviewId, capability, expected, content) {
+    const record = this.#authorize(reviewId, capability)
+    if (!expected || typeof expected !== 'object' || expected.resourceId !== record.resourceId) throw new Error('write preparation resource identity does not match the review')
+    const nextContent = boundedMarkdownContent(content)
+    const current = await fileSnapshot(record.root, record.displayPath)
+    if (current.truncated) throw new Error('truncated Markdown snapshots cannot be saved')
+    if (current.canonical !== record.canonical || expected.revision !== current.revision || expected.fingerprint !== current.fingerprint) {
+      return { status: 'conflict', latest: this.#snapshotResponse(record, current) }
+    }
+    const contentHash = digest(Buffer.from(nextContent))
+    const approval = opaqueId(32)
+    const prepared = {
+      approval, reviewId: record.reviewId, resourceId: record.resourceId, expectedRevision: current.revision,
+      expectedFingerprint: current.fingerprint, contentHash, expiresAt: Date.now() + APPROVAL_TTL_MS, used: false,
+    }
+    record.approvals.set(approval, prepared)
+    return { status: 'prepared', approval, contentHash, expiresAt: prepared.expiresAt }
+  }
+
+  async commitWrite(reviewId, capability, approval, idempotencyKey, content) {
+    const record = this.#authorize(reviewId, capability)
+    const key = boundedId(idempotencyKey, 'idempotency key')
+    const nextContent = boundedMarkdownContent(content)
+    const contentHash = digest(Buffer.from(nextContent))
+    const previous = record.writeResults.get(key)
+    if (previous !== undefined) {
+      if (previous.contentHash !== contentHash) throw new Error('idempotency key was already used for different Markdown content')
+      return previous.result ?? previous.pending
+    }
+    const grant = record.approvals.get(boundedId(approval, 'approval'))
+    if (grant === undefined || grant.used || Date.now() > grant.expiresAt || grant.contentHash !== contentHash) throw new Error('write approval is invalid, expired, used, or bound to different content')
+    grant.used = true
+    const pending = this.#withWriteFence(record.resourceId, async () => {
+      const current = await fileSnapshot(record.root, record.displayPath)
+      if (current.canonical !== record.canonical || current.revision !== grant.expectedRevision || current.fingerprint !== grant.expectedFingerprint) {
+        return { status: 'conflict', latest: this.#snapshotResponse(record, current) }
+      }
+      await atomicWrite(current.canonical, nextContent, current.mode)
+      const readback = await fileSnapshot(record.root, record.displayPath)
+      if (readback.canonical !== record.canonical || readback.fingerprint !== contentHash || readback.content !== nextContent) {
+        return { status: 'uncertain', message: 'Markdown write completed but same-resource readback did not match; re-read before retrying' }
+      }
+      record.revision = readback.revision
+      record.fingerprint = readback.fingerprint
+      return { status: 'verified_write', resource: this.#resource(record), contentHash }
+    })
+    record.writeResults.set(key, { contentHash, pending })
+    const result = await pending
+    record.writeResults.set(key, { contentHash, result })
+    return result
+  }
+
+  #snapshotResponse(record, snapshot) {
+    return {
+      v: 1, type: 'markdown-review-snapshot', reviewId: record.reviewId,
+      resource: { resourceId: record.resourceId, displayPath: record.displayPath, revision: snapshot.revision, fingerprint: snapshot.fingerprint },
+      content: snapshot.content, truncated: snapshot.truncated, readOnly: true,
+    }
+  }
+
+  async #withWriteFence(resourceId, operation) {
+    const previous = this.#writeFences.get(resourceId) ?? Promise.resolve()
+    let release
+    const next = new Promise(resolve => { release = resolve })
+    const tail = previous.then(() => next)
+    this.#writeFences.set(resourceId, tail)
+    await previous
+    try { return await operation() } finally {
+      release()
+      if (this.#writeFences.get(resourceId) === tail) this.#writeFences.delete(resourceId)
+    }
+  }
+
   #resource(record) {
     return { resourceId: record.resourceId, displayPath: record.displayPath, revision: record.revision, fingerprint: record.fingerprint }
   }
@@ -190,6 +344,42 @@ export class WorkspaceReviewRuntime {
     if (typeof capability !== 'string' || capability.length !== record.capability.length) throw new Error('review capability is invalid')
     if (!timingSafeEqual(Buffer.from(capability), Buffer.from(record.capability))) throw new Error('review capability is invalid')
     return record
+  }
+}
+
+function boundedId(value, label) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 160 || !/^[A-Za-z0-9._:-]+$/.test(value)) throw new Error(`${label} is invalid`)
+  return value
+}
+
+function boundedText(value, maximum, label, allowEmpty = false) {
+  if (typeof value !== 'string' || value.length > maximum || (!allowEmpty && value.length === 0)) throw new Error(`${label} is invalid or exceeds its limit`)
+  return value
+}
+
+function boundedMarkdownContent(value) {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > MAX_FILE_BYTES) throw new Error('Markdown content is invalid or exceeds its byte limit')
+  return value
+}
+
+async function atomicWrite(path, content, mode) {
+  const temp = resolve(dirname(path), `.${basename(path)}.${opaqueId(9)}.tmp`)
+  const file = await open(temp, 'wx', mode & 0o777)
+  try {
+    await file.writeFile(content, 'utf8')
+    await file.sync()
+  } catch (error) {
+    await file.close().catch(() => {})
+    await unlink(temp).catch(() => {})
+    throw error
+  }
+  await file.close()
+  try {
+    await chmod(temp, mode & 0o777)
+    await rename(temp, path)
+  } catch (error) {
+    await unlink(temp).catch(() => {})
+    throw error
   }
 }
 

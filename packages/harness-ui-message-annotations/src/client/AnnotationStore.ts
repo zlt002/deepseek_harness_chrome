@@ -18,25 +18,55 @@ export interface MarkdownSelectionAnchor {
   readonly suffix: string
   readonly sourceFingerprint: string
 }
+export interface VisualMarkdownSelectionAnchor {
+  readonly version: 2
+  readonly editorRevision: number
+  readonly from: number
+  readonly to: number
+  readonly quote: string
+  readonly blocks: ReadonlyArray<{ readonly kind: string; readonly text: string }>
+  readonly sourceFingerprint: string
+}
+export type WorkspaceMarkdownAnchor = MarkdownSelectionAnchor | VisualMarkdownSelectionAnchor
 
-export interface WorkspaceMarkdownFeedbackInput {
+interface WorkspaceMarkdownFeedbackBase {
   readonly id: string
+  readonly selectionId: string
   readonly reviewId: string
   readonly resourceId: string
   readonly displayPath: string
   readonly revision: string
   readonly fingerprint: string
-  readonly startUtf16: number
-  readonly endUtf16: number
   readonly quote: string
-  readonly prefix: string
-  readonly suffix: string
   readonly comment: string
 }
+export interface SourceWorkspaceMarkdownFeedbackInput extends WorkspaceMarkdownFeedbackBase {
+  readonly anchorKind: 'source'
+  readonly startUtf16: number
+  readonly endUtf16: number
+  readonly prefix: string
+  readonly suffix: string
+}
+export interface VisualWorkspaceMarkdownFeedbackInput extends WorkspaceMarkdownFeedbackBase {
+  readonly anchorKind: 'visual'
+  readonly editorRevision: number
+  readonly from: number
+  readonly to: number
+  readonly blocks: ReadonlyArray<{ readonly kind: string; readonly text: string }>
+}
+export type WorkspaceMarkdownFeedbackInput = SourceWorkspaceMarkdownFeedbackInput | VisualWorkspaceMarkdownFeedbackInput
 
-export interface WorkspaceMarkdownFeedback extends Omit<WorkspaceMarkdownFeedbackInput, 'startUtf16' | 'endUtf16' | 'quote' | 'prefix' | 'suffix'> {
+export interface WorkspaceMarkdownFeedback {
+  readonly id: string
+  readonly selectionId: string
   readonly source: 'workspace-markdown'
-  readonly anchor: MarkdownSelectionAnchor
+  readonly reviewId: string
+  readonly resourceId: string
+  readonly displayPath: string
+  readonly revision: string
+  readonly fingerprint: string
+  readonly comment: string
+  readonly anchor: WorkspaceMarkdownAnchor
 }
 
 export type ReviewFeedback = MessageAnnotation | WorkspaceMarkdownFeedback
@@ -79,6 +109,7 @@ export class ReviewFeedbackStore {
     const bySession = new Map(current.bySession)
     const normalized: WorkspaceMarkdownFeedback = {
       id: feedback.id,
+      selectionId: feedback.selectionId,
       source: 'workspace-markdown',
       reviewId: feedback.reviewId,
       resourceId: feedback.resourceId,
@@ -86,15 +117,9 @@ export class ReviewFeedbackStore {
       revision: feedback.revision,
       fingerprint: feedback.fingerprint,
       comment: feedback.comment,
-      anchor: {
-        version: 1,
-        startUtf16: feedback.startUtf16,
-        endUtf16: feedback.endUtf16,
-        quote: feedback.quote,
-        prefix: feedback.prefix,
-        suffix: feedback.suffix,
-        sourceFingerprint: feedback.fingerprint,
-      },
+      anchor: feedback.anchorKind === 'visual'
+        ? { version: 2, editorRevision: feedback.editorRevision, from: feedback.from, to: feedback.to, quote: feedback.quote, blocks: feedback.blocks.map(({ kind, text }) => ({ kind, text })), sourceFingerprint: feedback.fingerprint }
+        : { version: 1, startUtf16: feedback.startUtf16, endUtf16: feedback.endUtf16, quote: feedback.quote, prefix: feedback.prefix, suffix: feedback.suffix, sourceFingerprint: feedback.fingerprint },
     }
     bySession.set(sessionId, addAnnotation(items, normalized))
     this.set({ bySession })
@@ -143,16 +168,24 @@ function boundedText(value: unknown, maximum: number, allowEmpty = false): value
 }
 
 function validWorkspaceFeedback(value: WorkspaceMarkdownFeedbackInput): boolean {
-  return boundedText(value.id, 160)
+  const base = boundedText(value.id, 160)
+    && boundedText(value.selectionId, 160)
     && boundedText(value.reviewId, 160)
     && boundedText(value.resourceId, 160)
     && boundedText(value.displayPath, 2_048)
     && boundedText(value.revision, 160)
     && boundedText(value.fingerprint, 160)
     && boundedText(value.comment, 8_000)
-    && Number.isSafeInteger(value.startUtf16) && value.startUtf16 >= 0
-    && Number.isSafeInteger(value.endUtf16) && value.endUtf16 > value.startUtf16
     && boundedText(value.quote, 8_000)
-    && boundedText(value.prefix, 512, true)
-    && boundedText(value.suffix, 512, true)
+  if (!base) return false
+  if (value.anchorKind === 'source') {
+    return Number.isSafeInteger(value.startUtf16) && value.startUtf16 >= 0 && Number.isSafeInteger(value.endUtf16) && value.endUtf16 > value.startUtf16
+      && boundedText(value.prefix, 512, true) && boundedText(value.suffix, 512, true)
+  }
+  if (value.anchorKind === 'visual') {
+    return Number.isSafeInteger(value.editorRevision) && value.editorRevision >= 0
+      && Number.isSafeInteger(value.from) && value.from >= 0 && Number.isSafeInteger(value.to) && value.to > value.from
+      && Array.isArray(value.blocks) && value.blocks.length <= 24 && value.blocks.every(block => boundedText(block.kind, 32) && boundedText(block.text, 2_000, true))
+  }
+  return false
 }

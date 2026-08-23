@@ -38,3 +38,15 @@ test('renders the selection popover through a page-level portal instead of the c
   assert.match(view, /createPortal\(/)
   assert.match(view, /popoverPortalHost\(document\)/)
 })
+
+test('allows pending review feedback to make the ordinary empty composer submission sendable', async () => {
+  const [client, seam] = await Promise.all([
+    source('../src/client/index.ts'),
+    source('../../../upstream-contributions/0017-composer-submission-transforms.patch'),
+  ])
+  assert.match(client, /emptySubmission: \(sessionId\) => \(\{[\s\S]*annotations\.feedback\(String\(sessionId\)\)\.length > 0/)
+  assert.match(seam, /emptySubmission\?: \(sessionId: SessionId\) => ObservableSnapshot<boolean>/)
+  assert.match(seam, /emptySubmission\(sessionId: SessionId\): ObservableSnapshot<boolean>/)
+  assert.match(seam, /const sendable = !empty \|\| emptySubmission/)
+  assert.match(seam, /this\.submissionTransforms\.hasEmptySubmission\(id\)/)
+})

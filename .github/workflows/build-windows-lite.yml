@@ -69,10 +69,17 @@ jobs:
           key: windows-lite-ready-v2-${{ hashFiles('deepseek_harness_chrome/apps/chrome-extension/**', 'deepseek_harness_chrome/apps/native-server/**', 'deepseek_harness_chrome/packages/**', 'deepseek_harness_chrome/release/windows-lite/build-static-harness-runtime.mjs', 'deepseek_harness_chrome/release/mac-lite/build-mac-production.mjs', 'deepseek_harness_chrome/scripts/*.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/package.json', 'deepseek_harness_chrome/pnpm-lock.yaml', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
 
       - name: Build materialized Harness product
-        if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: pnpm build:harness-product
+
+      - name: Run TypeScript and complete test gates
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: |
+          pnpm typecheck
+          pnpm typecheck:plugins
+          pnpm test
 
       - name: Build release-ready extension
         if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'

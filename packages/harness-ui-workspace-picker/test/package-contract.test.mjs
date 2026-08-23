@@ -5,8 +5,9 @@ import test from 'node:test'
 const read = relative => readFile(new URL(`../${relative}`, import.meta.url), 'utf8')
 
 test('keeps the e327 compact picker in an out-of-tree public workspace seat', async () => {
-  const [client, picker, css] = await Promise.all([
+  const [client, picker, css, actions] = await Promise.all([
     read('src/client/index.ts'), read('src/client/CompactWorkspacePicker.tsx'), read('src/client/CompactWorkspacePicker.module.css'),
+    read('src/client/WorkspaceSurfaceActions.tsx'),
   ])
   assert.match(client, /sidebar\.workspaces\.compact/)
   assert.match(
@@ -21,15 +22,16 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.match(picker, /function classes\(/)
   assert.doesNotMatch(picker, /from 'clsx'/)
   assert.match(picker, /IconEllipsisOutline16/)
-  assert.match(picker, /IconDownloadOutline16/)
+  assert.match(actions, /IconDownloadOutline16/)
   assert.match(picker, /IconNewChatOutline16/)
   assert.match(picker, /css\.verticalEllipsis/)
   assert.match(picker, /owner\.startSession\(selectedWorkspace\?\.id\)/)
   assert.match(picker, /owner\.startSession\(workspace\.id\)/)
-  assert.match(picker, /从 Claude Code 导入/)
-  assert.match(picker, /ClaudeImportModal/)
+  assert.match(actions, /从 Claude Code 导入/)
+  assert.match(actions, /ClaudeImportModal/)
+  assert.match(picker, /ClaudeImportAction/)
   assert.match(picker, /claudeImportControllerOf\(owner\)/)
-  assert.match(picker, /disabled=\{importController === undefined\}/)
+  assert.match(actions, /disabled=\{controller === undefined \|\| workspace === undefined\}/)
   assert.match(picker, /owner\.renameWorkspace/)
   assert.match(picker, /owner\.deleteWorkspace/)
   assert.match(picker, /id: 'open'/)
@@ -122,4 +124,38 @@ test('the compact seat owner exposes workspace rename, delete, and new-session a
   assert.match(patch, /openPath: \(path: string\) => Promise<void>/)
   assert.match(patch, /openFolder: t\('open\.folder'\)/)
   assert.match(patch, /openPath: async \(path\) => \{ await ctx\.workspaces\.openPath\(path\) \}/)
+})
+
+test('wide workspace browser preserves its official list and exposes Claude import plus open-folder menu action', async () => {
+  const [patch, client] = await Promise.all([
+    readFile(new URL('../../../upstream-contributions/0021-workspace-column-action-seams.patch', import.meta.url), 'utf8'),
+    read('src/client/index.ts'),
+  ])
+  assert.match(patch, /'sidebar\.workspaces\.header\.action': \{ kind: 'list'; scope: 'root'; owner: WorkspaceHeaderActionOwnerProps \}/)
+  assert.match(patch, /renderSlot\('sidebar\.workspaces\.header\.action', \{ workspace: actionWorkspace \}\)/)
+  assert.match(patch, /\{ id: 'open', label: t\('open\.folder'\), icon: <IconFolderOpen16 \/> \}/)
+  assert.match(patch, /if \(id === 'open'\) actions\.openPath\(\)/)
+  assert.match(patch, /openPath: \(\) => \{[\s\S]*void openPath\(workspace\.path\)/)
+  assert.match(patch, /actions=\{\{ openPath: vi\.fn\(\), rename: onRename, delete: onDelete \}\}/)
+  assert.match(client, /ctx\.slots\.inject\('sidebar\.workspaces\.header\.action'/)
+  assert.doesNotMatch(patch, /sidebar\.workspaces\.workspace\.action/)
+  assert.doesNotMatch(client, /sidebar\.workspaces\.workspace\.action/)
+  assert.doesNotMatch(client, /ctx\.slots\.inject\('sidebar\.workspaces',/, 'the product must extend the official column browser rather than replace it')
+})
+
+test('wide Claude import remains visible with a clear enabled and disabled label', async () => {
+  const [actions, client, css, patch] = await Promise.all([
+    read('src/client/WorkspaceSurfaceActions.tsx'),
+    read('src/client/index.ts'),
+    read('src/client/CompactWorkspacePicker.module.css'),
+    readFile(new URL('../../../upstream-contributions/0021-workspace-column-action-seams.patch', import.meta.url), 'utf8'),
+  ])
+  assert.match(actions, /variant\?: 'compact' \| 'header'/)
+  assert.match(actions, /导入 Claude Code/)
+  assert.match(actions, /创建工作区后导入/)
+  assert.match(actions, /css\.importActionSlot/)
+  assert.match(client, /createWorkspaceHeaderClaudeImportAction\(claudeImport\)/)
+  assert.doesNotMatch(client, /name: 'sidebar\.workspaces\.header\.action'[\s\S]*select:/)
+  assert.match(css, /\.importWorkspace\s*\{[^}]*min-width:\s*128px;[^}]*white-space:\s*nowrap;/s)
+  assert.match(patch, /-  max-width: 60px;\n\+  max-width: none;/)
 })

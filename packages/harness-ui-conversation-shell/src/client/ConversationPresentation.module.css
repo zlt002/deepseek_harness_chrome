@@ -36,9 +36,19 @@
 /* Provider reasoning is not a user-facing answer and can arrive in the
    provider's default language before the product routing prompt takes effect.
    Keep it in the durable session/trajectory record, but never expose its raw
-   prose in the compact product conversation. Tool rows and their exact error
-   bodies remain visible. */
+   prose in the compact product conversation. */
 .root :global([data-variant='think']) { display: none; }
+
+/* These stable ChatNodeSeat markers own complete process records. A tool-call
+   seat contains its nested Read, question, error, and named-tool rows, while
+   its inner ToolRow exposes `data-state='running'`. Hide settled history,
+   including errors, but retain the active final call until it settles so the
+   user can see live work. Final assistant steps and user messages stay outside
+   this selector; all process records remain in Session Log / trajectory. */
+.root[data-show-process='false'] :global([data-chat-flow-kind='context']),
+.root[data-show-process='false'] :global([data-chat-flow-kind='tool-call']:not(:has([data-state='running']))) {
+  display: none;
+}
 
 /* The slot runtime gives its public anchor an inline `display: contents`, so a
    product-owned seat is the reliable presentation boundary.  Compact chrome
@@ -71,6 +81,45 @@
   z-index: 7;
   background: transparent;
   --dsh-composer-text-max-height: 336px;
+}
+
+/* The product-only fullscreen state occupies this Harness document, never the
+   browser tab. The native input machine remains mounted beneath the same card,
+   so draft text, attachments, model selection, and send controls keep state. */
+.root[data-composer-fullscreen='true'] > :global([data-composer-seat]) {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: block;
+  padding: 16px;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
+}
+
+.root[data-composer-fullscreen='true'] :global([data-composer-card]) {
+  position: fixed;
+  inset: 16px;
+  z-index: 51;
+  width: auto;
+  max-width: none;
+  min-height: 0;
+  border-radius: 16px;
+}
+
+.root[data-composer-fullscreen='true'] :global([data-input-scroll]) {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+/* The top-right icon deliberately reserves glyph room in the live draft. */
+.root :global([data-composer-card]:has([data-composer-fullscreen-control])) :global([data-input-scroll]) {
+  padding-right: 36px;
+}
+
+@media (max-width: 480px) {
+  .root[data-composer-fullscreen='true'] > :global([data-composer-seat]) { padding: 8px; }
+  .root[data-composer-fullscreen='true'] :global([data-composer-card]) { inset: 8px; }
 }
 
 /* The official hero stack centers its title and glow with a 32px foot. Its

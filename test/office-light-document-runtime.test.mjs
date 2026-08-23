@@ -343,6 +343,53 @@ test('light-document selection_insert replaces an arbitrary stable selection and
   }
 })
 
+test('light-document selection_delete removes only a stable partial selection or complete stable blocks with readback', async () => {
+  const partialState = {}
+  const partial = await runtime({
+    state: partialState,
+    initialXml: '<apcanvas><outlineTitle id="title">标题</outlineTitle><p id="one">前缀已选内容后缀</p><p id="two">保留正文</p></apcanvas>',
+    selectionReplace: true,
+    selectionInfo: { selected_tag_ids: ['one'] }, otlSelection: { from: 3, to: 7, anchor: 3, head: 7, empty: false },
+    selection: { async getSelectionContent() { return { text: '已选内容' } }, async getSelectionAnchor() { return { blockId: 'one', start: 3, end: 7 } } },
+  })
+  const selectedPartial = await partial({ action: 'selection' })
+  const partialDeleted = await partial({ action: 'write', operation: 'selection_delete', resource: selectedPartial.result.resource, payload: { expectedSelectionFingerprint: selectedPartial.result.document.selection.selectionFingerprint } })
+  assert.equal(partialDeleted.ok, true, JSON.stringify(partialDeleted))
+  assert.equal(partialDeleted.result.observed.deletedSelectionText, '已选内容')
+  assert.equal((await partial({ action: 'read' })).result.document.blocks.map((block) => block.text).join('|'), '前缀后缀|保留正文')
+  assert.equal(partialState.replaceCalls, 1)
+
+  const wholeState = {}
+  const whole = await runtime({
+    state: wholeState,
+    initialXml: '<apcanvas><outlineTitle id="title">标题</outlineTitle><p id="one">第一段</p><p id="two">第二段</p><p id="three">保留段</p></apcanvas>',
+    otlSelection: { from: 1, to: 10, anchor: 1, head: 10, empty: false }, selectionInfo: { selected_tag_ids: ['one', 'two'] },
+    selection: { async getSelectionContent() { return { text: '第一段 第二段' } }, async getSelectionAnchor() { return { blockId: 'one', start: 1, end: 10 } } },
+  })
+  const selectedWhole = await whole({ action: 'selection' })
+  const wholeDeleted = await whole({ action: 'write', operation: 'selection_delete', resource: selectedWhole.result.resource, payload: { expectedSelectionFingerprint: selectedWhole.result.document.selection.selectionFingerprint } })
+  assert.equal(wholeDeleted.ok, true, JSON.stringify(wholeDeleted))
+  assert.deepEqual(Array.from(wholeDeleted.result.observed.deletedTagIds), ['one', 'two'])
+  assert.equal((await whole({ action: 'read' })).result.document.blocks.map((block) => block.text).join('|'), '保留段')
+  assert.equal(wholeState.patchCalls, 1)
+})
+
+test('light-document selection_delete rejects a partial table selection before mutation', async () => {
+  const state = {}
+  const call = await runtime({
+    state,
+    initialXml: '<apcanvas><outlineTitle id="title">标题</outlineTitle><table id="table"><tr><td><p id="">甲</p></td><td><p id="">乙</p></td></tr><tr><td><p id="">一</p></td><td><p id="">二</p></td></tr></table></apcanvas>',
+    otlSelection: { from: 1, to: 4, anchor: 1, head: 4, empty: false }, selectionInfo: { selected_tag_ids: ["table[@id='table']/td"] },
+    selection: { async getSelectionContent() { return { html: '<table><tr><td>甲</td><td>乙</td></tr><tr><td>一</td><td>二</td></tr></table>', text: '甲 乙 一 二' } } },
+  })
+  const selected = await call({ action: 'selection' })
+  const rejected = await call({ action: 'write', operation: 'selection_delete', resource: selected.result.resource, payload: { expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint } })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.error.code, 'unsupported')
+  assert.equal(state.patchCalls ?? 0, 0)
+  assert.equal(state.replaceCalls ?? 0, 0)
+})
+
 test('light-document atomically replaces the uniquely selected containing table instead of appending a duplicate', async () => {
   const state = {}
   const initialXml = '<apcanvas><outlineTitle id="title">研发交付</outlineTitle><table id="evidence"><tr><td><p id="">Evidence ID</p></td><td><p id="">类型</p></td><td><p id="">事实或结论</p></td><td><p id="">来源</p></td><td><p id="">状态</p></td></tr><tr><td><p id="">E-001</p></td><td><p id="">用户事实</p></td><td><p id="">拒绝大面积改动首页架构</p></td><td><p id="">用户对话交互</p></td><td><p id="">已确认</p></td></tr><tr><td><p id="">E-002</p></td><td><p id="">知识依据</p></td><td><p id="">首页组件采用 van-tabs</p></td><td><p id="">远程代码库 H5_前端</p></td><td><p id="">已确认</p></td></tr></table><p id="after">表格后正文</p></apcanvas>'
