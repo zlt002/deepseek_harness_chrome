@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { access } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -11,14 +11,7 @@ const React = extensionRequire('react')
 const { createRoot } = extensionRequire('react-dom/client')
 const { flushSync } = extensionRequire('react-dom')
 
-function pluginClientPath(output, plugin) {
-  return fileURLToPath(new URL(`../../../apps/chrome-extension/.output/${output}/plugins/${plugin}/client.js`, import.meta.url))
-}
-
-function resolveWxtOutput(plugin, { env = process.env, exists = existsSync } = {}) {
-  const candidates = [env.ACCRUI_WXT_OUTPUT, 'chrome-mv3-dev', 'chrome-mv3'].filter(Boolean)
-  return candidates.find(output => exists(pluginClientPath(output, plugin))) ?? 'chrome-mv3-dev'
-}
+const deliverablesClientPath = fileURLToPath(new URL('../../../apps/chrome-extension/public/plugins/@deepseek-ai/dsh-client-ui-deliverables/client.js', import.meta.url))
 
 function loadClient(modules) {
   globalThis.window.__ModuleLoader__ = {
@@ -29,7 +22,7 @@ function loadClient(modules) {
     })) },
   }
   require(process.env.ACCRUI_WORKSPACE_REVIEW_CLIENT ?? fileURLToPath(new URL('../lib/client.js', import.meta.url)))
-  require(pluginClientPath(resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables'), '@deepseek-ai/dsh-client-ui-deliverables'))
+  require(deliverablesClientPath)
 }
 
 /**
@@ -38,21 +31,8 @@ function loadClient(modules) {
  * ProducedFiles button bypassed the Review-open message entirely.
  */
 test('a produced workspace Markdown chip emits the Markdown Review open event', async () => {
-  assert.equal(
-    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: {}, exists: path => path.includes('chrome-mv3') && !path.includes('chrome-mv3-dev') }),
-    'chrome-mv3',
-    'a production-only artifact must be selected when the development artifact is absent',
-  )
-  assert.equal(
-    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: { ACCRUI_WXT_OUTPUT: 'chrome-mv3-dev' }, exists: path => path.includes('chrome-mv3') && !path.includes('chrome-mv3-dev') }),
-    'chrome-mv3',
-    'a stale explicit development target must fall back to the production artifact',
-  )
-  assert.equal(
-    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: { ACCRUI_WXT_OUTPUT: 'custom-output' }, exists: path => path.includes('custom-output') }),
-    'custom-output',
-    'an explicit output target with a matching plugin artifact must take precedence over fallback detection',
-  )
+  assert.match(deliverablesClientPath, /apps[\\/]chrome-extension[\\/]public[\\/]plugins[\\/]/)
+  await access(deliverablesClientPath)
   const dom = new JSDOM('<!doctype html><body><div id="app"></div></body>', {
     url: 'http://127.0.0.1:3101/?dshWorkspaceReviewNonce=nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   })

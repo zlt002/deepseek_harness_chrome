@@ -1,20 +1,12 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { access } from 'node:fs/promises'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = new URL('../../../', import.meta.url)
 const cordis = await import(new URL('.generated/harness-product/vendor/cordis/lib/index.js', root))
 
-function pluginClientPath(output) {
-  return fileURLToPath(new URL(`../../../apps/chrome-extension/.output/${output}/plugins/@deepseek-ai/dsh-client-ui-deliverables/client.js`, import.meta.url))
-}
-
-function resolveWxtOutput({ env = process.env, exists = existsSync } = {}) {
-  const candidates = [env.ACCRUI_WXT_OUTPUT, 'chrome-mv3-dev', 'chrome-mv3'].filter(Boolean)
-  return candidates.find(output => exists(pluginClientPath(output))) ?? 'chrome-mv3-dev'
-}
+const deliverablesClientPath = fileURLToPath(new URL('../../../apps/chrome-extension/public/plugins/@deepseek-ai/dsh-client-ui-deliverables/client.js', import.meta.url))
 
 function fakeReactElement(type, props) { return { type, props: props ?? {} } }
 
@@ -36,6 +28,8 @@ function findClickableFileChip(node, path) {
 }
 
 test('a produced Markdown chip opens Markdown Review through the active Cordis resolver', async () => {
+  assert.match(deliverablesClientPath, /apps[\\/]chrome-extension[\\/]public[\\/]plugins[\\/]/)
+  await access(deliverablesClientPath)
   const original = {
     window: globalThis.window,
     fetch: globalThis.fetch,
@@ -63,7 +57,7 @@ test('a produced Markdown chip opens Markdown Review through the active Cordis r
       '@deepseek-ai/dsh-client-runtime/client': { isAppendSurfaceEvent: () => true },
     }
     const workspace = await loadClientBundle(fileURLToPath(new URL('../lib/client.js', import.meta.url)), modules)
-    const deliverables = await loadClientBundle(pluginClientPath(resolveWxtOutput()), modules)
+    const deliverables = await loadClientBundle(deliverablesClientPath, modules)
     const ctx = new cordis.Context()
     ctx.provide('slots', { inject: () => () => {} })
     ctx.provide('reviewFeedback', { submitWorkspaceMarkdown: async () => {} })

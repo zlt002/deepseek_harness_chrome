@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { access } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -11,14 +11,7 @@ const React = extensionRequire('react')
 const { createRoot } = extensionRequire('react-dom/client')
 const { flushSync } = extensionRequire('react-dom')
 
-function pluginClientPath(output) {
-  return fileURLToPath(new URL(`../../../apps/chrome-extension/.output/${output}/plugins/@deepseek-ai/dsh-client-ui-tool/client.js`, import.meta.url))
-}
-
-function resolveWxtOutput({ env = process.env, exists = existsSync } = {}) {
-  const candidates = [env.ACCRUI_WXT_OUTPUT, 'chrome-mv3-dev', 'chrome-mv3'].filter(Boolean)
-  return candidates.find(output => exists(pluginClientPath(output))) ?? 'chrome-mv3-dev'
-}
+const toolClientPath = fileURLToPath(new URL('../../../apps/chrome-extension/public/plugins/@deepseek-ai/dsh-client-ui-tool/client.js', import.meta.url))
 
 function loadClient(path, modules) {
   globalThis.window.__ModuleLoader__ = {
@@ -57,6 +50,8 @@ function toolResult(callId, name, argsRaw) {
  * workspace-review plugin registers its provider through ctx.effect().
  */
 test('real Tool rows route workspace Markdown to Review and keep other files on the Host', async () => {
+  assert.match(toolClientPath, /apps[\\/]chrome-extension[\\/]public[\\/]plugins[\\/]/)
+  await access(toolClientPath)
   const dom = new JSDOM('<!doctype html><body><div id="app"></div></body>', {
     url: 'http://127.0.0.1:3101/?dshWorkspaceReviewNonce=nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   })
@@ -81,7 +76,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
       ['@deepseek-ai/dsh-client-ui-primitives', primitives()],
       ['@deepseek-ai/dsh-client-runtime/client', {}],
     ])
-    loadClient(pluginClientPath(resolveWxtOutput()), modules)
+    loadClient(toolClientPath, modules)
     loadClient('../lib/client.js', modules)
     const tool = modules.get('@deepseek-ai/dsh-client-ui-tool')
     const workspace = modules.get('@accrui/harness-ui-workspace-review')
