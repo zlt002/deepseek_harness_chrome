@@ -28,5 +28,9 @@
     "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-workspace-review",
     "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-workspace-review",
     "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
   }
 }

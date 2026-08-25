@@ -126,9 +126,23 @@ importers:
 
   packages/harness-ui-subagent-compact: {}
 
-  packages/harness-ui-workspace-picker: {}
+  packages/harness-ui-workspace-picker:
+    devDependencies:
+      react:
+        specifier: ^19.2.1
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.2.1
+        version: 19.2.8(react@19.2.8)
 
-  packages/harness-ui-workspace-review: {}
+  packages/harness-ui-workspace-review:
+    devDependencies:
+      react:
+        specifier: ^19.2.1
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.2.1
+        version: 19.2.8(react@19.2.8)
 
 packages:
 

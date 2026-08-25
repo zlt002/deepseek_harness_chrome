@@ -25,5 +25,9 @@
     "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-workspace-picker",
     "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-workspace-picker",
     "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
   }
 }
