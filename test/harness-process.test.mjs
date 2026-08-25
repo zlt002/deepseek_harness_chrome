@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { claudeSkillsPatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
 import { mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import yaml from 'js-yaml'
@@ -16,28 +16,33 @@ import * as SelectedSourceRoutingPrompt from '../apps/native-server/src/selected
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('uses an explicit DSH_CWD before the Harness root', () => {
+  const harnessRoot = '/opt/deepseek-harness'
+  const workspace = '/tmp/workspace'
   assert.equal(
-    resolveHarnessCwd({ DSH_ROOT: '/opt/deepseek-harness', DSH_CWD: '/tmp/workspace' }),
-    '/tmp/workspace',
+    resolveHarnessCwd({ DSH_ROOT: harnessRoot, DSH_CWD: workspace }),
+    resolve(workspace),
   )
 })
 
 test('uses DSH_ROOT as the default Harness working directory', () => {
+  const harnessRoot = '/opt/deepseek-harness'
   assert.equal(
-    resolveHarnessCwd({ DSH_ROOT: '/opt/deepseek-harness' }),
-    '/opt/deepseek-harness',
+    resolveHarnessCwd({ DSH_ROOT: harnessRoot }),
+    resolve(harnessRoot),
   )
 })
 
 test('resolves the CLI from DSH_ROOT when no explicit CLI path is set', () => {
+  const harnessRoot = '/opt/deepseek-harness'
   assert.equal(
-    resolveHarnessCli({ DSH_ROOT: '/opt/deepseek-harness' }),
-    '/opt/deepseek-harness/apps/cli/lib/bin.js',
+    resolveHarnessCli({ DSH_ROOT: harnessRoot }),
+    join(resolve(harnessRoot), 'apps', 'cli', 'lib', 'bin.js'),
   )
 })
 
 test('resolves an explicit DSH_CLI_PATH without consulting the product tree', () => {
-  assert.equal(resolveHarnessCli({ DSH_CLI_PATH: '/opt/custom-dsh.mjs' }), '/opt/custom-dsh.mjs')
+  const cliPath = '/opt/custom-dsh.mjs'
+  assert.equal(resolveHarnessCli({ DSH_CLI_PATH: cliPath }), resolve(cliPath))
 })
 
 test('defaults to the generated product Harness CLI', () => {
@@ -84,8 +89,9 @@ test('passes the Native Host-owned MCP patch to the official Harness client', ()
 test('mounts Harness-native skills before Claude skills so duplicate names resolve to this project', () => {
   const harnessSkillsDir = resolve(projectRoot, 'skills')
   const officePlugin = resolve(projectRoot, 'apps/native-server/src/product-office-skills.mjs')
+  const deployedSkillsDir = resolve('/opt/runtime/skills')
   assert.equal(resolveProductSkillsRoot({}), harnessSkillsDir)
-  assert.equal(resolveProductSkillsRoot({ DSH_PRODUCT_SKILLS_ROOT: '/opt/runtime/skills' }), '/opt/runtime/skills')
+  assert.equal(resolveProductSkillsRoot({ DSH_PRODUCT_SKILLS_ROOT: '/opt/runtime/skills' }), deployedSkillsDir)
   assert.equal(resolveProductOfficeSkillsPlugin({}), officePlugin)
   assert.deepEqual([...PRODUCT_OFFICE_SKILL_NAMES], ['docx', 'pdf', 'pptx', 'xlsx'])
   assert.equal(resolveUserHome({ USERPROFILE: 'C:\\Users\\alice' }), 'C:\\Users\\alice')

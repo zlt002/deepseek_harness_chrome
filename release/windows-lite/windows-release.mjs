@@ -255,6 +255,7 @@ function runZip(cwd, outputPath, input) {
     // expecting portable `/`-separated names.  Create entries explicitly.
     const script = [
       "$ErrorActionPreference = 'Stop'",
+      'Add-Type -AssemblyName System.IO.Compression',
       'Add-Type -AssemblyName System.IO.Compression.FileSystem',
       '$base = [System.IO.Path]::GetFullPath($env:DSH_ZIP_CWD).TrimEnd([char[]]@([char]92, [char]47))',
       '$source = [System.IO.Path]::GetFullPath((Join-Path $base $env:DSH_ZIP_INPUT))',

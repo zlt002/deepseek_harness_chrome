@@ -90,14 +90,16 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
         register(options, component) { entries.push({ options, component }); return () => {} },
       },
       reviewFeedback: { submitWorkspaceMarkdown: async () => {} },
-      sessions: {},
+      sessions: { binding: sessionId => sessionId === 'session-1' ? { ctx: { sessionId } } : undefined },
       workspaces: {},
       chatFileMentions: { register: () => () => {} },
+      conversation: { input: { for: () => ({ notify: (...notice) => notices.push(notice) }) } },
     }
     services.set('reviewFeedback', ctx.reviewFeedback)
     services.set('sessions', ctx.sessions)
     services.set('workspaces', ctx.workspaces)
     services.set('chatFileMentions', ctx.chatFileMentions)
+    services.set('conversation', ctx.conversation)
     tool.apply(ctx)
     workspace.apply(ctx)
     const row = key => entries.find(entry => entry.options.name === 'tool.call.toolview' && entry.options.key === key)?.component
@@ -106,6 +108,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
 
     const root = createRoot(dom.window.document.getElementById('app'))
     const host = []
+    const notices = []
     const flushAsync = async () => {
       await new Promise(resolve => setImmediate(resolve))
       await new Promise(resolve => setImmediate(resolve))
@@ -160,6 +163,21 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
     assert.ok(nonMarkdown, 'a non-Markdown file must remain clickable')
     nonMarkdown.click()
     assert.deepEqual(host, ['/outside-workspace/private.md', 'spec/notes.txt'])
+
+    replace('fetch', async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: "ENOENT: no such file or directory, lstat '/Users/zhanglt21/Desktop/one/pmd-workspace'" }),
+    }))
+    render('missing', 'write', 'pmd-workspace/spec/req_1e7d3374/req_1e7d3374_产业带摸排表格线上化_PRD.md', '/Users/zhanglt21/Desktop/one')
+    const missing = dom.window.document.querySelector('button')
+    assert.ok(missing, 'a missing workspace Markdown file must remain clickable')
+    missing.click()
+    await flushAsync()
+    assert.deepEqual(notices, [[
+      'error',
+      "ENOENT: no such file or directory, lstat '/Users/zhanglt21/Desktop/one/pmd-workspace'",
+    ]], 'the concrete Host open error must be visible in the owning conversation')
     root.unmount()
     await flushAsync()
     cleanups.reverse().forEach(cleanup => cleanup?.())

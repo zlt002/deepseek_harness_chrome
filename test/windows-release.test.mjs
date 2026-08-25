@@ -70,6 +70,14 @@ function readZipUtf16Le(zipPath, entry) {
   return content.subarray(content[0] === 0xff && content[1] === 0xfe ? 2 : 0).toString('utf16le')
 }
 
+test('Windows ZIP writer loads the compression assemblies required by its portable entry writer', async () => {
+  const source = await readFile(new URL('../release/windows-lite/windows-release.mjs', import.meta.url), 'utf8')
+  assert.match(source, /['"]Add-Type -AssemblyName System\.IO\.Compression['"],/)
+  assert.match(source, /['"]Add-Type -AssemblyName System\.IO\.Compression\.FileSystem['"],/)
+  assert.match(source, /ZipArchiveMode\]::Create/)
+  assert.match(source, /Replace\(\[char\]92, \[char\]47\)/)
+})
+
 function decodeMessage(frame) {
   const length = frame.readUInt32LE(0)
   return JSON.parse(frame.subarray(4, 4 + length).toString('utf8'))

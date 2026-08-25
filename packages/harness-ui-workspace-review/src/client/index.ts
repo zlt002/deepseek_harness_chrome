@@ -1,5 +1,5 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ChatFileMentions } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ClientContext, ISessions, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ChatFileMentions, IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ToolFileLinkProvider } from '@deepseek-ai/dsh-client-ui-tool/client'
 import { createElement, useSyncExternalStore } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -26,6 +26,13 @@ export const inject = ['slots', 'reviewFeedback', 'sessions', 'workspaces', 'cha
 /** File discovery is same-origin; pending composer feedback belongs to the shared reviewFeedback service. */
 export function apply(ctx: ClientContext): void {
   const bridge = workspaceReviewBridgeConfig(); const reviewFeedback = ctx.get('reviewFeedback') as ReviewFeedback
+  const notifyOpenFailure = (sessionId: string, message: string): void => {
+    const conversation = ctx.get('conversation') as IConversation | undefined
+    const sessions = ctx.get('sessions') as ISessions | undefined
+    const binding = sessions?.binding(sessionId as SessionId)
+    if (conversation === undefined || binding === undefined) return
+    try { conversation.input.for(binding.ctx).notify('error', message) } catch { /* the session may have closed while opening */ }
+  }
   const resolveWorkspaceMarkdown = (sessionId: string, cwd: string | undefined, value: string) => {
     if (bridge === undefined) return undefined
     // A cold persisted session can have an identity before its cwd reaches the
@@ -41,7 +48,11 @@ export function apply(ctx: ClientContext): void {
       open: () => {
         void openWorkspaceMarkdown(sessionId, displayPath)
           .then(review => { requestOpenReview(window.parent, bridge, review) })
-          .catch(error => { console.warn('workspace Markdown link open rejected:', error) })
+          .catch(error => {
+            const message = error instanceof Error ? error.message : String(error)
+            notifyOpenFailure(sessionId, message)
+            console.warn('workspace Markdown link open rejected:', error)
+          })
       },
     }
   }
