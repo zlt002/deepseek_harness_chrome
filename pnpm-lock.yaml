@@ -94,7 +94,14 @@ importers:
 
   packages/harness-ui-browser-target: {}
 
-  packages/harness-ui-conversation-shell: {}
+  packages/harness-ui-conversation-shell:
+    devDependencies:
+      react:
+        specifier: ^19.2.1
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.2.1
+        version: 19.2.8(react@19.2.8)
 
   packages/harness-ui-document-intake: {}
 
