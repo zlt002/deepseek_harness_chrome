@@ -28,14 +28,15 @@ function activeParentTurn(agent) {
   return undefined
 }
 
-const MAX_SELECTED_SOURCE_SEARCHES_PER_TURN = 5
+const MAX_SELECTED_SOURCE_SEARCHES_PER_TURN = 1
 
 /**
- * Allow a few sequential same-side selected-source children in one parent turn.
+ * Admit one selected-source child per parent turn.
  * A guard is a product-owned, monotonic enforcement seam: unlike prompt text,
- * it also rejects a second model tool call that reaches dispatch. Generic
- * subagents stay blocked after scope discovery. Switching knowledge/code in
- * the same turn is rejected so the model cannot probe the unselected side.
+ * it rejects a second wrapper call that reaches dispatch. The parent must
+ * settle the first result before a later turn decides whether an independent
+ * evidence gap warrants another child. Generic subagents stay blocked after
+ * scope discovery.
  */
 export function createSelectedSourceDispatchGuard() {
   const states = new Map()
@@ -47,7 +48,7 @@ export function createSelectedSourceDispatchGuard() {
     const previous = states.get(parentId)
     const state = previous?.turn === turn
       ? previous
-      : { turn, selectedSourceScopeRead: false, childStarted: false, searchCount: 0, lastWrapper: undefined }
+      : { turn, selectedSourceScopeRead: false, childStarted: false, searchCount: 0 }
     states.set(parentId, state)
 
     if (exec.name === SELECTED_SOURCE_SCOPE) {
@@ -58,15 +59,11 @@ export function createSelectedSourceDispatchGuard() {
       return '本次请求已读取所选远程范围；请直接调用对应的 selected-source 检索工具，不要再启动通用子代理。'
     }
     if (!SELECTED_SOURCE_WRAPPERS.has(exec.name)) return undefined
-    if (state.lastWrapper !== undefined && state.lastWrapper !== exec.name) {
-      return '本次请求已在一侧远程范围检索；不要再启动另一侧检索来试探选择状态。'
-    }
     if (state.searchCount >= MAX_SELECTED_SOURCE_SEARCHES_PER_TURN) {
-      return '本次请求已连续检索多次；请先用已有结果作答，不要再把多个文件塞进同一次远程检索。'
+      return '本次父会话轮次已启动一个 selected-source 检索；请先等待该结果结算。只有结算后仍存在独立证据缺口时，才在后续父会话轮次追加一个聚焦检索。'
     }
     state.searchCount += 1
     state.childStarted = true
-    state.lastWrapper = exec.name
     return undefined
   }
 }

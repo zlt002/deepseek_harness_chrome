@@ -3,8 +3,8 @@
 | AccrUI 阶段/约束 | Harness-native 契约 | 可检查完成条件 |
 |---|---|---|
 | 1 输入需求 | `input` | 已提取目标、使用者、范围、约束与待确认项 |
-| 2 参考资料选择 | 范围选择器本身就是查询授权；父会话先调用无参数 `mcp__chrome__selected_source_scope`，有已选名称就以 continuable background 直接查询对应侧，不再要求聊天确认或复述名称；用户勾选后任意继续消息都先重新回显；两侧为空时只提示去顶部勾选代码库/知识库或明确不使用远程资料，不提供数字聊天选项；未选侧禁止 `search_selected_remote_code`、`search_selected_knowledge`、`subagent` 和底层检索 MCP。已选侧父会话用 `description`+`prompt` 走对应包装工具 | 每一侧都是已查询/明确失败/用户明确不使用/确认未选，且未选侧无子代理调用；选择不等于已查询 |
-| 3 初始理解与纠正循环 | `research(pending)` 与 `internal_requirement_normalization` 并行；pending 期间仅内部提取/去重用户已给事实、映射已知与待查、准备候选问题，不主动询问业务痛点、范围、规则或验收；结算后先用代码/知识证据排除可自行查明的问题，再进入 `correction_loop`，只问仍需产品决策的问题，最多 3 题 | 产品已确认范围和业务规则；无静默假设；不让用户等待或轮询 |
+| 2 参考资料选择 | 范围选择器本身就是查询授权；父会话先调用无参数 `mcp__chrome__selected_source_scope`，有已选名称就以 continuable background 启动一个对应侧的聚焦包装工具子代理，不再要求聊天确认或复述名称；结算结果存在独立证据缺口时，才在后续父会话轮次追加一个检索；用户勾选后任意继续消息都先重新回显；两侧为空时只提示去顶部勾选代码库/知识库或明确不使用远程资料，不提供数字聊天选项；未选侧禁止 `search_selected_remote_code`、`search_selected_knowledge`、`subagent` 和底层检索 MCP。已选侧父会话用 `description`+`prompt` 走对应包装工具 | 每一侧都是已查询/明确失败/用户明确不使用/确认未选，且每个父会话轮次至多一个 selected-source 子代理；选择不等于已查询 |
+| 3 初始理解与纠正循环 | `research(pending)` 与 `internal_requirement_normalization` 并行，但不启动第二个检索；结算后先用代码/知识证据排除可自行查明的问题，并仅在仍有独立证据缺口时于后续父会话轮次追加一个聚焦检索；证据充分后进入 `correction_loop`，只问仍需产品决策的问题，最多 3 题 | 产品已确认范围和业务规则；无静默假设；不让用户等待或轮询 |
 | 4 代码定位、修改建议与验收 | 只在每个远程查询完成、明确失败或用户明确跳过后，用已选远程资料形成代码计划和五类验收清单 | 查询 `pending` 时不得主动询问业务痛点、范围、规则或验收，也不得确认当前实现、代码位置、技术建议或最终验收影响；解除后代码位置含仓库/文件/函数/已确认时行号；未知项标 `[待确认]`；验收覆盖正常、异常、边界、权限、兼容 |
 | 5 单 PRD | 完整公司 PRD + 一份正文快照 | 所有查询已结算/明确失败/明确跳过后才可冻结；PRD 九个主章节顺序不变；标题和正文没有字段标签；功能包含现状、调整方式、调整后效果；第八章验收清单覆盖五类；无编造事实或无依据数字 |
 | 6 PRD 预览与父节点确认 | `mcp__chrome__team_knowledge_batch_preview` | 稳定 `batchId = pmd:${requirementId}` 已持久化在 Run state；恰好一项冻结 PRD 提交；同一 Browser Target、父 fingerprint 和 contentHash 已冻结，用户只确认一次 |

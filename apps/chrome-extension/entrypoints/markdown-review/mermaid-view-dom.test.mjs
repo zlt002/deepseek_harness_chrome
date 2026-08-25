@@ -8,7 +8,7 @@ const root = new URL('.', import.meta.url)
 const style = await readFile(new URL('./style.css', root), 'utf8')
 
 function fixture() {
-  const dom = new JSDOM(`<!doctype html><style>${style}</style><div class="visual-markdown-editor"><div class="milkdown"><div class="ProseMirror"><section class="mermaid-block" data-mermaid-source="one"><div class="mermaid-toolbar"><div class="mermaid-view-toggle"><button>可视化</button><button>源码</button></div><div class="mermaid-viewer-controls"><button>缩小</button><button>放大</button><button>适应</button><button>全屏</button><button hidden>退出全屏</button></div></div><div class="mermaid-preview"><div class="mermaid-canvas"><svg></svg></div></div></section><div class="milkdown-code-block" data-mermaid-source="one"><pre><code>graph TD</code></pre></div></div></div></div>`)
+  const dom = new JSDOM(`<!doctype html><style>${style}</style><div class="visual-markdown-editor"><div class="milkdown"><div class="ProseMirror" contenteditable="true"><section class="mermaid-block" data-mermaid-source="one"><div class="mermaid-toolbar"><div class="mermaid-view-toggle"><button>可视化</button><button>源码</button></div><div class="mermaid-viewer-controls"><button>缩小</button><button>放大</button><button>适应</button><button>全屏</button><button hidden>退出全屏</button></div></div><div class="mermaid-preview"><div class="mermaid-canvas"><svg></svg></div></div></section><div class="milkdown-code-block" data-mermaid-source="one"><pre><code>graph TD</code></pre></div></div></div></div>`)
   const document = dom.window.document
   return {
     dom,
@@ -159,4 +159,36 @@ test('Mermaid immersive view never invokes browser fullscreen, keeps its control
   viewer.destroy()
   assert.equal(block.classList.contains('is-fullscreen-fallback'), false)
   assert.equal(dom.window.document.body.classList.contains('mermaid-immersive-active'), false)
+})
+
+test('Mermaid immersive source mode overlays the real editable ProseMirror sibling without moving or cloning it', async () => {
+  const { dom, block, source } = fixture()
+  const [visual, sourceButton] = block.querySelectorAll('.mermaid-view-toggle button')
+  const [, , , fullscreen, close] = block.querySelectorAll('.mermaid-viewer-controls button')
+  wireMermaidViewToggle(block, 'one', visual, sourceButton)('visual')
+  const parentBefore = source.parentElement
+  const viewer = wireMermaidFullscreen(block, fullscreen, close, visual, sourceButton)
+
+  fullscreen.click()
+  sourceButton.click()
+  await Promise.resolve()
+  assert.equal(source.classList.contains('mermaid-source-hidden'), false)
+  assert.equal(source.classList.contains('mermaid-immersive-source'), true)
+  assert.equal(source.parentElement, parentBefore)
+  assert.equal(source.closest('.ProseMirror')?.getAttribute('contenteditable'), 'true')
+  assert.equal(dom.window.getComputedStyle(source).position, 'fixed')
+  assert.notEqual(dom.window.getComputedStyle(source).width, '0px')
+  assert.match(source.textContent, /graph TD/)
+  visual.click()
+  await Promise.resolve()
+  assert.equal(source.classList.contains('mermaid-immersive-source'), false)
+  assert.equal(source.classList.contains('mermaid-source-hidden'), true)
+  fullscreen.click()
+  sourceButton.click()
+  await Promise.resolve()
+  viewer.exit()
+  await Promise.resolve()
+  assert.equal(source.classList.contains('mermaid-immersive-source'), false)
+  assert.equal(source.classList.contains('mermaid-source-hidden'), false)
+  viewer.destroy()
 })

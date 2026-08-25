@@ -145,7 +145,7 @@ function mermaidPreview(source: string, sourceId: string): HTMLElement {
     preview.append(canvas)
     fitMermaidPreview(preview)
     wireMermaidViewer(block, preview, canvas, zoomInButton, zoomOutButton, resetButton)
-    wireMermaidFullscreen(block, fullscreenButton, closeFullscreenButton)
+    wireMermaidFullscreen(block, fullscreenButton, closeFullscreenButton, visualButton, sourceButton)
   }).catch(() => {
     preview.className = 'mermaid-preview mermaid-fallback'
     preview.replaceChildren('Mermaid 图无法渲染；已保留源码。')

@@ -346,11 +346,40 @@ try {
   if (!fullscreenState.nativeFullscreenElement || !fullscreenState.fallback || !fullscreenState.fullscreenHidden || !fullscreenState.closeVisible || fullscreenState.transform !== fullscreenBeforeTransform) {
     throw new Error(`Mermaid fullscreen did not preserve the viewer state: ${JSON.stringify(fullscreenState)}`)
   }
+  const immersiveSourceState = await evaluate(client, `(() => {
+    const block = document.querySelector('.mermaid-block')
+    block?.querySelector('.mermaid-view-toggle button:last-child')?.click()
+    const source = block?.parentElement?.querySelector('.milkdown-code-block[data-mermaid-source]')
+    const rect = source?.getBoundingClientRect()
+    return {
+      inProseMirror: source?.closest('.ProseMirror') !== null,
+      editable: source?.closest('.ProseMirror')?.getAttribute('contenteditable') === 'true',
+      immersive: source?.classList.contains('mermaid-immersive-source') ?? false,
+      sourceVisible: source ? getComputedStyle(source).display !== 'none' : false,
+      width: rect?.width ?? 0,
+      height: rect?.height ?? 0,
+      hasSource: source?.textContent?.includes('flowchart TD') ?? false,
+    }
+  })()`)
+  if (!immersiveSourceState.inProseMirror || !immersiveSourceState.editable || !immersiveSourceState.immersive || !immersiveSourceState.sourceVisible || immersiveSourceState.width <= 0 || immersiveSourceState.height <= 0 || !immersiveSourceState.hasSource) {
+    throw new Error(`Mermaid immersive source is not the real editable source node: ${JSON.stringify(immersiveSourceState)}`)
+  }
+  const visualCleanupState = await evaluate(client, `(() => {
+    const block = document.querySelector('.mermaid-block')
+    block?.querySelector('.mermaid-view-toggle button:first-child')?.click()
+    const source = block?.parentElement?.querySelector('.milkdown-code-block[data-mermaid-source]')
+    return {
+      immersive: source?.classList.contains('mermaid-immersive-source') ?? true,
+      hidden: source?.classList.contains('mermaid-source-hidden') ?? false,
+    }
+  })()`)
+  if (visualCleanupState.immersive || !visualCleanupState.hidden) throw new Error(`Mermaid visual switch did not clean immersive source state: ${JSON.stringify(visualCleanupState)}`)
+  await evaluate(client, `document.querySelector('.mermaid-block')?.querySelector('.mermaid-view-toggle button:last-child')?.click()`)
   const mermaidFullscreenScreenshot = await client.send('Page.captureScreenshot', { format: 'png' })
   await writeFile(new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url), Buffer.from(mermaidFullscreenScreenshot.data, 'base64'))
   await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' })
   await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' })
-  await waitFor(client, `document.fullscreenElement === null && !document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback') && document.querySelector('button[aria-label="全屏查看流程图"]')?.hidden === false && document.querySelector('button[aria-label="退出全屏查看流程图"]')?.hidden === true`, 'Mermaid immersive exit')
+  await waitFor(client, `document.fullscreenElement === null && !document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback') && document.querySelector('button[aria-label="全屏查看流程图"]')?.hidden === false && document.querySelector('button[aria-label="退出全屏查看流程图"]')?.hidden === true && !document.querySelector('.milkdown-code-block[data-mermaid-source]')?.classList.contains('mermaid-immersive-source') && !document.querySelector('.milkdown-code-block[data-mermaid-source]')?.classList.contains('mermaid-source-hidden')`, 'Mermaid immersive exit')
   const fullscreenAfterTransform = await evaluate(client, `document.querySelector('.mermaid-canvas')?.style.transform ?? ''`)
   if (fullscreenAfterTransform !== fullscreenBeforeTransform) throw new Error(`Mermaid fullscreen exit reset the viewer state: ${fullscreenAfterTransform}`)
   const mermaidScreenshot = await client.send('Page.captureScreenshot', { format: 'png' })
@@ -646,7 +675,7 @@ try {
 
   const screenshot = await client.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true })
   await writeFile(screenshotPath, Buffer.from(screenshot.data, 'base64'))
-  console.log(JSON.stringify({ ok: true, initial, sourceView, scaleOnePanTransform, viewerTransform, resetTransform, fullscreenState, fullscreenAfterTransform, finalState: { ...finalState, bodyText: undefined }, firstDiff, afterReject, afterAccept, crossBlock: { quote: crossBlock.quote, kinds: crossKinds }, screenshots: [screenshotPath.pathname, new URL('./markdown-review-ui-initial.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-zoom.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url).pathname, new URL('./markdown-review-ui-diff-reject.png', import.meta.url).pathname] }, null, 2))
+  console.log(JSON.stringify({ ok: true, initial, sourceView, scaleOnePanTransform, viewerTransform, resetTransform, fullscreenState, immersiveSourceState, visualCleanupState, fullscreenAfterTransform, finalState: { ...finalState, bodyText: undefined }, firstDiff, afterReject, afterAccept, crossBlock: { quote: crossBlock.quote, kinds: crossKinds }, screenshots: [screenshotPath.pathname, new URL('./markdown-review-ui-initial.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-zoom.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url).pathname, new URL('./markdown-review-ui-diff-reject.png', import.meta.url).pathname] }, null, 2))
 } finally {
   client?.close()
   browser.kill('SIGTERM')

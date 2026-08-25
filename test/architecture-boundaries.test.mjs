@@ -135,7 +135,7 @@ test('product plugin manifest drives portable client builds and root quality com
 test('Windows release workflow retains upstream, typecheck, and complete test gates', async () => {
   const workflow = await readFile(resolve(root, '.github/workflows/build-windows-lite.yml'), 'utf8')
   assert.match(workflow, /run: pnpm verify:upstream/)
-  assert.match(workflow, /pnpm typecheck\r?\n\s+pnpm typecheck:plugins\r?\n\s+pnpm test/)
+  assert.match(workflow, /pnpm typecheck\r?\n\s+pnpm typecheck:plugins\r?\n\s+pnpm sync-harness-assets\r?\n\s+pnpm test/)
 })
 
 test('product commands never silently fall back to the clean upstream checkout', async () => {

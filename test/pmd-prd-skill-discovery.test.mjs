@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const harnessRoot = resolve(projectRoot, 'upstream/deepseek-harness')
+const harnessRoot = resolve(projectRoot, '.generated/harness-product')
 
 test('the real Harness skill provider discovers /pmd-prd as user-only', async () => {
   const { Context } = await import(pathToFileURL(resolve(harnessRoot, 'vendor/cordis/lib/index.js')))

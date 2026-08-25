@@ -79,6 +79,7 @@ jobs:
         run: |
           pnpm typecheck
           pnpm typecheck:plugins
+          pnpm sync-harness-assets
           pnpm test
 
       - name: Build release-ready extension

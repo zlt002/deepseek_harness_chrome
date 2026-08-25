@@ -14,7 +14,7 @@ import {
 } from '../apps/native-server/src/product-office-skills.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const harnessRoot = resolve(projectRoot, 'upstream/deepseek-harness')
+const harnessRoot = resolve(projectRoot, '.generated/harness-product')
 
 test('ships the four product office skills with invocable catalog frontmatter', async () => {
   const root = resolveProductSkillsRoot({})
@@ -75,8 +75,9 @@ test('the real Harness registry keeps product office skills ahead of user and pr
 
 test('the generated Native Host patch points the office provider at the product skill root', async () => {
   const patch = claudeSkillsPatch({ HOME: '/tmp/office-skill-home', DSH_PRODUCT_SKILLS_ROOT: '/opt/runtime/skills' })
+  const productSkillsRoot = resolve('/opt/runtime/skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   assert.match(patch, /id: deepseek-harness-chrome-product-office-skills/)
-  assert.match(patch, /skillsRoot: '\/opt\/runtime\/skills'/)
+  assert.match(patch, new RegExp(`skillsRoot: '${productSkillsRoot}'`))
   assert.match(patch, /product-office-skills\.mjs/)
   assert.ok(patch.indexOf('deepseek-harness-chrome-product-office-skills') < patch.indexOf('deepseek-harness-chrome-claude-skills'))
   const macBuilder = await readFile(new URL('../release/mac-lite/build-mac-production.mjs', import.meta.url), 'utf8')

@@ -6,6 +6,11 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 
+// scripts/prepare-dev-port.mjs is a POSIX development helper which invokes
+// lsof and kill. These process-level fakes are shell scripts, so they cannot
+// exercise that contract on Windows (where neither command is present).
+const testPosixPortGuard = process.platform === 'win32' ? test.skip : test
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const script = join(projectRoot, 'scripts/prepare-dev-port.mjs')
 
@@ -73,7 +78,7 @@ async function runPrepare(overrides = {}) {
   return { ...result, calls }
 }
 
-test('continues without sending signals when port 3101 has no listener', async () => {
+testPosixPortGuard('continues without sending signals when port 3101 has no listener', async () => {
   const result = await runPrepare({ DEV_PORT_TEST_LISTENERS: '' })
 
   assert.equal(result.code, 0, result.stderr)
@@ -81,7 +86,7 @@ test('continues without sending signals when port 3101 has no listener', async (
   assert.match(result.stdout, /3101 is available/)
 })
 
-test('terminates every listener and continues after TERM releases port 3101', async () => {
+testPosixPortGuard('terminates every listener and continues after TERM releases port 3101', async () => {
   const result = await runPrepare({ DEV_PORT_TEST_LISTENERS: '101\n202' })
 
   assert.equal(result.code, 0, result.stderr)
@@ -89,7 +94,7 @@ test('terminates every listener and continues after TERM releases port 3101', as
   assert.match(result.stdout, /Released port 3101/)
 })
 
-test('escalates only remaining listeners to KILL when TERM does not release port 3101', async () => {
+testPosixPortGuard('escalates only remaining listeners to KILL when TERM does not release port 3101', async () => {
   const result = await runPrepare({
     DEV_PORT_TEST_LISTENERS: '101\n202',
     DEV_PORT_TEST_TERM_KEEPS_LISTENING: '1',
@@ -100,7 +105,7 @@ test('escalates only remaining listeners to KILL when TERM does not release port
   assert.match(result.stdout, /Released port 3101/)
 })
 
-test('fails without signalling when it cannot resolve port 3101 listeners', async () => {
+testPosixPortGuard('fails without signalling when it cannot resolve port 3101 listeners', async () => {
   const result = await runPrepare({ DEV_PORT_TEST_LSOF_EXIT: '2' })
 
   assert.notEqual(result.code, 0)
@@ -108,7 +113,7 @@ test('fails without signalling when it cannot resolve port 3101 listeners', asyn
   assert.match(result.stderr, /Unable to inspect listeners on port 3101/)
 })
 
-test('fails without signalling when lsof returns an invalid listener PID', async () => {
+testPosixPortGuard('fails without signalling when lsof returns an invalid listener PID', async () => {
   const result = await runPrepare({ DEV_PORT_TEST_LISTENERS: 'not-a-pid' })
 
   assert.notEqual(result.code, 0)
@@ -116,7 +121,7 @@ test('fails without signalling when lsof returns an invalid listener PID', async
   assert.match(result.stderr, /Unable to resolve listeners on port 3101/)
 })
 
-test('fails when port 3101 remains occupied after the bounded KILL wait', async () => {
+testPosixPortGuard('fails when port 3101 remains occupied after the bounded KILL wait', async () => {
   const result = await runPrepare({
     DEV_PORT_TEST_LISTENERS: '101',
     DEV_PORT_TEST_TERM_KEEPS_LISTENING: '1',

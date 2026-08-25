@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { platform, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -11,10 +11,32 @@ const script = join(projectRoot, 'scripts/register-native-host.mjs')
 const extensionId = 'abcdefghijklmnopabcdefghijklmnop'
 const devExtensionId = 'ponmlkjihgfedcbaponmlkjihgfedcba'
 const currentChromeDevExtensionId = 'lmignogiadonjcpigkehfnmdindgfckn'
+const testMac = platform() === 'darwin' ? test : test.skip
+
+function platformPaths(home) {
+  if (platform() === 'win32') {
+    const appData = join(home, 'AppData', 'Roaming')
+    return {
+      appData,
+      manifestPaths: [join(appData, 'Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')],
+    }
+  }
+  if (platform() === 'darwin') {
+    return {
+      appData: undefined,
+      manifestPaths: [
+        join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
+        join(home, 'Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
+      ],
+    }
+  }
+  return { appData: undefined, manifestPaths: [join(home, '.config/google-chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')] }
+}
 
 function runRegister(home, overrides = {}, args = []) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, HOME: home, DEEPSEEK_HARNESS_EXTENSION_ID: extensionId, ...overrides }
+    const { appData } = platformPaths(home)
+    const env = { ...process.env, HOME: home, ...(appData === undefined ? {} : { APPDATA: appData }), DEEPSEEK_HARNESS_EXTENSION_ID: extensionId, ...overrides }
     for (const [name, value] of Object.entries(env)) {
       if (value === undefined) delete env[name]
     }
@@ -32,7 +54,7 @@ function runRegister(home, overrides = {}, args = []) {
 
 test('check command catches and clears the exact Chrome forbidden-origin failure', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
-  const manifestPath = join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')
+  const manifestPath = platformPaths(home).manifestPaths[0]
   try {
     await mkdir(dirname(manifestPath), { recursive: true })
     await writeFile(manifestPath, JSON.stringify({
@@ -101,7 +123,7 @@ function pingLauncher(launcher) {
   })
 }
 
-test('installs the native host into a stable macOS location', async () => {
+testMac('installs the native host into a stable macOS location', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const installRoot = join(home, 'Library/Application Support/DeepSeekHarness')
   const launcher = join(installRoot, 'com.deepseek.harness.chrome')
@@ -149,7 +171,7 @@ test('installs the native host into a stable macOS location', async () => {
   }
 })
 
-test('can reinstall over a pnpm-linked native host dependency', async () => {
+testMac('can reinstall over a pnpm-linked native host dependency', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const installedSdk = join(home, 'Library/Application Support/DeepSeekHarness/native-server/node_modules/@modelcontextprotocol/sdk')
   const workspaceSdk = join(projectRoot, 'apps/native-server/node_modules/@modelcontextprotocol/sdk')
@@ -169,7 +191,7 @@ test('can reinstall over a pnpm-linked native host dependency', async () => {
   }
 })
 
-test('installed native host resolves self-contained product UI packages', async () => {
+testMac('installed native host resolves self-contained product UI packages', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const nativeServer = join(home, 'Library/Application Support/DeepSeekHarness/native-server')
   const dshHome = join(home, '.dsh')
@@ -193,7 +215,7 @@ test('installed native host resolves self-contained product UI packages', async 
   }
 })
 
-test('allows production and development extension ids together', async () => {
+testMac('allows production and development extension ids together', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const manifestPath = join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')
   try {
@@ -211,7 +233,7 @@ test('allows production and development extension ids together', async () => {
   }
 })
 
-test('merges a previously registered extension origin instead of replacing it', async () => {
+testMac('merges a previously registered extension origin instead of replacing it', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const manifestPath = join(home, 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json')
   try {
@@ -238,7 +260,7 @@ test('merges a previously registered extension origin instead of replacing it', 
   }
 })
 
-test('merges existing Edge origins and adds the current extension id', async () => {
+testMac('merges existing Edge origins and adds the current extension id', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const manifestPath = join(home, 'Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.deepseek.harness.chrome.json')
   try {
@@ -257,7 +279,7 @@ test('merges existing Edge origins and adds the current extension id', async () 
   }
 })
 
-test('records the generated product Harness root when no launch override is supplied', async () => {
+testMac('records the generated product Harness root when no launch override is supplied', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const launcher = join(home, 'Library/Application Support/DeepSeekHarness/com.deepseek.harness.chrome')
   const productRoot = resolve(projectRoot, '.generated/harness-product')
@@ -277,7 +299,7 @@ test('records the generated product Harness root when no launch override is supp
   }
 })
 
-test('treats a blank Harness root as an absent override', async () => {
+testMac('treats a blank Harness root as an absent override', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const launcher = join(home, 'Library/Application Support/DeepSeekHarness/com.deepseek.harness.chrome')
   const productRoot = resolve(projectRoot, '.generated/harness-product')
@@ -292,7 +314,7 @@ test('treats a blank Harness root as an absent override', async () => {
   }
 })
 
-test('installed launcher answers a Native Messaging ping in a Chrome-like environment', async () => {
+testMac('installed launcher answers a Native Messaging ping in a Chrome-like environment', async () => {
   const home = await mkdtemp(join(tmpdir(), 'deepseek-harness-home-'))
   const launcher = join(home, 'Library/Application Support/DeepSeekHarness/com.deepseek.harness.chrome')
   try {

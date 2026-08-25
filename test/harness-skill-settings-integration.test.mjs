@@ -22,9 +22,11 @@ test('generic Skill seams remain applicable to the clean upstream', () => {
 })
 
 test('product profile mounts Claude discovery and the Skill settings plugin exactly once', () => {
-  const patch = claudeSkillsPatch({ HOME: '/tmp/accrui-skill-settings-home' })
+  const home = '/tmp/accrui-skill-settings-home'
+  const patch = claudeSkillsPatch({ HOME: home })
+  const claudeSkills = resolve(home, '.claude', 'skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   assert.match(patch, /customSkillDirs:/)
-  assert.match(patch, /\/tmp\/accrui-skill-settings-home\/.claude\/skills/)
+  assert.match(patch, new RegExp(claudeSkills))
   assert.match(patch, /deepseek-harness-chrome-product-office-skills/)
   assert.doesNotMatch(patch, /@accrui\/harness-skill-settings/)
   const productPatch = productUiPatch({})

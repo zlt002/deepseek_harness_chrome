@@ -87,7 +87,7 @@ test('materializer deploys a production closure, runs smoke, and only then write
       smokeCalled = true
       assert.equal(command, process.execPath)
       assert.deepEqual(args, ['apps/cli/lib/bin.js', '--help'])
-      assert.equal(options.cwd, `${outputDir}.staging/runtime`)
+      assert.equal(options.cwd, path.join(`${outputDir}.staging`, 'runtime'))
       return { status: 0, stdout: 'dsh help\n', stderr: '' }
     },
   })

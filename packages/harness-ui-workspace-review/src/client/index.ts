@@ -27,8 +27,12 @@ export const inject = ['slots', 'reviewFeedback', 'sessions', 'workspaces', 'cha
 export function apply(ctx: ClientContext): void {
   const bridge = workspaceReviewBridgeConfig(); const reviewFeedback = ctx.get('reviewFeedback') as ReviewFeedback
   const resolveWorkspaceMarkdown = (sessionId: string, cwd: string | undefined, value: string) => {
-    if (bridge === undefined || cwd === undefined) return undefined
-    const displayPath = workspaceMarkdownLink(cwd, value)
+    if (bridge === undefined) return undefined
+    // A cold persisted session can have an identity before its cwd reaches the
+    // chat owner. Relative paths remain safe: the Host resolves them against
+    // that session's registered workspace. An absolute path still needs cwd
+    // proof, so the `.` sentinel deliberately leaves it unclaimed.
+    const displayPath = workspaceMarkdownLink(cwd ?? '.', value)
     if (displayPath === undefined) return undefined
     const label = `在 Markdown 审阅 Tab 中打开 ${displayPath}`
     return {

@@ -6,11 +6,11 @@ import { dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import yaml from 'js-yaml'
-import { Context } from '../upstream/deepseek-harness/vendor/cordis/lib/index.js'
-import { entryListSchema } from '../upstream/deepseek-harness/vendor/include/lib/index.js'
-import SystemPrompt, { renderPrompt } from '../upstream/deepseek-harness/packages/core/system-prompt/lib/index.js'
-import { createScope } from '../upstream/deepseek-harness/packages/core/scope/lib/index.js'
-import * as Persona from '../upstream/deepseek-harness/packages/preset/persona/lib/index.js'
+import { Context } from '../.generated/harness-product/vendor/cordis/lib/index.js'
+import { entryListSchema } from '../.generated/harness-product/vendor/include/lib/index.js'
+import SystemPrompt, { renderPrompt } from '../.generated/harness-product/packages/core/system-prompt/lib/index.js'
+import { createScope } from '../.generated/harness-product/packages/core/scope/lib/index.js'
+import * as Persona from '../.generated/harness-product/packages/preset/persona/lib/index.js'
 import * as SelectedSourceRoutingPrompt from '../apps/native-server/src/selected-source-routing-prompt.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -194,7 +194,7 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   assert.match(capabilityMatrix, /search_selected_knowledge/)
   assert.match(capabilityMatrix, /`description`\+`prompt`/)
   assert.match(capabilityMatrix, /范围选择器本身就是查询授权/)
-  assert.match(capabilityMatrix, /有已选名称就以 continuable background 直接查询对应侧，不再要求聊天确认或复述名称/)
+  assert.match(capabilityMatrix, /有已选名称就以 continuable background 启动一个对应侧的聚焦包装工具子代理/)
   assert.match(capabilityMatrix, /未选侧禁止 `search_selected_remote_code`、`search_selected_knowledge`、`subagent` 和底层检索 MCP/)
   assert.match(template, /PRD: \{编号\} - \{主题\}/)
   assert.match(template, /单 PRD 模板/)
@@ -310,11 +310,12 @@ test('keeps pmd-prd project-agnostic and bounds Code Mode execution', async () =
   assert.match(skill, /两侧回显都未选时，停在本阶段/)
   assert.match(skill, /不得先做 RAG 检索再问/)
   assert.match(skill, /包装工具不接受 `question`/)
+  assert.match(skill, /每个父会话轮次最多启动一个 selected-source 检索子代理/)
   assert.match(skill, /只有下一步确实依赖检索结果时，才显式设 `run_in_background: false` 前台等待/)
   assert.match(skill, /后续阶段 3–5 必须使用这次包装工具回执里的远程证据/)
 })
 
-test('keeps pending research internal and defers product questions until evidence settles', async () => {
+test('keeps pending research internal while limiting each parent turn to one selected-source child', async () => {
   const skill = await readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8')
   const processState = await readFile(new URL('../skills/pmd-prd/references/process-state.md', import.meta.url), 'utf8')
   const capabilityMatrix = await readFile(new URL('../skills/pmd-prd/references/capability-matrix.md', import.meta.url), 'utf8')
@@ -326,26 +327,25 @@ test('keeps pending research internal and defers product questions until evidenc
   assert.match(skill, /research_settled → correction_loop/)
   assert.match(skill, /代码正在后台查询，您无需等待；结果回来后我会先核对现状，只集中确认仍需产品决策的问题/)
   assert.match(skill, /远程查询一律以 continuable background 启动，不等待结果/)
+  assert.match(skill, /每个父会话轮次最多启动一个 selected-source 检索子代理/)
   assert.match(skill, /pending 期间仅内部整理/)
   assert.match(skill, /提取、去重用户已给事实，映射已知与待查，并准备候选问题但不向用户展示/)
   assert.match(skill, /用户自愿补充则记录，但不主动追问/)
-  assert.doesNotMatch(skill, /继续处理不依赖检索结果的业务痛点/)
   assert.match(skill, /最多 3 题/)
   assert.match(skill, /先用代码\/知识证据删除可自行查明的问题/)
+  assert.match(skill, /只有存在时，才在后续父会话轮次追加一个聚焦检索/)
   assert.match(skill, /不得确认当前实现、代码位置、技术建议或最终验收影响/)
   assert.match(skill, /不得完成代码计划、冻结文档或交付/)
   assert.match(skill, /检索完成、明确失败或用户明确跳过/)
-  assert.match(skill, /自动唤醒父会话并投递结算通知/)
-  assert.match(skill, /只补问受代码事实影响的问题/)
-  assert.match(skill, /不得要求用户等待、反复询问是否继续等待，或另造轮询\/UI/)
-  assert.match(processState, /`pending` 的远程查询与 `internal_requirement_normalization` 并行/)
+  assert.match(processState, /子代理结算通知自动唤醒父会话/)
+  assert.match(processState, /`pending` 期间与 `internal_requirement_normalization` 并行/)
+  assert.match(processState, /不得启动第二个检索/)
   assert.match(processState, /pending 期间不得主动向用户提问/)
-  assert.doesNotMatch(processState, /立即继续处理不依赖远程事实的业务澄清/)
   assert.match(processState, /`correction_loop` 必须在 `research_settled` 后启动/)
   assert.match(processState, /完成、明确失败或用户明确跳过后解除自己的门/)
   assert.match(processState, /不得轮询、另造 UI，或让用户再次确认是否继续等待/)
-  assert.match(capabilityMatrix, /continuable background/)
-  assert.match(capabilityMatrix, /查询 `pending` 时不得主动询问业务痛点、范围、规则或验收/)
+  assert.match(capabilityMatrix, /结算结果存在独立证据缺口时，才在后续父会话轮次追加一个检索/)
+  assert.match(capabilityMatrix, /`research\(pending\)` 与 `internal_requirement_normalization` 并行/)
   assert.match(capabilityMatrix, /结算后先用代码\/知识证据排除可自行查明的问题/)
   assert.match(capabilityMatrix, /所有查询已结算\/明确失败\/明确跳过后才可冻结/)
 })
@@ -454,6 +454,8 @@ test('keeps selected-source routing in the final Code preset system prompt', asy
   assert.match(prompt, /When the end user's message is Chinese, write every user-visible message from the parent in Simplified Chinese/)
   assert.match(prompt, /Keep each selected-source wrapper prompt to one file, one function, or one short topic/)
   assert.match(prompt, /call the same matching wrapper sequentially, once per file or function/)
+  assert.match(prompt, /Each parent turn starts at most one selected-source wrapper child/)
+  assert.match(prompt, /Only a later parent turn may start one additional focused wrapper/)
   assert.match(prompt, /current working directory is a session workspace for generated documents and process files, not the product codebase/)
   assert.match(prompt, /empty or docs-only cwd is expected/)
   assert.match(prompt, /never ask where the code is after seeing an empty listing/)

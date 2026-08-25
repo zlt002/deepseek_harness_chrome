@@ -75,18 +75,26 @@ export function wireMermaidViewer(block, preview, canvas, zoomInButton, zoomOutB
  * fullscreen hides the extension side panel; this mode changes neither the
  * Mermaid source nor its viewer transform.
  */
-export function wireMermaidFullscreen(block, fullscreenButton, closeButton) {
+export function wireMermaidFullscreen(block, fullscreenButton, closeButton, visualButton, sourceButton) {
   const document = block.ownerDocument
   const body = document.body
   let immersive = false
   let disposed = false
   let observer
   const active = () => immersive
+  const sourceNode = () => {
+    const sourceId = block.dataset.mermaidSource
+    return sourceId === undefined
+      ? undefined
+      : block.parentElement?.querySelector(`[data-mermaid-source="${sourceId}"]:not(.mermaid-block)`)
+  }
   const update = () => {
     const isActive = active()
+    const sourceImmersive = isActive && block.classList.contains('is-source')
     block.classList.toggle('is-fullscreen-fallback', isActive)
     block.classList.toggle('is-fullscreen-active', isActive)
     body?.classList.toggle('mermaid-immersive-active', isActive)
+    sourceNode()?.classList.toggle('mermaid-immersive-source', sourceImmersive)
     fullscreenButton.setAttribute('aria-pressed', String(isActive))
     fullscreenButton.hidden = isActive
     closeButton.hidden = !isActive
@@ -112,13 +120,18 @@ export function wireMermaidFullscreen(block, fullscreenButton, closeButton) {
     document.removeEventListener('keydown', onKeydown)
     fullscreenButton.removeEventListener('click', onFullscreenClick)
     closeButton.removeEventListener('click', onCloseClick)
+    visualButton?.removeEventListener('click', onViewChange)
+    sourceButton?.removeEventListener('click', onViewChange)
     observer?.disconnect()
   }
   const onFullscreenClick = () => { void enter() }
   const onCloseClick = () => { void exit() }
+  const onViewChange = () => update()
 
   fullscreenButton.addEventListener('click', onFullscreenClick)
   closeButton.addEventListener('click', onCloseClick)
+  visualButton?.addEventListener('click', onViewChange)
+  sourceButton?.addEventListener('click', onViewChange)
   document.addEventListener('keydown', onKeydown)
   const MutationObserver = document.defaultView?.MutationObserver
   if (MutationObserver !== undefined && block.isConnected) {

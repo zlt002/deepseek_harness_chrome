@@ -590,6 +590,8 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
 .mermaid-preview.is-panning { cursor: grabbing; }
 .mermaid-block.is-source .mermaid-preview { display: none !important; }
 .mermaid-block.is-source .mermaid-viewer-controls { visibility: hidden; pointer-events: none; }
+.mermaid-block.is-source.is-fullscreen-fallback .mermaid-viewer-controls { visibility: visible; pointer-events: auto; }
+.mermaid-block.is-source.is-fullscreen-fallback .mermaid-viewer-controls button:not([aria-label='退出全屏查看流程图']) { visibility: hidden; pointer-events: none; }
 .mermaid-canvas { display: grid; min-width: 100%; min-height: 80px; place-items: center; transform-origin: center; transition: transform .12s ease-out; will-change: transform; }
 .mermaid-preview > .mermaid-canvas > svg { display: block; width: auto; max-width: 100%; max-height: 560px; height: auto; margin: auto; }
 .mermaid-block.is-fullscreen-fallback {
@@ -609,6 +611,15 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
   box-shadow: var(--review-shadow-3);
 }
 .mermaid-immersive-active { overflow: hidden; }
+.visual-markdown-editor .milkdown .ProseMirror .milkdown-code-block.mermaid-immersive-source {
+  position: fixed;
+  inset: 56px 12px 12px;
+  z-index: 201;
+  display: block !important;
+  overflow: auto;
+  margin: 0;
+  background: var(--review-surface);
+}
 .mermaid-block.is-fullscreen-fallback .mermaid-preview { min-height: 0; max-height: none; flex: 1; }
 .mermaid-block.is-fullscreen-fallback .mermaid-canvas { min-height: 100%; }
 .mermaid-block.is-fullscreen-fallback .mermaid-preview > .mermaid-canvas > svg { max-height: min(100%, calc(100vh - 72px)); }
