@@ -116,7 +116,7 @@ test('presentation write previews use the slow mutation-inspection budget end to
 
 test('Office reads and write previews do not queue behind Native start and restart work', async () => {
   const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
-  const responder = /function respondToOfficeRequest[\s\S]*?\n}\n\nasync function queueResourceWrite/.exec(backgroundSource)?.[0]
+  const responder = /function respondToOfficeRequest[\s\S]*?\r?\n}\r?\n\r?\nasync function queueResourceWrite/.exec(backgroundSource)?.[0]
   assert.ok(responder, 'the Office request responder must remain discoverable')
   assert.doesNotMatch(responder, /queueNativeLifecycle\(execute\)/, 'a stale iframe request must not block later Office reads or previews behind the Native lifecycle queue')
   assert.match(responder, /void respond\(execute\(\)\)/, 'non-commit Office requests should execute directly')

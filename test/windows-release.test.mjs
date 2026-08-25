@@ -47,8 +47,26 @@ async function writeFixture(root, relativePath, content = '') {
   return target
 }
 
+function zipEntries(zipPath) {
+  return execFileSync('unzip', ['-Z1', zipPath], { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)
+}
+
+function readZip(zipPath, entry, encoding) {
+  const normalizedEntry = entry.replaceAll('\\', '/').replace(/^\.\//, '')
+  const rawEntry = zipEntries(zipPath).find((candidate) => candidate.replaceAll('\\', '/').replace(/^\.\//, '') === normalizedEntry)
+  assert.ok(rawEntry, `ZIP must contain ${entry}`)
+  return execFileSync('unzip', ['-p', zipPath, rawEntry], encoding ? { encoding } : undefined)
+}
+
+function assertPortableZipEntries(entries) {
+  for (const entry of entries) {
+    assert.equal(entry.includes('\\'), false, `ZIP entry must use / separators: ${entry}`)
+    assert.equal(entry.startsWith('./'), false, `ZIP entry must not use a ./ prefix: ${entry}`)
+  }
+}
+
 function readZipUtf16Le(zipPath, entry) {
-  const content = execFileSync('unzip', ['-p', zipPath, entry])
+  const content = readZip(zipPath, entry)
   return content.subarray(content[0] === 0xff && content[1] === 0xfe ? 2 : 0).toString('utf16le')
 }
 
@@ -186,12 +204,13 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.equal(result.extensionId, ACCR_UI_EXTENSION_ID)
   assert.equal(result.version, '1.1.63')
   const payloadZip = path.join(result.packageDir, 'payload.zip')
-  const manifest = JSON.parse(execFileSync('unzip', ['-p', payloadZip, 'extension/manifest.json'], { encoding: 'utf8' }))
+  const manifest = JSON.parse(readZip(payloadZip, 'extension/manifest.json', 'utf8'))
   assert.equal(manifest.key, ACCR_UI_EXTENSION_MANIFEST_KEY)
   assert.equal(manifest.version, '1.1.63')
   assert.equal(manifest.name, 'accr-ui Harness UI')
-  const launcher = execFileSync('unzip', ['-p', payloadZip, 'runtime/run_native_host.bat'], { encoding: 'utf8' })
-  const payloadEntries = execFileSync('unzip', ['-Z1', payloadZip], { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)
+  const launcher = readZip(payloadZip, 'runtime/run_native_host.bat', 'utf8')
+  const payloadEntries = zipEntries(payloadZip)
+  assertPortableZipEntries(payloadEntries)
   assert.ok(payloadEntries.includes('runtime/native-server/harness-runtime.mjs'))
   assert.ok(payloadEntries.includes('runtime/native-server/harness-tracking.mjs'))
   assert.ok(payloadEntries.includes('runtime/dsh-plugin.bat'))
@@ -202,7 +221,7 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.ok(payloadEntries.includes('runtime/skills/docx/SKILL.md'))
   assert.ok(payloadEntries.includes('runtime/skills/pdf/SKILL.md'))
   assert.ok(payloadEntries.includes('runtime/native-server/product-office-skills.mjs'))
-  assert.equal(payloadEntries.some((entry) => entry.startsWith('runtime/harness/node_modules/')), false)
+  assert.equal(payloadEntries.some((entry) => /(^|\/)node_modules\//.test(entry)), false)
   assert.match(launcher, /DSH_ROOT=%PACKAGE_DIR%harness/)
   assert.match(launcher, /DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server\.mjs/)
   assert.match(launcher, /DSH_HOME=%APPDATA%\\accr-ui-harness\\profile/)
@@ -212,24 +231,26 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   const packagedReadme = await readFile(path.join(result.packageDir, 'README.zh-CN.md'), 'utf8')
   assert.match(packagedReadme, /DSH_PRODUCT_SKILLS_ROOT/)
   assert.match(packagedReadme, /runtime\/skills/)
-  const packagedSkill = execFileSync('unzip', ['-p', payloadZip, 'runtime/skills/pmd-prd/SKILL.md'], { encoding: 'utf8' })
+  const packagedSkill = readZip(payloadZip, 'runtime/skills/pmd-prd/SKILL.md', 'utf8')
   assert.match(packagedSkill, /Harness Workspace 是唯一用户界面/)
   assert.doesNotMatch(packagedSkill, /pmd-workspace|clarification\.md/)
-  assert.match(execFileSync('unzip', ['-p', payloadZip, 'runtime/skills/product-prototype/SKILL.md'], { encoding: 'utf8' }), /name:\s*product-prototype/)
+  assert.match(readZip(payloadZip, 'runtime/skills/product-prototype/SKILL.md', 'utf8'), /name:\s*product-prototype/)
   for (const [entry, expectedName] of [
     ['runtime/skills/pptx/SKILL.md', 'name: pptx'],
     ['runtime/skills/xlsx/SKILL.md', 'name: xlsx'],
     ['runtime/skills/docx/SKILL.md', 'name: docx'],
     ['runtime/skills/pdf/SKILL.md', 'name: pdf'],
   ]) {
-    assert.match(execFileSync('unzip', ['-p', payloadZip, entry], { encoding: 'utf8' }), new RegExp(expectedName))
+    assert.match(readZip(payloadZip, entry, 'utf8'), new RegExp(expectedName))
   }
-  assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.ps1`), true)
-  assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install-ui.ps1`), true)
-  assert.equal(execFileSync('unzip', ['-Z1', result.zipPath], { encoding: 'utf8' }).includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/payload/extension/manifest.json`), false)
+  const outerEntries = zipEntries(result.zipPath)
+  assertPortableZipEntries(outerEntries)
+  assert.equal(outerEntries.includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.ps1`), true)
+  assert.equal(outerEntries.includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/install-ui.ps1`), true)
+  assert.equal(outerEntries.includes(`${ACCR_UI_WINDOWS_PACKAGE_NAME}/payload/extension/manifest.json`), false)
   const installLauncher = readZipUtf16Le(result.zipPath, `${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.vbs`)
-  const installPowerShell = execFileSync('unzip', ['-p', result.zipPath, `${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.ps1`])
-  const registerPowerShell = execFileSync('unzip', ['-p', payloadZip, 'runtime/register-native-host.ps1'])
+  const installPowerShell = readZip(result.zipPath, `${ACCR_UI_WINDOWS_PACKAGE_NAME}/install.ps1`)
+  const registerPowerShell = readZip(payloadZip, 'runtime/register-native-host.ps1')
   assert.deepEqual([...installPowerShell.subarray(0, 3)], [0xef, 0xbb, 0xbf])
   assert.deepEqual([...registerPowerShell.subarray(0, 3)], [0xef, 0xbb, 0xbf])
   assert.match(installLauncher, /install-ui\.ps1/)
@@ -241,7 +262,7 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.match(installLauncher, /If Not fso\.FileExists\(scriptPath\) Then\r?\n  If Not nonInteractive Then\r?\n    MsgBox "Harness UI 安装器文件缺失："/)
   assert.match(installLauncher, /MsgBox/)
   assert.match(installLauncher, /WScript\.Quit exitCode/)
-  const installUi = execFileSync('unzip', ['-p', result.zipPath, `${ACCR_UI_WINDOWS_PACKAGE_NAME}/install-ui.ps1`], { encoding: 'utf8' })
+  const installUi = readZip(result.zipPath, `${ACCR_UI_WINDOWS_PACKAGE_NAME}/install-ui.ps1`, 'utf8')
   assert.match(installUi, /System\.Windows\.Forms\.FolderBrowserDialog/)
   assert.match(installUi, /Node\.js 22\+/)
   assert.match(installUi, /Chrome \/ Edge/)
@@ -260,7 +281,8 @@ test('the in-place updater start script re-registers both native-host names thro
   const fixture = await createFixture()
   const result = await buildWindowsRelease({ ...fixture, releaseDir: path.join(fixture.root, 'release') })
   const payloadZip = path.join(result.packageDir, 'payload.zip')
-  const payloadEntries = execFileSync('unzip', ['-Z1', payloadZip], { encoding: 'utf8' })
+  const payloadEntries = zipEntries(payloadZip)
+  assertPortableZipEntries(payloadEntries)
   for (const requiredPath of [
     'runtime/start.vbs',
     'runtime/register-native-host.ps1',
@@ -268,8 +290,8 @@ test('the in-place updater start script re-registers both native-host names thro
     `runtime/${LEGACY_NATIVE_HOST_NAME}.json`,
   ]) assert.ok(payloadEntries.includes(requiredPath))
   const startScript = readZipUtf16Le(payloadZip, 'runtime/start.vbs')
-  const registerScript = execFileSync('unzip', ['-p', payloadZip, 'runtime/register-native-host.ps1'], { encoding: 'utf8' })
-  const launcher = execFileSync('unzip', ['-p', payloadZip, 'runtime/run_native_host.bat'], { encoding: 'utf8' })
+  const registerScript = readZip(payloadZip, 'runtime/register-native-host.ps1', 'utf8')
+  const launcher = readZip(payloadZip, 'runtime/run_native_host.bat', 'utf8')
   const installer = await readFile(path.join(result.packageDir, 'install.ps1'), 'utf8')
   assert.match(startScript, /register-native-host\.ps1/)
   assert.match(startScript, / 0, False/)

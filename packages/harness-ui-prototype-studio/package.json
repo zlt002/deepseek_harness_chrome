@@ -25,5 +25,9 @@
     "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-prototype-studio",
     "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-prototype-studio",
     "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.1",
+    "react": "^19.2.1"
   }
 }

@@ -558,11 +558,10 @@ async function copyProductUiPackages(destination) {
     if (!existsSync(path.join(source, 'package.json')) || !existsSync(path.join(source, 'lib', 'index.js')) || !existsSync(path.join(source, 'lib', 'client.js'))) {
       throw new Error(`Missing built product UI package: ${source}`)
     }
-    await cp(source, path.join(destination, name), {
-      recursive: true,
-      dereference: true,
-      filter: (candidate) => !candidate.endsWith('.map') && !candidate.includes(`${path.sep}src${path.sep}`) && !candidate.includes(`${path.sep}test${path.sep}`),
-    })
+    const target = path.join(destination, name)
+    await mkdir(target, { recursive: true })
+    await cp(path.join(source, 'package.json'), path.join(target, 'package.json'))
+    await copyWithoutSourceMaps(path.join(source, 'lib'), path.join(target, 'lib'))
   }
 }
 

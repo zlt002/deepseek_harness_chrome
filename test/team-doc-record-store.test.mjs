@@ -3,17 +3,18 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { platform } from 'node:process'
 import { TeamDocRecordStore, resolveTeamDocStatePath } from '../apps/native-server/src/team-doc-record-store.mjs'
 
 test('uses only the explicit connector-state override in tests', () => {
-  assert.equal(resolveTeamDocStatePath({ DSH_CONNECTOR_STATE_DIR: '/private/test-state' }), '/private/test-state/team-doc-delivery-records.json')
+  assert.equal(resolveTeamDocStatePath({ DSH_CONNECTOR_STATE_DIR: '/private/test-state' }), join('/private/test-state', 'team-doc-delivery-records.json'))
 })
 
 test('persists body-free recovery stages atomically with owner-only permissions', async () => {
   const path = join(await mkdtemp(join(tmpdir(), 'dsh-team-doc-')), 'records.json')
   const store = new TeamDocRecordStore({ recordPath: path })
   await store.save({ idempotencyIdentity: 'doc-1', targetFingerprint: 'target', contentHash: 'sha256:body', stages: ['parent_inspected', 'created'], documentId: '9007199254740993' })
-  assert.equal((await stat(path)).mode & 0o777, 0o600)
+  if (platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600)
   assert.deepEqual(await store.load('doc-1'), { idempotencyIdentity: 'doc-1', targetFingerprint: 'target', contentHash: 'sha256:body', stages: ['parent_inspected', 'created'], documentId: '9007199254740993' })
 })
 

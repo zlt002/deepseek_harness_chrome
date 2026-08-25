@@ -299,14 +299,26 @@ try {
     };
   })()`)
   if (!sourceView.toolbarBeforeSource || !sourceView.sourceVisible || !sourceView.previewHidden) throw new Error(`Mermaid source switch moved or overlapped its toolbar: ${JSON.stringify(sourceView)}`)
-  const panStart = await evaluate(client, `(() => {
+  const scaleOnePanStart = await evaluate(client, `(() => {
     const block = document.querySelector('.mermaid-block');
     block?.querySelector('.mermaid-view-toggle button:first-child')?.click();
+    const rect = block?.querySelector('.mermaid-preview')?.getBoundingClientRect();
+    return rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`)
+  if (scaleOnePanStart === null) throw new Error('Mermaid viewer did not expose a pannable preview at scale 1')
+  await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: scaleOnePanStart.x, y: scaleOnePanStart.y, button: 'left', buttons: 1, clickCount: 1 })
+  await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: scaleOnePanStart.x + 42, y: scaleOnePanStart.y + 28, button: 'left', buttons: 1 })
+  await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: scaleOnePanStart.x + 42, y: scaleOnePanStart.y + 28, button: 'left', buttons: 0, clickCount: 1 })
+  const scaleOnePanTransform = await evaluate(client, `document.querySelector('.mermaid-canvas')?.style.transform ?? ''`)
+  if (scaleOnePanTransform !== 'translate(42px, 28px) scale(1)') throw new Error(`Mermaid viewer did not pan at scale 1: ${scaleOnePanTransform}`)
+  await evaluate(client, `document.querySelector('button[aria-label="重置并适应流程图"]')?.click()`)
+  const panStart = await evaluate(client, `(() => {
+    const block = document.querySelector('.mermaid-block');
     block?.querySelector('button[aria-label="放大流程图"]')?.click();
     const rect = block?.querySelector('.mermaid-preview')?.getBoundingClientRect();
     return rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   })()`)
-  if (panStart === null) throw new Error('Mermaid viewer did not expose a pannable preview')
+  if (panStart === null) throw new Error('Mermaid viewer did not expose a pannable zoomed preview')
   await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: panStart.x, y: panStart.y, button: 'left', buttons: 1, clickCount: 1 })
   await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: panStart.x + 42, y: panStart.y + 28, button: 'left', buttons: 1 })
   await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: panStart.x + 42, y: panStart.y + 28, button: 'left', buttons: 0, clickCount: 1 })
@@ -320,24 +332,25 @@ try {
   await evaluate(client, `document.querySelector('button[aria-label="放大流程图"]')?.click()`)
   const fullscreenBeforeTransform = await evaluate(client, `document.querySelector('.mermaid-canvas')?.style.transform ?? ''`)
   await evaluate(client, `document.querySelector('button[aria-label="全屏查看流程图"]')?.click()`)
-  await waitFor(client, `document.fullscreenElement === document.querySelector('.mermaid-block') || document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback')`, 'Mermaid fullscreen')
+  await waitFor(client, `document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback')`, 'Mermaid immersive view')
   const fullscreenState = await evaluate(client, `(() => {
     const block = document.querySelector('.mermaid-block')
     return {
-      native: document.fullscreenElement === block,
+      nativeFullscreenElement: document.fullscreenElement === null,
       fallback: block?.classList.contains('is-fullscreen-fallback') ?? false,
+      fullscreenHidden: block?.querySelector('button[aria-label="全屏查看流程图"]')?.hidden === true,
       closeVisible: block?.querySelector('button[aria-label="退出全屏查看流程图"]')?.hidden === false,
       transform: block?.querySelector('.mermaid-canvas')?.style.transform ?? '',
     }
   })()`)
-  if ((!fullscreenState.native && !fullscreenState.fallback) || !fullscreenState.closeVisible || fullscreenState.transform !== fullscreenBeforeTransform) {
+  if (!fullscreenState.nativeFullscreenElement || !fullscreenState.fallback || !fullscreenState.fullscreenHidden || !fullscreenState.closeVisible || fullscreenState.transform !== fullscreenBeforeTransform) {
     throw new Error(`Mermaid fullscreen did not preserve the viewer state: ${JSON.stringify(fullscreenState)}`)
   }
   const mermaidFullscreenScreenshot = await client.send('Page.captureScreenshot', { format: 'png' })
   await writeFile(new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url), Buffer.from(mermaidFullscreenScreenshot.data, 'base64'))
   await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' })
   await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' })
-  await waitFor(client, `document.fullscreenElement !== document.querySelector('.mermaid-block') && !document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback')`, 'Mermaid fullscreen exit')
+  await waitFor(client, `document.fullscreenElement === null && !document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback') && document.querySelector('button[aria-label="全屏查看流程图"]')?.hidden === false && document.querySelector('button[aria-label="退出全屏查看流程图"]')?.hidden === true`, 'Mermaid immersive exit')
   const fullscreenAfterTransform = await evaluate(client, `document.querySelector('.mermaid-canvas')?.style.transform ?? ''`)
   if (fullscreenAfterTransform !== fullscreenBeforeTransform) throw new Error(`Mermaid fullscreen exit reset the viewer state: ${fullscreenAfterTransform}`)
   const mermaidScreenshot = await client.send('Page.captureScreenshot', { format: 'png' })
@@ -633,7 +646,7 @@ try {
 
   const screenshot = await client.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true })
   await writeFile(screenshotPath, Buffer.from(screenshot.data, 'base64'))
-  console.log(JSON.stringify({ ok: true, initial, sourceView, viewerTransform, resetTransform, fullscreenState, fullscreenAfterTransform, finalState: { ...finalState, bodyText: undefined }, firstDiff, afterReject, afterAccept, crossBlock: { quote: crossBlock.quote, kinds: crossKinds }, screenshots: [screenshotPath.pathname, new URL('./markdown-review-ui-initial.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-zoom.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url).pathname, new URL('./markdown-review-ui-diff-reject.png', import.meta.url).pathname] }, null, 2))
+  console.log(JSON.stringify({ ok: true, initial, sourceView, scaleOnePanTransform, viewerTransform, resetTransform, fullscreenState, fullscreenAfterTransform, finalState: { ...finalState, bodyText: undefined }, firstDiff, afterReject, afterAccept, crossBlock: { quote: crossBlock.quote, kinds: crossKinds }, screenshots: [screenshotPath.pathname, new URL('./markdown-review-ui-initial.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-zoom.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url).pathname, new URL('./markdown-review-ui-diff-reject.png', import.meta.url).pathname] }, null, 2))
 } finally {
   client?.close()
   browser.kill('SIGTERM')

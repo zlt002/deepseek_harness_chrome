@@ -35,6 +35,15 @@ test('requires the fixed action outcome to match the flow instead of trusting it
   assert.equal(filter.items.find(item => item.kind === 'flow').status, 'missing')
 })
 
+test('treats a replayed navigation as opening the requested business page', () => {
+  const result = flow({ screens: [
+    { id: 'workspace', title: '工作台', nodes: [{ id: 'open-detail', type: 'button', label: '打开供应商详情', action: { type: 'navigate', targetScreenId: 'detail' } }] },
+    { id: 'detail', title: '供应商详情', nodes: [{ id: 'detail-copy', type: 'text', text: '供应商详情内容' }] },
+  ] }, '打开供应商详情')
+  assert.equal(result.status, 'satisfied')
+  assert.match(result.matches[0].verification.steps.join(' '), /进入「供应商详情」/)
+})
+
 test('does not let generic labels or a forged status falsely satisfy a requirement', () => {
   const generic = productRequirementCoverage({ screens: [{ id: 'generic-page', title: '页面', nodes: [{ id: 'generic-module', type: 'list', label: '列表', items: [{ id: 'generic-action', title: '操作', action: { type: 'open-modal', targetId: 'detail' } }] }] }] }, brief)
   assert.deepEqual(generic.items.map(item => item.status), ['missing', 'missing', 'missing'])

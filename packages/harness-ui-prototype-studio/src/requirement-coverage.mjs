@@ -5,7 +5,7 @@ const GENERIC_REQUIREMENT_TERMS = new Set(['页面', '功能', '模块', '列表
 const FLOW_INTENT_TERMS = ['筛选', '搜索', '排序', '分页', '新增', '创建', '编辑', '删除', '提交', '保存', '关闭', '打开']
 
 function exactObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
-function compactProductText(value) { return String(value ?? '').normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/[^\p{L}\p{N}]+/gu, '').replaceAll('查看', '打开') }
+function compactProductText(value) { return String(value ?? '').normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/[^\p{L}\p{N}]+/gu, '').replaceAll('查看', '打开').replaceAll('进入', '打开') }
 
 export function directRequirementMatch(requirement, candidate) {
   const wanted = compactProductText(requirement); const actual = compactProductText(candidate)

@@ -102,7 +102,14 @@ importers:
 
   packages/harness-ui-message-annotations: {}
 
-  packages/harness-ui-prototype-studio: {}
+  packages/harness-ui-prototype-studio:
+    devDependencies:
+      '@types/react':
+        specifier: ^19.2.1
+        version: 19.2.18
+      react:
+        specifier: ^19.2.1
+        version: 19.2.8
 
   packages/harness-ui-responsive-sidebar: {}
 

@@ -612,7 +612,7 @@ test('Host persists and enforces local edit scope through failure, refresh, canc
   const selection = { elementId: 'open-details', type: 'button', label: '查看详情' }
   await store.open({ projectId, sessionId: 'session-1', capability, evidence: [evidence] })
   await store.confirmDesign({ projectId, capability, designSpec })
-  await store.beginGeneration({ projectId, capability, requestId: 'request-local-initial-001', brief: { ...TEST_BRIEF, requiredFlows: ['查看详情'] } })
+  await store.beginGeneration({ projectId, capability, requestId: 'request-local-initial-001', brief: { ...TEST_BRIEF, requiredFlows: ['查看供应商详情'] } })
   const first = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-local-initial-001', document, changeSummary: '初始原型' })
 
   await store.beginGeneration({ projectId, capability, requestId: 'request-local-failure-002', expectedRevisionId: first.revisionId, selection })

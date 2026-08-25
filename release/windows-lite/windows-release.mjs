@@ -84,6 +84,17 @@ async function copyDereferenced(source, destination) {
   await cp(source, destination, { recursive: true, dereference: true, force: true })
 }
 
+async function copyProductUiPackage(source, destination) {
+  await mkdir(destination, { recursive: true })
+  await copyDereferenced(path.join(source, 'package.json'), path.join(destination, 'package.json'))
+  await cp(path.join(source, 'lib'), path.join(destination, 'lib'), {
+    recursive: true,
+    dereference: true,
+    force: true,
+    filter: (candidate) => !candidate.endsWith('.map'),
+  })
+}
+
 async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
 }
@@ -239,7 +250,22 @@ function releaseReadme(version) {
 
 function runZip(cwd, outputPath, input) {
   if (process.platform === 'win32') {
-    execFileSync('tar.exe', ['-a', '-c', '-f', outputPath, input], { cwd, stdio: 'pipe' })
+    // Windows tar.exe writes entries such as `.\\runtime\\start.vbs`.  Those
+    // are legal ZIP names, but break standard ZIP readers and update tooling
+    // expecting portable `/`-separated names.  Create entries explicitly.
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+      '$base = [System.IO.Path]::GetFullPath($env:DSH_ZIP_CWD).TrimEnd([char[]]@([char]92, [char]47))',
+      '$source = [System.IO.Path]::GetFullPath((Join-Path $base $env:DSH_ZIP_INPUT))',
+      '$archive = [System.IO.Compression.ZipFile]::Open($env:DSH_ZIP_PATH, [System.IO.Compression.ZipArchiveMode]::Create)',
+      'try { Get-ChildItem -LiteralPath $source -File -Recurse | Sort-Object FullName | ForEach-Object { $entryName = $_.FullName.Substring($base.Length).TrimStart([char[]]@([char]92, [char]47)).Replace([char]92, [char]47); [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null } } finally { $archive.Dispose() }',
+    ].join('; ')
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      cwd,
+      env: { ...process.env, DSH_ZIP_CWD: cwd, DSH_ZIP_PATH: outputPath, DSH_ZIP_INPUT: input },
+      stdio: 'pipe',
+    })
     return
   }
   execFileSync('zip', ['-qr', outputPath, input], { cwd, stdio: 'pipe' })
@@ -507,7 +533,7 @@ export async function buildWindowsRelease({
   await writeFile(manifestPath, `${JSON.stringify(packagedManifest, null, 2)}\n`, 'utf8')
 
   for (const directory of PRODUCT_UI_PLUGIN_DIRECTORIES) {
-    await copyDereferenced(
+    await copyProductUiPackage(
       path.join(projectRoot, 'packages', directory),
       path.join(runtimeDir, 'product-plugins', directory),
     )

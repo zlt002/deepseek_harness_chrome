@@ -46,20 +46,20 @@ export function wireMermaidViewer(block, preview, canvas, zoomInButton, zoomOutB
   zoomOutButton.addEventListener('click', () => zoom(-0.2))
   resetButton.addEventListener('click', reset)
   preview.addEventListener('pointerdown', (event) => {
-    if (scale <= 1 || event.target?.closest?.('button')) return
-    dragStart = { clientX: event.clientX, clientY: event.clientY, x, y }
+    if (event.button !== 0 || event.isPrimary === false || event.target?.closest?.('button')) return
+    dragStart = { clientX: event.clientX, clientY: event.clientY, pointerId: event.pointerId, x, y }
     preview.setPointerCapture?.(event.pointerId)
     preview.classList.add('is-panning')
     event.preventDefault()
   })
   preview.addEventListener('pointermove', (event) => {
-    if (dragStart === undefined) return
+    if (dragStart === undefined || event.isPrimary === false || (dragStart.pointerId !== undefined && event.pointerId !== dragStart.pointerId)) return
     x = dragStart.x + event.clientX - dragStart.clientX
     y = dragStart.y + event.clientY - dragStart.clientY
     apply()
   })
   const finishDrag = (event) => {
-    if (dragStart === undefined) return
+    if (dragStart === undefined || (dragStart.pointerId !== undefined && event.pointerId !== dragStart.pointerId)) return
     dragStart = undefined
     preview.releasePointerCapture?.(event.pointerId)
     preview.classList.remove('is-panning')
@@ -71,49 +71,33 @@ export function wireMermaidViewer(block, preview, canvas, zoomInButton, zoomOutB
 }
 
 /**
- * Prefer the browser fullscreen surface, with a page-level overlay when an
- * extension page or a test runtime denies the Fullscreen API. Neither mode
- * touches the Mermaid source or the viewer transform.
+ * Use a page-level immersive overlay instead of browser fullscreen. Native
+ * fullscreen hides the extension side panel; this mode changes neither the
+ * Mermaid source nor its viewer transform.
  */
 export function wireMermaidFullscreen(block, fullscreenButton, closeButton) {
   const document = block.ownerDocument
-  let fallback = false
+  const body = document.body
+  let immersive = false
   let disposed = false
   let observer
-  const nativeActive = () => document.fullscreenElement === block
-  const active = () => fallback || nativeActive()
+  const active = () => immersive
   const update = () => {
     const isActive = active()
-    block.classList.toggle('is-fullscreen-fallback', fallback)
+    block.classList.toggle('is-fullscreen-fallback', isActive)
     block.classList.toggle('is-fullscreen-active', isActive)
+    body?.classList.toggle('mermaid-immersive-active', isActive)
     fullscreenButton.setAttribute('aria-pressed', String(isActive))
+    fullscreenButton.hidden = isActive
     closeButton.hidden = !isActive
   }
   const exit = async () => {
-    fallback = false
-    if (nativeActive() && typeof document.exitFullscreen === 'function') {
-      try { await document.exitFullscreen() } catch { /* Native exit may already be in progress. */ }
-    }
+    immersive = false
     update()
   }
   const enter = async () => {
     if (active()) return
-    if (typeof block.requestFullscreen === 'function' && document.fullscreenEnabled !== false) {
-      try {
-        await block.requestFullscreen()
-        if (nativeActive()) {
-          update()
-          return
-        }
-      } catch {
-        // Some extension pages reject Fullscreen API calls; use the overlay.
-      }
-    }
-    fallback = true
-    update()
-  }
-  const onFullscreenChange = () => {
-    if (!nativeActive()) fallback = false
+    immersive = true
     update()
   }
   const onKeydown = (event) => {
@@ -124,7 +108,7 @@ export function wireMermaidFullscreen(block, fullscreenButton, closeButton) {
   const destroy = () => {
     if (disposed) return
     disposed = true
-    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    void exit()
     document.removeEventListener('keydown', onKeydown)
     fullscreenButton.removeEventListener('click', onFullscreenClick)
     closeButton.removeEventListener('click', onCloseClick)
@@ -135,7 +119,6 @@ export function wireMermaidFullscreen(block, fullscreenButton, closeButton) {
 
   fullscreenButton.addEventListener('click', onFullscreenClick)
   closeButton.addEventListener('click', onCloseClick)
-  document.addEventListener('fullscreenchange', onFullscreenChange)
   document.addEventListener('keydown', onKeydown)
   const MutationObserver = document.defaultView?.MutationObserver
   if (MutationObserver !== undefined && block.isConnected) {

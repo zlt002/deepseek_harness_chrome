@@ -49,7 +49,7 @@ test('rejects missing input/output rules, replaced exception focus, missing requ
     { body: body.replace('## （二）异常场景关注点', '## （二）验收清单').replace('## （三）验收清单', '## （三）补充说明'), message: /PRD test focus is missing or reorders: ## （二）异常场景关注点/ },
     { body: body.replace('| 产品经理 | [待确认] | 预估人天 | [待确认] |', '| 产品经理 | [待确认] | | |'), message: /PRD basic information is missing: 预估人天/ },
     { body: body.replace('#### 调整后效果', '#### 调整后效果\n\n调用 confirmReceivingOrders 完成接单。'), message: /code-style identifier.*confirmReceivingOrders/ },
-    { body: body.replace('### 兼容情况\n- [ ] [待确认]', '### 兼容情况\n无'), message: /PRD acceptance checklist is empty: 兼容情况/ },
+    { body: body.replace(/### 兼容情况\r?\n- \[ \] \[待确认\]/, '### 兼容情况\n无'), message: /PRD acceptance checklist is empty: 兼容情况/ },
     { body: body.replace('## 修订记录', '## 修订记录 [必填]'), message: /PRD exposes a field label: \[必填\]/ },
     { body, name: 'req_contract_PRD_02.md', message: /PRD filename must end with _PRD/ },
   ]
