@@ -10,6 +10,7 @@ const PRD_SUFFIX = '_PRD'
 const ALLOWED_MISSING_MARKERS = ['[待确认]', '不适用（原因）']
 const FINAL_FIELD_LABEL = /\[(?:必填|选填|建议填写|涉及多系统交互时必填)\]|【选填】/
 const ACCEPTANCE_CATEGORIES = ['正常情况', '异常情况', '边界情况', '权限情况', '兼容情况']
+const IMPACT_RISK_HEADER = ['直接改动', '关联影响', '可能风险', '建议处理', '是否需要产品决策']
 
 function normaliseText(value) { return value.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n') }
 
@@ -62,6 +63,22 @@ function tableHeaders(markdown) {
     if (header && separator && separator.every((cell) => /^:?-{3,}:?$/.test(cell))) headers.push(header)
   }
   return headers
+}
+
+function tableDataRows(markdown, expectedHeader) {
+  const lines = markdownOutsideFences(markdown).split('\n')
+  for (let index = 0; index < lines.length - 2; index += 1) {
+    const header = tableRow(lines[index]); const separator = tableRow(lines[index + 1])
+    if (!header || !equalRows(header, expectedHeader) || !separator || !separator.every((cell) => /^:?-{3,}:?$/.test(cell))) continue
+    const rows = []
+    for (let rowIndex = index + 2; rowIndex < lines.length; rowIndex += 1) {
+      const row = tableRow(lines[rowIndex])
+      if (!row) break
+      rows.push(row)
+    }
+    return rows
+  }
+  return []
 }
 
 function equalRows(left, right) { return left.length === right.length && left.every((cell, index) => cell === right[index]) }
@@ -172,7 +189,17 @@ function validateTestFocus(body) {
     if (index < 0 || index > chapterEnd) return [`PRD test focus is missing or reorders: ${heading}`]
     cursor = index
   }
+  const impactStart = exactHeadingIndex(lines, '## （一）影响范围分析', chapterStart)
   const exceptionStart = exactHeadingIndex(lines, '## （二）异常场景关注点', chapterStart)
+  const riskStart = exactHeadingIndex(lines, '### 关联改动与风险', impactStart)
+  const regressionStart = exactHeadingIndex(lines, '### 回归范围', riskStart)
+  if (riskStart < 0 || riskStart > exceptionStart) errors.push('PRD impact analysis is missing: ### 关联改动与风险')
+  if (regressionStart < 0 || regressionStart > exceptionStart) errors.push('PRD impact analysis is missing: ### 回归范围')
+  const impactSection = lines.slice(impactStart, exceptionStart).join('\n')
+  if (!tableHeaders(impactSection).some((header) => equalRows(header, IMPACT_RISK_HEADER))) errors.push(`PRD impact analysis is missing required table: ${IMPACT_RISK_HEADER.join(' / ')}`)
+  const impactRows = tableDataRows(impactSection, IMPACT_RISK_HEADER)
+  if (!impactRows.some((row) => row.length === IMPACT_RISK_HEADER.length && row.every((cell) => cell.length > 0))) errors.push('PRD impact analysis must contain at least one complete change-risk row')
+  if (regressionStart >= 0 && !lines.slice(regressionStart + 1, exceptionStart).some((line) => line.trim() && !line.trim().startsWith('#'))) errors.push('PRD 回归范围 is empty')
   const checklistStart = exactHeadingIndex(lines, '## （三）验收清单', exceptionStart)
   if (!lines.slice(exceptionStart + 1, checklistStart).some((line) => line.trim() && !line.trim().startsWith('#'))) errors.push('PRD 异常场景关注点 is empty')
   return errors

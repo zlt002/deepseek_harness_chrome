@@ -29,7 +29,7 @@ async function runFixture({ body, name = 'req_contract_单一交付_PRD.md' }) {
   } finally { await rm(directory, { recursive: true, force: true }) }
 }
 
-test('accepts one complete product-readable PRD that preserves the company template and adds an acceptance checklist', async () => {
+test('accepts one complete product-readable PRD with code-informed change risks and an acceptance checklist', async () => {
   const authority = await readFile(authorityPath, 'utf8')
   const template = prdTemplate(authority)
   assert.ok(template, 'authoritative templates must expose one complete PRD body')
@@ -37,15 +37,19 @@ test('accepts one complete product-readable PRD that preserves the company templ
   const result = await runFixture({ body })
   assert.match(result.stdout, /PASS: PMD frozen PRD contract/)
   assert.doesNotMatch(body, /\[(?:必填|选填|建议填写)\]|【选填】/)
-  for (const section of ['## （一）正常业务场景', '#### 现状', '#### 调整方式', '#### 输入/输出规则', '#### 调整后效果', '## 边界场景', '## （二）异常业务场景', '## （二）异常场景关注点', '## （三）验收清单', '### 正常情况', '### 异常情况', '### 边界情况', '### 权限情况', '### 兼容情况']) assert.match(body, new RegExp(section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  for (const section of ['## （一）正常业务场景', '#### 现状', '#### 调整方式', '#### 输入/输出规则', '#### 调整后效果', '## 边界场景', '## （二）异常业务场景', '### 关联改动与风险', '### 回归范围', '## （二）异常场景关注点', '## （三）验收清单', '### 正常情况', '### 异常情况', '### 边界情况', '### 权限情况', '### 兼容情况']) assert.match(body, new RegExp(section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(body, /\| 直接改动 \| 关联影响 \| 可能风险 \| 建议处理 \| 是否需要产品决策 \|/)
   assert.match(body, /\| 产品经理 \| \[待确认\] \| 预估人天 \| \[待确认\] \|/)
 })
 
-test('rejects missing input/output rules, replaced exception focus, missing required basic information, code identifiers, field labels, and invalid names', async () => {
+test('rejects missing input/output rules, change-risk analysis, exception focus, required basic information, code identifiers, field labels, and invalid names', async () => {
   const authority = await readFile(authorityPath, 'utf8')
   const body = materialise(prdTemplate(authority))
   const fixtures = [
     { body: body.replace('#### 输入/输出规则', '#### 交互说明'), message: /is missing or reorders: #### 输入\/输出规则/ },
+    { body: body.replace('### 关联改动与风险', '### 普通影响说明'), message: /PRD impact analysis is missing: ### 关联改动与风险/ },
+    { body: body.replace('| 直接改动 | 关联影响 | 可能风险 | 建议处理 | 是否需要产品决策 |', '| 改动内容 | 影响说明 |'), message: /PRD impact analysis is missing required table/ },
+    { body: body.replace('### 回归范围', '### 其他说明'), message: /PRD impact analysis is missing: ### 回归范围/ },
     { body: body.replace('## （二）异常场景关注点', '## （二）验收清单').replace('## （三）验收清单', '## （三）补充说明'), message: /PRD test focus is missing or reorders: ## （二）异常场景关注点/ },
     { body: body.replace('| 产品经理 | [待确认] | 预估人天 | [待确认] |', '| 产品经理 | [待确认] | | |'), message: /PRD basic information is missing: 预估人天/ },
     { body: body.replace('#### 调整后效果', '#### 调整后效果\n\n调用 confirmReceivingOrders 完成接单。'), message: /code-style identifier.*confirmReceivingOrders/ },

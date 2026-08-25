@@ -18,6 +18,26 @@ interface ReviewFeedback {
   submitWorkspaceMarkdown(sessionId: string, feedback: MarkdownReviewFeedback): Promise<void>
 }
 
+interface ProducedFileFact {
+  readonly seq: number
+  readonly path: string
+}
+
+/** Preserve the unique full path behind a basename shown in closing prose. */
+function producedMarkdownMention(owner: Parameters<ChatFileMentions['forClosing']>[0], value: string): string | undefined {
+  const deliverables = owner.turn.data.get('deliverables') as { readonly produced?: readonly ProducedFileFact[] } | undefined
+  const paths = deliverables?.produced
+    ?.filter(produced => produced.seq <= owner.seq && typeof produced.path === 'string')
+    .map(produced => produced.path) ?? []
+  if (paths.includes(value)) return value
+  const matches = [...new Set(paths.filter(path => {
+    const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+    return path.slice(separator + 1) === value
+  }))]
+  if (matches.length === 0) return value
+  return matches.length === 1 ? matches[0] : undefined
+}
+
 // Conversation and Tool UI own the composable resolver registries. Both are
 // hard dependencies: an optional one-shot lookup would silently skip a route
 // when this product plugin starts before its registry is provided.
@@ -58,7 +78,10 @@ export function apply(ctx: ClientContext): void {
   }
   const conversationMarkdown: ChatFileMentions = {
     forClosing(owner) {
-      const resolveReview = (value: string) => resolveWorkspaceMarkdown(String(owner.sessionId), owner.cwd, value)
+      const resolveReview = (value: string) => {
+        const producedPath = producedMarkdownMention(owner, value)
+        return producedPath === undefined ? undefined : resolveWorkspaceMarkdown(String(owner.sessionId), owner.cwd, producedPath)
+      }
       return { resolve: resolveReview, resolveLink: resolveReview }
     },
   }

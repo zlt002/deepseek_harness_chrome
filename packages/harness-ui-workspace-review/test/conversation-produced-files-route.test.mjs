@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 const extensionRequire = createRequire(new URL('../../../apps/chrome-extension/package.json', import.meta.url))
 const require = createRequire(import.meta.url)
@@ -17,7 +18,7 @@ function loadClient(output, modules) {
       return {}
     })) },
   }
-  require(process.env.ACCRUI_WORKSPACE_REVIEW_CLIENT ?? new URL('../lib/client.js', import.meta.url).pathname)
+  require(process.env.ACCRUI_WORKSPACE_REVIEW_CLIENT ?? fileURLToPath(new URL('../lib/client.js', import.meta.url)))
   require(`../../../apps/chrome-extension/.output/${output}/plugins/@deepseek-ai/dsh-client-ui-deliverables/client.js`)
 }
 
@@ -31,7 +32,12 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
     url: 'http://127.0.0.1:3101/?dshWorkspaceReviewNonce=nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   })
   const posted = []
-  const reviewOpened = Promise.withResolvers()
+  const waitForPosts = async count => {
+    for (let attempt = 0; attempt < 10 && posted.length < count; attempt += 1) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(posted.length, count, `expected ${count} review-open event(s)`)
+  }
   const globals = new Map(['window', 'document', 'navigator', 'HTMLElement', 'Event', 'fetch', 'getComputedStyle']
     .map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]))
   const replace = (name, value) => Object.defineProperty(globalThis, name, { configurable: true, writable: true, value })
@@ -41,7 +47,7 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
   replace('HTMLElement', dom.window.HTMLElement)
   replace('Event', dom.window.Event)
   replace('getComputedStyle', dom.window.getComputedStyle.bind(dom.window))
-  Object.defineProperty(dom.window, 'parent', { value: { postMessage: (...args) => { posted.push(args); reviewOpened.resolve() } }, configurable: true })
+  Object.defineProperty(dom.window, 'parent', { value: { postMessage: (...args) => { posted.push(args) } }, configurable: true })
   const requests = []
   replace('fetch', async (...args) => {
     requests.push(args)
@@ -64,6 +70,15 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
         return mentions.length === 0 ? undefined : { resolve: value => mentions.map(mention => mention.resolve(value)).find(Boolean) }
       },
     }
+    const producedPath = 'pmd-workspace/spec/req-5b8f31ba2b51c864/req-5b8f31ba2b51c864_产业带摸排线上化_PRD.md'
+    const producedBasename = 'req-5b8f31ba2b51c864_产业带摸排线上化_PRD.md'
+    registry.register({
+      forClosing: owner => ({
+        resolve: value => value === producedBasename
+          ? { open: () => owner.openFile(producedPath), label: producedPath, title: producedPath }
+          : undefined,
+      }),
+    })
     const toolFileLinks = { register: () => () => {} }
     applyWorkspaceReview({
       get: (name) => name === 'chatFileMentions' ? registry : name === 'toolFileLinks' ? toolFileLinks : {},
@@ -72,7 +87,16 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
     })
 
     const hostOpen = []
-    const owner = { sessionId: 'session-1', cwd: '/Users/me/Desktop/html', turn: { data: new Map() }, seq: 1, openFile: path => hostOpen.push(path) }
+    const owner = {
+      sessionId: 'session-1', cwd: '/Users/me/Desktop/html', seq: 1, openFile: path => hostOpen.push(path),
+      turn: { data: new Map([['deliverables', { produced: [{ seq: 1, path: producedPath }] }]]) },
+    }
+    const inlineMention = registry.forClosing(owner)?.resolve(producedBasename)
+    assert.ok(inlineMention, 'the closing prose basename must remain linked')
+    inlineMention.open()
+    await waitForPosts(1)
+    assert.equal(JSON.parse(requests[0][1].body).relativePath, producedPath,
+      'a produced basename must retain its unique nested workspace path')
     const root = createRoot(dom.window.document.getElementById('app'))
     flushSync(() => root.render(React.createElement(ProducedFiles, {
       matched: { paths: ['pmd-workspace/spec/process.md'], resolveFile: path => registry.forClosing(owner)?.resolve(path) },
@@ -84,10 +108,10 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
     const button = dom.window.document.querySelector('button')
     assert.ok(button, 'the ProducedFiles chip must render')
     button.click()
-    await reviewOpened.promise
+    await waitForPosts(2)
 
     assert.deepEqual(hostOpen, [], 'Markdown must not fall through to the system opener')
-    assert.equal(posted.length, 1, `expected review-open after ${requests.length} request(s)`)
+    assert.equal(requests.length, 2, 'both the closing prose link and produced-file chip must request Review')
     assert.deepEqual(posted[0], [{
       type: 'markdown-review-open/v1', nonce: 'nonce', review: {
         v: 1, reviewId: 'review-1', harnessSessionId: 'session-1', capability: 'capability-1',

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-process.env.NODE_PATH = new URL('../../../.generated/harness-product/node_modules/', import.meta.url).pathname
+process.env.NODE_PATH = fileURLToPath(new URL('../../../.generated/harness-product/node_modules/', import.meta.url))
 createRequire(import.meta.url)('node:module').Module._initPaths()
 const require = createRequire(import.meta.url)
 let client

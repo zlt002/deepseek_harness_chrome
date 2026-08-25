@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
 const source = await readFile(new URL('../src/client/composer-fullscreen.ts', import.meta.url), 'utf8')
+const clientDir = fileURLToPath(new URL('../src/client/', import.meta.url))
 const output = await build({
-  stdin: { contents: source, loader: 'ts', resolveDir: new URL('../src/client/', import.meta.url).pathname },
+  stdin: { contents: source, loader: 'ts', resolveDir: clientDir },
   bundle: true,
   format: 'esm',
   platform: 'node',

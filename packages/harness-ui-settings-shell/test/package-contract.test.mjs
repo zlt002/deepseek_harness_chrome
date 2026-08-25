@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
 const onboardingSource = await readFile(new URL('../src/client/onboarding.ts', import.meta.url), 'utf8')
+const clientDir = fileURLToPath(new URL('../src/client/', import.meta.url))
 const onboardingOutput = await build({
-  stdin: { contents: onboardingSource, loader: 'ts', resolveDir: new URL('../src/client/', import.meta.url).pathname },
+  stdin: { contents: onboardingSource, loader: 'ts', resolveDir: clientDir },
   bundle: true,
   format: 'esm',
   platform: 'node',

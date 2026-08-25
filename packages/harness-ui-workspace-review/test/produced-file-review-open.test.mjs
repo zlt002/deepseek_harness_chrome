@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = new URL('../../../', import.meta.url)
 const cordis = await import(new URL('.generated/harness-product/vendor/cordis/lib/index.js', root))
@@ -52,8 +52,8 @@ test('a produced Markdown chip opens Markdown Review through the active Cordis r
       '@deepseek-ai/dsh-client-ui-primitives': {},
       '@deepseek-ai/dsh-client-runtime/client': { isAppendSurfaceEvent: () => true },
     }
-    const workspace = await loadClientBundle(new URL('../lib/client.js', import.meta.url).pathname, modules)
-    const deliverables = await loadClientBundle(new URL('../../../apps/chrome-extension/.output/chrome-mv3-dev/plugins/@deepseek-ai/dsh-client-ui-deliverables/client.js', import.meta.url).pathname, modules)
+    const workspace = await loadClientBundle(fileURLToPath(new URL('../lib/client.js', import.meta.url)), modules)
+    const deliverables = await loadClientBundle(fileURLToPath(new URL('../../../apps/chrome-extension/.output/chrome-mv3-dev/plugins/@deepseek-ai/dsh-client-ui-deliverables/client.js', import.meta.url)), modules)
     const ctx = new cordis.Context()
     ctx.provide('slots', { inject: () => () => {} })
     ctx.provide('reviewFeedback', { submitWorkspaceMarkdown: async () => {} })
