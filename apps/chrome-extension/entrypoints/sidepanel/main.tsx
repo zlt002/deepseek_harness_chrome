@@ -19,7 +19,7 @@ interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: s
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
 interface BrowserTargetSettingsResponse { ok: boolean; settings?: BrowserTargetSettings; tabs?: BrowserTargetTab[]; error?: string }
 interface DesignReferenceCaptureResponse { ok: boolean; referenceId?: string; error?: string }
-interface RecentPrototypeStudio { projectId: string; referenceId: string; referenceTitle?: string; referenceUrl?: string; updatedAt: number; authorizationActive: boolean }
+interface RecentPrototypeStudio { projectId: string; referenceId: string; referenceTitle?: string; referenceUrl?: string; projectName?: string; currentRevisionId?: string; revisionCount?: number; updatedAt: number; authorizationActive: boolean; boundToCurrentSession?: boolean }
 interface RecentPrototypeStudiosResponse { ok: boolean; projects?: RecentPrototypeStudio[]; error?: string }
 interface ActiveTab extends BrowserTargetTab {}
 interface ActiveTabResponse { ok: boolean; epoch?: string; sequence?: number; tab?: ActiveTab; error?: string }
@@ -49,6 +49,7 @@ interface OpenMarkdownReview {
 
 interface MarkdownReviewIdentity { reviewId: string; harnessSessionId: string; resourceId: string }
 interface PrototypePromptPayload { projectId: string; sessionId: string; requestId: string; expectedRevisionId?: string; request: string; selection?: { elementId?: unknown; type?: unknown; label?: unknown }; evidence: unknown[]; revisions: unknown[]; currentRevisionId?: unknown; designSpec?: unknown; document?: unknown }
+interface BriefSuggestionPayload { projectId: string; sessionId: string; requestId: string }
 
 type BrowserTargetCommand =
   | { command: 'refresh' }
@@ -56,6 +57,8 @@ type BrowserTargetCommand =
   | { command: 'toggle-pinned-tab'; tabId: number; checked: boolean }
   | { command: 'set-primary'; tabId: number }
   | { command: 'capture-design-reference'; tabId: number; sessionId?: string }
+  | { command: 'capture-responsive-design-reference'; tabId: number; sessionId?: string }
+  | { command: 'capture-design-references'; tabIds: number[]; sessionId?: string }
 
 function isActiveTab(value: unknown): value is ActiveTab {
   return typeof value === 'object' && value !== null
@@ -68,11 +71,12 @@ function isActiveTab(value: unknown): value is ActiveTab {
 
 function isBrowserTargetCommand(value: unknown): value is BrowserTargetCommand {
   if (!value || typeof value !== 'object') return false
-  const command = value as { command?: unknown; mode?: unknown; tabId?: unknown; checked?: unknown; sessionId?: unknown }
+  const command = value as { command?: unknown; mode?: unknown; tabId?: unknown; tabIds?: unknown; checked?: unknown; sessionId?: unknown }
   if (command.command === 'refresh') return true
   if (command.command === 'set-mode') return command.mode === 'follow-active-tab' || command.mode === 'pinned-tabs' || command.mode === 'none'
   if (command.command === 'toggle-pinned-tab') return Number.isInteger(command.tabId) && typeof command.checked === 'boolean'
-  if (command.command === 'capture-design-reference') return Number.isInteger(command.tabId) && (command.sessionId === undefined || boundedString(command.sessionId, 160))
+  if (command.command === 'capture-design-reference' || command.command === 'capture-responsive-design-reference') return Number.isInteger(command.tabId) && (command.sessionId === undefined || boundedString(command.sessionId, 160))
+  if (command.command === 'capture-design-references') return Array.isArray(command.tabIds) && command.tabIds.length >= 2 && command.tabIds.length <= 3 && command.tabIds.every(Number.isInteger) && new Set(command.tabIds).size === command.tabIds.length && (command.sessionId === undefined || boundedString(command.sessionId, 160))
   return command.command === 'set-primary' && Number.isInteger(command.tabId)
 }
 
@@ -105,9 +109,15 @@ function isMarkdownReviewIdentity(value: unknown): value is MarkdownReviewIdenti
 function isPrototypePromptPayload(value: unknown): value is PrototypePromptPayload {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const item = value as Record<string, unknown>
-  if (typeof item.projectId !== 'string' || !/^prototype-[a-z0-9-]{8,72}$/.test(item.projectId) || !boundedString(item.sessionId, 160) || !boundedString(item.requestId, 160) || !/^[A-Za-z0-9._:-]{8,160}$/.test(item.requestId) || (item.expectedRevisionId !== undefined && !boundedString(item.expectedRevisionId, 160)) || !boundedString(item.request, 4_000) || !Array.isArray(item.evidence) || item.evidence.length !== 1 || !Array.isArray(item.revisions) || item.revisions.length > 20) return false
+  if (typeof item.projectId !== 'string' || !/^prototype-[a-z0-9-]{8,72}$/.test(item.projectId) || !boundedString(item.sessionId, 160) || !boundedString(item.requestId, 160) || !/^[A-Za-z0-9._:-]{8,160}$/.test(item.requestId) || (item.expectedRevisionId !== undefined && !boundedString(item.expectedRevisionId, 160)) || !boundedString(item.request, 4_000) || !Array.isArray(item.evidence) || item.evidence.length < 1 || item.evidence.length > 3 || item.evidence.some(evidence => evidence === null || typeof evidence !== 'object' || Array.isArray(evidence) || Object.hasOwn(evidence, 'screenshotDataUrl')) || !Array.isArray(item.revisions) || item.revisions.length > 20) return false
   if (item.selection !== undefined && (typeof item.selection !== 'object' || item.selection === null || Array.isArray(item.selection))) return false
   try { return JSON.stringify(item).length <= 260_000 } catch { return false }
+}
+
+function isBriefSuggestionPayload(value: unknown): value is BriefSuggestionPayload {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const item = value as Record<string, unknown>
+  return Object.keys(item).length === 3 && /^prototype-[a-z0-9-]{8,72}$/.test(String(item.projectId)) && boundedString(item.sessionId, 160) && boundedString(item.requestId, 160) && /^[A-Za-z0-9._:-]{8,160}$/.test(String(item.requestId))
 }
 
 function requestHarness(message: unknown = { type: 'ensure-harness' }): Promise<HarnessResponse> {
@@ -153,13 +163,53 @@ function requestDesignReferenceCapture(browserTarget: BrowserTarget, sessionId: 
   })
 }
 
-function requestRecentPrototypeStudios(): Promise<RecentPrototypeStudiosResponse> {
+function requestResponsiveDesignReferenceCapture(browserTarget: BrowserTarget, sessionId: string): Promise<DesignReferenceCaptureResponse> {
+  return new Promise(resolve => {
+    let settled = false
+    const timeout = window.setTimeout(() => { if (!settled) { settled = true; resolve({ ok: false, error: '多尺寸实测超时，临时窗口会自动清理。请确认网页可以正常打开后重试。' }) } }, 90_000)
+    chrome.runtime.sendMessage({ type: 'capture-responsive-design-reference/v1', browserTarget, sessionId }, (response: DesignReferenceCaptureResponse | undefined) => {
+      if (settled) return
+      settled = true; window.clearTimeout(timeout)
+      resolve(chrome.runtime.lastError === undefined ? response ?? { ok: false, error: '多尺寸实测没有返回结果。' } : { ok: false, error: chrome.runtime.lastError.message })
+    })
+  })
+}
+
+function requestDesignReferenceCaptures(browserTargets: BrowserTarget[], sessionId: string): Promise<DesignReferenceCaptureResponse> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'prototype-studio-recent/v1' }, (response: RecentPrototypeStudiosResponse | undefined) => {
+    const timeout = window.setTimeout(() => resolve({ ok: false, error: '合并提取超时，未创建原型项目。请确认每个网页都已加载完成后重试。' }), 135_000)
+    try {
+      chrome.runtime.sendMessage({ type: 'capture-design-references/v1', browserTargets, sessionId }, (response: DesignReferenceCaptureResponse | undefined) => {
+        window.clearTimeout(timeout)
+        resolve(chrome.runtime.lastError === undefined ? response ?? { ok: false, error: 'Background did not return the captured references.' } : { ok: false, error: chrome.runtime.lastError.message })
+      })
+    } catch (cause) { window.clearTimeout(timeout); resolve({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }) }
+  })
+}
+
+function requestRecentPrototypeStudios(sessionId?: string): Promise<RecentPrototypeStudiosResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'prototype-studio-recent/v1', ...(sessionId === undefined ? {} : { sessionId }) }, (response: RecentPrototypeStudiosResponse | undefined) => {
       const runtimeError = chrome.runtime.lastError
       resolve(runtimeError === undefined ? response ?? { ok: false, error: '无法读取最近原型。' } : { ok: false, error: runtimeError.message })
     })
   })
+}
+
+function continueRecentPrototypeStudio(projectId: string, sessionId: string): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'prototype-studio-continue-current/v1', projectId, sessionId }, (response: { ok: boolean; error?: string } | undefined) => {
+      const runtimeError = chrome.runtime.lastError
+      resolve(runtimeError === undefined ? response ?? { ok: false, error: '无法在当前对话继续。' } : { ok: false, error: runtimeError.message })
+    })
+  })
+}
+
+function manageRecentPrototypeStudio(message: { type: 'prototype-studio-rename/v1'; projectId: string; projectName: string } | { type: 'prototype-studio-delete/v1'; projectId: string; confirmationProjectId: string }): Promise<{ ok: boolean; error?: string }> {
+  return new Promise(resolve => chrome.runtime.sendMessage(message, (response: { ok: boolean; error?: string } | undefined) => {
+    const runtimeError = chrome.runtime.lastError
+    resolve(runtimeError === undefined ? response ?? { ok: false, error: '最近原型操作没有返回结果。' } : { ok: false, error: runtimeError.message })
+  }))
 }
 
 function openRecentPrototypeStudio(projectId: string): Promise<{ ok: boolean; error?: string }> {
@@ -285,10 +335,14 @@ function App(): React.JSX.Element {
   const [availableTabs, setAvailableTabs] = useState<BrowserTargetTab[]>([])
   const [targetError, setTargetError] = useState<string>()
   const [capturingDesignReferenceTabId, setCapturingDesignReferenceTabId] = useState<number>()
+  const [capturingDesignReferenceProgress, setCapturingDesignReferenceProgress] = useState<{ current: number; total: number }>()
   const [recentPrototypes, setRecentPrototypes] = useState<RecentPrototypeStudio[]>([])
   const [recentPrototypesOpen, setRecentPrototypesOpen] = useState(false)
   const [recentPrototypeError, setRecentPrototypeError] = useState<string>()
   const [openingRecentProjectId, setOpeningRecentProjectId] = useState<string>()
+  const [editingRecentProjectId, setEditingRecentProjectId] = useState<string>()
+  const [recentProjectNameDraft, setRecentProjectNameDraft] = useState('')
+  const [deletingRecentProjectId, setDeletingRecentProjectId] = useState<string>()
   const [activeTab, setActiveTab] = useState<{ epoch: string; sequence: number; tab: ActiveTab }>()
   const frameRef = useRef<HTMLIFrameElement>(null)
   const frameReadyRef = useRef(false)
@@ -356,11 +410,11 @@ function App(): React.JSX.Element {
   }, [])
 
   const loadRecentPrototypes = useCallback(async () => {
-    const response = await requestRecentPrototypeStudios()
+    const response = await requestRecentPrototypeStudios(activeHarnessSessionId)
     if (!response.ok) { setRecentPrototypeError(response.error ?? '无法读取最近原型。'); return }
     setRecentPrototypes((response.projects ?? []).filter(item => typeof item.projectId === 'string' && typeof item.referenceId === 'string' && Number.isSafeInteger(item.updatedAt)))
     setRecentPrototypeError(undefined)
-  }, [])
+  }, [activeHarnessSessionId])
 
   const saveTargetSettings = useCallback(async (settings: BrowserTargetSettings) => {
     const response = await requestTargetSettings({ type: 'save-browser-target-settings', settings })
@@ -395,7 +449,16 @@ function App(): React.JSX.Element {
     void requestActiveTab().then((response) => { if (response.ok) accept(response.epoch, response.sequence, response.tab) })
     const onMessage = (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void): boolean | void => {
       if (!message || typeof message !== 'object') return
-      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown; feedback?: unknown; review?: unknown; payload?: unknown }
+      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; tabId?: unknown; current?: unknown; total?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown; feedback?: unknown; review?: unknown; payload?: unknown }
+      if (value.type === 'prototype-studio-brief-suggestion-forward/v1') {
+        const target = frameRef.current?.contentWindow
+        if (!isBriefSuggestionPayload(value.payload) || frameOrigin === undefined || target === null || target === undefined) { sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' }); return false }
+        const deliveryId = crypto.randomUUID()
+        const timeout = window.setTimeout(() => { const pending = prototypePromptRef.current.get(deliveryId); if (pending === undefined) return; prototypePromptRef.current.delete(deliveryId); pending.sendResponse({ ok: false, error: 'Timed out sending the product requirement request to Harness.' }) }, 5_000)
+        prototypePromptRef.current.set(deliveryId, { sendResponse, timeout })
+        target.postMessage({ type: 'prototype-studio-brief-suggestion/v1', nonce: frameNonce, deliveryId, payload: value.payload }, frameOrigin)
+        return true
+      }
       if (value.type === 'prototype-studio-prompt-forward/v1') {
         const target = frameRef.current?.contentWindow
         if (!isPrototypePromptPayload(value.payload) || frameOrigin === undefined || target === null || target === undefined) { sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' }); return false }
@@ -445,6 +508,9 @@ function App(): React.JSX.Element {
         return true
       }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
+      if (value.type === 'design-reference-capture-progress/v1' && Number.isInteger(value.tabId) && Number.isInteger(value.current) && Number.isInteger(value.total) && (value.current as number) >= 1 && (value.total as number) >= (value.current as number)) {
+        setCapturingDesignReferenceTabId(value.tabId as number); setCapturingDesignReferenceProgress({ current: value.current as number, total: value.total as number })
+      }
       if (value.type === 'harness-ready' && typeof value.url === 'string') { setUrl(value.url); setStatus('ready'); setError(undefined) }
       if (value.type === 'harness-runtime-mismatch' && typeof value.error === 'string') { setStatus('error'); setError(value.error) }
       if (value.type === 'harness-disconnected') { void connect() }
@@ -470,9 +536,9 @@ function App(): React.JSX.Element {
     target.postMessage({
       type: 'browser-target-snapshot/v1', nonce: frameNonce, sequence: bridgeSequenceRef.current,
       settings: targetSettings, tabs: availableTabs, activeTab: activeTab?.tab,
-      ...(capturingTabId === undefined ? {} : { capturingDesignReferenceTabId: capturingTabId }), error: targetError,
+      ...(capturingTabId === undefined ? {} : { capturingDesignReferenceTabId: capturingTabId }), ...(capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress }), error: targetError,
     }, frameOrigin)
-  }, [activeTab, availableTabs, frameNonce, frameOrigin, targetError, targetSettings])
+  }, [activeTab, availableTabs, capturingDesignReferenceProgress, frameNonce, frameOrigin, targetError, targetSettings])
 
   const sendBrowserTargetSnapshot = useCallback(() => {
     projectBrowserTargetSnapshot(capturingDesignReferenceTabId)
@@ -484,7 +550,20 @@ function App(): React.JSX.Element {
     if (command.command === 'refresh') { await loadTargetSettings(); return }
     const settings = targetSettingsRef.current
     if (command.command === 'set-mode') { await saveTargetSettings({ ...settings, mode: command.mode }); return }
-    if (command.command === 'capture-design-reference' && designReferenceCaptureRef.current !== undefined) return
+    if ((command.command === 'capture-design-reference' || command.command === 'capture-responsive-design-reference' || command.command === 'capture-design-references') && designReferenceCaptureRef.current !== undefined) return
+    if (command.command === 'capture-design-references') {
+      if (command.sessionId === undefined) { setTargetError('请先打开一个 Harness 对话，再采集参考网页。'); return }
+      const tabs = command.tabIds.map(tabId => availableTabsRef.current.find(item => item.tabId === tabId))
+      if (tabs.some(item => item === undefined)) { setTargetError('有一个参考网页已关闭或切换，请刷新后重新选择。'); return }
+      const selected = tabs as BrowserTargetTab[]
+      setTargetError(undefined); setCapturingDesignReferenceProgress({ current: 1, total: selected.length })
+      const response = await runDesignReferenceCaptureOnce(designReferenceCaptureRef, selected[0]!.tabId, tabId => { setCapturingDesignReferenceTabId(tabId); projectBrowserTargetSnapshot(tabId) }, () => requestDesignReferenceCaptures(selected.map(tab => ({ browser: 'chrome' as const, windowId: tab.windowId, tabId: tab.tabId, url: tab.url })), command.sessionId as string))
+      setCapturingDesignReferenceProgress(undefined)
+      if (response === undefined) return
+      if (!response.ok) setTargetError(response.error ?? '无法合并提取这些参考网页；没有创建原型项目。')
+      else void loadRecentPrototypes()
+      return
+    }
     const tab = availableTabsRef.current.find((item) => item.tabId === command.tabId)
       ?? (command.command === 'toggle-pinned-tab' && !command.checked ? settings.pinnedTabs.find((item) => item.tabId === command.tabId) : undefined)
     if (tab === undefined) { setTargetError('The selected Chrome tab is no longer available.'); return }
@@ -502,6 +581,16 @@ function App(): React.JSX.Element {
       )
       if (response === undefined) return
       if (!response.ok) setTargetError(response.error ?? '无法采集这个参考网页。')
+      else void loadRecentPrototypes()
+      return
+    }
+    if (command.command === 'capture-responsive-design-reference') {
+      if (command.sessionId === undefined) { setTargetError('请先打开一个 Harness 对话，再进行多尺寸实测。'); return }
+      setTargetError(undefined); setCapturingDesignReferenceProgress({ current: 1, total: 3 })
+      const response = await runDesignReferenceCaptureOnce(designReferenceCaptureRef, tab.tabId, capturingTabId => { setCapturingDesignReferenceTabId(capturingTabId); projectBrowserTargetSnapshot(capturingTabId) }, () => requestResponsiveDesignReferenceCapture({ browser: 'chrome', windowId: tab.windowId, tabId: tab.tabId, url: tab.url }, command.sessionId as string))
+      setCapturingDesignReferenceProgress(undefined)
+      if (response === undefined) return
+      if (!response.ok) setTargetError(response.error ?? '无法完成桌面、平板、手机实测。')
       else void loadRecentPrototypes()
       return
     }
@@ -665,6 +754,14 @@ function App(): React.JSX.Element {
         void returnToSidePanel(isHarnessSessionIdentity(value.sessionId) ? value.sessionId : activeHarnessSessionId).catch((error: unknown) => console.error('[deepseek-harness] Failed to return to the side panel:', error))
         return
       }
+      if (value.type === 'open-recent-prototypes/v1' && value.nonce === frameNonce) {
+        setRecentPrototypesOpen(true)
+        setRecentPrototypeError(undefined)
+        setEditingRecentProjectId(undefined)
+        setDeletingRecentProjectId(undefined)
+        void loadRecentPrototypes()
+        return
+      }
       const selectedSessionId = value.sessionId
       if (value.type === 'harness-session-selected/v1' && isHarnessSessionIdentity(selectedSessionId)) { setSidePanelHandoff((previous) => ({ ...previous, sessionId: selectedSessionId })); return }
       if (value.type === 'session-handoff-applied/v1' && value.sessionId === activeHarnessSessionId && surface === 'sidepanel' && sidePanelHandoff.tabId !== undefined) {
@@ -710,20 +807,20 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
+  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, loadRecentPrototypes, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (
       <section className="harness-frame-shell">
         <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="ACCRUI Web UI" allow="clipboard-read; clipboard-write" />
-        <div className="recent-prototypes-control">
-          <button className="recent-prototypes-trigger" type="button" aria-expanded={recentPrototypesOpen} onClick={() => { setRecentPrototypesOpen(value => !value); void loadRecentPrototypes() }}>最近原型{recentPrototypes.length > 0 ? ` · ${recentPrototypes.length}` : ''}</button>
-          {recentPrototypesOpen && <section className="recent-prototypes-popover" aria-label="最近原型">
-            <header><div><b>最近原型</b><small>关闭原型页后，也能从这里继续。</small></div><button type="button" className="recent-prototypes-refresh" aria-label="刷新最近原型" onClick={() => void loadRecentPrototypes()}>↻</button></header>
-            {recentPrototypeError !== undefined ? <p className="recent-prototypes-error">{recentPrototypeError}</p> : recentPrototypes.length === 0 ? <p className="recent-prototypes-empty">还没有保存过原型。先在对话中选择网页并提取设计规范。</p> : <ul>{recentPrototypes.map(project => <li key={project.projectId}><button type="button" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); setRecentPrototypeError(undefined); void openRecentPrototypeStudio(project.projectId).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法打开最近原型。'); else setRecentPrototypesOpen(false) }).finally(() => setOpeningRecentProjectId(undefined)) }}><span><b>{project.referenceTitle ?? '参考网页原型'}</b><small>{project.referenceUrl ?? '参考网页信息已清理'} · {new Date(project.updatedAt).toLocaleString()}</small></span><em>{openingRecentProjectId === project.projectId ? '正在打开…' : project.authorizationActive ? '继续编辑' : '恢复后编辑'}</em></button></li>)}</ul>}
-            <footer>“恢复后编辑”会先打开项目；随后由你点击“恢复已有项目”，不会自动恢复。</footer>
+        {recentPrototypesOpen && <section className="recent-prototypes-popover" aria-label="最近原型">
+            <header><div><b>最近原型</b><small>关闭原型页后，也能从这里继续。</small></div><div className="recent-prototypes-header-actions"><button type="button" className="recent-prototypes-refresh" aria-label="刷新最近原型" onClick={() => void loadRecentPrototypes()}>↻</button><button type="button" className="recent-prototypes-close" aria-label="关闭最近原型" onClick={() => setRecentPrototypesOpen(false)}>关闭</button></div></header>
+            {recentPrototypeError !== undefined ? <p className="recent-prototypes-error">{recentPrototypeError}</p> : recentPrototypes.length === 0 ? <p className="recent-prototypes-empty">还没有保存过原型。先在对话中选择网页并提取设计规范。</p> : <ul>{recentPrototypes.map(project => <li key={project.projectId}><div className="recent-prototype-card">
+              <button className="recent-prototype-open" type="button" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); setRecentPrototypeError(undefined); void openRecentPrototypeStudio(project.projectId).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法打开最近原型。'); else setRecentPrototypesOpen(false) }).finally(() => setOpeningRecentProjectId(undefined)) }}><span><b>{project.projectName ?? project.referenceTitle ?? '未命名原型'}</b><small>{project.revisionCount === undefined ? '历史项目' : project.revisionCount === 0 ? '尚未生成版本' : `共 ${project.revisionCount} 个版本`} · {new Date(project.updatedAt).toLocaleString()}</small></span><em>{openingRecentProjectId === project.projectId ? '处理中…' : '打开'}</em></button>
+              {editingRecentProjectId === project.projectId ? <div className="recent-prototype-edit"><input aria-label="原型名称" maxLength={80} value={recentProjectNameDraft} onChange={event => setRecentProjectNameDraft(event.target.value)} autoFocus /><button type="button" disabled={recentProjectNameDraft.trim() === '' || openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); void manageRecentPrototypeStudio({ type: 'prototype-studio-rename/v1', projectId: project.projectId, projectName: recentProjectNameDraft.trim() }).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法重命名原型。'); else { setEditingRecentProjectId(undefined); void loadRecentPrototypes() } }).finally(() => setOpeningRecentProjectId(undefined)) }}>保存</button><button type="button" onClick={() => setEditingRecentProjectId(undefined)}>取消</button></div> : deletingRecentProjectId === project.projectId ? <div className="recent-prototype-delete-confirm"><span>确认永久删除这个原型和全部版本？</span><button type="button" className="danger" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); void manageRecentPrototypeStudio({ type: 'prototype-studio-delete/v1', projectId: project.projectId, confirmationProjectId: project.projectId }).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法删除原型。'); else { setDeletingRecentProjectId(undefined); void loadRecentPrototypes() } }).finally(() => setOpeningRecentProjectId(undefined)) }}>确认删除</button><button type="button" onClick={() => setDeletingRecentProjectId(undefined)}>取消</button></div> : <div className="recent-prototype-actions">{activeHarnessSessionId !== undefined && project.boundToCurrentSession === false && <button type="button" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); setRecentPrototypeError(undefined); void continueRecentPrototypeStudio(project.projectId, activeHarnessSessionId).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法在当前对话继续。'); else setRecentPrototypesOpen(false) }).finally(() => setOpeningRecentProjectId(undefined)) }}>在当前对话继续</button>}<button type="button" onClick={() => { setEditingRecentProjectId(project.projectId); setRecentProjectNameDraft(project.projectName ?? project.referenceTitle ?? '未命名原型'); setDeletingRecentProjectId(undefined) }}>重命名</button><button type="button" onClick={() => { setDeletingRecentProjectId(project.projectId); setEditingRecentProjectId(undefined) }}>删除</button></div>}
+            </div></li>)}</ul>}
+            <footer>“在当前对话继续”会由你明确确认后，把项目交给现在打开的 AI 对话；历史版本不会丢失。</footer>
           </section>}
-        </div>
         {surface === 'fullscreen-tab' && <button
           className="fullscreen-collapse"
           type="button"

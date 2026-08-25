@@ -12,7 +12,7 @@ export interface PrototypeRuntimeState {
   validationErrorIds: string[]
 }
 
-export type PrototypeRuntimeEvent = { type: 'reset'; document: PrototypeDocumentV1 } | { type: 'action'; action: PrototypeActionV1 } | { type: 'input'; elementId: string; value: string | boolean; bindStateId?: string } | { type: 'submit'; action: PrototypeActionV1; missingInputIds: string[] }
+export type PrototypeRuntimeEvent = { type: 'reset'; document: PrototypeDocumentV1 } | { type: 'action'; action: PrototypeActionV1 } | { type: 'input'; elementId: string; value: string | boolean; bindStateId?: string } | { type: 'submit'; action: PrototypeActionV1; missingInputIds: string[] } | { type: 'validate'; missingInputIds: string[] }
 
 export function initialRuntimeState(document: PrototypeDocumentV1): PrototypeRuntimeState {
   const stateVariables = document.stateVariables ?? []
@@ -50,6 +50,7 @@ export function prototypeInputHasValidationError(node: PrototypeInputNodeV1, sta
 /** Fixed reducer for the small action language; no model text is ever evaluated. */
 export function reducePrototypeRuntime(state: PrototypeRuntimeState, event: PrototypeRuntimeEvent): PrototypeRuntimeState {
   if (event.type === 'reset') return initialRuntimeState(event.document)
+  if (event.type === 'validate') return { ...state, submitted: false, validationErrorIds: [...new Set(event.missingInputIds)] }
   if (event.type === 'input') { const updated = event.bindStateId === undefined
     ? { ...state, values: { ...state.values, [event.elementId]: event.value } }
     : setBoundState(state, event.bindStateId, event.value); return { ...updated, validationErrorIds: updated.validationErrorIds.filter(id => id !== event.elementId) } }
@@ -67,5 +68,8 @@ export function reducePrototypeRuntime(state: PrototypeRuntimeState, event: Prot
     case 'toggle': return action.targetId === undefined ? state : { ...state, values: { ...state.values, [action.targetId]: !state.values[action.targetId] } }
     case 'set-tab': return action.targetId === undefined || typeof action.value !== 'string' ? state : { ...state, tabs: { ...state.tabs, [action.targetId]: action.value } }
     case 'submit-success': return action.targetScreenId === undefined ? { ...state, submitted: true, validationErrorIds: [] } : { ...state, submitted: true, screenId: action.targetScreenId, openModalIds: [], validationErrorIds: [] }
+    case 'add-row':
+    case 'edit-row':
+    case 'delete-row': return state
   }
 }

@@ -90,11 +90,15 @@ const verifiedWrite = 'prepare -> confirm -> commit -> readback'
 ## 状态流转
 
 \`\`\`mermaid
-stateDiagram-v2
-  [*] --> 待处理
-  待处理 --> 处理中: 开始处理
-  处理中 --> 已完成: 已处理\\n等待回读
-  已完成 --> [*]
+flowchart TD
+  A[进入产业带摸排列表] --> B{选择操作}
+  B -->|新增| C [填写表单<br>必填校验 + 查重 + 天眼查名称校验]
+  B -->|导入| D [下载模板填写<br>上传后逐行校验<br>撞重返回行号提示]
+  C --> E[保存入库]
+  D --> E
+  B -->|导出| F[按当前筛选与本人权限导出<br>大批量走下载中心]
+  B -->|转移| G [选择目标跟进人<br>确认后直接生效]
+  B -->|废弃| H [仅创建人/管理员可操作<br>标记废弃留痕]
 \`\`\`
 `
 
@@ -258,8 +262,10 @@ try {
       const blockRect = block?.getBoundingClientRect();
       return {
         previewVisible: preview ? getComputedStyle(preview).display !== 'none' : false,
+        fallbackVisible: block?.querySelector('.mermaid-fallback') !== null,
         sourceHidden: source?.classList.contains('mermaid-source-hidden') ?? false,
         labelHasLiteralEscape: svg?.textContent?.includes('\\\\n') ?? true,
+        hasIndustryLabels: svg?.textContent?.includes('进入产业带摸排列表') && svg.textContent.includes('必填校验') && svg.textContent.includes('标记废弃留痕'),
         width: rect?.width ?? 0,
         height: rect?.height ?? 0,
         proseWidth: proseRect?.width ?? 0,
@@ -276,7 +282,7 @@ try {
       };
     })(),
   })`)
-  if (initial.hasRightPanel || initial.hasSourceEditor || !initial.hasVisualEditor || initial.visualEditorCount !== 1 || !initial.mermaid.previewVisible || !initial.mermaid.sourceHidden || initial.mermaid.labelHasLiteralEscape || initial.mermaid.contentWidth < 100 || initial.mermaid.widthRatio < 0.9 || initial.mermaid.overflowsProse || initial.mermaid.height < 100 || initial.mermaid.height > 622) {
+  if (initial.hasRightPanel || initial.hasSourceEditor || !initial.hasVisualEditor || initial.visualEditorCount !== 1 || !initial.mermaid.previewVisible || initial.mermaid.fallbackVisible || !initial.mermaid.sourceHidden || initial.mermaid.labelHasLiteralEscape || !initial.mermaid.hasIndustryLabels || initial.mermaid.contentWidth < 100 || initial.mermaid.widthRatio < 0.9 || initial.mermaid.overflowsProse || initial.mermaid.height < 100 || initial.mermaid.height > 622) {
     throw new Error(`Unexpected review layout: ${JSON.stringify(initial)}`)
   }
   await evaluate(client, `document.querySelector('.mermaid-block')?.scrollIntoView({ block: 'center' })`)
@@ -311,6 +317,29 @@ try {
   await evaluate(client, `document.querySelector('button[aria-label="重置并适应流程图"]')?.click()`)
   const resetTransform = await evaluate(client, `document.querySelector('.mermaid-canvas')?.style.transform ?? ''`)
   if (resetTransform !== 'translate(0px, 0px) scale(1)') throw new Error(`Mermaid viewer did not reset: ${resetTransform}`)
+  await evaluate(client, `document.querySelector('button[aria-label="放大流程图"]')?.click()`)
+  const fullscreenBeforeTransform = await evaluate(client, `document.querySelector('.mermaid-canvas')?.style.transform ?? ''`)
+  await evaluate(client, `document.querySelector('button[aria-label="全屏查看流程图"]')?.click()`)
+  await waitFor(client, `document.fullscreenElement === document.querySelector('.mermaid-block') || document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback')`, 'Mermaid fullscreen')
+  const fullscreenState = await evaluate(client, `(() => {
+    const block = document.querySelector('.mermaid-block')
+    return {
+      native: document.fullscreenElement === block,
+      fallback: block?.classList.contains('is-fullscreen-fallback') ?? false,
+      closeVisible: block?.querySelector('button[aria-label="退出全屏查看流程图"]')?.hidden === false,
+      transform: block?.querySelector('.mermaid-canvas')?.style.transform ?? '',
+    }
+  })()`)
+  if ((!fullscreenState.native && !fullscreenState.fallback) || !fullscreenState.closeVisible || fullscreenState.transform !== fullscreenBeforeTransform) {
+    throw new Error(`Mermaid fullscreen did not preserve the viewer state: ${JSON.stringify(fullscreenState)}`)
+  }
+  const mermaidFullscreenScreenshot = await client.send('Page.captureScreenshot', { format: 'png' })
+  await writeFile(new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url), Buffer.from(mermaidFullscreenScreenshot.data, 'base64'))
+  await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' })
+  await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' })
+  await waitFor(client, `document.fullscreenElement !== document.querySelector('.mermaid-block') && !document.querySelector('.mermaid-block')?.classList.contains('is-fullscreen-fallback')`, 'Mermaid fullscreen exit')
+  const fullscreenAfterTransform = await evaluate(client, `document.querySelector('.mermaid-canvas')?.style.transform ?? ''`)
+  if (fullscreenAfterTransform !== fullscreenBeforeTransform) throw new Error(`Mermaid fullscreen exit reset the viewer state: ${fullscreenAfterTransform}`)
   const mermaidScreenshot = await client.send('Page.captureScreenshot', { format: 'png' })
   await writeFile(new URL('./markdown-review-ui-mermaid.png', import.meta.url), Buffer.from(mermaidScreenshot.data, 'base64'))
   await evaluate(client, `document.querySelector('.visual-markdown-editor')?.scrollTo(0, 0)`)
@@ -604,7 +633,7 @@ try {
 
   const screenshot = await client.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true })
   await writeFile(screenshotPath, Buffer.from(screenshot.data, 'base64'))
-  console.log(JSON.stringify({ ok: true, initial, sourceView, viewerTransform, resetTransform, finalState: { ...finalState, bodyText: undefined }, firstDiff, afterReject, afterAccept, crossBlock: { quote: crossBlock.quote, kinds: crossKinds }, screenshots: [screenshotPath.pathname, new URL('./markdown-review-ui-initial.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-zoom.png', import.meta.url).pathname, new URL('./markdown-review-ui-diff-reject.png', import.meta.url).pathname] }, null, 2))
+  console.log(JSON.stringify({ ok: true, initial, sourceView, viewerTransform, resetTransform, fullscreenState, fullscreenAfterTransform, finalState: { ...finalState, bodyText: undefined }, firstDiff, afterReject, afterAccept, crossBlock: { quote: crossBlock.quote, kinds: crossKinds }, screenshots: [screenshotPath.pathname, new URL('./markdown-review-ui-initial.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-zoom.png', import.meta.url).pathname, new URL('./markdown-review-ui-mermaid-fullscreen.png', import.meta.url).pathname, new URL('./markdown-review-ui-diff-reject.png', import.meta.url).pathname] }, null, 2))
 } finally {
   client?.close()
   browser.kill('SIGTERM')

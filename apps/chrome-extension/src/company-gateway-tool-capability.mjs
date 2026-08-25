@@ -4,24 +4,30 @@ const ENDPOINTS = {
   'openai-completions': 'https://anapi-uat.annto.com/api-sse-anthropic/v1/chat/completions',
 }
 
-function anthropicBody(modelId) {
-  return {
+function anthropicBody(modelId, forceTool = true) {
+  const body = {
     model: modelId,
     max_tokens: 32,
     messages: [{ role: 'user', content: 'Call the capability probe tool exactly once.' }],
     tools: [{ name: PROBE_TOOL, description: 'Verifies Agent tool-call support.', input_schema: { type: 'object', properties: {}, additionalProperties: false } }],
-    tool_choice: { type: 'tool', name: PROBE_TOOL },
   }
+  return forceTool ? { ...body, tool_choice: { type: 'tool', name: PROBE_TOOL } } : body
 }
 
-function openAiBody(modelId) {
-  return {
+function openAiBody(modelId, forceTool = true) {
+  const body = {
     model: modelId,
     max_tokens: 32,
     messages: [{ role: 'user', content: 'Call the capability probe tool exactly once.' }],
     tools: [{ type: 'function', function: { name: PROBE_TOOL, description: 'Verifies Agent tool-call support.', parameters: { type: 'object', properties: {}, additionalProperties: false } } }],
-    tool_choice: { type: 'function', function: { name: PROBE_TOOL } },
   }
+  return forceTool ? { ...body, tool_choice: { type: 'function', function: { name: PROBE_TOOL } } } : body
+}
+
+function thinkingRejectsForcedToolChoice(detail) {
+  const normalized = detail.toLowerCase()
+  return normalized.includes('thinking mode does not support this tool_choice')
+    || (detail.includes('Thinking mode') && detail.includes('不支持') && detail.includes('tool_choice'))
 }
 
 function returnedProbe(protocol, value) {
@@ -38,13 +44,21 @@ export async function probeCompanyGatewayToolCapability({ apiKey, protocol, mode
   const headers = protocol === 'anthropic-messages'
     ? { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
     : { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }
-  const response = await fetchImpl(endpoint, {
+  const request = forceTool => fetchImpl(endpoint, {
     method: 'POST', headers, signal,
-    body: JSON.stringify(protocol === 'anthropic-messages' ? anthropicBody(modelId) : openAiBody(modelId)),
+    body: JSON.stringify(protocol === 'anthropic-messages' ? anthropicBody(modelId, forceTool) : openAiBody(modelId, forceTool)),
   })
+  let response = await request(true)
   if (!response.ok) {
     const detail = typeof response.text === 'function' ? (await response.text()).slice(0, 1_000) : `HTTP ${response.status}`
-    throw new Error(`当前模型或协议不支持 Agent 工具调用：${detail || `HTTP ${response.status}`}`)
+    if (!thinkingRejectsForcedToolChoice(detail)) {
+      throw new Error(`当前模型或协议不支持 Agent 工具调用：${detail || `HTTP ${response.status}`}`)
+    }
+    response = await request(false)
+    if (!response.ok) {
+      const retryDetail = typeof response.text === 'function' ? (await response.text()).slice(0, 1_000) : `HTTP ${response.status}`
+      throw new Error(`当前模型或协议不支持 Agent 工具调用：${retryDetail || `HTTP ${response.status}`}`)
+    }
   }
   const value = await response.json()
   if (!returnedProbe(protocol, value)) throw new Error('当前模型没有返回测试工具，不能作为 Agent 模型。')

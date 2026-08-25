@@ -28,3 +28,16 @@ test('automatically selects the same workspace member once its cwd arrives', () 
   sessions.byId.waiting.cwd = '/Users/me/one'
   assert.equal(client.selectReadyWorkspaceDirectorySession(workspaces, sessions, 'one'), 'waiting')
 })
+
+test('falls back to a durable workspace member before its live cwd arrives', () => {
+  const workspaces = [{ workspaceId: 'html', path: '/Users/me/html', sessionIds: ['cold'] }]
+  const sessions = { current: undefined, byId: {} }
+
+  assert.equal(client.selectReadyWorkspaceDirectorySession(workspaces, sessions, 'html'), 'cold')
+})
+
+test('resolves the selected workspace path from the public items snapshot', () => {
+  const workspaces = [{ workspaceId: 'html', path: '/Users/me/html', sessionIds: ['cold'] }]
+
+  assert.equal(client.workspacePathForDirectory(workspaces, 'html'), '/Users/me/html')
+})

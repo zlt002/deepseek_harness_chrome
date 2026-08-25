@@ -2,9 +2,11 @@
 import { spawn } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { acquireHarnessProductBuildLock } from './harness-product-build-lock.mjs'
 import { installedPaths, stopInstalledHost } from './restart-dev.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const generatedRoot = resolve(projectRoot, '.generated')
 const fast = process.argv.slice(2).includes('--fast')
 
 function run(command, args) {
@@ -36,6 +38,9 @@ async function stopCurrentNativeHost() {
   }
 }
 
+const fastBuildLock = fast ? await acquireHarnessProductBuildLock(generatedRoot) : undefined
+process.once('exit', () => { void fastBuildLock?.release() })
+
 await stopCurrentNativeHost()
 
 if (fast) {
@@ -50,6 +55,7 @@ await run('pnpm', ['run', 'build:harness-client-plugins'])
 
 console.log('3/4 Synchronizing Harness Web assets into the extension...')
 await run('pnpm', ['run', 'sync-harness-assets'])
+await fastBuildLock?.release()
 
 console.log('4/4 Restarting WXT and Native Host...')
 // WXT's development public directory is populated during its build:done hook.

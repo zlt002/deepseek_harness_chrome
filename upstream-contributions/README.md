@@ -51,6 +51,14 @@ the official display formatting.
 “配置文件” and gives the action a shrinkable ellipsis width so narrow settings
 surfaces preserve the navigation icons first.
 
+`0022` makes assistant-message file links composable. It carries the owning
+session and workspace root to ordered link resolvers; a resolver may claim a
+destination, while unclaimed links retain the official safe-link fallback.
+
+`0023` gives Tool argument paths the same ordered resolver boundary. A resolver
+may claim a path using the Tool call's session and workspace root; unclaimed
+paths retain the Host opener and the Tool row's normal detail interaction.
+
 Verify against the pinned upstream commit:
 
 ```sh

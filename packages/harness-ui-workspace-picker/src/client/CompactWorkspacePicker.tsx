@@ -13,7 +13,7 @@ import type { ClaudeImportController } from './ClaudeImportModal.tsx'
 import { claudeImportControllerOf } from './claude-import-controller.mjs'
 import { ClaudeImportAction } from './WorkspaceSurfaceActions.tsx'
 import { selectWorkspaceDirectorySession } from './directory-selection.ts'
-import { WORKSPACE_PICKER_DIRECTORY_SLOT, type CompactWorkspacePickerSlots } from './directory-slot.ts'
+import { WORKSPACE_PICKER_DIRECTORY_ACTIONS_SLOT, WORKSPACE_PICKER_DIRECTORY_SLOT, type CompactWorkspacePickerSlots } from './directory-slot.ts'
 import { workspacePickerMaxHeight } from './popover-geometry.ts'
 import { workspacePickerTabForKey, type WorkspacePickerPane } from './tab-navigation.ts'
 
@@ -201,6 +201,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
 } & CompactWorkspacePickerSlots) {
   const importController = claudeImportControllerOf(owner) as ClaudeImportController | undefined
   const [open, setOpen] = useState(false)
+  const [directoryRefreshGeneration, setDirectoryRefreshGeneration] = useState(0)
   const [activePane, setActivePane] = useState<WorkspacePickerPane>('sessions')
   const [popoverMaxHeight, setPopoverMaxHeight] = useState<number>()
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(owner.workspaces[0]?.id)
@@ -445,6 +446,10 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
                 </Tooltip>
                 <ClaudeImportAction workspace={selectedWorkspace} controller={importController} />
               </div>}
+              {activePane === 'directory' && selectedWorkspace !== undefined && owner.renderSlot(WORKSPACE_PICKER_DIRECTORY_ACTIONS_SLOT, {
+                workspacePath: selectedWorkspace.path,
+                refreshDirectory: () => { setDirectoryRefreshGeneration(value => value + 1) },
+              })}
             </div>
             <div id={sessionsPanelId} className={css.list} role="tabpanel" aria-labelledby={sessionsTabId} hidden={activePane !== 'sessions'}>{selectedWorkspace?.sessions.map(session => (
               <SessionRow
@@ -469,7 +474,9 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
               {activePane === 'directory' && (selectedWorkspace === undefined ? <div className={css.empty}>请先选择工作区。</div> : owner.renderSlot(WORKSPACE_PICKER_DIRECTORY_SLOT, {
                   workspaceId: String(selectedWorkspace.id),
                   workspaceTitle: selectedWorkspace.title,
+                  workspacePath: selectedWorkspace.path,
                   sessionId: selectedDirectorySession === undefined ? undefined : String(selectedDirectorySession.id),
+                  refreshGeneration: directoryRefreshGeneration,
                   onClose: () => { setOpen(false) },
                 }))}
             </div>

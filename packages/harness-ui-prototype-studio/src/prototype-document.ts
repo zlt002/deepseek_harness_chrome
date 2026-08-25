@@ -1,6 +1,7 @@
 /** The only model-to-preview contract: bounded data, never executable code. */
 export const PROTOTYPE_DOCUMENT_VERSION = 1 as const
-export const MAX_REFERENCE_EVIDENCE = 12
+/** A design can combine a compact set of pages (for example list/detail/form). */
+export const MAX_REFERENCE_EVIDENCE = 3
 export const MAX_SCREENS = 12
 export const MAX_NODES = 240
 export const MAX_TEXT_LENGTH = 2_000
@@ -9,10 +10,17 @@ export const MAX_DOCUMENT_JSON_BYTES = 200_000
 export const MAX_DOCUMENT_TEXT_BYTES = 24_000
 export const MAX_STATE_VARIABLES = 24
 export const MAX_STATE_ALLOWED_VALUES = 40
+export const MAX_TABLE_COLUMNS = 12
+export const MAX_TABLE_ROWS = 50
+export const MAX_TABLE_FILTERS = 5
+export const MAX_FIELD_RULES = 10
+export const MAX_FIELD_RULE_CONDITIONS = 3
+export const MAX_TEXT_VARIABLES = 5
+export const MAX_CRUD_FIELD_MAPPINGS = 12
 
-export type PrototypeActionType = 'navigate' | 'open-modal' | 'close-modal' | 'set-value' | 'set-state' | 'toggle' | 'set-tab' | 'submit-success' | 'sequence'
+export type PrototypeActionType = 'navigate' | 'open-modal' | 'close-modal' | 'set-value' | 'set-state' | 'toggle' | 'set-tab' | 'submit-success' | 'sequence' | 'add-row' | 'edit-row' | 'delete-row'
 export type PrototypeNodeType = 'text' | 'icon' | 'button' | 'input' | 'card' | 'group' | 'metric' | 'badge' | 'alert' | 'progress' | 'chart' | 'table' | 'tabs' | 'list' | 'breadcrumb' | 'empty-state' | 'pagination' | 'modal'
-export const PROTOTYPE_ACTION_TYPES = ['navigate', 'open-modal', 'close-modal', 'set-value', 'set-state', 'toggle', 'set-tab', 'submit-success', 'sequence'] as const satisfies readonly PrototypeActionType[]
+export const PROTOTYPE_ACTION_TYPES = ['navigate', 'open-modal', 'close-modal', 'set-value', 'set-state', 'toggle', 'set-tab', 'submit-success', 'sequence', 'add-row', 'edit-row', 'delete-row'] as const satisfies readonly PrototypeActionType[]
 export const PROTOTYPE_NODE_TYPES = ['text', 'icon', 'button', 'input', 'card', 'group', 'metric', 'badge', 'alert', 'progress', 'chart', 'table', 'tabs', 'list', 'breadcrumb', 'empty-state', 'pagination', 'modal'] as const satisfies readonly PrototypeNodeType[]
 /** A deliberately small, closed icon vocabulary. Model output may name one, never supply artwork. */
 export const PROTOTYPE_ICON_NAMES = ['home', 'dashboard', 'search', 'add', 'user', 'users', 'settings', 'calendar', 'filter', 'check', 'info', 'warning', 'error', 'close', 'chevron-left', 'chevron-right', 'chevron-up', 'chevron-down', 'arrow-left', 'arrow-right', 'menu', 'bell', 'edit', 'trash'] as const
@@ -59,6 +67,26 @@ export interface ReferenceDesignTokensV1 {
   responsiveBreakpoints?: number[]
   focusStyles?: { width: string; style: 'solid' | 'dashed' | 'dotted'; color: string; offset: string }[]
 }
+export type ReferenceCssStateComponentV1 = 'button' | 'input' | 'select' | 'textarea' | 'link' | 'tab' | 'control' | 'other'
+export type ReferenceCssInteractionStateV1 = 'hover' | 'focus' | 'focus-visible' | 'active' | 'disabled' | 'checked' | 'selected'
+export interface ReferenceCssStateTokenV1 {
+  component: ReferenceCssStateComponentV1
+  state: ReferenceCssInteractionStateV1
+  color?: string
+  backgroundColor?: string
+  borderColor?: string
+  boxShadow?: string
+  transitionDuration?: string
+  transitionTimingFunction?: string
+}
+export interface ReferenceResponsiveCoverageV1 {
+  cssBreakpoints: number[]
+  observedViewportWidths: number[]
+}
+export interface ReferenceStateCoverageV1 {
+  observedTokens: string[]
+  cssRuleTokens: ReferenceCssStateTokenV1[]
+}
 export interface ReferenceCaptureCoverageV1 {
   candidateElements: number
   inspectedElements: number
@@ -69,10 +97,16 @@ export interface ReferenceCaptureCoverageV1 {
   unloadedImages: number
   horizontalOverflow: boolean
   limitations: string[]
+  openShadowRoots?: number
+  potentialClosedShadowHosts?: number
+  responsive?: ReferenceResponsiveCoverageV1
+  states?: ReferenceStateCoverageV1
 }
 export interface ReferenceEvidenceV1 { v: 1; id: string; source: { url: string; title: string; capturedAt: string }; viewport: { width: number; height: number; deviceScaleFactor: number }; pageSize?: { width: number; height: number; sampledBands: number }; captureCoverage?: ReferenceCaptureCoverageV1; observations: string[]; designTokens: ReferenceDesignTokensV1; fingerprint: string; screenshotFingerprint?: string; screenshotDataUrl?: string }
 export interface DesignSpecV1 {
   v: 1; id: string; name: string; basedOnEvidenceIds: string[]; summary: string
+  /** The first page is the explicit visual authority; we never silently average page differences. */
+  merge?: { primaryEvidenceId: string; auxiliaryEvidenceIds: string[]; strategy: 'primary' | 'common' }
   colors: { name: string; value: string; usage: string }[]
   typography: { fontFamily: string; headingWeight: number; bodyWeight?: number; bodySize: number; headingSize?: number; captionSize?: number; fontSizeScale?: number[]; fontWeightScale?: number[]; lineHeightScale?: number[]; bodyLineHeight?: number; headingLineHeight?: number; letterSpacing?: number }
   spacing: { base: number; cardRadius: number; scale?: number[]; sectionGap?: number; contentWidth?: number }
@@ -86,7 +120,8 @@ export interface DesignSpecV1 {
   responsive?: { breakpoints: number[]; layoutPatterns: Array<'block' | 'flex-row' | 'flex-column' | 'grid' | 'sticky'> }
   principles: string[]
 }
-export interface PrototypeActionV1 { type: PrototypeActionType; targetId?: string; targetScreenId?: string; value?: string; actions?: PrototypeActionV1[] }
+export interface PrototypeCrudFieldMappingV1 { fieldId: string; columnKey: string }
+export interface PrototypeActionV1 { type: PrototypeActionType; targetId?: string; targetScreenId?: string; value?: string; actions?: PrototypeActionV1[]; tableId?: string; fieldMap?: PrototypeCrudFieldMappingV1[]; businessName?: string }
 /** A finite product state. It makes a demo feel real without adding model code. */
 export interface PrototypeStateVariableV1 { id: string; initialValue: string; allowedValues: string[] }
 export interface PrototypeVisibleWhenV1 { stateId: string; equals: string }
@@ -106,7 +141,11 @@ export interface PrototypeChartBarV1 { label: string; value: number }
 export interface PrototypeChartNodeV1 extends PrototypeNodeBase { type: 'chart'; label: string; bars: PrototypeChartBarV1[] }
 export interface PrototypeTableColumnV1 { key: string; label: string }
 export interface PrototypeTableRowV1 { id: string; values: string[]; action?: PrototypeActionV1 }
-export interface PrototypeTableNodeV1 extends PrototypeNodeBase { type: 'table'; label?: string; columns: PrototypeTableColumnV1[]; rows: PrototypeTableRowV1[] }
+/** Table interaction stays declarative: inputs name a real column, while trusted UI owns every event. */
+export interface PrototypeTableFilterV1 { inputId: string; columnKey: string; operator: 'contains' | 'equals' }
+export interface PrototypeTableSortV1 { columnKey: string; direction?: 'asc' | 'desc' }
+export interface PrototypeTablePaginationV1 { pageSize: 5 | 10 | 20 }
+export interface PrototypeTableNodeV1 extends PrototypeNodeBase { type: 'table'; label?: string; columns: PrototypeTableColumnV1[]; rows: PrototypeTableRowV1[]; filters?: PrototypeTableFilterV1[]; sort?: PrototypeTableSortV1; pagination?: PrototypeTablePaginationV1 }
 export interface PrototypeListItemV1 { id: string; title: string; detail?: string; action?: PrototypeActionV1 }
 export interface PrototypeListNodeV1 extends PrototypeNodeBase { type: 'list'; items: PrototypeListItemV1[] }
 export interface PrototypeTabV1 { id: string; label: string; children: PrototypeNodeV1[]; action?: PrototypeActionV1 }
@@ -116,11 +155,15 @@ export interface PrototypeBreadcrumbNodeV1 extends PrototypeNodeBase { type: 'br
 export interface PrototypeEmptyStateNodeV1 extends PrototypeNodeBase { type: 'empty-state'; title: string; detail?: string; actionLabel?: string; action?: PrototypeActionV1 }
 export interface PrototypePaginationNodeV1 extends PrototypeNodeBase { type: 'pagination'; label?: string; pageCount: number; bindStateId: string }
 export interface PrototypeModalNodeV1 extends PrototypeNodeBase { type: 'modal'; title: string; placement?: 'dialog' | 'drawer-left' | 'drawer-right'; children: PrototypeNodeV1[] }
+export type PrototypeFieldOperatorV1 = 'equals' | 'not-equals' | 'empty' | 'not-empty'
+export interface PrototypeFieldConditionV1 { fieldId: string; operator: PrototypeFieldOperatorV1; value?: string }
+export interface PrototypeFieldEffectV1 { type: 'show' | 'hide' | 'enable' | 'disable' | 'set-options'; options?: PrototypeInputOptionV1[] }
+export interface PrototypeFieldRuleV1 { targetId: string; conditions: PrototypeFieldConditionV1[]; effect: PrototypeFieldEffectV1 }
 export type PrototypeNodeV1 = PrototypeTextNodeV1 | PrototypeIconNodeV1 | PrototypeButtonNodeV1 | PrototypeInputNodeV1 | PrototypeCardNodeV1 | PrototypeGroupNodeV1 | PrototypeMetricNodeV1 | PrototypeBadgeNodeV1 | PrototypeAlertNodeV1 | PrototypeProgressNodeV1 | PrototypeChartNodeV1 | PrototypeTableNodeV1 | PrototypeListNodeV1 | PrototypeTabsNodeV1 | PrototypeBreadcrumbNodeV1 | PrototypeEmptyStateNodeV1 | PrototypePaginationNodeV1 | PrototypeModalNodeV1
 export interface PrototypeScreenV1 { id: string; title: string; nodes: PrototypeNodeV1[] }
 export interface PrototypeShellItemV1 { id: string; label: string; targetScreenId: string }
 export interface PrototypeShellV1 { productName: string; placement: 'top' | 'sidebar'; items: PrototypeShellItemV1[] }
-export interface PrototypeDocumentV1 { v: 1; id: string; title: string; designSpecId: string; initialScreenId: string; stateVariables?: PrototypeStateVariableV1[]; shell?: PrototypeShellV1; screens: PrototypeScreenV1[] }
+export interface PrototypeDocumentV1 { v: 1; id: string; title: string; designSpecId: string; initialScreenId: string; stateVariables?: PrototypeStateVariableV1[]; fieldRules?: PrototypeFieldRuleV1[]; shell?: PrototypeShellV1; screens: PrototypeScreenV1[] }
 export interface PrototypeBundleV1 { evidence: ReferenceEvidenceV1[]; designSpec: DesignSpecV1; document: PrototypeDocumentV1 }
 export interface PrototypeRevisionV1 { v: 1; id: string; prototypeId: string; parentRevisionId?: string; createdAt: string; author: 'agent' | 'user'; document: PrototypeDocumentV1; documentFingerprint: string; referenceEvidenceFingerprints: string[]; designSpecFingerprint: string; changeSummary: string }
 export interface ValidationSuccess<T> { ok: true; value: T }
@@ -132,7 +175,8 @@ const hash = /^[0-9a-f]{64}$/
 const color = /^(#[0-9a-fA-F]{3,8}|rgba?\([^)]{1,50}\)|hsla?\([^)]{1,60}\))$/
 const cssSize = /^(?:0|\d+(?:\.\d+)?(?:px|rem|em|%))$/
 const cssDuration = /^\d+(?:\.\d+)?m?s$/
-const safeCssText = (value: unknown, max = 320): value is string => typeof value === 'string' && value.length <= max && !/[;{}<>]/.test(value) && !/url\s*\(/i.test(value)
+const safeCssText = (value: unknown, max = 320): value is string => typeof value === 'string' && value.length <= max && !/[;{}<>]/.test(value) && !/url\s*\(|expression\s*\(/i.test(value)
+const cssTimingFunction = /^(?:linear|ease(?:-in|-out|-in-out)?|step-start|step-end|steps\([^)]{1,60}\)|cubic-bezier\([^)]{1,60}\))$/i
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const id = (value: unknown): value is string => typeof value === 'string' && ids.test(value)
 const text = (value: unknown, max = MAX_TEXT_LENGTH): value is string => typeof value === 'string' && value.length <= max
@@ -142,13 +186,37 @@ const strings = (value: unknown, max: number, each = MAX_TEXT_LENGTH): value is 
 const numberIn = (value: unknown, min: number, max: number): value is number => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
 const integerIn = (value: unknown, min: number, max: number): value is number => Number.isSafeInteger(value) && (value as number) >= min && (value as number) <= max
 const fail = <T>(...errors: string[]): ValidationResult<T> => ({ ok: false, errors })
+const cssStateComponents = ['button', 'input', 'select', 'textarea', 'link', 'tab', 'control', 'other'] as const
+const cssInteractionStates = ['hover', 'focus', 'focus-visible', 'active', 'disabled', 'checked', 'selected'] as const
+const observedStateToken = /^(button|input|select|textarea|link|tab|control|other):(disabled|checked|selected|expanded|collapsed|focus)$/
+
+function validCssStateToken(value: unknown): boolean {
+  if (!object(value) || !keys(value, ['component', 'state', 'color', 'backgroundColor', 'borderColor', 'boxShadow', 'transitionDuration', 'transitionTimingFunction']) || !cssStateComponents.includes(value.component as ReferenceCssStateComponentV1) || !cssInteractionStates.includes(value.state as ReferenceCssInteractionStateV1)) return false
+  const properties = [value.color, value.backgroundColor, value.borderColor, value.boxShadow, value.transitionDuration, value.transitionTimingFunction]
+  if (properties.every(item => item === undefined)) return false
+  return (value.color === undefined || color.test(String(value.color)))
+    && (value.backgroundColor === undefined || color.test(String(value.backgroundColor)))
+    && (value.borderColor === undefined || color.test(String(value.borderColor)))
+    && (value.boxShadow === undefined || safeCssText(value.boxShadow, 240))
+    && (value.transitionDuration === undefined || strings(String(value.transitionDuration).split(',').map(item => item.trim()), 8, 20) && String(value.transitionDuration).split(',').every(item => cssDuration.test(item.trim())))
+    && (value.transitionTimingFunction === undefined || typeof value.transitionTimingFunction === 'string' && value.transitionTimingFunction.split(',').map(item => item.trim()).length <= 8 && value.transitionTimingFunction.split(',').map(item => item.trim()).every(item => cssTimingFunction.test(item)))
+}
+
+function validReferenceCaptureCoverage(value: unknown): boolean {
+  if (!object(value) || !keys(value, ['candidateElements', 'inspectedElements', 'sampledElements', 'accessibleStylesheets', 'opaqueStylesheets', 'iframeElements', 'unloadedImages', 'horizontalOverflow', 'limitations', 'openShadowRoots', 'potentialClosedShadowHosts', 'responsive', 'states']) || !integerIn(value.candidateElements, 1, 1_000_000) || !integerIn(value.inspectedElements, 1, 6_000) || value.inspectedElements > value.candidateElements || !integerIn(value.sampledElements, 1, 240) || value.sampledElements > value.inspectedElements || !integerIn(value.accessibleStylesheets, 0, 200) || !integerIn(value.opaqueStylesheets, 0, 200) || !integerIn(value.iframeElements, 0, 10_000) || !integerIn(value.unloadedImages, 0, 100_000) || typeof value.horizontalOverflow !== 'boolean' || !strings(value.limitations, 12, 240)) return false
+  if (value.openShadowRoots !== undefined && !integerIn(value.openShadowRoots, 0, 2_000)) return false
+  if (value.potentialClosedShadowHosts !== undefined && !integerIn(value.potentialClosedShadowHosts, 0, 12_000)) return false
+  if (value.responsive !== undefined && (!object(value.responsive) || !keys(value.responsive, ['cssBreakpoints', 'observedViewportWidths']) || !array(value.responsive.cssBreakpoints, 20) || !value.responsive.cssBreakpoints.every(item => integerIn(item, 240, 7_680)) || !array(value.responsive.observedViewportWidths, 20) || !value.responsive.observedViewportWidths.every(item => integerIn(item, 1, 20_000)))) return false
+  if (value.states !== undefined && (!object(value.states) || !keys(value.states, ['observedTokens', 'cssRuleTokens']) || !array(value.states.observedTokens, 40) || !value.states.observedTokens.every(item => typeof item === 'string' && observedStateToken.test(item)) || !array(value.states.cssRuleTokens, 40) || !value.states.cssRuleTokens.every(validCssStateToken))) return false
+  return true
+}
 
 function byteLength(value: unknown): number { return new TextEncoder().encode(JSON.stringify(value) ?? '').byteLength }
 function stringBytes(value: unknown): number { if (typeof value === 'string') return new TextEncoder().encode(value).byteLength; if (Array.isArray(value)) return value.reduce<number>((total, item) => total + stringBytes(item), 0); if (object(value)) return Object.values(value).reduce<number>((total, item) => total + stringBytes(item), 0); return 0 }
 function withinDocumentBudget(value: unknown): boolean { return byteLength(value) <= MAX_DOCUMENT_JSON_BYTES && stringBytes(value) <= MAX_DOCUMENT_TEXT_BYTES }
 
 type ActionOwner = { kind: 'button' | 'list-item' | 'table-row' | 'tab' | 'navigation-item' | 'breadcrumb-item' | 'empty-state'; id: string; tabParentId?: string }
-interface Registry { ids: Set<string>; screens: Set<string>; inputs: Map<string, PrototypeInputNodeV1>; modals: Set<string>; tabs: Map<string, Set<string>>; stateVariables: Map<string, PrototypeStateVariableV1>; conditions: PrototypeVisibleWhenV1[]; bindings: PrototypeInputNodeV1[]; paginations: PrototypePaginationNodeV1[]; actions: Array<{ action: PrototypeActionV1; owner: ActionOwner }>; types: Set<string>; count: number; errors: string[] }
+interface Registry { ids: Set<string>; screens: Set<string>; inputScreens: Map<string, string>; nodeScreens: Map<string, string>; nodeKinds: Map<string, PrototypeNodeType>; inputs: Map<string, PrototypeInputNodeV1>; modals: Set<string>; tabs: Map<string, Set<string>>; tables: PrototypeTableNodeV1[]; rowTables: Map<string, string>; templates: Array<{ text: string; screenId: string }>; fieldRules: PrototypeFieldRuleV1[]; stateVariables: Map<string, PrototypeStateVariableV1>; conditions: PrototypeVisibleWhenV1[]; bindings: PrototypeInputNodeV1[]; paginations: PrototypePaginationNodeV1[]; actions: Array<{ action: PrototypeActionV1; owner: ActionOwner }>; types: Set<string>; count: number; errors: string[] }
 function addId(registry: Registry, value: unknown, label: string): value is string { if (!id(value) || registry.ids.has(value)) { registry.errors.push(`${label} id 无效或重复。`); return false }; registry.ids.add(value); return true }
 function parseAction(value: unknown, owner: ActionOwner, registry: Registry, allowSequence = true): value is PrototypeActionV1 {
   const errorCount = registry.errors.length
@@ -157,6 +225,15 @@ function parseAction(value: unknown, owner: ActionOwner, registry: Registry, all
     if (!allowSequence || owner.kind === 'tab' || !keys(value, ['type', 'actions']) || !array(value.actions, 4) || value.actions.length === 0) { registry.errors.push('连续动作只能用于按钮、表格行或列表项，必须包含 1 到 4 个非嵌套固定动作。'); return false }
     for (const action of value.actions) parseAction(action, owner, registry, false)
     return registry.errors.length === errorCount
+  }
+  const crud = value.type === 'add-row' || value.type === 'edit-row' || value.type === 'delete-row'
+  if (crud) {
+    const fieldMap = value.fieldMap
+    const safeBusinessName = typeof value.businessName === 'string' && text(value.businessName, 80) && !/[<>;{}]/.test(value.businessName) && !/\b(?:javascript|data|vbscript):|https?:\/\/|url\s*\(/i.test(value.businessName)
+    const mapOk = Array.isArray(fieldMap) && fieldMap.length > 0 && fieldMap.length <= MAX_CRUD_FIELD_MAPPINGS && fieldMap.every(item => object(item) && keys(item, ['fieldId', 'columnKey']) && id(item.fieldId) && id(item.columnKey))
+    const expected = value.type === 'delete-row' ? ['type', 'tableId', 'businessName'] : ['type', 'tableId', 'fieldMap']
+    if (!allowSequence || !keys(value, expected) || !id(value.tableId) || (value.type === 'delete-row' ? !safeBusinessName : !mapOk)) { registry.errors.push('CRUD 动作必须是受限的同页表格操作。'); return false }
+    registry.actions.push({ action: value as unknown as PrototypeActionV1, owner }); return registry.errors.length === errorCount
   }
   const allowed = value.type === 'navigate' || value.type === 'submit-success' ? ['type', 'targetScreenId'] : value.type === 'set-value' || value.type === 'set-state' || value.type === 'set-tab' ? ['type', 'targetId', 'value'] : ['type', 'targetId']
   if (!keys(value, allowed) || (value.targetId !== undefined && !id(value.targetId)) || (value.targetScreenId !== undefined && !id(value.targetScreenId)) || (value.value !== undefined && !text(value.value, 500))) { registry.errors.push('动作字段或目标 id 无效。'); return false }
@@ -171,34 +248,66 @@ function parseVisibleWhen(value: unknown, registry: Registry): value is Prototyp
   registry.conditions.push(value as unknown as PrototypeVisibleWhenV1)
   return true
 }
-function childNodes(children: unknown[], registry: Registry, depth: number): void { for (const child of children) if (!node(child, registry, depth + 1)) registry.errors.push('嵌套组件格式无效。') }
-function node(value: unknown, registry: Registry, depth: number): value is PrototypeNodeV1 {
+function childNodes(children: unknown[], registry: Registry, depth: number, screenId: string): void { for (const child of children) if (!node(child, registry, depth + 1, screenId)) registry.errors.push('嵌套组件格式无效。') }
+function node(value: unknown, registry: Registry, depth: number, screenId: string): value is PrototypeNodeV1 {
   registry.count += 1
   if (depth > 4 || registry.count > MAX_NODES || !object(value) || !addId(registry, value.id, '组件') || !text(value.type, 24)) { registry.errors.push('组件层级或数量超出限制。'); return false }
   const type = value.type
+  registry.nodeScreens.set(value.id as string, screenId)
   if (!PROTOTYPE_NODE_TYPES.includes(type as PrototypeNodeType)) { registry.errors.push(`不支持的组件：${String(type)}`); return false }
   registry.types.add(type)
+  registry.nodeKinds.set(value.id as string, type as PrototypeNodeType)
   const visibleWhenOk = value.visibleWhen === undefined || parseVisibleWhen(value.visibleWhen, registry)
-  if (type === 'text') return visibleWhenOk && keys(value, ['id', 'type', 'text', 'tone', 'visibleWhen']) && text(value.text) && (value.tone === undefined || ['heading', 'body', 'caption'].includes(String(value.tone)))
+  if (type === 'text') { const ok = visibleWhenOk && keys(value, ['id', 'type', 'text', 'tone', 'visibleWhen']) && text(value.text) && (value.tone === undefined || ['heading', 'body', 'caption'].includes(String(value.tone))); if (ok && String(value.text).includes('${')) { const variables = [...String(value.text).matchAll(/\$\{([^}]+)\}/g)]; if (variables.length > MAX_TEXT_VARIABLES || variables.some(item => !id(item[1])) || String(value.text).replace(/\$\{[^}]+\}/g, '').includes('${')) registry.errors.push('文本变量必须是最多 5 个合法字段 id。'); else registry.templates.push({ text: String(value.text), screenId }) }; return ok }
   if (type === 'icon') return visibleWhenOk && keys(value, ['id', 'type', 'name', 'label', 'visibleWhen']) && typeof value.name === 'string' && PROTOTYPE_ICON_NAMES.includes(value.name as PrototypeIconName) && (value.label === undefined || text(value.label, 160))
   if (type === 'button') { const ok = visibleWhenOk && keys(value, ['id', 'type', 'label', 'variant', 'disabled', 'action', 'visibleWhen']) && text(value.label, 160) && (value.variant === undefined || ['primary', 'secondary', 'danger'].includes(String(value.variant))) && (value.disabled === undefined || typeof value.disabled === 'boolean'); if (value.action !== undefined) parseAction(value.action, { kind: 'button', id: value.id as string }, registry); return ok }
-  if (type === 'input') { const inputType = value.inputType ?? 'text'; const options = value.options; const optionsOk = inputType === 'select' ? array(options, 40) && options.length > 0 && options.every(item => object(item) && keys(item, ['label', 'value']) && text(item.label, 120) && text(item.value, 160)) : options === undefined; const bindingOk = value.bindStateId === undefined || (id(value.bindStateId) && inputType !== 'checkbox'); const ok = visibleWhenOk && keys(value, ['id', 'type', 'label', 'placeholder', 'value', 'inputType', 'options', 'bindStateId', 'required', 'errorText', 'visibleWhen']) && text(value.label, 160) && (value.placeholder === undefined || text(value.placeholder, 240)) && (value.value === undefined || text(value.value, 500)) && (value.required === undefined || typeof value.required === 'boolean') && (value.errorText === undefined || text(value.errorText, 240)) && ['text', 'email', 'password', 'checkbox', 'search', 'number', 'date', 'textarea', 'select'].includes(String(inputType)) && optionsOk && bindingOk; if (ok) { const input = value as unknown as PrototypeInputNodeV1; registry.inputs.set(value.id as string, input); if (input.bindStateId !== undefined) registry.bindings.push(input) }; return ok }
-  if (type === 'card' || type === 'modal') { const modal = type === 'modal'; const children = array(value.children, 40) ? value.children : undefined; const ok = visibleWhenOk && keys(value, modal ? ['id', 'type', 'title', 'placement', 'children', 'visibleWhen'] : ['id', 'type', 'label', 'children', 'visibleWhen']) && (modal ? text(value.title, 160) && (value.placement === undefined || ['dialog', 'drawer-left', 'drawer-right'].includes(String(value.placement))) : value.label === undefined || text(value.label, 160)) && children !== undefined; if (modal) registry.modals.add(value.id as string); if (ok && children !== undefined) childNodes(children, registry, depth); return ok }
-  if (type === 'group') { const children = array(value.children, 40) ? value.children : undefined; const ok = visibleWhenOk && keys(value, ['id', 'type', 'label', 'layout', 'children', 'visibleWhen']) && (value.label === undefined || text(value.label, 160)) && ['row', 'column', 'grid-2', 'grid-3'].includes(String(value.layout)) && children !== undefined; if (ok && children !== undefined) childNodes(children, registry, depth); return ok }
+  if (type === 'input') { const inputType = value.inputType ?? 'text'; const options = value.options; const optionsOk = inputType === 'select' ? array(options, 40) && options.length > 0 && options.every(item => object(item) && keys(item, ['label', 'value']) && text(item.label, 120) && text(item.value, 160)) : options === undefined; const bindingOk = value.bindStateId === undefined || (id(value.bindStateId) && inputType !== 'checkbox'); const ok = visibleWhenOk && keys(value, ['id', 'type', 'label', 'placeholder', 'value', 'inputType', 'options', 'bindStateId', 'required', 'errorText', 'visibleWhen']) && text(value.label, 160) && (value.placeholder === undefined || text(value.placeholder, 240)) && (value.value === undefined || text(value.value, 500)) && (value.required === undefined || typeof value.required === 'boolean') && (value.errorText === undefined || text(value.errorText, 240)) && ['text', 'email', 'password', 'checkbox', 'search', 'number', 'date', 'textarea', 'select'].includes(String(inputType)) && optionsOk && bindingOk; if (ok) { const input = value as unknown as PrototypeInputNodeV1; registry.inputs.set(value.id as string, input); registry.inputScreens.set(input.id, screenId); if (input.bindStateId !== undefined) registry.bindings.push(input) }; return ok }
+  if (type === 'card' || type === 'modal') { const modal = type === 'modal'; const children = array(value.children, 40) ? value.children : undefined; const ok = visibleWhenOk && keys(value, modal ? ['id', 'type', 'title', 'placement', 'children', 'visibleWhen'] : ['id', 'type', 'label', 'children', 'visibleWhen']) && (modal ? text(value.title, 160) && (value.placement === undefined || ['dialog', 'drawer-left', 'drawer-right'].includes(String(value.placement))) : value.label === undefined || text(value.label, 160)) && children !== undefined; if (modal) registry.modals.add(value.id as string); if (ok && children !== undefined) childNodes(children, registry, depth, screenId); return ok }
+  if (type === 'group') { const children = array(value.children, 40) ? value.children : undefined; const ok = visibleWhenOk && keys(value, ['id', 'type', 'label', 'layout', 'children', 'visibleWhen']) && (value.label === undefined || text(value.label, 160)) && ['row', 'column', 'grid-2', 'grid-3'].includes(String(value.layout)) && children !== undefined; if (ok && children !== undefined) childNodes(children, registry, depth, screenId); return ok }
   if (type === 'metric') return visibleWhenOk && keys(value, ['id', 'type', 'label', 'value', 'detail', 'tone', 'visibleWhen']) && text(value.label, 160) && text(value.value, 160) && (value.detail === undefined || text(value.detail, 300)) && (value.tone === undefined || ['neutral', 'positive', 'warning', 'danger'].includes(String(value.tone)))
   if (type === 'badge') return visibleWhenOk && keys(value, ['id', 'type', 'text', 'tone', 'visibleWhen']) && text(value.text, 120) && (value.tone === undefined || ['neutral', 'primary', 'positive', 'warning', 'danger'].includes(String(value.tone)))
   if (type === 'alert') return visibleWhenOk && keys(value, ['id', 'type', 'title', 'detail', 'tone', 'visibleWhen']) && text(value.title, 160) && (value.detail === undefined || text(value.detail, 600)) && (value.tone === undefined || ['info', 'positive', 'warning', 'danger'].includes(String(value.tone)))
   if (type === 'progress') return visibleWhenOk && keys(value, ['id', 'type', 'label', 'value', 'detail', 'tone', 'visibleWhen']) && text(value.label, 160) && numberIn(value.value, 0, 100) && (value.detail === undefined || text(value.detail, 300)) && (value.tone === undefined || ['primary', 'positive', 'warning', 'danger'].includes(String(value.tone)))
   if (type === 'chart') return visibleWhenOk && keys(value, ['id', 'type', 'label', 'bars', 'visibleWhen']) && text(value.label, 160) && array(value.bars, 16) && value.bars.length > 0 && value.bars.every(item => object(item) && keys(item, ['label', 'value']) && text(item.label, 120) && numberIn(item.value, 0, 1_000_000_000))
-  if (type === 'table') { if (!visibleWhenOk || !keys(value, ['id', 'type', 'label', 'columns', 'rows', 'visibleWhen']) || (value.label !== undefined && !text(value.label, 160)) || !array(value.columns, 8) || value.columns.length === 0 || !array(value.rows, 40)) return false; const columnKeys = new Set<string>(); for (const column of value.columns) { if (!object(column) || !keys(column, ['key', 'label']) || !id(column.key) || columnKeys.has(column.key) || !text(column.label, 120)) { registry.errors.push('表格列无效或重复。'); continue }; columnKeys.add(column.key as string) }; for (const row of value.rows) { if (!object(row) || !keys(row, ['id', 'values', 'action']) || !addId(registry, row.id, '表格行') || !array(row.values, 8) || row.values.length !== value.columns.length || !row.values.every(item => text(item, 500))) { registry.errors.push('表格行无效或与列数不一致。'); continue }; if (row.action !== undefined) parseAction(row.action, { kind: 'table-row', id: row.id as string }, registry) }; return true }
+  if (type === 'table') {
+    if (!visibleWhenOk || !keys(value, ['id', 'type', 'label', 'columns', 'rows', 'filters', 'sort', 'pagination', 'visibleWhen']) || (value.label !== undefined && !text(value.label, 160)) || !array(value.columns, MAX_TABLE_COLUMNS) || value.columns.length === 0 || !array(value.rows, MAX_TABLE_ROWS)) return false
+    const columnKeys = new Set<string>()
+    for (const column of value.columns) { if (!object(column) || !keys(column, ['key', 'label']) || !id(column.key) || columnKeys.has(column.key) || !text(column.label, 120)) { registry.errors.push('表格列无效或重复。'); continue }; columnKeys.add(column.key as string) }
+    const tableText = (item: unknown): boolean => text(item, 500) && !/[<>;{}]/.test(item) && !/\b(?:javascript|data|vbscript):|https?:\/\/|url\s*\(/i.test(item)
+    for (const row of value.rows) { if (!object(row) || !keys(row, ['id', 'values', 'action']) || !addId(registry, row.id, '表格行') || !array(row.values, MAX_TABLE_COLUMNS) || row.values.length !== value.columns.length || !row.values.every(tableText)) { registry.errors.push('表格行无效、超出文本边界或与列数不一致。'); continue }; registry.nodeScreens.set(row.id as string, screenId); registry.rowTables.set(row.id as string, value.id as string); if (row.action !== undefined) parseAction(row.action, { kind: 'table-row', id: row.id as string }, registry) }
+    const filtersOk = value.filters === undefined || array(value.filters, MAX_TABLE_FILTERS) && value.filters.every(filter => object(filter) && keys(filter, ['inputId', 'columnKey', 'operator']) && id(filter.inputId) && id(filter.columnKey) && ['contains', 'equals'].includes(String(filter.operator)))
+    const sortOk = value.sort === undefined || object(value.sort) && keys(value.sort, ['columnKey', 'direction']) && id(value.sort.columnKey) && (value.sort.direction === undefined || ['asc', 'desc'].includes(String(value.sort.direction)))
+    const paginationOk = value.pagination === undefined || object(value.pagination) && keys(value.pagination, ['pageSize']) && [5, 10, 20].includes(Number(value.pagination.pageSize))
+    if (!filtersOk || !sortOk || !paginationOk) { registry.errors.push('表格筛选、排序或分页配置无效。'); return false }
+    registry.tables.push(value as unknown as PrototypeTableNodeV1)
+    return true
+  }
   if (type === 'list') { if (!visibleWhenOk || !keys(value, ['id', 'type', 'label', 'items', 'visibleWhen']) || (value.label !== undefined && !text(value.label, 160)) || !array(value.items, 40)) return false; for (const item of value.items) { if (!object(item) || !keys(item, ['id', 'title', 'detail', 'action']) || !addId(registry, item.id, '列表项') || !text(item.title, 200) || (item.detail !== undefined && !text(item.detail, 600))) { registry.errors.push('列表项无效。'); continue }; if (item.action !== undefined) parseAction(item.action, { kind: 'list-item', id: item.id as string }, registry) }; return true }
-  if (type === 'tabs') { if (!visibleWhenOk || !keys(value, ['id', 'type', 'label', 'tabs', 'visibleWhen']) || (value.label !== undefined && !text(value.label, 160)) || !array(value.tabs, 8) || value.tabs.length === 0) return false; const tabIds = new Set<string>(); registry.tabs.set(value.id as string, tabIds); for (const tab of value.tabs) { if (!object(tab) || !keys(tab, ['id', 'label', 'children', 'action']) || !addId(registry, tab.id, 'Tab') || !text(tab.label, 80) || !array(tab.children, 40)) { registry.errors.push('Tab 无效。'); continue }; tabIds.add(tab.id as string); if (tab.action !== undefined) parseAction(tab.action, { kind: 'tab', id: tab.id as string, tabParentId: value.id as string }, registry); childNodes(tab.children, registry, depth) }; return true }
+  if (type === 'tabs') { if (!visibleWhenOk || !keys(value, ['id', 'type', 'label', 'tabs', 'visibleWhen']) || (value.label !== undefined && !text(value.label, 160)) || !array(value.tabs, 8) || value.tabs.length === 0) return false; const tabIds = new Set<string>(); registry.tabs.set(value.id as string, tabIds); for (const tab of value.tabs) { if (!object(tab) || !keys(tab, ['id', 'label', 'children', 'action']) || !addId(registry, tab.id, 'Tab') || !text(tab.label, 80) || !array(tab.children, 40)) { registry.errors.push('Tab 无效。'); continue }; registry.nodeScreens.set(tab.id as string, screenId); tabIds.add(tab.id as string); if (tab.action !== undefined) parseAction(tab.action, { kind: 'tab', id: tab.id as string, tabParentId: value.id as string }, registry); childNodes(tab.children, registry, depth, screenId) }; return true }
   if (type === 'breadcrumb') { if (!visibleWhenOk || !keys(value, ['id', 'type', 'items', 'visibleWhen']) || !array(value.items, 8) || value.items.length === 0) return false; for (const item of value.items) { if (!object(item) || !keys(item, ['id', 'label', 'targetScreenId']) || !addId(registry, item.id, '面包屑项') || !text(item.label, 80) || (item.targetScreenId !== undefined && !id(item.targetScreenId))) { registry.errors.push('面包屑项无效。'); continue }; if (item.targetScreenId !== undefined) registry.actions.push({ action: { type: 'navigate', targetScreenId: item.targetScreenId as string }, owner: { kind: 'breadcrumb-item', id: item.id as string } }) }; return true }
   if (type === 'empty-state') { const pairedAction = (value.actionLabel === undefined) === (value.action === undefined); const ok = visibleWhenOk && keys(value, ['id', 'type', 'title', 'detail', 'actionLabel', 'action', 'visibleWhen']) && text(value.title, 160) && (value.detail === undefined || text(value.detail, 600)) && (value.actionLabel === undefined || text(value.actionLabel, 120)) && pairedAction; if (value.action !== undefined) parseAction(value.action, { kind: 'empty-state', id: value.id as string }, registry); return ok }
   if (type === 'pagination') { const ok = visibleWhenOk && keys(value, ['id', 'type', 'label', 'pageCount', 'bindStateId', 'visibleWhen']) && (value.label === undefined || text(value.label, 120)) && Number.isInteger(value.pageCount) && numberIn(value.pageCount, 2, 20) && id(value.bindStateId); if (ok) registry.paginations.push(value as unknown as PrototypePaginationNodeV1); return ok }
   return false
 }
-function validateReferences(registry: Registry): void { for (const condition of registry.conditions) { const variable = registry.stateVariables.get(condition.stateId); if (variable === undefined || !variable.allowedValues.includes(condition.equals)) registry.errors.push('显示条件必须引用已声明的状态和值。') }; for (const input of registry.bindings) { const variable = registry.stateVariables.get(input.bindStateId!); if (variable === undefined) { registry.errors.push('输入框绑定了不存在的状态。'); continue }; if (input.value !== undefined && !variable.allowedValues.includes(input.value)) registry.errors.push('输入框初始值必须属于绑定状态。'); if (input.inputType === 'select' && !input.options?.every(option => variable.allowedValues.includes(option.value))) registry.errors.push('下拉选项必须属于绑定状态。') }; for (const pagination of registry.paginations) { const variable = registry.stateVariables.get(pagination.bindStateId); const pages = Array.from({ length: pagination.pageCount }, (_, index) => String(index + 1)); if (variable === undefined || !pages.every(page => variable.allowedValues.includes(page))) registry.errors.push('分页必须绑定包含全部页码的有限业务状态。') }; for (const { action, owner } of registry.actions) { if ((action.type === 'navigate' || action.type === 'submit-success') && !registry.screens.has(action.targetScreenId!)) registry.errors.push('动作引用了不存在的页面。'); if ((action.type === 'open-modal' || action.type === 'close-modal') && !registry.modals.has(action.targetId!)) registry.errors.push('弹窗动作必须引用 modal。'); if (action.type === 'set-value') { const target = registry.inputs.get(action.targetId!); if (target === undefined || target.inputType === 'checkbox') registry.errors.push('set-value 必须引用非 checkbox input。') }; if (action.type === 'set-state') { const variable = registry.stateVariables.get(action.targetId!); if (variable === undefined || !variable.allowedValues.includes(action.value!)) registry.errors.push('set-state 必须引用已声明状态的允许值。') }; if (action.type === 'toggle') { const target = registry.inputs.get(action.targetId!); if (target?.inputType !== 'checkbox') registry.errors.push('toggle 必须引用 checkbox input。') }; if (action.type === 'set-tab') { const targets = registry.tabs.get(action.targetId!); if (targets === undefined || !targets.has(action.value!) || owner.tabParentId !== action.targetId || owner.id !== action.value) registry.errors.push('set-tab 必须由目标 tabs 内的对应 tab 执行。') } } }
+function validateReferences(registry: Registry): void { for (const condition of registry.conditions) { const variable = registry.stateVariables.get(condition.stateId); if (variable === undefined || !variable.allowedValues.includes(condition.equals)) registry.errors.push('显示条件必须引用已声明的状态和值。') }; for (const input of registry.bindings) { const variable = registry.stateVariables.get(input.bindStateId!); if (variable === undefined) { registry.errors.push('输入框绑定了不存在的状态。'); continue }; if (input.value !== undefined && !variable.allowedValues.includes(input.value)) registry.errors.push('输入框初始值必须属于绑定状态。'); if (input.inputType === 'select' && !input.options?.every(option => variable.allowedValues.includes(option.value))) registry.errors.push('下拉选项必须属于绑定状态。') }; for (const table of registry.tables) { const columnKeys = new Set(table.columns.map(column => column.key)); for (const filter of table.filters ?? []) { const input = registry.inputs.get(filter.inputId); if (input === undefined || input.inputType === 'checkbox' || !columnKeys.has(filter.columnKey)) registry.errors.push('表格筛选必须引用已声明的非 checkbox 输入框和本表列。'); if (input?.value !== undefined && /[<>;{}]|\b(?:javascript|data|vbscript):|https?:\/\/|url\s*\(/i.test(input.value)) registry.errors.push('表格筛选初始值只能是普通文本。') }; if (table.sort !== undefined && !columnKeys.has(table.sort.columnKey)) registry.errors.push('表格排序必须引用本表列。') }; for (const pagination of registry.paginations) { const variable = registry.stateVariables.get(pagination.bindStateId); const pages = Array.from({ length: pagination.pageCount }, (_, index) => String(index + 1)); if (variable === undefined || !pages.every(page => variable.allowedValues.includes(page))) registry.errors.push('分页必须绑定包含全部页码的有限业务状态。') }; for (const { action, owner } of registry.actions) { if ((action.type === 'navigate' || action.type === 'submit-success') && !registry.screens.has(action.targetScreenId!)) registry.errors.push('动作引用了不存在的页面。'); if ((action.type === 'open-modal' || action.type === 'close-modal') && !registry.modals.has(action.targetId!)) registry.errors.push('弹窗动作必须引用 modal。'); if (action.type === 'set-value') { const target = registry.inputs.get(action.targetId!); if (target === undefined || target.inputType === 'checkbox') registry.errors.push('set-value 必须引用非 checkbox input。') }; if (action.type === 'set-state') { const variable = registry.stateVariables.get(action.targetId!); if (variable === undefined || !variable.allowedValues.includes(action.value!)) registry.errors.push('set-state 必须引用已声明状态的允许值。') }; if (action.type === 'toggle') { const target = registry.inputs.get(action.targetId!); if (target?.inputType !== 'checkbox') registry.errors.push('toggle 必须引用 checkbox input。') }; if (action.type === 'set-tab') { const targets = registry.tabs.get(action.targetId!); if (targets === undefined || !targets.has(action.value!) || owner.tabParentId !== action.targetId || owner.id !== action.value) registry.errors.push('set-tab 必须由目标 tabs 内的对应 tab 执行。') } } }
+
+function validateCrudActions(registry: Registry): void {
+  for (const { action, owner } of registry.actions) {
+    if (!['add-row', 'edit-row', 'delete-row'].includes(action.type)) continue
+    const table = registry.tables.find(item => item.id === action.tableId)
+    const ownerScreen = registry.nodeScreens.get(owner.id)
+    if (table === undefined || registry.nodeScreens.get(table.id) !== ownerScreen) { registry.errors.push('CRUD 动作必须引用同页面已声明 table。'); continue }
+    if ((action.type === 'edit-row' || action.type === 'delete-row') && (owner.kind !== 'table-row' || registry.rowTables.get(owner.id) !== table.id)) registry.errors.push('编辑或删除只能作用于用户当前点击的本表行。')
+    if (action.type === 'add-row' && owner.kind === 'table-row') registry.errors.push('新增行不能由既有表格行触发。')
+    if (action.type === 'delete-row') continue
+    const columns = new Set(table.columns.map(column => column.key)); const fields = new Set<string>(); const targets = new Set<string>()
+    for (const mapping of action.fieldMap ?? []) {
+      const input = registry.inputs.get(mapping.fieldId)
+      if (input === undefined || input.inputType === 'checkbox' || registry.inputScreens.get(mapping.fieldId) !== ownerScreen || !columns.has(mapping.columnKey) || fields.has(mapping.fieldId) || targets.has(mapping.columnKey)) registry.errors.push('CRUD 字段映射必须是同页、唯一的普通表单字段和表格列。')
+      fields.add(mapping.fieldId); targets.add(mapping.columnKey)
+    }
+  }
+}
 
 function parseStateVariables(value: unknown, registry: Registry): void {
   if (value === undefined) return
@@ -209,13 +318,53 @@ function parseStateVariables(value: unknown, registry: Registry): void {
   }
 }
 
+function parseFieldRules(value: unknown, registry: Registry): void {
+  if (value === undefined) return
+  const safeFieldText = (item: unknown): item is string => text(item, 160) && !/[<>;{}]/.test(item) && !/\b(?:javascript|data|vbscript):|https?:\/\/|url\s*\(/i.test(item)
+  if (!array(value, MAX_FIELD_RULES)) { registry.errors.push('字段联动规则超过限制。'); return }
+  for (const rule of value) {
+    const conditions = object(rule) && Array.isArray(rule.conditions) ? rule.conditions : undefined
+    const effect = object(rule) ? rule.effect : undefined
+    const conditionsOk = conditions !== undefined && conditions.length > 0 && conditions.length <= MAX_FIELD_RULE_CONDITIONS && conditions.every(condition => object(condition) && keys(condition, ['fieldId', 'operator', 'value']) && id(condition.fieldId) && ['equals', 'not-equals', 'empty', 'not-empty'].includes(String(condition.operator)) && (['equals', 'not-equals'].includes(String(condition.operator)) ? safeFieldText(condition.value) : condition.value === undefined))
+    const optionsOk = object(effect) && (effect.type === 'set-options' ? array(effect.options, 40) && effect.options.length > 0 && effect.options.every(option => object(option) && keys(option, ['label', 'value']) && safeFieldText(option.label) && safeFieldText(option.value)) : effect.options === undefined)
+    if (!object(rule) || !keys(rule, ['targetId', 'conditions', 'effect']) || !id(rule.targetId) || !conditionsOk || !object(effect) || !keys(effect, ['type', 'options']) || !['show', 'hide', 'enable', 'disable', 'set-options'].includes(String(effect.type)) || !optionsOk) { registry.errors.push('字段联动规则格式无效。'); continue }
+    registry.fieldRules.push(rule as unknown as PrototypeFieldRuleV1)
+  }
+}
+
+function validateFieldRules(registry: Registry): void {
+  const referencedFields = new Set<string>()
+  const effectSlots = new Set<string>()
+  const graph = new Map<string, Set<string>>()
+  for (const rule of registry.fieldRules) {
+    const targetScreen = registry.nodeScreens.get(rule.targetId)
+    const targetKind = registry.nodeKinds.get(rule.targetId)
+    const effect = rule.effect
+    const slot = `${rule.targetId}:${effect.type === 'show' || effect.type === 'hide' ? 'visibility' : effect.type === 'enable' || effect.type === 'disable' ? 'enabled' : 'options'}`
+    if (targetScreen === undefined || effectSlots.has(slot)) registry.errors.push('字段联动目标不存在或有冲突规则。')
+    effectSlots.add(slot)
+    if ((effect.type === 'enable' || effect.type === 'disable') && !['input', 'button'].includes(String(targetKind))) registry.errors.push('启用或禁用只能作用于 input 或 button。')
+    if (effect.type === 'set-options' && (targetKind !== 'input' || registry.inputs.get(rule.targetId)?.inputType !== 'select')) registry.errors.push('set-options 只能作用于 select input。')
+    for (const condition of rule.conditions) {
+      referencedFields.add(condition.fieldId)
+      if (!registry.inputs.has(condition.fieldId) || registry.inputScreens.get(condition.fieldId) !== targetScreen) registry.errors.push('字段联动条件必须引用同页面已声明 input。')
+      if (targetKind === 'input') { const edges = graph.get(condition.fieldId) ?? new Set<string>(); edges.add(rule.targetId); graph.set(condition.fieldId, edges) }
+    }
+  }
+  if (referencedFields.size > MAX_FIELD_RULES) registry.errors.push('字段联动最多引用 10 个字段。')
+  const visiting = new Set<string>(); const visited = new Set<string>()
+  const visit = (fieldId: string): boolean => { if (visiting.has(fieldId)) return true; if (visited.has(fieldId)) return false; visiting.add(fieldId); const cyclic = [...(graph.get(fieldId) ?? [])].some(visit); visiting.delete(fieldId); visited.add(fieldId); return cyclic }
+  if ([...graph.keys()].some(visit)) registry.errors.push('字段联动不能存在循环依赖。')
+  for (const template of registry.templates) for (const match of template.text.matchAll(/\$\{([^}]+)\}/g)) if (!registry.inputs.has(match[1]) || registry.inputScreens.get(match[1]) !== template.screenId) registry.errors.push('文本变量必须引用同页面已声明 input。')
+}
+
 /** Parse untrusted agent output and resolve every reference only after discovery. */
 export function validatePrototypeDocument(value: unknown): ValidationResult<PrototypeDocumentV1> {
   if (!withinDocumentBudget(value)) return fail('原型文档总大小或总文本超过限制。')
-  if (!object(value) || !keys(value, ['v', 'id', 'title', 'designSpecId', 'initialScreenId', 'stateVariables', 'shell', 'screens']) || value.v !== 1 || !id(value.id) || !text(value.title, 160) || !id(value.designSpecId) || !id(value.initialScreenId) || !array(value.screens, MAX_SCREENS) || value.screens.length === 0) return fail('原型文档不是受支持的 V1 格式。')
-  const registry: Registry = { ids: new Set([value.id]), screens: new Set(), inputs: new Map(), modals: new Set(), tabs: new Map(), stateVariables: new Map(), conditions: [], bindings: [], paginations: [], actions: [], types: new Set(), count: 0, errors: [] }
+  if (!object(value) || !keys(value, ['v', 'id', 'title', 'designSpecId', 'initialScreenId', 'stateVariables', 'fieldRules', 'shell', 'screens']) || value.v !== 1 || !id(value.id) || !text(value.title, 160) || !id(value.designSpecId) || !id(value.initialScreenId) || !array(value.screens, MAX_SCREENS) || value.screens.length === 0) return fail('原型文档不是受支持的 V1 格式。')
+  const registry: Registry = { ids: new Set([value.id]), screens: new Set(), inputScreens: new Map(), nodeScreens: new Map(), nodeKinds: new Map(), inputs: new Map(), modals: new Set(), tabs: new Map(), tables: [], rowTables: new Map(), templates: [], fieldRules: [], stateVariables: new Map(), conditions: [], bindings: [], paginations: [], actions: [], types: new Set(), count: 0, errors: [] }
   parseStateVariables(value.stateVariables, registry)
-  for (const screen of value.screens) { if (!object(screen) || !keys(screen, ['id', 'title', 'nodes']) || !addId(registry, screen.id, '页面') || !text(screen.title, 160) || !array(screen.nodes, 80)) { registry.errors.push('页面格式无效。'); continue }; registry.screens.add(screen.id as string); for (const item of screen.nodes) if (!node(item, registry, 0)) registry.errors.push('页面包含不受支持组件或字段。') }
+  for (const screen of value.screens) { if (!object(screen) || !keys(screen, ['id', 'title', 'nodes']) || !addId(registry, screen.id, '页面') || !text(screen.title, 160) || !array(screen.nodes, 80)) { registry.errors.push('页面格式无效。'); continue }; registry.screens.add(screen.id as string); for (const item of screen.nodes) if (!node(item, registry, 0, screen.id as string)) registry.errors.push('页面包含不受支持组件或字段。') }
   if (value.shell !== undefined) {
     if (!object(value.shell) || !keys(value.shell, ['productName', 'placement', 'items']) || !text(value.shell.productName, 120) || !['top', 'sidebar'].includes(String(value.shell.placement)) || !array(value.shell.items, 12) || value.shell.items.length === 0) registry.errors.push('产品导航外壳格式无效。')
     else for (const item of value.shell.items) {
@@ -223,7 +372,8 @@ export function validatePrototypeDocument(value: unknown): ValidationResult<Prot
       registry.actions.push({ action: { type: 'navigate', targetScreenId: item.targetScreenId as string }, owner: { kind: 'navigation-item', id: item.id as string } })
     }
   }
-  if (!registry.screens.has(value.initialScreenId)) registry.errors.push('初始页面不存在。'); validateReferences(registry)
+  parseFieldRules(value.fieldRules, registry)
+  if (!registry.screens.has(value.initialScreenId)) registry.errors.push('初始页面不存在。'); validateReferences(registry); validateFieldRules(registry); validateCrudActions(registry)
   if (!registry.actions.some(item => item.action.type !== 'close-modal')) registry.errors.push('原型至少需要一条可演示交互流程，必须能改变页面、弹窗、表单、标签页或业务状态，不能只展示静态文字和图片。')
   if (registry.count < 6 || registry.types.size < 3 || ![...registry.types].some(type => ['card', 'group', 'input', 'metric', 'alert', 'progress', 'chart', 'table', 'tabs', 'list', 'empty-state', 'pagination'].includes(type))) registry.errors.push('原型页面过于简单：至少需要 6 个组件、3 种组件类型，并包含表单、卡片、列表、表格、指标、图表、空状态、分页或标签页等真实业务结构。')
   return registry.errors.length === 0 ? { ok: true, value: value as unknown as PrototypeDocumentV1 } : fail(...registry.errors)
@@ -232,7 +382,7 @@ export function isIsoDate(value: unknown): value is string { return typeof value
 export function validateReferenceEvidence(value: unknown): ValidationResult<ReferenceEvidenceV1> {
   const tokenKeys = ['colors', 'fonts', 'radius', 'spacing', 'textColors', 'backgroundColors', 'pageBackgroundColors', 'elevatedBackgroundColors', 'borderColors', 'accentColors', 'accentBackgroundColors', 'accentTextColors', 'fontSizes', 'fontWeights', 'lineHeights', 'letterSpacings', 'textStyles', 'borderWidths', 'borderStyles', 'shadows', 'gradients', 'opacities', 'controlHeights', 'motionDurations', 'motionEasings', 'buttonHeights', 'inputHeights', 'contentWidths', 'iconSizes', 'componentKinds', 'componentStates', 'componentSamples', 'layoutPatterns', 'responsiveBreakpoints', 'focusStyles']
   if (!object(value) || !keys(value, ['v', 'id', 'source', 'viewport', 'pageSize', 'captureCoverage', 'observations', 'designTokens', 'fingerprint', 'screenshotFingerprint', 'screenshotDataUrl']) || value.v !== 1 || !id(value.id) || !object(value.source) || !keys(value.source, ['url', 'title', 'capturedAt']) || !text(value.source.url, MAX_URL_LENGTH) || !/^https?:\/\//.test(value.source.url) || !text(value.source.title, 240) || !isIsoDate(value.source.capturedAt) || !object(value.viewport) || !keys(value.viewport, ['width', 'height', 'deviceScaleFactor']) || !numberIn(value.viewport.width, 1, 20_000) || !numberIn(value.viewport.height, 1, 20_000) || !numberIn(value.viewport.deviceScaleFactor, .25, 8) || (value.pageSize !== undefined && (!object(value.pageSize) || !keys(value.pageSize, ['width', 'height', 'sampledBands']) || !numberIn(value.pageSize.width, 1, 100_000) || !numberIn(value.pageSize.height, 1, 1_000_000) || !numberIn(value.pageSize.sampledBands, 1, 12))) || !strings(value.observations, 40, 600) || !object(value.designTokens) || !keys(value.designTokens, tokenKeys) || !strings(value.designTokens.colors, 24, 80) || !value.designTokens.colors.every(item => color.test(item)) || !strings(value.designTokens.fonts, 12, 120) || !strings(value.designTokens.radius, 12, 80) || !strings(value.designTokens.spacing, 16, 80)) return fail('参考网页证据格式无效或超过大小限制。')
-  if (value.captureCoverage !== undefined && (!object(value.captureCoverage) || !keys(value.captureCoverage, ['candidateElements', 'inspectedElements', 'sampledElements', 'accessibleStylesheets', 'opaqueStylesheets', 'iframeElements', 'unloadedImages', 'horizontalOverflow', 'limitations']) || !integerIn(value.captureCoverage.candidateElements, 1, 1_000_000) || !integerIn(value.captureCoverage.inspectedElements, 1, 6_000) || value.captureCoverage.inspectedElements > value.captureCoverage.candidateElements || !integerIn(value.captureCoverage.sampledElements, 1, 240) || value.captureCoverage.sampledElements > value.captureCoverage.inspectedElements || !integerIn(value.captureCoverage.accessibleStylesheets, 0, 200) || !integerIn(value.captureCoverage.opaqueStylesheets, 0, 200) || !integerIn(value.captureCoverage.iframeElements, 0, 10_000) || !integerIn(value.captureCoverage.unloadedImages, 0, 100_000) || typeof value.captureCoverage.horizontalOverflow !== 'boolean' || !strings(value.captureCoverage.limitations, 12, 240))) return fail('参考网页采集覆盖信息无效。')
+  if (value.captureCoverage !== undefined && (!validReferenceCaptureCoverage(value.captureCoverage))) return fail('参考网页采集覆盖信息无效。')
   for (const key of ['textColors', 'backgroundColors', 'pageBackgroundColors', 'elevatedBackgroundColors', 'borderColors', 'accentColors', 'accentBackgroundColors', 'accentTextColors'] as const) { const list = value.designTokens[key]; if (list !== undefined && (!strings(list, 24, 80) || !list.every(item => color.test(item)))) return fail('参考网页颜色规范无效。') }
   for (const key of ['fontSizes', 'lineHeights', 'borderWidths', 'controlHeights', 'buttonHeights', 'inputHeights', 'contentWidths', 'iconSizes'] as const) { const list = value.designTokens[key]; if (list !== undefined && (!strings(list, 20, 80) || !list.every(item => item === 'normal' || cssSize.test(item)))) return fail('参考网页尺寸规范无效。') }
   if (value.designTokens.letterSpacings !== undefined && (!strings(value.designTokens.letterSpacings, 20, 80) || !value.designTokens.letterSpacings.every(item => item === 'normal' || /^-?\d+(?:\.\d+)?(?:px|rem|em)$/.test(item)))) return fail('参考网页字距规范无效。')
@@ -242,7 +392,7 @@ export function validateReferenceEvidence(value: unknown): ValidationResult<Refe
   for (const key of ['componentKinds', 'componentStates'] as const) { const list = value.designTokens[key]; if (list !== undefined && !strings(list, 32, 120)) return fail('参考网页组件规范无效。') }
   if (value.designTokens.componentSamples !== undefined && (!array(value.designTokens.componentSamples, 20) || !value.designTokens.componentSamples.every(item => object(item) && keys(item, ['kind', 'count', 'exampleText', 'states', 'width', 'height', 'color', 'backgroundColor', 'backgroundImage', 'borderColor', 'borderRadius', 'borderWidth', 'boxShadow', 'disabledOpacity', 'transitionDuration', 'transitionTimingFunction']) && text(item.kind, 60) && numberIn(item.count, 1, 240) && (item.exampleText === undefined || text(item.exampleText, 120)) && strings(item.states, 8, 40) && numberIn(item.width, 1, 20_000) && numberIn(item.height, 1, 20_000) && color.test(String(item.color)) && color.test(String(item.backgroundColor)) && (item.backgroundImage === undefined || safeCssText(String(item.backgroundImage))) && color.test(String(item.borderColor)) && safeCssText(String(item.borderRadius)) && safeCssText(String(item.borderWidth)) && safeCssText(String(item.boxShadow)) && (item.disabledOpacity === undefined || /^\d*(?:\.\d+)?$/.test(String(item.disabledOpacity))) && (item.transitionDuration === undefined || safeCssText(String(item.transitionDuration), 80)) && (item.transitionTimingFunction === undefined || safeCssText(String(item.transitionTimingFunction), 120))))) return fail('参考网页组件样本无效。')
   if (value.designTokens.layoutPatterns !== undefined && (!array(value.designTokens.layoutPatterns, 8) || !value.designTokens.layoutPatterns.every(item => ['block', 'flex-row', 'flex-column', 'grid', 'sticky'].includes(String(item))))) return fail('参考网页布局模式无效。')
-  if (value.designTokens.responsiveBreakpoints !== undefined && (!array(value.designTokens.responsiveBreakpoints, 12) || !value.designTokens.responsiveBreakpoints.every(item => numberIn(item, 240, 7_680)))) return fail('参考网页响应式断点无效。')
+  if (value.designTokens.responsiveBreakpoints !== undefined && (!array(value.designTokens.responsiveBreakpoints, 20) || !value.designTokens.responsiveBreakpoints.every(item => numberIn(item, 240, 7_680)))) return fail('参考网页响应式断点无效。')
   if (value.designTokens.focusStyles !== undefined && (!array(value.designTokens.focusStyles, 8) || !value.designTokens.focusStyles.every(item => object(item) && keys(item, ['width', 'style', 'color', 'offset']) && cssSize.test(String(item.width)) && ['solid', 'dashed', 'dotted'].includes(String(item.style)) && color.test(String(item.color)) && /^-?\d+(?:\.\d+)?px$/.test(String(item.offset))))) return fail('参考网页焦点样式无效。')
   for (const key of ['shadows', 'gradients'] as const) { const list = value.designTokens[key]; if (list !== undefined && (!strings(list, 12, 320) || !list.every(item => safeCssText(item)))) return fail('参考网页效果规范无效。') }
   if (!text(value.fingerprint, 64) || !hash.test(value.fingerprint) || (value.screenshotFingerprint !== undefined && (!text(value.screenshotFingerprint, 64) || !hash.test(value.screenshotFingerprint))) || (value.screenshotDataUrl !== undefined && (!text(value.screenshotDataUrl, 2_000_000) || !/^data:image\/(png|jpeg);base64,/.test(value.screenshotDataUrl)))) return fail('参考网页证据格式无效或超过大小限制。')
@@ -272,7 +422,16 @@ function validDesignMotion(value: unknown): boolean {
 }
 export function validateDesignSpec(value: unknown, authorizedEvidenceIds: readonly string[]): ValidationResult<DesignSpecV1> {
   if (authorizedEvidenceIds.length === 0 || new Set(authorizedEvidenceIds).size !== authorizedEvidenceIds.length || !authorizedEvidenceIds.every(id)) return fail('设计规范必须有非空、去重的已授权参考证据。')
-  if (!object(value) || !keys(value, ['v', 'id', 'name', 'basedOnEvidenceIds', 'summary', 'colors', 'typography', 'spacing', 'surfaces', 'borders', 'effects', 'controls', 'motion', 'focus', 'responsive', 'principles']) || value.v !== 1 || !id(value.id) || !text(value.name, 120) || !strings(value.basedOnEvidenceIds, MAX_REFERENCE_EVIDENCE, 80) || value.basedOnEvidenceIds.length === 0 || new Set(value.basedOnEvidenceIds).size !== value.basedOnEvidenceIds.length || !value.basedOnEvidenceIds.every(item => id(item) && authorizedEvidenceIds.includes(item)) || !text(value.summary, 1_200) || !array(value.colors, 16) || value.colors.length === 0 || !value.colors.every(item => object(item) && keys(item, ['name', 'value', 'usage']) && text(item.name, 80) && text(item.value, 80) && color.test(item.value) && text(item.usage, 240))) return fail('设计规范的来源或颜色无效。')
+  if (!object(value) || !keys(value, ['v', 'id', 'name', 'basedOnEvidenceIds', 'summary', 'merge', 'colors', 'typography', 'spacing', 'surfaces', 'borders', 'effects', 'controls', 'motion', 'focus', 'responsive', 'principles']) || value.v !== 1 || !id(value.id) || !text(value.name, 120) || !strings(value.basedOnEvidenceIds, MAX_REFERENCE_EVIDENCE, 80) || value.basedOnEvidenceIds.length === 0 || new Set(value.basedOnEvidenceIds).size !== value.basedOnEvidenceIds.length || !value.basedOnEvidenceIds.every(item => id(item) && authorizedEvidenceIds.includes(item)) || !text(value.summary, 1_200) || !array(value.colors, 16) || value.colors.length === 0 || !value.colors.every(item => object(item) && keys(item, ['name', 'value', 'usage']) && text(item.name, 80) && text(item.value, 80) && color.test(item.value) && text(item.usage, 240))) return fail('设计规范的来源或颜色无效。')
+  const evidenceIds = value.basedOnEvidenceIds as string[]
+  const multiReference = authorizedEvidenceIds.length > 1
+  if (multiReference && (evidenceIds.length !== authorizedEvidenceIds.length || !authorizedEvidenceIds.every(id => evidenceIds.includes(id)) || value.merge === undefined)) return fail('多页面设计规范必须包含全部参考页及明确的合并策略。')
+  if (value.merge !== undefined) {
+    const merge = value.merge as Record<string, unknown>
+    const auxiliary = merge.auxiliaryEvidenceIds
+    if (!object(merge) || !keys(merge, ['primaryEvidenceId', 'auxiliaryEvidenceIds', 'strategy']) || !id(String(merge.primaryEvidenceId)) || !evidenceIds.includes(String(merge.primaryEvidenceId)) || !strings(auxiliary, MAX_REFERENCE_EVIDENCE - 1, 80) || new Set(auxiliary).size !== auxiliary.length || !auxiliary.every(item => item !== merge.primaryEvidenceId && evidenceIds.includes(item)) || auxiliary.length !== evidenceIds.length - 1 || !['primary', 'common'].includes(String(merge.strategy))) return fail('设计规范的多页面合并策略无效。')
+    if (multiReference && (merge.primaryEvidenceId !== authorizedEvidenceIds[0] || auxiliary.length !== authorizedEvidenceIds.length - 1 || auxiliary.some((id, index) => id !== authorizedEvidenceIds[index + 1]))) return fail('多页面设计规范必须保持主参考和辅助参考的原始顺序。')
+  }
   if (!object(value.typography) || !keys(value.typography, ['fontFamily', 'headingWeight', 'bodyWeight', 'bodySize', 'headingSize', 'captionSize', 'fontSizeScale', 'fontWeightScale', 'lineHeightScale', 'bodyLineHeight', 'headingLineHeight', 'letterSpacing']) || !text(value.typography.fontFamily, 160) || !numberIn(value.typography.headingWeight, 100, 1_000) || (value.typography.bodyWeight !== undefined && !numberIn(value.typography.bodyWeight, 100, 1_000)) || !numberIn(value.typography.bodySize, 8, 96) || (value.typography.headingSize !== undefined && !numberIn(value.typography.headingSize, 10, 160)) || (value.typography.captionSize !== undefined && !numberIn(value.typography.captionSize, 8, 48)) || (value.typography.fontSizeScale !== undefined && (!array(value.typography.fontSizeScale, 20) || !value.typography.fontSizeScale.every(item => numberIn(item, 8, 160)))) || (value.typography.fontWeightScale !== undefined && (!array(value.typography.fontWeightScale, 12) || !value.typography.fontWeightScale.every(item => numberIn(item, 100, 1_000)))) || (value.typography.lineHeightScale !== undefined && (!array(value.typography.lineHeightScale, 20) || !value.typography.lineHeightScale.every(item => numberIn(item, 8, 240)))) || (value.typography.bodyLineHeight !== undefined && !numberIn(value.typography.bodyLineHeight, .8, 3)) || (value.typography.headingLineHeight !== undefined && !numberIn(value.typography.headingLineHeight, .8, 3)) || (value.typography.letterSpacing !== undefined && !numberIn(value.typography.letterSpacing, -5, 20))) return fail('设计规范的排版系统无效。')
   if (!object(value.spacing) || !keys(value.spacing, ['base', 'cardRadius', 'scale', 'sectionGap', 'contentWidth']) || !numberIn(value.spacing.base, 0, 64) || !numberIn(value.spacing.cardRadius, 0, 80) || (value.spacing.scale !== undefined && (!array(value.spacing.scale, 16) || !value.spacing.scale.every(item => numberIn(item, 0, 160)))) || (value.spacing.sectionGap !== undefined && !numberIn(value.spacing.sectionGap, 0, 240)) || (value.spacing.contentWidth !== undefined && !numberIn(value.spacing.contentWidth, 240, 3_840))) return fail('设计规范的间距系统无效。')
   if (value.surfaces !== undefined && (!object(value.surfaces) || !keys(value.surfaces, ['page', 'surface', 'elevated', 'text', 'textMuted', 'border']) || !Object.values(value.surfaces).every(item => typeof item === 'string' && color.test(item)))) return fail('设计规范的表面颜色无效。')
@@ -281,7 +440,7 @@ export function validateDesignSpec(value: unknown, authorizedEvidenceIds: readon
   if (value.controls !== undefined && (!object(value.controls) || !keys(value.controls, ['height', 'buttonHeight', 'inputHeight', 'iconSize', 'radius']) || !numberIn(value.controls.height, 20, 120) || (value.controls.buttonHeight !== undefined && !numberIn(value.controls.buttonHeight, 20, 120)) || !numberIn(value.controls.inputHeight, 20, 240) || (value.controls.iconSize !== undefined && !numberIn(value.controls.iconSize, 4, 160)) || !numberIn(value.controls.radius, 0, 80))) return fail('设计规范的控件尺寸无效。')
   if (value.motion !== undefined && !validDesignMotion(value.motion)) return fail('设计规范的动效系统无效。')
   if (value.focus !== undefined && (!object(value.focus) || !keys(value.focus, ['width', 'style', 'color', 'offset']) || !numberIn(value.focus.width, 0, 12) || !['solid', 'dashed', 'dotted'].includes(String(value.focus.style)) || typeof value.focus.color !== 'string' || !color.test(value.focus.color) || !numberIn(value.focus.offset, -8, 16))) return fail('设计规范的键盘焦点样式无效。')
-  if (value.responsive !== undefined && (!object(value.responsive) || !keys(value.responsive, ['breakpoints', 'layoutPatterns']) || !array(value.responsive.breakpoints, 12) || !value.responsive.breakpoints.every(item => numberIn(item, 240, 7_680)) || !array(value.responsive.layoutPatterns, 8) || !value.responsive.layoutPatterns.every(item => ['block', 'flex-row', 'flex-column', 'grid', 'sticky'].includes(String(item))))) return fail('设计规范的响应式布局无效。')
+  if (value.responsive !== undefined && (!object(value.responsive) || !keys(value.responsive, ['breakpoints', 'layoutPatterns']) || !array(value.responsive.breakpoints, 20) || !value.responsive.breakpoints.every(item => numberIn(item, 240, 7_680)) || !array(value.responsive.layoutPatterns, 8) || !value.responsive.layoutPatterns.every(item => ['block', 'flex-row', 'flex-column', 'grid', 'sticky'].includes(String(item))))) return fail('设计规范的响应式布局无效。')
   if (!strings(value.principles, 12, 240)) return fail('设计原则无效。')
   return { ok: true, value: value as unknown as DesignSpecV1 }
 }

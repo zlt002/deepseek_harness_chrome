@@ -1,4 +1,4 @@
-import { computeReferenceEvidenceFingerprint, validateReferenceEvidence, type ReferenceEvidenceV1 } from '../../../packages/harness-ui-prototype-studio/src/prototype-document'
+import { computeReferenceEvidenceFingerprint, validateReferenceEvidence, type ReferenceCssStateTokenV1, type ReferenceEvidenceV1 } from '../../../packages/harness-ui-prototype-studio/src/prototype-document'
 
 export const PROTOTYPE_REFERENCE_STORAGE_KEY = 'harnessPrototypeReferencesV1'
 
@@ -45,6 +45,7 @@ export interface CapturedDesignReferencePage {
   responsiveBreakpoints?: number[]
   declaredInteractionStates?: string[]
   declaredFocusStyles?: { width: string; style: string; color: string; offset: string }[]
+  cssStateRuleTokens?: ReferenceCssStateTokenV1[]
   captureCoverage?: {
     candidateElements: number
     inspectedElements: number
@@ -55,6 +56,10 @@ export interface CapturedDesignReferencePage {
     unloadedImages: number
     horizontalOverflow: boolean
     limitations: string[]
+    openShadowRoots?: number
+    potentialClosedShadowHosts?: number
+    responsive?: { cssBreakpoints: number[]; observedViewportWidths: number[] }
+    states?: { observedTokens: string[]; cssRuleTokens: ReferenceCssStateTokenV1[] }
   }
   samples: CapturedStyleSample[]
 }
@@ -77,13 +82,54 @@ export function captureDesignReferencePage(): CapturedDesignReferencePage {
   const responsiveBreakpoints = new Set<number>()
   const declaredInteractionStates = new Set<string>()
   const declaredFocusStyles: { width: string; style: string; color: string; offset: string }[] = []
+  const cssStateRuleTokens = new Map<string, ReferenceCssStateTokenV1>()
   let accessibleStylesheets = 0
   let opaqueStylesheets = 0
   let inspectedCssRules = 0
   let cssRuleLimitReached = false
   const cssRuleLimit = 20_000
   const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
-  const collectBreakpoints = (rules: CSSRuleList, depth = 0): void => {
+  const safeColor = (value: string): string | undefined => pageCssColor.test(value.trim()) ? bounded(value, 80) : undefined
+  const safeCssValue = (value: string, maximum: number): string | undefined => {
+    const compact = bounded(value, maximum)
+    return compact === '' || /[;{}<>]|url\s*\(|expression\s*\(/i.test(compact) ? undefined : compact
+  }
+  const safeDuration = (value: string): string | undefined => {
+    const compact = safeCssValue(value, 80)
+    return compact !== undefined && splitCssList(compact).length <= 8 && splitCssList(compact).every(item => /^\d+(?:\.\d+)?m?s$/.test(item)) ? compact : undefined
+  }
+  const safeTimingFunction = (value: string): string | undefined => {
+    const compact = safeCssValue(value, 120)
+    return compact !== undefined && splitCssList(compact).length <= 8 && splitCssList(compact).every(item => /^(?:linear|ease(?:-in|-out|-in-out)?|step-start|step-end|steps\([^)]{1,60}\)|cubic-bezier\([^)]{1,60}\))$/i.test(item)) ? compact : undefined
+  }
+  const stateComponent = (selector: string): ReferenceCssStateTokenV1['component'] => {
+    const value = selector.toLowerCase()
+    if (/\bbutton\b|\[role\s*[~|^$*]?=\s*["']?button/.test(value)) return 'button'
+    if (/\binput\b|\[role\s*[~|^$*]?=\s*["']?(?:textbox|searchbox)/.test(value)) return 'input'
+    if (/\bselect\b|\[role\s*[~|^$*]?=\s*["']?(?:combobox|listbox)/.test(value)) return 'select'
+    if (/\btextarea\b/.test(value)) return 'textarea'
+    if (/\ba\b|\[role\s*[~|^$*]?=\s*["']?link/.test(value)) return 'link'
+    if (/\[role\s*[~|^$*]?=\s*["']?tab/.test(value)) return 'tab'
+    return /\[role\s*=|\b(?:button|input|select|textarea)\b/.test(value) ? 'control' : 'other'
+  }
+  const collectStateRule = (selector: string, style: CSSStyleDeclaration): void => {
+    const component = stateComponent(selector)
+    const values = {
+      ...(safeColor(style.color) === undefined ? {} : { color: safeColor(style.color)! }),
+      ...(safeColor(style.backgroundColor) === undefined ? {} : { backgroundColor: safeColor(style.backgroundColor)! }),
+      ...(safeColor(style.borderColor) === undefined ? {} : { borderColor: safeColor(style.borderColor)! }),
+      ...(safeCssValue(style.boxShadow, 240) === undefined || style.boxShadow === 'none' ? {} : { boxShadow: safeCssValue(style.boxShadow, 240)! }),
+      ...(safeDuration(style.transitionDuration) === undefined ? {} : { transitionDuration: safeDuration(style.transitionDuration)! }),
+      ...(safeTimingFunction(style.transitionTimingFunction) === undefined ? {} : { transitionTimingFunction: safeTimingFunction(style.transitionTimingFunction)! }),
+    }
+    if (Object.keys(values).length === 0) return
+    for (const match of selector.matchAll(/:(hover|active|focus-visible|focus|disabled|checked|selected)\b/gi)) {
+      if (cssStateRuleTokens.size >= 40) return
+      const token: ReferenceCssStateTokenV1 = { component, state: match[1]!.toLowerCase() as ReferenceCssStateTokenV1['state'], ...values }
+      cssStateRuleTokens.set(JSON.stringify(token), token)
+    }
+  }
+  const collectCssRules = (rules: CSSRuleList, depth = 0): void => {
     if (depth > 4 || inspectedCssRules >= cssRuleLimit) { if (inspectedCssRules >= cssRuleLimit) cssRuleLimitReached = true; return }
     for (let index = 0; index < rules.length; index += 1) {
       if (inspectedCssRules >= cssRuleLimit) { cssRuleLimitReached = true; return }
@@ -93,10 +139,11 @@ export function captureDesignReferencePage(): CapturedDesignReferencePage {
       const mediaText = 'media' in rule && rule.media instanceof MediaList ? rule.media.mediaText : ''
       for (const match of mediaText.matchAll(/(?:min|max)-width\s*:\s*(\d+(?:\.\d+)?)(px|em|rem)/gi)) {
         const value = Math.round(Number(match[1]) * (match[2]?.toLowerCase() === 'px' ? 1 : rootFontSize))
-        if (responsiveBreakpoints.size < 12 && value >= 240 && value <= 7_680) responsiveBreakpoints.add(value)
+        if (responsiveBreakpoints.size < 20 && value >= 240 && value <= 7_680) responsiveBreakpoints.add(value)
       }
       if ('selectorText' in rule && typeof rule.selectorText === 'string') {
         for (const match of rule.selectorText.matchAll(/:(hover|active|focus-visible|focus|disabled|checked|selected)\b/gi)) declaredInteractionStates.add(match[1]!.toLowerCase())
+        if ('style' in rule) collectStateRule(rule.selectorText, rule.style as CSSStyleDeclaration)
         if (/:focus(?:-visible)?\b/i.test(rule.selectorText) && 'style' in rule) {
           const style = rule.style as CSSStyleDeclaration
           const shorthand = style.outline.match(/^([^\s]+)\s+(solid|dashed|dotted)\s+(.+)$/i)
@@ -108,12 +155,12 @@ export function captureDesignReferencePage(): CapturedDesignReferencePage {
         }
       }
       if ('cssRules' in rule) {
-        try { collectBreakpoints(rule.cssRules as CSSRuleList, depth + 1) } catch { /* Cross-origin and disabled sheets stay opaque. */ }
+        try { collectCssRules(rule.cssRules as CSSRuleList, depth + 1) } catch { /* Cross-origin and disabled sheets stay opaque. */ }
       }
     }
   }
   for (const sheet of Array.from(document.styleSheets).slice(0, 200)) {
-    try { accessibleStylesheets += 1; collectBreakpoints(sheet.cssRules) } catch { accessibleStylesheets -= 1; opaqueStylesheets += 1 }
+    try { accessibleStylesheets += 1; collectCssRules(sheet.cssRules) } catch { accessibleStylesheets -= 1; opaqueStylesheets += 1 }
   }
   let inspected = 0
   const priority = (element: Element): number => {
@@ -129,19 +176,30 @@ export function captureDesignReferencePage(): CapturedDesignReferencePage {
   const ordinary: Array<{ element: Element; order: number; priority: number }> = []
   // Large SPA pages can contain tens of thousands of nodes. Walk only a bounded
   // prefix instead of materializing the entire DOM into one huge array.
-  const roots: Array<Element | null> = [document.documentElement, document.body]
-  const candidates: Element[] = roots.filter((element): element is Element => element !== null)
+  const candidates: Element[] = document.documentElement === null ? [] : [document.documentElement]
   const candidateLimit = 12_000
   let candidateLimitReached = false
-  if (document.body !== null) {
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT)
+  let openShadowRoots = 0
+  let potentialClosedShadowHosts = 0
+  const collectCandidates = (root: Node): void => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT)
     while (candidates.length < candidateLimit) {
       const next = walker.nextNode()
       if (!(next instanceof Element)) break
       candidates.push(next)
+      if (next.shadowRoot !== null) {
+        openShadowRoots += 1
+        collectCandidates(next.shadowRoot)
+      } else if (next.tagName.includes('-')) {
+        // The platform intentionally does not reveal whether this host has no
+        // Shadow Root or a closed one. Record it as a potential boundary, not
+        // as proof of a closed root.
+        potentialClosedShadowHosts += 1
+      }
     }
-    candidateLimitReached = walker.nextNode() !== null
+    if (candidates.length >= candidateLimit && walker.nextNode() !== null) candidateLimitReached = true
   }
+  if (document.documentElement !== null) collectCandidates(document.documentElement)
   for (let order = 0; order < candidates.length; order += 1) {
     const element = candidates[order]!; const score = priority(element); const bucket = score > 0 ? prioritized : ordinary
     if (bucket.length < 3_000) bucket.push({ element, order, priority: score })
@@ -166,7 +224,7 @@ export function captureDesignReferencePage(): CapturedDesignReferencePage {
       node.getAttribute('aria-expanded') === 'true' ? 'expanded' : node.getAttribute('aria-expanded') === 'false' ? 'collapsed' : '',
       node === document.activeElement ? 'focus' : '',
     ].filter(Boolean).join(',')
-    const text = bounded((node instanceof HTMLElement ? node.innerText : node.textContent) ?? node.getAttribute('aria-label') ?? '', 240)
+    const text = bounded((node instanceof HTMLElement ? node.innerText : '') || node.textContent || node.getAttribute('aria-label') || '', 240)
     const hasVisualSurface = style.backgroundColor !== 'rgba(0, 0, 0, 0)' || style.boxShadow !== 'none' || style.borderRadius !== '0px'
     if (!relevant.has(node.tagName) && role === undefined && text === '' && !hasVisualSurface) continue
     const kind = `${band}:${role ?? node.tagName}`
@@ -214,7 +272,9 @@ export function captureDesignReferencePage(): CapturedDesignReferencePage {
   const limitations = [
     `仅在当前 ${Math.max(1, Math.round(innerWidth))}px 宽度实测；响应式断点来自可读取的 CSS 声明，未切换多尺寸重采。`,
     'hover、active 等交互状态只读取当前 DOM 状态和可访问样式表声明，没有逐个主动触发。',
-    ...(opaqueStylesheets > 0 ? [`${opaqueStylesheets} 个跨域或受限样式表无法读取规则。`] : []),
+    ...(opaqueStylesheets > 0 ? [`${opaqueStylesheets} 个跨域或受限样式表无法读取规则；这些规则只标记为不可访问，不会导致采集失败。`] : []),
+    ...(openShadowRoots > 0 ? [`已读取 ${openShadowRoots} 个开放 Shadow Root 的可见元素。`] : []),
+    ...(potentialClosedShadowHosts > 0 ? [`${potentialClosedShadowHosts} 个自定义组件宿主未暴露开放 Shadow Root；浏览器无法区分“没有 Shadow Root”和 closed Shadow Root，内部样式未作为证据。`] : []),
     ...(iframeElements > 0 ? [`${iframeElements} 个 iframe 的内部页面没有采集。`] : []),
     ...(unloadedImages > 0 ? [`${unloadedImages} 张未完成加载或不可用的图片没有形成可靠证据。`] : []),
     ...(horizontalOverflow ? ['页面存在横向滚动；只采集了与当前横向视口相交的元素。'] : []),
@@ -228,8 +288,8 @@ export function captureDesignReferencePage(): CapturedDesignReferencePage {
     source: { url: safeUrl(), title: bounded(document.title, 240) },
     viewport: { width: Math.max(1, Math.round(innerWidth)), height: Math.max(1, Math.round(innerHeight)), deviceScaleFactor: Math.max(0.25, Math.min(8, devicePixelRatio || 1)) },
     pageSize: { width: Math.max(1, Math.round(pageWidth)), height: Math.max(1, Math.round(pageHeight)), sampledBands },
-    responsiveBreakpoints: [...responsiveBreakpoints].sort((left, right) => left - right), declaredInteractionStates: [...declaredInteractionStates].slice(0, 16), declaredFocusStyles,
-    captureCoverage: { candidateElements: candidates.length, inspectedElements: inspected, sampledElements: samples.length, accessibleStylesheets, opaqueStylesheets, iframeElements, unloadedImages, horizontalOverflow, limitations },
+    responsiveBreakpoints: [...responsiveBreakpoints].sort((left, right) => left - right), declaredInteractionStates: [...declaredInteractionStates].slice(0, 16), declaredFocusStyles, cssStateRuleTokens: [...cssStateRuleTokens.values()].slice(0, 40),
+    captureCoverage: { candidateElements: candidates.length, inspectedElements: inspected, sampledElements: samples.length, accessibleStylesheets, opaqueStylesheets, iframeElements, unloadedImages, horizontalOverflow, limitations, openShadowRoots, potentialClosedShadowHosts, responsive: { cssBreakpoints: [...responsiveBreakpoints].sort((left, right) => left - right), observedViewportWidths: [Math.max(1, Math.round(innerWidth))] }, states: { observedTokens: [], cssRuleTokens: [...cssStateRuleTokens.values()].slice(0, 40) } },
     samples,
   }
 }
@@ -380,15 +440,45 @@ function isCapturedPage(value: unknown): value is CapturedDesignReferencePage {
     && typeof capture.viewport.deviceScaleFactor === 'number' && typeof capture.pageSize?.width === 'number' && typeof capture.pageSize.height === 'number' && typeof capture.pageSize.sampledBands === 'number' && (capture.responsiveBreakpoints === undefined || Array.isArray(capture.responsiveBreakpoints)) && (capture.declaredInteractionStates === undefined || Array.isArray(capture.declaredInteractionStates)) && (capture.declaredFocusStyles === undefined || Array.isArray(capture.declaredFocusStyles)) && coverageOk && Array.isArray(capture.samples) && capture.samples.length <= 240
 }
 
+function safeCapturedStateToken(value: unknown): ReferenceCssStateTokenV1 | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  const allowed = ['component', 'state', 'color', 'backgroundColor', 'borderColor', 'boxShadow', 'transitionDuration', 'transitionTimingFunction']
+  if (!Object.keys(item).every(key => allowed.includes(key)) || !['button', 'input', 'select', 'textarea', 'link', 'tab', 'control', 'other'].includes(String(item.component)) || !['hover', 'focus', 'focus-visible', 'active', 'disabled', 'checked', 'selected'].includes(String(item.state))) return undefined
+  const safe = (raw: unknown, maximum: number): string | undefined => typeof raw === 'string' && raw.length <= maximum && raw.trim() !== '' && !/[;{}<>]|url\s*\(|expression\s*\(/i.test(raw) ? raw.trim() : undefined
+  const colorValue = (raw: unknown): string | undefined => typeof raw === 'string' && cssColor.test(raw.trim()) ? raw.trim() : undefined
+  const transitionDuration = safe(item.transitionDuration, 80)
+  const transitionTimingFunction = safe(item.transitionTimingFunction, 120)
+  const token: ReferenceCssStateTokenV1 = {
+    component: item.component as ReferenceCssStateTokenV1['component'], state: item.state as ReferenceCssStateTokenV1['state'],
+    ...(colorValue(item.color) === undefined ? {} : { color: colorValue(item.color)! }),
+    ...(colorValue(item.backgroundColor) === undefined ? {} : { backgroundColor: colorValue(item.backgroundColor)! }),
+    ...(colorValue(item.borderColor) === undefined ? {} : { borderColor: colorValue(item.borderColor)! }),
+    ...(safe(item.boxShadow, 240) === undefined ? {} : { boxShadow: safe(item.boxShadow, 240)! }),
+    ...(transitionDuration === undefined || !splitCssList(transitionDuration).every(item => /^\d+(?:\.\d+)?m?s$/.test(item)) ? {} : { transitionDuration }),
+    ...(transitionTimingFunction === undefined || !splitCssList(transitionTimingFunction).every(item => /^(?:linear|ease(?:-in|-out|-in-out)?|step-start|step-end|steps\([^)]{1,60}\)|cubic-bezier\([^)]{1,60}\))$/i.test(item)) ? {} : { transitionTimingFunction }),
+  }
+  return Object.keys(token).length > 2 ? token : undefined
+}
+
+function observedStateCoverage(samples: CapturedStyleSample[]): string[] {
+  const component = (sample: CapturedStyleSample): string => {
+    const kind = componentKind(sample)
+    return ['button', 'input', 'select', 'textarea', 'link', 'tab'].includes(kind ?? '') ? kind! : ['button', 'checkbox', 'combobox', 'searchbox', 'switch', 'textbox'].includes(sample.role ?? '') ? 'control' : 'other'
+  }
+  const allowed = new Set(['disabled', 'checked', 'selected', 'expanded', 'collapsed', 'focus'])
+  return [...new Set(samples.flatMap(sample => (sample.state ?? '').split(',').filter(state => allowed.has(state)).map(state => `${component(sample)}:${state}`)))].sort().slice(0, 40)
+}
+
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
 /** Converts raw page observations into the only bounded evidence shown to the model. */
-export async function buildReferenceEvidence(raw: unknown, screenshotDataUrl: string, capturedAt = new Date()): Promise<ReferenceEvidenceV1> {
+export async function buildReferenceEvidence(raw: unknown, screenshotDataUrl: string | undefined, capturedAt = new Date()): Promise<ReferenceEvidenceV1> {
   if (!isCapturedPage(raw) || raw.samples.length === 0) throw new Error('The selected page exposed no bounded visual evidence.')
-  if (!/^data:image\/(png|jpeg);base64,/.test(screenshotDataUrl) || screenshotDataUrl.length > 2_000_000) throw new Error('The visible-page screenshot is missing or too large.')
+  if (screenshotDataUrl !== undefined && (!/^data:image\/(png|jpeg);base64,/.test(screenshotDataUrl) || screenshotDataUrl.length > 2_000_000)) throw new Error('The visible-page screenshot is invalid or too large.')
   const colors = frequent(raw.samples.flatMap(sample => [sample.color, sample.backgroundColor, ...(hasVisibleBorder(sample) ? [sample.borderColor] : [])]), 16, value => cssColor.test(value) && value !== 'rgba(0, 0, 0, 0)')
   const textColors = frequent(raw.samples.map(sample => sample.color), 12, value => cssColor.test(value) && value !== 'rgba(0, 0, 0, 0)')
   const backgroundColors = frequent(raw.samples.map(sample => sample.backgroundColor), 12, value => cssColor.test(value) && value !== 'rgba(0, 0, 0, 0)')
@@ -435,7 +525,7 @@ export async function buildReferenceEvidence(raw: unknown, screenshotDataUrl: st
     if (['flex', 'inline-flex'].includes(sample.display ?? '')) return [sample.flexDirection?.startsWith('column') ? 'flex-column' : 'flex-row']
     return sample.display === 'block' ? ['block'] : []
   }), 8, value => ['block', 'flex-row', 'flex-column', 'grid', 'sticky'].includes(value)) as NonNullable<ReferenceEvidenceV1['designTokens']['layoutPatterns']>
-  const responsiveBreakpoints = [...new Set((raw.responsiveBreakpoints ?? []).filter(value => Number.isFinite(value) && value >= 240 && value <= 7_680).map(Math.round))].sort((left, right) => left - right).slice(0, 12)
+  const responsiveBreakpoints = [...new Set((raw.responsiveBreakpoints ?? []).filter(value => Number.isFinite(value) && value >= 240 && value <= 7_680).map(Math.round))].sort((left, right) => left - right).slice(0, 20)
   const focusStyleCounts = new Map<string, { value: NonNullable<ReferenceEvidenceV1['designTokens']['focusStyles']>[number]; count: number }>()
   for (const sample of [...raw.samples, ...(raw.declaredFocusStyles ?? []).map(style => ({ outlineWidth: style.width, outlineStyle: style.style, outlineColor: style.color, outlineOffset: style.offset } as CapturedStyleSample))]) {
     if (!pixels.test(sample.outlineWidth ?? '') || Number.parseFloat(sample.outlineWidth ?? '0') <= 0 || !['solid', 'dashed', 'dotted'].includes(sample.outlineStyle ?? '') || !cssColor.test(sample.outlineColor ?? '') || !/^-?\d+(?:\.\d+)?px$/.test(sample.outlineOffset ?? '')) continue
@@ -444,9 +534,14 @@ export async function buildReferenceEvidence(raw: unknown, screenshotDataUrl: st
   }
   const focusStyles = [...focusStyleCounts.values()].sort((left, right) => right.count - left.count).slice(0, 8).map(item => item.value)
   const surfaceCount = raw.samples.filter(sample => sample.backgroundColor !== 'rgba(0, 0, 0, 0)').length
-  const captureCoverage = raw.captureCoverage ?? { candidateElements: raw.samples.length, inspectedElements: raw.samples.length, sampledElements: raw.samples.length, accessibleStylesheets: 0, opaqueStylesheets: 0, iframeElements: 0, unloadedImages: 0, horizontalOverflow: raw.pageSize.width > raw.viewport.width + 1, limitations: ['旧版采集没有记录样式表、iframe、图片加载和元素丢弃范围；请重新提取以获得完整覆盖说明。'] }
-  const declaredStates = [...new Set((raw.declaredInteractionStates ?? []).filter(state => ['hover', 'active', 'focus-visible', 'focus', 'disabled', 'checked', 'selected'].includes(state)))].slice(0, 16)
-  if (declaredStates.length > 0) captureCoverage.limitations = [...captureCoverage.limitations, `CSS 声明了 ${declaredStates.join('、')} 状态，但采集未触发这些状态，未记录其视觉值。`].slice(0, 12)
+  const rawCoverage = raw.captureCoverage
+  const cssRuleTokens = [...new Map((raw.cssStateRuleTokens ?? rawCoverage?.states?.cssRuleTokens ?? []).map(safeCapturedStateToken).filter((item): item is ReferenceCssStateTokenV1 => item !== undefined).map(item => [JSON.stringify(item), item])).values()].slice(0, 40)
+  const captureCoverage = rawCoverage === undefined
+    ? { candidateElements: raw.samples.length, inspectedElements: raw.samples.length, sampledElements: raw.samples.length, accessibleStylesheets: 0, opaqueStylesheets: 0, iframeElements: 0, unloadedImages: 0, horizontalOverflow: raw.pageSize.width > raw.viewport.width + 1, limitations: ['旧版采集没有记录样式表、iframe、图片加载和元素丢弃范围；请重新提取以获得完整覆盖说明。'], responsive: { cssBreakpoints: responsiveBreakpoints, observedViewportWidths: [Math.round(raw.viewport.width)] }, states: { observedTokens: observedStateCoverage(raw.samples), cssRuleTokens } }
+    : { candidateElements: rawCoverage.candidateElements, inspectedElements: rawCoverage.inspectedElements, sampledElements: rawCoverage.sampledElements, accessibleStylesheets: rawCoverage.accessibleStylesheets, opaqueStylesheets: rawCoverage.opaqueStylesheets, iframeElements: rawCoverage.iframeElements, unloadedImages: rawCoverage.unloadedImages, horizontalOverflow: rawCoverage.horizontalOverflow, limitations: [...rawCoverage.limitations], ...(rawCoverage.openShadowRoots === undefined ? {} : { openShadowRoots: rawCoverage.openShadowRoots }), ...(rawCoverage.potentialClosedShadowHosts === undefined ? {} : { potentialClosedShadowHosts: rawCoverage.potentialClosedShadowHosts }), responsive: { cssBreakpoints: responsiveBreakpoints, observedViewportWidths: [Math.round(raw.viewport.width)] }, states: { observedTokens: observedStateCoverage(raw.samples), cssRuleTokens } }
+  const declaredStates = [...new Set((raw.declaredInteractionStates ?? []).filter(state => ['hover', 'active', 'focus-visible', 'focus', 'disabled', 'checked', 'selected'].includes(state)))].slice(0, 40)
+  if (cssRuleTokens.length > 0) captureCoverage.limitations = [...captureCoverage.limitations, `从可读取 CSS 规则提取了 ${cssRuleTokens.length} 条交互状态 token；它们不是逐个触发后的网页实测。`].slice(0, 12)
+  else if (declaredStates.length > 0) captureCoverage.limitations = [...captureCoverage.limitations, `CSS 声明了 ${declaredStates.join('、')} 状态，但采集未触发这些状态，未记录其视觉值。`].slice(0, 12)
   const observations = [
     `当前视口为 ${raw.viewport.width}×${raw.viewport.height}，完整页面为 ${raw.pageSize.width}×${raw.pageSize.height}，已跨 ${raw.pageSize.sampledBands} 个纵向区域采集 ${raw.samples.length} 个设计元素。`,
     `候选元素 ${captureCoverage.candidateElements} 个，检查 ${captureCoverage.inspectedElements} 个；读取 ${captureCoverage.accessibleStylesheets} 个样式表，另有 ${captureCoverage.opaqueStylesheets} 个样式表无法读取。`,
@@ -456,15 +551,15 @@ export async function buildReferenceEvidence(raw: unknown, screenshotDataUrl: st
     `检测到 ${surfaceCount} 个具有可见背景的区域；常用圆角为 ${radius.slice(0, 4).join('、') || '0px'}。`,
     `常用间距为 ${spacing.slice(0, 8).join('、') || '未识别'}；边框宽度为 ${borderWidths.slice(0, 4).join('、') || '0px'}。`,
     `视觉效果包含 ${shadows.length} 种投影、${gradients.length} 种渐变和 ${motionDurations.length} 种动效时长。`,
-    `布局中识别到 ${layoutPatterns.join('、') || '常规文档流'}；样式表暴露 ${responsiveBreakpoints.length} 个响应式断点；识别到 ${focusStyles.length} 组键盘焦点样式。`,
+    `布局中识别到 ${layoutPatterns.join('、') || '常规文档流'}；样式表暴露 ${responsiveBreakpoints.length} 个响应式断点（未多尺寸实测）；从可读取 CSS 规则提取 ${cssRuleTokens.length} 条交互状态 token；识别到 ${focusStyles.length} 组键盘焦点样式。`,
   ]
-  const screenshotFingerprint = await sha256(screenshotDataUrl)
-  const content = { v: 1 as const, source: { ...raw.source, capturedAt: capturedAt.toISOString() }, viewport: raw.viewport, pageSize: raw.pageSize, captureCoverage, observations, designTokens: { colors, fonts, radius, spacing, textColors, backgroundColors, pageBackgroundColors, elevatedBackgroundColors, borderColors, accentColors, accentBackgroundColors, accentTextColors, fontSizes, fontWeights, lineHeights, letterSpacings, textStyles, borderWidths, borderStyles, shadows, gradients, opacities, controlHeights, buttonHeights, inputHeights, contentWidths, iconSizes, componentKinds, componentStates, componentSamples, motionDurations, motionEasings, layoutPatterns, responsiveBreakpoints, focusStyles }, screenshotFingerprint }
+  const screenshotFingerprint = screenshotDataUrl === undefined ? undefined : await sha256(screenshotDataUrl)
+  const content = { v: 1 as const, source: { ...raw.source, capturedAt: capturedAt.toISOString() }, viewport: raw.viewport, pageSize: raw.pageSize, captureCoverage, observations, designTokens: { colors, fonts, radius, spacing, textColors, backgroundColors, pageBackgroundColors, elevatedBackgroundColors, borderColors, accentColors, accentBackgroundColors, accentTextColors, fontSizes, fontWeights, lineHeights, letterSpacings, textStyles, borderWidths, borderStyles, shadows, gradients, opacities, controlHeights, buttonHeights, inputHeights, contentWidths, iconSizes, componentKinds, componentStates, componentSamples, motionDurations, motionEasings, layoutPatterns, responsiveBreakpoints, focusStyles }, ...(screenshotFingerprint === undefined ? {} : { screenshotFingerprint }) }
   const evidence: ReferenceEvidenceV1 = {
     ...content,
     id: `ref-${crypto.randomUUID()}`,
     fingerprint: await computeReferenceEvidenceFingerprint(content),
-    screenshotDataUrl,
+    ...(screenshotDataUrl === undefined ? {} : { screenshotDataUrl }),
   }
   const checked = validateReferenceEvidence(evidence)
   if (!checked.ok) throw new Error(checked.errors[0])

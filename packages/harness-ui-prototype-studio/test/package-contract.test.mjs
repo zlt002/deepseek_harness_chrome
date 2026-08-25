@@ -5,7 +5,7 @@ import test from 'node:test'
 const source = path => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
 
 test('keeps prototype preview as an out-of-tree, schema-only product package', async () => {
-  const [manifest, schema, runtime, host] = await Promise.all([source('package.json'), source('src/prototype-document.ts'), source('src/client/TrustedPrototypeRuntime.tsx'), source('src/index.ts')])
+  const [manifest, schema, runtime, host, store] = await Promise.all([source('package.json'), source('src/prototype-document.ts'), source('src/client/TrustedPrototypeRuntime.tsx'), source('src/index.ts'), source('src/prototype-store.mjs')])
   assert.match(manifest, /@accrui\/harness-ui-prototype-studio/)
   assert.match(manifest, /"inject"/)
   assert.match(schema, /ReferenceEvidenceV1/)
@@ -49,5 +49,12 @@ test('keeps prototype preview as an out-of-tree, schema-only product package', a
   assert.match(host, /targetRevisionId/)
   assert.match(host, /expectedCurrentRevisionId/)
   assert.match(host, /verified_write/)
+  assert.match(host, /v: \{ type: ['\"]number['\"], const: 1 \}/)
+  assert.match(host, /status: \{ type: ['\"]string['\"], const: ['\"]verified_write['\"] \}/)
   assert.doesNotMatch(`${schema}\n${runtime}`, /new Function|\beval\s*\(|innerHTML|deepseek-harness\/packages\/.*\/src/)
+  assert.match(store, /node:sqlite/)
+  assert.match(store, /BEGIN IMMEDIATE/)
+  assert.match(store, /COMMIT/)
+  assert.match(store, /ROLLBACK/)
+  assert.doesNotMatch(store, /recover\.lock/)
 })

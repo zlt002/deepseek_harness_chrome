@@ -19,6 +19,10 @@ export type DesignSpecTweak =
   | { key: 'motionDuration'; value: number }
   | { key: 'motionEasing'; value: 'linear' | 'ease' | 'ease-in' | 'ease-out' | 'ease-in-out' }
   | { key: 'mobileBreakpoint' | 'desktopBreakpoint'; value: number }
+  | { key: 'rawColor'; index: number; value: string }
+  | { key: 'fontSizeScale' | 'fontWeightScale' | 'lineHeightScale' | 'spacingScale' | 'radiusScale' | 'opacityScale'; value: number[] }
+  | { key: 'surfaceShadow' | 'elevatedShadow' | 'primaryGradient'; value: string | undefined }
+  | { key: 'layoutPatterns'; value: Array<'block' | 'flex-row' | 'flex-column' | 'grid' | 'sticky'> }
 
 const colorPattern = /^(#[0-9a-fA-F]{3,8}|rgba?\([^)]{1,50}\)|hsla?\([^)]{1,60}\))$/
 
@@ -36,6 +40,19 @@ function replaceColor(spec: DesignSpecV1, name: string, value: string): DesignSp
 
 function scaleWith(values: readonly number[] | undefined, value: number, maximum: number): number[] {
   return [...new Set([...(values ?? []), value].map(item => bounded(item, 0, maximum)))].sort((left, right) => left - right).slice(0, 20)
+}
+
+function numericScale(values: unknown, minimum: number, maximum: number, count: number): number[] | undefined {
+  if (!Array.isArray(values) || values.length === 0 || values.length > count || !values.every(item => typeof item === 'number' && Number.isFinite(item))) return undefined
+  return [...new Set(values.map(item => bounded(item, minimum, maximum)))].sort((left, right) => left - right)
+}
+
+function semanticEffect(spec: DesignSpecV1, role: 'surfaceShadow' | 'elevatedShadow' | 'primaryControlGradient', value: string | undefined): DesignSpecV1 {
+  const effects = spec.effects ?? { shadows: [], gradients: [], opacities: [] }
+  const allowed = role === 'primaryControlGradient' ? effects.gradients : effects.shadows
+  if (value !== undefined && !allowed.includes(value)) return spec
+  const semantic = { ...effects.semantic, [role]: value }
+  return { ...spec, effects: { ...effects, ...(Object.values(semantic).some(item => item !== undefined) ? { semantic } : {}) } }
 }
 
 export function motionDurationMilliseconds(value: string | undefined, fallback = 160): number {
@@ -73,12 +90,22 @@ export function colorInputValue(value: string, fallback = '#3977e8'): string {
 export function applyDesignSpecTweak(spec: DesignSpecV1, tweak: DesignSpecTweak): DesignSpecV1 {
   if (['primary', 'onPrimary', 'page', 'surface', 'elevated', 'text', 'textMuted', 'border', 'info', 'positive', 'warning', 'danger', 'focus'].includes(tweak.key)) {
     if (typeof tweak.value !== 'string' || !colorPattern.test(tweak.value)) return spec
+    const colorValue = tweak.value
     const key = tweak.key as DesignSpecColorKey
-    if (key === 'focus') return { ...spec, focus: { width: spec.focus?.width ?? 2, style: spec.focus?.style ?? 'solid', color: tweak.value, offset: spec.focus?.offset ?? 2 } }
+    if (key === 'focus') return { ...spec, focus: { width: spec.focus?.width ?? 2, style: spec.focus?.style ?? 'solid', color: colorValue, offset: spec.focus?.offset ?? 2 } }
     const semanticName = { primary: '主要操作色', onPrimary: '按钮文字', page: '页面背景', surface: '内容表面', elevated: '浮层表面', text: '主要文字', textMuted: '次要文字', border: '边框颜色', info: '信息色', positive: '成功色', warning: '警告色', danger: '危险色' }[key]
     const surfaces = spec.surfaces ?? { page: designSpecColor(spec, 'page'), surface: designSpecColor(spec, 'surface'), elevated: designSpecColor(spec, 'surface'), text: designSpecColor(spec, 'text'), textMuted: designSpecColor(spec, 'textMuted'), border: designSpecColor(spec, 'border') }
     const surfaceKey = ['onPrimary', 'primary', 'info', 'positive', 'warning', 'danger'].includes(key) ? undefined : key as 'page' | 'surface' | 'elevated' | 'text' | 'textMuted' | 'border'
-    return { ...spec, colors: semanticName === '浮层表面' && !spec.colors.some(item => item.name === semanticName) ? spec.colors : replaceColor(spec, semanticName, tweak.value), surfaces: surfaceKey === undefined ? surfaces : { ...surfaces, [surfaceKey]: tweak.value } }
+    const colors = semanticName === '浮层表面' && !spec.colors.some(item => item.name === semanticName)
+      ? spec.colors
+      : key === 'primary' && !spec.colors.some(item => item.name === semanticName)
+        ? spec.colors.map((item, index) => index === 0 ? { ...item, value: colorValue } : item)
+        : replaceColor(spec, semanticName, colorValue)
+    return { ...spec, colors, surfaces: surfaceKey === undefined ? surfaces : { ...surfaces, [surfaceKey]: colorValue } }
+  }
+  if (tweak.key === 'rawColor') {
+    if (!Number.isInteger(tweak.index) || tweak.index < 0 || tweak.index >= spec.colors.length || typeof tweak.value !== 'string' || !colorPattern.test(tweak.value)) return spec
+    return { ...spec, colors: spec.colors.map((item, index) => index === tweak.index ? { ...item, value: tweak.value } : item) }
   }
   if (tweak.key === 'fontFamily') return tweak.value.length > 0 && tweak.value.length <= 160 && !/[;{}<>]/.test(tweak.value) ? { ...spec, typography: { ...spec.typography, fontFamily: tweak.value } } : spec
   if (tweak.key === 'bodySize') { const value = bounded(tweak.value, 8, 96); return { ...spec, typography: { ...spec.typography, bodySize: value, fontSizeScale: scaleWith(spec.typography.fontSizeScale, value, 160) } } }
@@ -89,10 +116,15 @@ export function applyDesignSpecTweak(spec: DesignSpecV1, tweak: DesignSpecTweak)
   if (tweak.key === 'bodyLineHeight') return { ...spec, typography: { ...spec.typography, bodyLineHeight: bounded(tweak.value, .8, 3) } }
   if (tweak.key === 'headingLineHeight') return { ...spec, typography: { ...spec.typography, headingLineHeight: bounded(tweak.value, .8, 3) } }
   if (tweak.key === 'letterSpacing') return { ...spec, typography: { ...spec.typography, letterSpacing: bounded(tweak.value, -5, 20) } }
+  if (tweak.key === 'fontSizeScale') { const values = numericScale(tweak.value, 8, 160, 20); return values === undefined ? spec : { ...spec, typography: { ...spec.typography, fontSizeScale: values } } }
+  if (tweak.key === 'fontWeightScale') { const values = numericScale(tweak.value, 100, 1_000, 12); return values === undefined ? spec : { ...spec, typography: { ...spec.typography, fontWeightScale: values } } }
+  if (tweak.key === 'lineHeightScale') { const values = numericScale(tweak.value, 8, 240, 20); return values === undefined ? spec : { ...spec, typography: { ...spec.typography, lineHeightScale: values } } }
   if (tweak.key === 'spacingBase') { const value = bounded(tweak.value, 0, 64); return { ...spec, spacing: { ...spec.spacing, base: value, scale: [value / 2, value, value * 2, value * 3].map(item => bounded(item, 0, 160)) } } }
+  if (tweak.key === 'spacingScale') { const values = numericScale(tweak.value, 0, 160, 16); return values === undefined ? spec : { ...spec, spacing: { ...spec.spacing, scale: values } } }
   if (tweak.key === 'sectionGap') return { ...spec, spacing: { ...spec.spacing, sectionGap: bounded(tweak.value, 0, 240) } }
   if (tweak.key === 'contentWidth') return { ...spec, spacing: { ...spec.spacing, contentWidth: bounded(tweak.value, 240, 3_840) } }
   if (tweak.key === 'cardRadius') { const value = bounded(tweak.value, 0, 80); return { ...spec, spacing: { ...spec.spacing, cardRadius: value }, borders: { width: spec.borders?.width ?? 1, style: spec.borders?.style ?? 'solid', radiusScale: [value / 2, value, Math.min(80, value * 1.5)] } } }
+  if (tweak.key === 'radiusScale') { const values = numericScale(tweak.value, 0, 160, 12); return values === undefined ? spec : { ...spec, borders: { width: spec.borders?.width ?? 1, style: spec.borders?.style ?? 'solid', radiusScale: values } } }
   if (tweak.key === 'controlRadius') { const value = bounded(tweak.value, 0, 80); return { ...spec, controls: { height: spec.controls?.height ?? 38, buttonHeight: spec.controls?.buttonHeight, inputHeight: spec.controls?.inputHeight ?? 38, iconSize: spec.controls?.iconSize ?? 16, radius: value } } }
   if (tweak.key === 'borderWidth') return { ...spec, borders: { width: bounded(tweak.value, 0, 16), style: spec.borders?.style ?? 'solid', radiusScale: spec.borders?.radiusScale ?? [spec.spacing.cardRadius] } }
   if (tweak.key === 'borderStyle') return { ...spec, borders: { width: spec.borders?.width ?? 1, style: tweak.value, radiusScale: spec.borders?.radiusScale ?? [spec.spacing.cardRadius] } }
@@ -127,6 +159,10 @@ export function applyDesignSpecTweak(spec: DesignSpecV1, tweak: DesignSpecTweak)
     const opacities = effects.opacities.includes(disabledControlOpacity) ? effects.opacities : [...effects.opacities, disabledControlOpacity].slice(0, 12)
     return { ...spec, effects: { ...effects, opacities, semantic: { ...effects.semantic, disabledControlOpacity } } }
   }
+  if (tweak.key === 'opacityScale') { const values = numericScale(tweak.value, 0, 1, 12); return values === undefined ? spec : { ...spec, effects: { ...(spec.effects ?? { shadows: [], gradients: [], opacities: [] }), opacities: values } } }
+  if (tweak.key === 'surfaceShadow') return semanticEffect(spec, 'surfaceShadow', tweak.value)
+  if (tweak.key === 'elevatedShadow') return semanticEffect(spec, 'elevatedShadow', tweak.value)
+  if (tweak.key === 'primaryGradient') return semanticEffect(spec, 'primaryControlGradient', tweak.value)
   if (tweak.key === 'motionDuration') {
     const controlDuration = `${Math.round(bounded(tweak.value, 0, 10_000))}ms`
     const motion = spec.motion ?? { durations: [], easings: [] }
@@ -137,6 +173,11 @@ export function applyDesignSpecTweak(spec: DesignSpecV1, tweak: DesignSpecTweak)
     const motion = spec.motion ?? { durations: [], easings: [] }
     const easings = motion.easings.includes(tweak.value) ? motion.easings : [...motion.easings, tweak.value].slice(0, 12)
     return { ...spec, motion: { ...motion, easings, semantic: { ...motion.semantic, controlEasing: tweak.value } } }
+  }
+  if (tweak.key === 'layoutPatterns') {
+    const allowed = ['block', 'flex-row', 'flex-column', 'grid', 'sticky'] as const
+    if (!Array.isArray(tweak.value) || tweak.value.length === 0 || tweak.value.length > allowed.length || !tweak.value.every(item => allowed.includes(item))) return spec
+    return { ...spec, responsive: { breakpoints: spec.responsive?.breakpoints ?? [768, 1_024], layoutPatterns: [...new Set(tweak.value)] } }
   }
   if (tweak.key === 'mobileBreakpoint' || tweak.key === 'desktopBreakpoint') {
     const existing = spec.responsive?.breakpoints ?? [768, 1_024]

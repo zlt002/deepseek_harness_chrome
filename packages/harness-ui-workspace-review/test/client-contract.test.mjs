@@ -4,12 +4,13 @@ import test from 'node:test'
 const source = path => readFile(new URL(path, import.meta.url), 'utf8')
 
 test('renders through the picker child slot and desktop header action without a quick action', async () => {
-  const [manifest, client, action, tree, bridge, host] = await Promise.all([
-    source('../package.json'), source('../src/client/index.ts'), source('../src/client/WorkspaceReviewAction.tsx'), source('../src/client/WorkspaceReviewTree.tsx'), source('../src/client/bridge.ts'), source('../src/index.ts'),
+  const [manifest, client, action, tree, bridge, host, filePath] = await Promise.all([
+    source('../package.json'), source('../src/client/index.ts'), source('../src/client/WorkspaceReviewAction.tsx'), source('../src/client/WorkspaceReviewTree.tsx'), source('../src/client/bridge.ts'), source('../src/index.ts'), source('../src/client/workspace-file-path.mjs'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-workspace-review/)
   assert.doesNotMatch(client, /settingsQuickActions|workspace-markdown-files|sidebar\.compact\.action/)
   assert.match(client, /accrui\.workspace-picker\.directory/)
+  assert.match(client, /accrui\.workspace-picker\.directory\.actions/)
   assert.match(client, /sidebar\.workspaces\.header\.action/)
   assert.match(client, /useSessionForWorkspace/)
   assert.match(client, /useSyncExternalStore/)
@@ -24,6 +25,20 @@ test('renders through the picker child slot and desktop header action without a 
   assert.match(action, />目录</)
   assert.match(tree, /listWorkspaceMarkdown/)
   assert.match(tree, /openWorkspaceMarkdown/)
+  assert.match(tree, /entry\.kind === 'markdown'/, 'only Markdown entries may open the review flow')
+  assert.match(tree, /onOpenFile\(entry\.displayPath\)/, 'ordinary files must be system-openable from the directory')
+  assert.match(client, /ctx\.workspaces\.openPath\(workspaceFilePath\(workspacePath, displayPath\)\)/)
+  assert.match(filePath, /displayPath\.split\('\/'\)\.some\(part => part === '' \|\| part === '\.' \|\| part === '\.\.'\)/)
+  assert.match(action, /在资源管理器中打开工作区/)
+  assert.match(action, /刷新文件树/)
+  assert.match(client, /WorkspaceReviewDirectoryActions/)
+  assert.match(client, /chatFileMentions[\s\S]*register\(conversationMarkdown\)/)
+  assert.match(client, /toolFileLinks[\s\S]*register\(toolMarkdown\)/)
+  assert.match(client, /resolveWorkspaceMarkdown\(String\(owner\.sessionId\), owner\.cwd, value\)/)
+  assert.match(client, /resolve:\s*resolveReview, resolveLink:\s*resolveReview/)
+  assert.match(client, /openWorkspaceMarkdown\(sessionId, displayPath\)/)
+  assert.match(client, /requestOpenReview\(window\.parent, bridge, review\)/)
+  assert.doesNotMatch(tree, /treeToolbar|在资源管理器中打开工作区|刷新文件树/, 'the tree must not duplicate compact pane-header actions')
   assert.match(tree, /generation\.current\.isCurrent\(requestedGeneration\)/)
   assert.match(tree, /setTrees\(new Map\(\)\)/)
   assert.match(tree, /inFlight\.current\.has\(requestKey\)/)

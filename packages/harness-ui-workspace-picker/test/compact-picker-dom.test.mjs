@@ -96,6 +96,8 @@ test('compact picker measures its popover and routes the selected workspace into
 
     await act(async () => { click(dom.window, tabs[1]) })
     assert.equal(slotCalls.at(-1).sessionId, 'a-current')
+    assert.equal(slotCalls.at(-1).workspacePath, '/a')
+    assert.ok(slotCalls.some(props => props.workspacePath === '/a' && typeof props.refreshDirectory === 'function'))
     assert.equal(container.querySelector('[data-directory-session]').getAttribute('data-directory-session'), 'a-current')
     assert.equal(panels.find(panel => panel.getAttribute('aria-labelledby') === tabs[0].id).hidden, true)
     assert.equal(panels.find(panel => panel.getAttribute('aria-labelledby') === tabs[1].id).hidden, false)
@@ -103,6 +105,7 @@ test('compact picker measures its popover and routes the selected workspace into
     const workspaceB = [...container.querySelectorAll('[role="button"]')].find(node => node.textContent.includes('工作区 B'))
     await act(async () => { click(dom.window, workspaceB) })
     assert.equal(slotCalls.at(-1).sessionId, 'b-first')
+    assert.equal(slotCalls.at(-1).workspacePath, '/b')
     assert.equal(container.querySelector('[data-directory-session]').getAttribute('data-directory-session'), 'b-first')
     await act(async () => { root.unmount() })
   } finally {

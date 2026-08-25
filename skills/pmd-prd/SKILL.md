@@ -1,16 +1,13 @@
 ---
 name: pmd-prd
-description: "从业务材料、旧 PRD 和已选资料多轮对齐，交付一份研发交接包与一份完整公司 PRD。"
+description: "从业务材料、旧 PRD 和已选资料多轮对齐，只交付一份完整公司 PRD。"
 disable-model-invocation: true
 user-invocable: true
 ---
 
 # `/pmd-prd` Harness-native workflow
 
-Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel，也不要求用户填写内部 ID、Cookie 或工具 payload。最终只允许创建两份美的 Team Knowledge 轻文档：
-
-1. `{需求标识}_{主题}_01_需求分析与研发交付`
-2. `{需求标识}_{主题}_02_PRD`
+Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel，也不要求用户填写内部 ID、Cookie 或工具 payload。最终只允许创建一份美的 Team Knowledge 轻文档：`{需求标识}_{主题}_PRD`。`process.md`、`trace-events.jsonl` 等内部恢复文件可以保留，但不得生成可见的“需求分析与研发交付”文档。
 
 ## 状态机与确认门
 
@@ -69,31 +66,29 @@ Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel�
 
 仅在每个已启动的远程检索已完成、明确失败或用户明确跳过后，才可进入本阶段；等待期间不得将代码计划标为完成。仅根据已选远程代码库实际查到的内容，形成研发能直接阅读的计划：改什么、在哪里改（仓库/文件/函数；能确认时再写行号）、怎么改、改完效果。代码位置未知时写 `[待确认]` 与需要补查的范围，不得猜仓库、文件、函数或行号。
 
-按正常、异常、边界、权限、兼容五类整理通俗验收清单。没有依据时不得填写业务指标、人天、性能值、用户反馈或代码事实；公司 PRD 的必填项没有事实时按模板写 `[待确认]` 并说明影响。
+按正常、异常、边界、权限、兼容五类整理通俗验收清单。第四章每个功能都要整理“现状、调整方式、输入/输出规则、调整后效果”：有输入字段时明确类型、必填性、长度、格式、取值范围和校验提示；没有用户输入字段时明确写出，并说明操作条件、成功结果和失败结果。没有依据时不得填写业务指标、人天、性能值、用户反馈或代码事实；公司 PRD 的必填项没有事实时按模板写 `[待确认]` 并说明影响。
 
-### 阶段 5：双文档预览与确认
+### 阶段 5：PRD 预览与确认
 
-本阶段开始前，所有已启动的远程检索必须已完成、明确失败或被用户明确跳过；后台仍在运行时不得冻结文档、预览或交付。随后完整读取 [`references/templates.md`](references/templates.md) 的全部内容；它是两份最终产物的唯一权威正文结构。[`templates.md`](templates.md) 只负责导航，不能替代正文读取，也不能把两个模板压缩成章节摘要。按该权威文件中的完整 `analysis.md` 和 `prd.md` 模板生成两份正文：第一份必须严格保留六部分“需求最终理解、产品纠正、最终业务规则、代码修改位置、具体修改方式、验收清单”；PRD 必须保留公司模板的基本信息、修订记录、九个主章节及原始顺序、标题和标签，且不得追加或改写公司模板正文。
+本阶段开始前，所有已启动的远程检索必须已完成、明确失败或被用户明确跳过；后台仍在运行时不得冻结文档、预览或交付。随后完整读取 [`references/templates.md`](references/templates.md) 的全部内容；它是唯一最终 PRD 的权威正文结构。[`templates.md`](templates.md) 只负责导航，不能替代正文读取。PRD 必须保留基本信息（包括需求编号及链接、优先级、产品经理、预估人天）、修订记录、九个主章节及原始顺序；最终标题和正文不得显示 `[必填]`、`[选填]`、`[建议填写]` 等字段标签。第四章保留“正常业务场景、边界场景、异常业务场景”：每个功能依次写“现状、调整方式、输入/输出规则、调整后效果”，每项输入和输出规则按权威模板填写，缺少用户输入字段时也必须明确说明。第八章保留独立的“异常场景关注点”，并新增正常、异常、边界、权限、兼容五类“验收清单”，两者不得互相替换。
 
-填写时把已确认结论写入对应位置；缺失必填信息写 `[待确认]` 并说明影响，选填内容不适用写“不适用（原因）”。第一份只面向产品和研发，使用通俗业务语言；两份正文都不得编造代码事实或无依据数字。展示两个规范文件名、章节摘要和待确认数量，请求用户确认两个文档内容。
+填写时把已确认结论写入对应位置；缺失事实写 `[待确认]` 并说明影响，不适用内容写“不适用（原因）”。不得编造代码事实或无依据数字。展示一个规范文件名、章节摘要和待确认数量，请求用户确认 PRD 内容。
 
-用户确认前，将两份**完整冻结正文**原样写入 manifest 记录的当前需求冻结产物目录，文件名固定为 `{需求标识}_{主题}_01_需求分析与研发交付.md` 和 `{需求标识}_{主题}_02_PRD.md`。随后运行确定性门禁：
+用户确认前，将一份**完整冻结 PRD 正文**原样写入 manifest 记录的当前需求冻结产物目录，文件名固定为 `{需求标识}_{主题}_PRD.md`。随后运行确定性门禁：
 
 ```sh
-node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs \
-  --analysis <analysis-frozen-path> \
-  --prd <prd-frozen-path>
+node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs --prd <prd-frozen-path>
 ```
 
-只有该命令以 0 退出，才可把这两个冻结文件的正文按“需求分析、PRD”的固定顺序传给 `mcp__chrome__team_knowledge_batch_preview`；preview 的 `name` 使用同一规范文件名去掉 `.md`，`body` 逐字来自冻结文件。校验失败时停止在阶段 5，修正文档并重新冻结、校验和确认；不从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。内容变化必须重新预览并重新确认。此阶段不绑定父节点、不写远程。完成条件：两份完整正文快照、规范文件名和校验结果均冻结，用户内容确认有效。
+只有该命令以 0 退出，才可把冻结文件正文作为恰好一项 `{name, body}` 传给 `mcp__chrome__team_knowledge_batch_preview`；`name` 使用同一规范文件名去掉 `.md`，`body` 逐字来自冻结文件。校验失败时停止在阶段 5，修正文档并重新冻结、校验和确认；不从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。内容变化必须重新预览并重新确认。此阶段不绑定父节点、不写远程。完成条件：一份完整正文快照、规范文件名和校验结果均冻结，用户内容确认有效。
 
-### 阶段 6：双文档预览与父节点确认
+### 阶段 6：PRD 预览与父节点确认
 
-请用户在 Chrome 手动打开目标目录或可创建子项的轻文档父级。运行时依据内部 `requirementId` 生成并持久化稳定的 `batchId`，其值严格为 `pmd:${requirementId}`（`requirementId` 最长 64 字符，因此 `batchId` 最长 68 字符）；用户不得填写，所有恢复和重试沿用它。调用 `mcp__chrome__team_knowledge_batch_preview`，只传该 `batchId` 与阶段 5 冻结的恰好两项 `items`，顺序固定为：需求分析（`{name, body}`）在前、PRD（`{name, body}`）在后；正文只能来自已确认的两份快照。Preview 会检查当前 Browser Target 和可创建父节点，冻结父 fingerprint、Target/content fingerprints、两项 content hash，并返回一次性 `challenge` 与 `expiresAt`；此步骤不创建或修改线上文档。Preview 成功后只询问一次是否在回显的父节点下创建这两份 Doc；用户拒绝、父节点不一致、权限不足或检查失败时停止。完成条件：两项按顺序 preview 成功，且用户完成这一次创建确认。
+请用户在 Chrome 手动打开目标目录或可创建子项的轻文档父级。运行时依据内部 `requirementId` 生成并持久化稳定的 `batchId`，其值严格为 `pmd:${requirementId}`（`requirementId` 最长 64 字符，因此 `batchId` 最长 68 字符）；用户不得填写，所有恢复和重试沿用它。调用 `mcp__chrome__team_knowledge_batch_preview`，只传该 `batchId` 与阶段 5 冻结的恰好一项 PRD（`{name, body}`）；正文只能来自已确认快照。Preview 会检查当前 Browser Target 和可创建父节点，冻结父 fingerprint、Target/content fingerprints 和 content hash，并返回一次性 `challenge` 与 `expiresAt`；此步骤不创建或修改线上文档。Preview 成功后只询问一次是否在回显的父节点下创建该 PRD；用户拒绝、父节点不一致、权限不足或检查失败时停止。完成条件：PRD preview 成功，且用户完成这一次创建确认。
 
 ### 阶段 7：创建与回读
 
-按 `preview → batch approval → create → per-document confirmation` 执行。用户完成批次创建确认后立即调用 `mcp__chrome__team_knowledge_batch_create`，且参数只能是 `{ batchId, challenge }`；不得传入 `items`、正文、`requirementId` 或父节点参数。正文由 Connector 持有的 ephemeral preview plan 提供，create 不重发正文。工具逐份处理两项：每份正文写入并完成当前页面 XML 回读后，Browser Target 必须停留在该文档并显示确认卡；让用户检查正文完整性与页面保存状态，只有用户点击“已确认并继续”后才允许离开该文档、重开做持久化回读、返回父级并处理下一份。两份文档分别确认，任何一份未确认、超时、页面离开或用户选择停止时都保留当前页面，返回 `partial_delivery`，且不得启动下一份或报告完成。两项确认并通过持久化回读后，以 `team_knowledge_batch_create` 返回的 batch 状态为准。工具内部为两项生成并复用独立幂等身份，成功项不得重复创建；恢复只处理未完成项。若 challenge 过期、已消费或 ephemeral plan 缺失，停止 create，使用同一批两项冻结正文重新 preview，取得新 challenge，并重新完成这一次用户确认（批次创建确认）。完成条件：两份均已由用户逐项确认，batch 状态为 `completed`，两项均 `created`，均有 catalogId、完整 stages 和同目标持久化回读证据。
+按 `preview → approval → create → 页面确认` 执行。用户完成创建确认后立即调用 `mcp__chrome__team_knowledge_batch_create`，且参数只能是 `{ batchId, challenge }`；不得传入 `items`、正文、`requirementId` 或父节点参数。正文由 Connector 持有的 ephemeral preview plan 提供，create 不重发正文。PRD 写入并完成当前页面 XML 回读后，Browser Target 必须停留在该文档并显示确认卡；让用户检查正文完整性与页面保存状态，只有用户点击“已确认并继续”后才允许离开、重开做持久化回读。未确认、超时、页面离开或用户选择停止时保留当前页面，返回 `partial_delivery`，不得报告完成。确认并通过持久化回读后，以 `team_knowledge_batch_create` 返回的 batch 状态为准。若 challenge 过期、已消费或 ephemeral plan 缺失，停止 create，使用同一份冻结 PRD 重新 preview，取得新 challenge，并重新完成这一次用户确认。完成条件：PRD 已由用户确认，batch 状态为 `completed`，有 catalogId、完整 stages 和同目标持久化回读证据。
 
 ### 阶段 8：生成不对时选中再改
 
@@ -113,4 +108,4 @@ node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs \
 - 轻文档和表格是不同能力；本流程只创建轻文档。表格只可 `read_work_tab` 看一眼，不要改格子、不要下载。
 - 不从本地 `process.md`、`prd.md` 或其他文件重建已确认正文；唯一正文来源是阶段 5 快照。
 - 模板完整性校验失败时停止，不删除或压缩章节。
-- 批量交付失败时保留 `partial_delivery` 并用同一 `batchId` 续传；交付正文只走 `team_knowledge_batch_preview` / `team_knowledge_batch_create`。阶段 7 完成前不要改去手工补写；阶段 8 只改用户选中的那段。
+- 交付失败时保留 `partial_delivery` 并用同一 `batchId` 续传；交付正文只走 `team_knowledge_batch_preview` / `team_knowledge_batch_create`。阶段 7 完成前不要改去手工补写；阶段 8 只改用户选中的那段。

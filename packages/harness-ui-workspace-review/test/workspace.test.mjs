@@ -17,12 +17,19 @@ test('rejects absolute and traversal UI paths before any workspace file is read'
   assert.throws(() => normalizeRelativePath('notes\\secret.md'), /relative slash-separated/)
 })
 
-test('lists directories lazily but exposes only bounded Markdown files', async (t) => {
+test('lists directories lazily and exposes every ordinary file while marking reviewable Markdown', async (t) => {
   const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
   const listing = await runtime.list(root)
-  assert.deepEqual(listing.entries.map(entry => entry.displayPath), ['notes', 'README.md'])
+  assert.deepEqual(listing.entries.map(entry => entry.displayPath), ['notes', 'plain.txt', 'README.md'])
+  assert.deepEqual(listing.entries.map(entry => entry.kind), ['directory', 'file', 'markdown'])
   const nested = await runtime.list(root, 'notes')
   assert.deepEqual(nested.entries.map(entry => entry.displayPath), ['notes/todo.markdown'])
+})
+
+test('keeps oversized Markdown visible as a non-reviewable ordinary file', async (t) => {
+  const root = await fixture(t); await writeFile(join(root, 'large.md'), Buffer.alloc(MAX_FILE_BYTES + 1))
+  const listing = await new WorkspaceReviewRuntime().list(root)
+  assert.deepEqual(listing.entries.find(entry => entry.displayPath === 'large.md'), { kind: 'file', name: 'large.md', displayPath: 'large.md' })
 })
 
 test('rejects symlinks, non-Markdown resources, and oversized Markdown', async (t) => {

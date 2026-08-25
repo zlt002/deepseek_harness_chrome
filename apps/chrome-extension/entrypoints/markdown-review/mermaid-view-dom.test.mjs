@@ -2,13 +2,13 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { JSDOM } from 'jsdom'
-import { fitMermaidPreview, wireMermaidViewer, wireMermaidViewToggle } from './mermaid-view.mjs'
+import { fitMermaidPreview, wireMermaidFullscreen, wireMermaidViewer, wireMermaidViewToggle } from './mermaid-view.mjs'
 
 const root = new URL('.', import.meta.url)
 const style = await readFile(new URL('./style.css', root), 'utf8')
 
 function fixture() {
-  const dom = new JSDOM(`<!doctype html><style>${style}</style><div class="visual-markdown-editor"><div class="milkdown"><div class="ProseMirror"><section class="mermaid-block" data-mermaid-source="one"><div class="mermaid-toolbar"><div class="mermaid-view-toggle"><button>可视化</button><button>源码</button></div><div class="mermaid-viewer-controls"><button>缩小</button><button>放大</button><button>适应</button></div></div><div class="mermaid-preview"><div class="mermaid-canvas"><svg></svg></div></div></section><div class="milkdown-code-block" data-mermaid-source="one"><pre><code>graph TD</code></pre></div></div></div></div>`)
+  const dom = new JSDOM(`<!doctype html><style>${style}</style><div class="visual-markdown-editor"><div class="milkdown"><div class="ProseMirror"><section class="mermaid-block" data-mermaid-source="one"><div class="mermaid-toolbar"><div class="mermaid-view-toggle"><button>可视化</button><button>源码</button></div><div class="mermaid-viewer-controls"><button>缩小</button><button>放大</button><button>适应</button><button>全屏</button><button hidden>退出全屏</button></div></div><div class="mermaid-preview"><div class="mermaid-canvas"><svg></svg></div></div></section><div class="milkdown-code-block" data-mermaid-source="one"><pre><code>graph TD</code></pre></div></div></div></div>`)
   const document = dom.window.document
   return {
     dom,
@@ -112,4 +112,25 @@ test('Mermaid viewer zooms, resets, and pans the canvas without touching the SVG
   reset.click()
   assert.equal(canvas.style.transform, 'translate(0px, 0px) scale(1)')
   assert.equal(dom.window.document.querySelector('pre').textContent, markdownBefore)
+})
+
+test('Mermaid fullscreen uses an in-page fallback when the Fullscreen API is unavailable and Esc restores the same canvas', async () => {
+  const { dom, block, canvas } = fixture()
+  const [, , , fullscreen, close] = block.querySelectorAll('.mermaid-viewer-controls button')
+  Object.defineProperty(block, 'requestFullscreen', { configurable: true, value: undefined })
+  const viewer = wireMermaidFullscreen(block, fullscreen, close)
+  canvas.style.transform = 'translate(30px, 36px) scale(1.2)'
+
+  fullscreen.click()
+  await Promise.resolve()
+  assert.equal(block.classList.contains('is-fullscreen-fallback'), true)
+  assert.equal(close.hidden, false)
+  dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' }))
+  assert.equal(block.classList.contains('is-fullscreen-fallback'), false)
+  assert.equal(close.hidden, true)
+  assert.equal(canvas.style.transform, 'translate(30px, 36px) scale(1.2)')
+  viewer.destroy()
+  fullscreen.click()
+  await Promise.resolve()
+  assert.equal(block.classList.contains('is-fullscreen-fallback'), false)
 })

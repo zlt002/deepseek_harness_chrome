@@ -197,20 +197,18 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   assert.match(capabilityMatrix, /有已选名称就以 continuable background 直接查询对应侧，不再要求聊天确认或复述名称/)
   assert.match(capabilityMatrix, /未选侧禁止 `search_selected_remote_code`、`search_selected_knowledge`、`subagent` 和底层检索 MCP/)
   assert.match(template, /PRD: \{编号\} - \{主题\}/)
-  assert.match(template, /analysis\.md 固定模板/)
-  assert.match(template, /# 需求分析与研发交付：\{编号\} - \{主题\}/)
+  assert.match(template, /单 PRD 模板/)
   for (const heading of [
     '# 一、术语与缩写', '# 二、背景与目标', '# 三、整体流程', '# 四、功能性需求',
     '# 五、角色权限', '# 六、非功能性需求', '# 七、配置与开关', '# 八、测试关注点',
     '# 九、参考文档',
   ]) assert.match(template, new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  for (const rule of ['必填项无事实时写', '选填项不适用时写', '每个功能至少包含正常场景', 'PRD 只写最终业务结论']) assert.match(template, new RegExp(rule))
-  for (const heading of ['需求最终理解', '产品纠正', '最终业务规则', '代码修改位置', '具体修改方式', '验收清单']) assert.match(template, new RegExp(heading))
-  assert.match(template, /改什么 \| 在哪里改 \| 怎么改 \| 改完效果/)
+  for (const rule of ['最终只生成一份 PRD', '功能内容必须写清', 'PRD 只写最终业务结论']) assert.match(template, new RegExp(rule))
+  for (const heading of ['现状', '调整方式', '调整后效果', '验收清单']) assert.match(template, new RegExp(heading))
   for (const category of ['正常情况', '异常情况', '边界情况', '权限情况', '兼容情况']) assert.match(template, new RegExp(category))
   assert.doesNotMatch(template, /AccrUI 需求交接附录|Evidence ID|Impact ID|测试 seam|验收合同/)
   assert.match(capabilityMatrix, /初始理解与纠正循环/)
-  assert.match(capabilityMatrix, /六部分研发交接包/)
+  assert.match(capabilityMatrix, /单 PRD/)
 })
 
 test('declares pmd-prd run binding, isolated scope, persisted state, and stale-confirmation recovery contracts', async () => {
@@ -255,7 +253,7 @@ test('declares pmd-prd run binding, isolated scope, persisted state, and stale-c
   assert.match(skill, /`pmd:\$\{requirementId\}`/)
   assert.match(skill, /生成并持久化稳定的 `batchId`/)
   assert.doesNotMatch(skill, /deliveryRunId/)
-  assert.match(skill, /恰好两项 `items`/)
+  assert.match(skill, /恰好一项 PRD/)
   assert.match(skill, /参数只能是 `\{ batchId, challenge \}`/)
   assert.match(skill, /以 `team_knowledge_batch_create` 返回的 batch 状态为准/)
   assert.match(skill, /challenge 过期、已消费或 ephemeral plan 缺失/)
@@ -441,6 +439,14 @@ test('keeps selected-source routing in the final Code preset system prompt', asy
   const prompt = renderPrompt(await ctx.systemPrompt.assemble({ scope: codeScope }))
   assert.match(prompt, /You are a coding agent powered by the test-model model/)
   assert.doesNotMatch(prompt, /deployment persona that Code shadows/)
+  assert.match(prompt, /你是 Harness Browser Workspace，一个面向企业用户的浏览器 AI 工作助手/)
+  assert.match(prompt, /包括会话过程、进度说明和最终结果，都使用通俗、简洁、直接的表达/)
+  assert.match(prompt, /让非开发用户能快速理解并做出决策/)
+  assert.match(prompt, /浏览器操作必须绑定明确的 Browser Target/)
+  assert.match(prompt, /先展示预览并获得授权；执行后从同一目标回读验证/)
+  assert.match(prompt, /只有结果真实产生并验证后，才能报告成功/)
+  assert.match(prompt, /多项任务部分成功时，保留已完成结果/)
+  assert.match(prompt, /用户只需要解释或建议时，不擅自执行修改/)
   assert.match(prompt, /search_selected_remote_code/)
   assert.match(prompt, /search_selected_knowledge/)
   assert.match(prompt, /searching them is the default path for answering questions/)

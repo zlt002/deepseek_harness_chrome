@@ -1,0 +1,295 @@
+diff --git a/packages/client/ui-tool/tests/tool-file-link-resolver.client.spec.tsx b/packages/client/ui-tool/tests/tool-file-link-resolver.client.spec.tsx
+new file mode 100644
+index 0000000000..1111111111
+--- /dev/null
++++ b/packages/client/ui-tool/tests/tool-file-link-resolver.client.spec.tsx
+@@ -0,0 +1,75 @@
++// @vitest-environment jsdom
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { cleanup, fireEvent, render } from '@testing-library/react'
++import type { ReactNode } from 'react'
++import type { RunningToolCall, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
++import type { ToolCallOwnerProps, ToolTreeProps } from '../src/client/contract/slots.ts'
++import { ToolCallTree } from '../src/client/tool/ToolCallTree.tsx'
++
++afterEach(cleanup)
++
++const t = ((key: string) => key) as never
++
++function call(toolName: string, path: string): RunningToolCall {
++  return {
++    callId: 'call-1', name: toolName, argsRaw: JSON.stringify(toolName === 'read' ? { path } : { file_path: path }),
++    turn: 1, step: 1, time: 1_000, callView: null, subCalls: [],
++  }
++}
++
++function renderToolPath(toolName: string, path: string, resolver: (path: string) => { open(): void } | undefined) {
++  const openFile = vi.fn()
++  const inspectCall = vi.fn()
++  const root = call(toolName, path)
++  const renderSlot = ((_name: string, owner: ToolCallOwnerProps, { fallback }: { fallback: ReactNode }) => {
++    if (owner.toolName === 'read' || owner.toolName === 'edit' || owner.toolName === 'write') {
++      return <button type="button" onClick={() => { owner.openFile(path) }}>{path}</button>
++    }
++    return fallback
++  }) as unknown as ToolTreeProps['renderSlot']
++  const props = {
++    renderSlot,
++    node: { data: { root } },
++    sessionId: 'session-1' as SessionId,
++    selectedCallId: undefined,
++    cwd: '/workspace',
++    openFile,
++    inspectCall,
++    t,
++    toolFileLinks: { resolve: (_owner: unknown, value: string) => resolver(value) },
++  } as unknown as ToolTreeProps & { toolFileLinks: { resolve(owner: ToolCallOwnerProps, path: string): { open(): void } | undefined } }
++  const view = render(
++    <ToolCallTree
++      {...props}
++    />,
++  )
++  return { ...view, openFile, inspectCall }
++}
++
++describe('ToolCallTree file paths', () => {
++  it.each([
++    ['edit', 'spec/process.md'],
++    ['write', 'spec/output.markdown'],
++    ['read', 'README.md'],
++  ])('%s Markdown paths are claimed without opening the Host or details', (toolName, path) => {
++    const review = vi.fn()
++    const view = renderToolPath(toolName, path, value => value.endsWith('.md') || value.endsWith('.markdown') ? { open: review } : undefined)
++
++    fireEvent.click(view.getByText(path))
++
++    expect(review).toHaveBeenCalledOnce()
++    expect(view.openFile).not.toHaveBeenCalled()
++    expect(view.inspectCall).not.toHaveBeenCalled()
++    expect(view.container.querySelector('[aria-expanded="true"]')).toBeNull()
++  })
++
++  it('leaves an unclaimed path on the Host opener', () => {
++    const view = renderToolPath('edit', 'spec/notes.txt', () => undefined)
++
++    fireEvent.click(view.getByText('spec/notes.txt'))
++
++    expect(view.openFile).toHaveBeenCalledWith('spec/notes.txt')
++    expect(view.inspectCall).not.toHaveBeenCalled()
++    expect(view.container.querySelector('[aria-expanded="true"]')).toBeNull()
++  })
++})
+diff --git a/packages/client/ui-tool/src/client/contract/slots.ts b/packages/client/ui-tool/src/client/contract/slots.ts
+index 04af306..d09cce5 100644
+--- a/packages/client/ui-tool/src/client/contract/slots.ts
++++ b/packages/client/ui-tool/src/client/contract/slots.ts
+@@ -1,6 +1,6 @@
+ /** Tool UI slot declarations and their composed component props. */
+ import type { PropsLocale, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
++import type { SessionId, ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+ import type {} from '@deepseek-ai/dsh-client-locale/client'
+ 
+@@ -24,8 +24,43 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   }
+ }
+ 
++/** A resolver-owned action for a Tool argument path. */
++export interface ToolFileLink {
++  open(): void
++}
++
++/** Optional handler for Tool argument paths before the Host fallback. */
++export interface ToolFileLinkProvider {
++  resolve(owner: ToolCallOwnerProps, path: string): ToolFileLink | undefined
++}
++
++/** Ordered, composable providers for Tool argument paths. */
++export class ToolFileLinkRegistry implements ToolFileLinkProvider {
++  readonly #providers = new Set<ToolFileLinkProvider>()
++
++  register(provider: ToolFileLinkProvider): () => void {
++    this.#providers.add(provider)
++    return () => { this.#providers.delete(provider) }
++  }
++
++  resolve(owner: ToolCallOwnerProps, path: string): ToolFileLink | undefined {
++    return [...this.#providers].reverse()
++      .map(provider => provider.resolve(owner, path))
++      .find((link): link is ToolFileLink => link !== undefined)
++  }
++}
++
++declare module '@deepseek-ai/cordis' {
++  interface Context {
++    /** Composable Tool argument-path registry. */
++    toolFileLinks: ToolFileLinkRegistry
++  }
++}
++
+ /** Standard owner currency supplied to every atomic Tool view. */
+ export interface ToolCallOwnerProps {
++  /** Session that owns this Tool call when rendered through a session tree. */
++  sessionId?: SessionId | undefined
+   /** Tool call identity, stable across running and settled forms. */
+   callId: string
+   /** Wire Tool name and keyed dispatch value. */
+diff --git a/packages/client/ui-tool/src/client/apply.ts b/packages/client/ui-tool/src/client/apply.ts
+index ec2f0b8..16d8d98 100644
+--- a/packages/client/ui-tool/src/client/apply.ts
++++ b/packages/client/ui-tool/src/client/apply.ts
+@@ -1,6 +1,8 @@
+ /** Register the Tool call tree, details renderer, and built-in atomic views. */
+ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
++import { createElement } from 'react'
++import { ToolFileLinkRegistry } from './contract/slots.ts'
+ import { ToolCallTree } from './tool/ToolCallTree.tsx'
+ import { ToolDetails } from './tool/ToolDetails.tsx'
+ import { CONVERSATION_NS as NS } from './locale.ts'
+@@ -20,6 +22,7 @@ export const inject = ['slots']
+  * @param ctx - Client root context.
+  */
+ export function apply(ctx: ClientContext): void {
++  ctx.provide('toolFileLinks', new ToolFileLinkRegistry())
+   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+     name: 'conversation.chat.node',
+     key: 'tool-call',
+@@ -27,7 +30,7 @@ export function apply(ctx: ClientContext): void {
+     children: {
+       'tool.call.toolview': { kind: 'keyed', scope: 'session' },
+     },
+-  }, ToolCallTree))
++  }, props => createElement(ToolCallTree, { ...props, toolFileLinks: ctx.toolFileLinks })))
+ 
+   ctx.slots.inject('conversation.details.tool', () => ctx.slots.register({
+     name: 'conversation.details.tool',
+     name: 'conversation.details.tool',
+diff --git a/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx b/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
+index db3ed0a..a455a00 100644
+--- a/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
++++ b/packages/client/ui-tool/src/client/tool/ToolCallTree.tsx
+@@ -1,7 +1,7 @@
+ /** Root/subcall Tool composition with one keyed atomic dispatch path. */
+-import { memo, useMemo, type ReactNode } from 'react'
++import { memo, useCallback, useMemo, type ReactNode } from 'react'
+ import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
+-import type { ToolCallOwnerProps, ToolTreeProps } from '../contract/slots.ts'
++import type { ToolCallOwnerProps, ToolFileLinkProvider, ToolTreeProps } from '../contract/slots.ts'
+ import { GenericToolCard } from './toolviews/GenericToolCard.tsx'
+ import css from './ToolCallTree.module.css'
+ 
+@@ -12,22 +12,30 @@ function callName(node: ToolCallBlock): string {
+ 
+ /** One atomic call dispatched through the Tool-owned keyed slot. */
+ const ToolCall = memo(function ToolCall({
+-  renderSlot, callId, toolName, block, openFile, selected, cwd, inspectCall, t, children,
+-}: Pick<ToolTreeProps, 'renderSlot' | 'openFile' | 'cwd' | 'inspectCall' | 't'> & {
++  renderSlot, callId, toolName, block, sessionId, openFile, toolFileLinks, selected, cwd, inspectCall, t, children,
++}: Pick<ToolTreeProps, 'renderSlot' | 'sessionId' | 'openFile' | 'cwd' | 'inspectCall' | 't'> & {
+   callId: string
+   toolName: string
+   block: ToolCallBlock
++  toolFileLinks?: ToolFileLinkProvider | undefined
+   selected: boolean
+   children?: ReactNode
+ }) {
+   const owner: ToolCallOwnerProps = useMemo(() => ({
++    sessionId,
+     callId,
+     toolName,
+     block,
+     openFile,
+     cwd,
+     inspect: () => { inspectCall(callId) },
+-  }), [callId, toolName, block, openFile, cwd, inspectCall])
++  }), [sessionId, callId, toolName, block, openFile, cwd, inspectCall])
++  const openToolFile = useCallback((path: string) => {
++    const link = toolFileLinks?.resolve(owner, path)
++    if (link !== undefined) link.open()
++    else openFile(path)
++  }, [owner, openFile, toolFileLinks])
++  const viewOwner = useMemo(() => ({ ...owner, openFile: openToolFile }), [owner, openToolFile])
+   return (
+     <div
+       className={css.callRow}
+@@ -35,9 +43,9 @@ const ToolCall = memo(function ToolCall({
+       data-chat-call-id={callId}
+       data-selected={selected || undefined}
+     >
+-      {renderSlot('tool.call.toolview', owner, {
++      {renderSlot('tool.call.toolview', viewOwner, {
+         entryKey: toolName,
+-        fallback: <GenericToolCard {...owner} t={t} />,
++        fallback: <GenericToolCard {...viewOwner} t={t} />,
+       })}
+       {children}
+     </div>
+@@ -45,9 +53,10 @@ const ToolCall = memo(function ToolCall({
+ })
+ 
+ const ToolCallBranch = memo(function ToolCallBranch({
+-  renderSlot, block, selectedCallId, cwd, openFile, inspectCall, t,
+-}: Pick<ToolTreeProps, 'renderSlot' | 'selectedCallId' | 'cwd' | 'openFile' | 'inspectCall' | 't'> & {
++  renderSlot, block, sessionId, selectedCallId, cwd, openFile, toolFileLinks, inspectCall, t,
++}: Pick<ToolTreeProps, 'renderSlot' | 'sessionId' | 'selectedCallId' | 'cwd' | 'openFile' | 'inspectCall' | 't'> & {
+   block: ToolCallBlock
++  toolFileLinks?: ToolFileLinkProvider | undefined
+ }) {
+   return (
+     <ToolCall
+@@ -55,7 +64,9 @@ const ToolCallBranch = memo(function ToolCallBranch({
+       callId={block.callId}
+       toolName={callName(block)}
+       block={block}
++      sessionId={sessionId}
+       openFile={openFile}
++      toolFileLinks={toolFileLinks}
+       selected={block.callId === selectedCallId}
+       cwd={cwd}
+       inspectCall={inspectCall}
+@@ -68,9 +79,11 @@ const ToolCallBranch = memo(function ToolCallBranch({
+               key={child.callId}
+               renderSlot={renderSlot}
+               block={child}
++              sessionId={sessionId}
+               selectedCallId={selectedCallId}
+               cwd={cwd}
+               openFile={openFile}
++              toolFileLinks={toolFileLinks}
+               inspectCall={inspectCall}
+               t={t}
+             />
+@@ -88,16 +101,18 @@ const ToolCallBranch = memo(function ToolCallBranch({
+  * @returns the Tool call tree.
+  */
+ export function ToolCallTree({
+-  renderSlot, node, selectedCallId, cwd, openFile, inspectCall, t,
+-}: ToolTreeProps) {
++  renderSlot, node, sessionId, selectedCallId, cwd, openFile, toolFileLinks, inspectCall, t,
++}: ToolTreeProps & { toolFileLinks?: ToolFileLinkProvider | undefined }) {
+   const block = node.data.root
+   return (
+     <ToolCallBranch
+       renderSlot={renderSlot}
+       block={block}
++      sessionId={sessionId}
+       selectedCallId={selectedCallId}
+       cwd={cwd}
+       openFile={openFile}
++      toolFileLinks={toolFileLinks}
+       inspectCall={inspectCall}
+       t={t}
+     />
+     />
+diff --git a/packages/client/ui-tool/src/client/index.ts b/packages/client/ui-tool/src/client/index.ts
+index 357506b..57b602f 100644
+--- a/packages/client/ui-tool/src/client/index.ts
++++ b/packages/client/ui-tool/src/client/index.ts
+@@ -1,3 +1,4 @@
+ /** Browser Tool plugin: whole-call composition and keyed atomic Tool views. */
+ export { apply, inject } from './apply.ts'
+-export type { ToolCallOwnerProps, ToolCallViewProps, ToolDetailsProps, ToolTreeProps } from './contract/slots.ts'
++export { ToolFileLinkRegistry } from './contract/slots.ts'
++export type { ToolCallOwnerProps, ToolFileLink, ToolFileLinkProvider, ToolCallViewProps, ToolDetailsProps, ToolTreeProps } from './contract/slots.ts'

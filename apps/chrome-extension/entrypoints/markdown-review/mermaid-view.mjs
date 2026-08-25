@@ -70,6 +70,82 @@ export function wireMermaidViewer(block, preview, canvas, zoomInButton, zoomOutB
   return { reset }
 }
 
+/**
+ * Prefer the browser fullscreen surface, with a page-level overlay when an
+ * extension page or a test runtime denies the Fullscreen API. Neither mode
+ * touches the Mermaid source or the viewer transform.
+ */
+export function wireMermaidFullscreen(block, fullscreenButton, closeButton) {
+  const document = block.ownerDocument
+  let fallback = false
+  let disposed = false
+  let observer
+  const nativeActive = () => document.fullscreenElement === block
+  const active = () => fallback || nativeActive()
+  const update = () => {
+    const isActive = active()
+    block.classList.toggle('is-fullscreen-fallback', fallback)
+    block.classList.toggle('is-fullscreen-active', isActive)
+    fullscreenButton.setAttribute('aria-pressed', String(isActive))
+    closeButton.hidden = !isActive
+  }
+  const exit = async () => {
+    fallback = false
+    if (nativeActive() && typeof document.exitFullscreen === 'function') {
+      try { await document.exitFullscreen() } catch { /* Native exit may already be in progress. */ }
+    }
+    update()
+  }
+  const enter = async () => {
+    if (active()) return
+    if (typeof block.requestFullscreen === 'function' && document.fullscreenEnabled !== false) {
+      try {
+        await block.requestFullscreen()
+        if (nativeActive()) {
+          update()
+          return
+        }
+      } catch {
+        // Some extension pages reject Fullscreen API calls; use the overlay.
+      }
+    }
+    fallback = true
+    update()
+  }
+  const onFullscreenChange = () => {
+    if (!nativeActive()) fallback = false
+    update()
+  }
+  const onKeydown = (event) => {
+    if (event.key !== 'Escape' || !active()) return
+    event.preventDefault()
+    void exit()
+  }
+  const destroy = () => {
+    if (disposed) return
+    disposed = true
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    document.removeEventListener('keydown', onKeydown)
+    fullscreenButton.removeEventListener('click', onFullscreenClick)
+    closeButton.removeEventListener('click', onCloseClick)
+    observer?.disconnect()
+  }
+  const onFullscreenClick = () => { void enter() }
+  const onCloseClick = () => { void exit() }
+
+  fullscreenButton.addEventListener('click', onFullscreenClick)
+  closeButton.addEventListener('click', onCloseClick)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('keydown', onKeydown)
+  const MutationObserver = document.defaultView?.MutationObserver
+  if (MutationObserver !== undefined && block.isConnected) {
+    observer = new MutationObserver(() => { if (!block.isConnected) destroy() })
+    observer.observe(document.documentElement, { childList: true, subtree: true })
+  }
+  update()
+  return { enter, exit, destroy }
+}
+
 /** Keep the review card aligned with the document regardless of diagram size. */
 export function fitMermaidPreview(preview) {
   preview.style.width = '100%'

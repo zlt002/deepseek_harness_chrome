@@ -11,17 +11,16 @@ const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://doc.mid
 const parent = { parentId: '9', bookId: '10', parentName: 'Root', parentType: 'directory', canRead: true, canCreate: true, fingerprint: 'parent-batch-v1' }
 const documents = [{ name: 'One', body: '# One\nsecret one' }, { name: 'Two', body: '# Two\nsecret two' }]
 
-async function authoritativePmdBodies() {
+async function authoritativePmdBody() {
   const authority = await readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8')
   const blocks = [...authority.matchAll(/```markdown\s*\n([\s\S]*?)\n```/g)].map((match) => match[1])
   const materialise = (body) => body
     .replaceAll('{编号}', 'REQ')
     .replaceAll('{主题}', 'CRM')
     .replace(/\{[^{}\n]+\}/g, '[待确认]')
-  const analysisBody = blocks.find((body) => body.includes('# 需求分析与研发交付'))
   const prdBody = blocks.find((body) => body.includes('# PRD:'))
-  assert.ok(analysisBody && prdBody, 'authoritative PMD templates must expose both document bodies')
-  return { analysisBody: materialise(analysisBody), prdBody: materialise(prdBody) }
+  assert.ok(prdBody, 'authoritative PMD templates must expose one document body')
+  return materialise(prdBody)
 }
 
 // Matches Harness's current model-facing projection: it reads only top-level
@@ -276,13 +275,13 @@ test('rejects non-canonical duplicate names before preview', async () => {
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('rejects a PMD batch that replaces the two authoritative templates with summaries', async () => {
+test('rejects a PMD batch that does not contain exactly one complete PRD', async () => {
   let inspections = 0
   const harness = await open((request) => { inspections += 1; return request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1') })
   try {
     const response = await preview(harness, 'pmd:req-crm', [
-      { name: 'req_crm_01_需求分析与研发交付', body: '# 需求分析与研发交付\n## 1. 需求背景与痛点' },
-      { name: 'req_crm_02_PRD', body: '# PRD: req_crm\\n## 1. 文档信息与变更历史' },
+      { name: 'req_crm_需求分析与研发交付', body: '# 需求分析与研发交付\n## 1. 需求背景与痛点' },
+      { name: 'req_crm_PRD', body: '# PRD: req_crm\\n## 需求基本信息' },
     ])
     assert.equal(response.result.isError, true)
     assert.match(response.result.content[0].text, /pmd_prd_template_invalid/)
@@ -290,15 +289,12 @@ test('rejects a PMD batch that replaces the two authoritative templates with sum
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('accepts a PMD batch only when the current six-part handoff and company PRD structures are complete', async () => {
-  const { analysisBody, prdBody } = await authoritativePmdBodies()
+test('accepts a PMD batch only when the single PRD structure is complete', async () => {
+  const prdBody = await authoritativePmdBody()
   let inspections = 0
   const harness = await open((request) => { inspections += 1; return request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1') })
   try {
-    const response = await preview(harness, 'pmd:req-crm-valid', [
-      { name: 'req_crm_01_需求分析与研发交付', body: analysisBody },
-      { name: 'req_crm_02_PRD', body: prdBody },
-    ])
+    const response = await preview(harness, 'pmd:req-crm-valid', [{ name: 'req_crm_PRD', body: prdBody }])
     assert.equal(response.result.isError, undefined)
     assert.equal(typeof response.result.structuredContent.challenge, 'string')
     assert.equal(inspections, 1)

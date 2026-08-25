@@ -7,7 +7,16 @@ interface WorkspaceMemberView {
 interface SessionSummaryView { readonly id: string; readonly cwd?: string }
 interface SessionListView { readonly current: string | undefined; readonly byId: Readonly<Record<string, SessionSummaryView | undefined>> }
 
-/** A directory read is valid only for an accounted session whose Host cwd has arrived. */
+/** Public workspace snapshots expose an item list; do not assume a private byId index exists. */
+export function workspacePathForDirectory(
+  workspaces: readonly WorkspaceMemberView[],
+  workspaceId: string | undefined,
+): string | undefined {
+  if (workspaceId === undefined) return undefined
+  return workspaces.find(item => String(item.workspaceId) === workspaceId)?.path
+}
+
+/** Prefer a cwd-ready session, then let the Host resolve an accounted cold session from its durable registry. */
 export function selectReadyWorkspaceDirectorySession(
   workspaces: readonly WorkspaceMemberView[],
   sessions: SessionListView,
@@ -19,9 +28,11 @@ export function selectReadyWorkspaceDirectorySession(
   const candidates = sessions.current === undefined
     ? workspace.sessionIds
     : [sessions.current, ...workspace.sessionIds.filter(id => id !== sessions.current)]
-  return candidates.find(id => {
+  const ready = candidates.find(id => {
     if (!workspace.sessionIds.some(member => String(member) === String(id))) return false
     const session = sessions.byId[String(id)]
     return session !== undefined && session.cwd === workspace.path
   })
+  if (ready !== undefined) return ready
+  return workspace.sessionIds.find(id => String(id) !== '')
 }

@@ -57,6 +57,91 @@ test('accepts safe product-dashboard components and rejects malformed tables or 
   assert.equal(validatePrototypeDocument(drawer).ok, true)
 })
 
+test('accepts bounded declarative table filtering, sorting, and pagination but rejects unsafe references or data', async () => {
+  const { validatePrototypeDocument, MAX_TABLE_ROWS, MAX_TABLE_COLUMNS } = await schema()
+  const doc = documentFixture()
+  doc.screens[0].nodes.push(
+    { id: 'project-search', type: 'input', label: '搜索项目', inputType: 'search', value: '' },
+    { id: 'project-table', type: 'table', label: '项目列表', columns: [{ key: 'name', label: '项目' }, { key: 'owner', label: '负责人' }], rows: Array.from({ length: 12 }, (_, index) => ({ id: `project-${index + 1}`, values: [`项目 ${index + 1}`, index % 2 ? '张三' : '李四'] })), filters: [{ inputId: 'project-search', columnKey: 'name', operator: 'contains' }], sort: { columnKey: 'name', direction: 'asc' }, pagination: { pageSize: 5 } },
+  )
+  assert.equal(validatePrototypeDocument(doc).ok, true)
+
+  const unknownInput = structuredClone(doc); unknownInput.screens[0].nodes.at(-1).filters[0].inputId = 'missing-input'
+  assert.equal(validatePrototypeDocument(unknownInput).ok, false)
+  const checkboxInput = structuredClone(doc); checkboxInput.screens[0].nodes.at(-2).inputType = 'checkbox'
+  assert.equal(validatePrototypeDocument(checkboxInput).ok, false)
+  const unknownColumn = structuredClone(doc); unknownColumn.screens[0].nodes.at(-1).filters[0].columnKey = 'missing-column'
+  assert.equal(validatePrototypeDocument(unknownColumn).ok, false)
+  const unsafeOperator = structuredClone(doc); unsafeOperator.screens[0].nodes.at(-1).filters[0].operator = 'regex'
+  assert.equal(validatePrototypeDocument(unsafeOperator).ok, false)
+  const unsafeSort = structuredClone(doc); unsafeSort.screens[0].nodes.at(-1).sort.columnKey = 'missing-column'
+  assert.equal(validatePrototypeDocument(unsafeSort).ok, false)
+  const unsafePageSize = structuredClone(doc); unsafePageSize.screens[0].nodes.at(-1).pagination.pageSize = 7
+  assert.equal(validatePrototypeDocument(unsafePageSize).ok, false)
+  const tooManyRows = structuredClone(doc); tooManyRows.screens[0].nodes.at(-1).rows = Array.from({ length: MAX_TABLE_ROWS + 1 }, (_, index) => ({ id: `row-${index}`, values: ['安全文本', '安全文本'] }))
+  assert.equal(validatePrototypeDocument(tooManyRows).ok, false)
+  const tooManyColumns = structuredClone(doc); tooManyColumns.screens[0].nodes.at(-1).columns = Array.from({ length: MAX_TABLE_COLUMNS + 1 }, (_, index) => ({ key: `column-${index}`, label: `列${index}` })); tooManyColumns.screens[0].nodes.at(-1).rows[0].values = Array(MAX_TABLE_COLUMNS + 1).fill('安全文本')
+  assert.equal(validatePrototypeDocument(tooManyColumns).ok, false)
+  const unsafeCell = structuredClone(doc); unsafeCell.screens[0].nodes.at(-1).rows[0].values[0] = '<img src=x>'
+  assert.equal(validatePrototypeDocument(unsafeCell).ok, false)
+  const urlCell = structuredClone(doc); urlCell.screens[0].nodes.at(-1).rows[0].values[0] = 'https://example.test'
+  assert.equal(validatePrototypeDocument(urlCell).ok, false)
+  const unsafeFilterValue = structuredClone(doc); unsafeFilterValue.screens[0].nodes.at(-2).value = 'javascript:alert(1)'
+  assert.equal(validatePrototypeDocument(unsafeFilterValue).ok, false)
+  const urlFilterValue = structuredClone(doc); urlFilterValue.screens[0].nodes.at(-2).value = 'https://example.test'
+  assert.equal(validatePrototypeDocument(urlFilterValue).ok, false)
+})
+
+test('accepts bounded same-screen field rules and text variables but rejects cycles, injections, and invalid targets', async () => {
+  const { validatePrototypeDocument, MAX_FIELD_RULES } = await schema()
+  const doc = documentFixture()
+  doc.screens[0].nodes.push(
+    { id: 'kind', type: 'input', label: '类型', inputType: 'select', options: [{ label: '企业', value: 'company' }, { label: '个人', value: 'person' }] },
+    { id: 'owner', type: 'input', label: '负责人', inputType: 'select', options: [{ label: '默认', value: 'default' }], required: true },
+    { id: 'conditional-copy', type: 'text', text: '当前类型：${kind}' },
+  )
+  doc.fieldRules = [
+    { targetId: 'owner', conditions: [{ fieldId: 'kind', operator: 'equals', value: 'company' }], effect: { type: 'set-options', options: [{ label: '张三', value: 'zhang-san' }] } },
+    { targetId: 'owner', conditions: [{ fieldId: 'kind', operator: 'equals', value: 'person' }], effect: { type: 'disable' } },
+  ]
+  assert.equal(validatePrototypeDocument(doc).ok, true)
+  const unknownField = structuredClone(doc); unknownField.fieldRules[0].conditions[0].fieldId = 'missing'
+  assert.equal(validatePrototypeDocument(unknownField).ok, false)
+  const crossScreen = structuredClone(doc); crossScreen.fieldRules[0].targetId = 'email'
+  assert.equal(validatePrototypeDocument(crossScreen).ok, false)
+  const invalidOptionsTarget = structuredClone(doc); invalidOptionsTarget.fieldRules[0].targetId = 'conditional-copy'
+  assert.equal(validatePrototypeDocument(invalidOptionsTarget).ok, false)
+  const injectedOption = structuredClone(doc); injectedOption.fieldRules[0].effect.options[0].value = 'https://example.test'
+  assert.equal(validatePrototypeDocument(injectedOption).ok, false)
+  const badVariable = structuredClone(doc); badVariable.screens[0].nodes.at(-1).text = '坏变量 ${kind.toString}'
+  assert.equal(validatePrototypeDocument(badVariable).ok, false)
+  const cycle = structuredClone(doc); cycle.fieldRules = [{ targetId: 'kind', conditions: [{ fieldId: 'owner', operator: 'not-empty' }], effect: { type: 'set-options', options: [{ label: '企业', value: 'company' }] } }, { targetId: 'owner', conditions: [{ fieldId: 'kind', operator: 'not-empty' }], effect: { type: 'set-options', options: [{ label: '张三', value: 'zhang-san' }] } }]
+  assert.equal(validatePrototypeDocument(cycle).ok, false)
+  const tooMany = structuredClone(doc); tooMany.fieldRules = Array.from({ length: MAX_FIELD_RULES + 1 }, () => doc.fieldRules[0])
+  assert.equal(validatePrototypeDocument(tooMany).ok, false)
+})
+
+test('accepts bounded same-screen CRUD mappings and rejects cross-table, injected, or row-forged actions', async () => {
+  const { validatePrototypeDocument, MAX_CRUD_FIELD_MAPPINGS } = await schema()
+  const doc = documentFixture()
+  doc.screens[1].nodes.unshift(
+    { id: 'project-name', type: 'input', label: '项目名称', required: true },
+    { id: 'add-project', type: 'button', label: '新增', action: { type: 'add-row', tableId: 'projects', fieldMap: [{ fieldId: 'project-name', columnKey: 'name' }] } },
+    { id: 'projects', type: 'table', columns: [{ key: 'name', label: '名称' }], rows: [{ id: 'project-edit', values: ['旧项目'], action: { type: 'edit-row', tableId: 'projects', fieldMap: [{ fieldId: 'project-name', columnKey: 'name' }] } }, { id: 'project-delete', values: ['待删项目'], action: { type: 'delete-row', tableId: 'projects', businessName: '项目' } }] },
+  )
+  assert.equal(validatePrototypeDocument(doc).ok, true)
+  const crossTable = structuredClone(doc); crossTable.screens[1].nodes.find(node => node.id === 'add-project').action.tableId = 'missing'
+  assert.equal(validatePrototypeDocument(crossTable).ok, false)
+  const forgedDelete = structuredClone(doc); forgedDelete.screens[1].nodes.find(node => node.id === 'add-project').action = { type: 'delete-row', tableId: 'projects', businessName: '项目' }
+  assert.equal(validatePrototypeDocument(forgedDelete).ok, false)
+  const injectedName = structuredClone(doc); injectedName.screens[1].nodes.find(node => node.id === 'projects').rows[1].action.businessName = 'javascript:alert(1)'
+  assert.equal(validatePrototypeDocument(injectedName).ok, false)
+  const duplicateMapping = structuredClone(doc); duplicateMapping.screens[1].nodes.find(node => node.id === 'add-project').action.fieldMap.push({ fieldId: 'project-name', columnKey: 'name' })
+  assert.equal(validatePrototypeDocument(duplicateMapping).ok, false)
+  const tooManyMappings = structuredClone(doc); tooManyMappings.screens[1].nodes.find(node => node.id === 'add-project').action.fieldMap = Array.from({ length: MAX_CRUD_FIELD_MAPPINGS + 1 }, () => ({ fieldId: 'project-name', columnKey: 'name' }))
+  assert.equal(validatePrototypeDocument(tooManyMappings).ok, false)
+})
+
 test('accepts mature product navigation, empty results, pagination, disabled actions, and required fields', async () => {
   const { validatePrototypeDocument, collectPrototypeElementIds } = await schema()
   const doc = documentFixture()
@@ -180,6 +265,12 @@ test('binds design specs only to authorized reference evidence', async () => {
   assert.equal(validateReferenceEvidence(invalidCoverage).ok, false)
   const spec = { v: 1, id: 'design-main', name: '参考风格', basedOnEvidenceIds: ['ref-one'], summary: '简洁', colors: [{ name: '蓝', value: '#2563eb', usage: '按钮' }], typography: { fontFamily: 'system-ui', headingWeight: 700, bodySize: 14 }, spacing: { base: 8, cardRadius: 12 }, principles: ['清晰'] }
   assert.equal(validateDesignSpec(spec, ['ref-one']).ok, true)
+  const multi = { ...spec, basedOnEvidenceIds: ['ref-one', 'ref-two'] }
+  assert.equal(validateDesignSpec(multi, ['ref-one', 'ref-two']).ok, false)
+  multi.merge = { primaryEvidenceId: 'ref-one', auxiliaryEvidenceIds: ['ref-two'], strategy: 'primary' }
+  assert.equal(validateDesignSpec(multi, ['ref-one', 'ref-two']).ok, true)
+  multi.merge = { primaryEvidenceId: 'ref-two', auxiliaryEvidenceIds: ['ref-one'], strategy: 'primary' }
+  assert.equal(validateDesignSpec(multi, ['ref-one', 'ref-two']).ok, false)
   spec.basedOnEvidenceIds = ['unapproved']; assert.equal(validateDesignSpec(spec, ['ref-one']).ok, false)
 })
 

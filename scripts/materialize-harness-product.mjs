@@ -4,6 +4,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { acquireHarnessProductBuildLock } from './harness-product-build-lock.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const generatedRoot = resolve(projectRoot, '.generated')
@@ -82,6 +83,10 @@ const patchRoot = resolve(projectRoot, option('--patch-dir', 'upstream-contribut
 const shouldInstall = process.argv.includes('--install') || process.argv.includes('--build')
 const shouldBuild = process.argv.includes('--build')
 
+await mkdir(generatedRoot, { recursive: true })
+const buildLock = await acquireHarnessProductBuildLock(generatedRoot)
+process.once('exit', () => { void buildLock.release() })
+
 assertGeneratedTarget(target)
 if (!existsSync(resolve(source, '.git'))) throw new Error(`Harness source is not a Git checkout: ${source}`)
 
@@ -91,7 +96,6 @@ const patchFiles = (await readdir(patchRoot, { withFileTypes: true }))
   .map(entry => resolve(patchRoot, entry.name))
   .sort()
 
-await mkdir(generatedRoot, { recursive: true })
 const worktrees = run('git', ['worktree', 'list', '--porcelain'], source)
 const registered = worktrees
   .split(/\n\n+/)
@@ -153,3 +157,4 @@ if (shouldBuild) {
 
 console.log(`Materialized Harness product tree at ${target}`)
 console.log(`Official revision: ${revision}; generic patches: ${patchFiles.length}`)
+await buildLock.release()

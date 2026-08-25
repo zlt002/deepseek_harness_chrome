@@ -55,8 +55,15 @@ test('each Mermaid block defaults to a visual view and can independently reveal 
   assert.match(editor, /Decoration\.widget\(position, /)
   assert.match(editor, /mermaid-viewer-controls/)
   assert.match(editor, /wireMermaidViewer/)
+  assert.match(editor, /全屏/)
+  assert.match(editor, /退出全屏/)
+  assert.match(editor, /wireMermaidFullscreen/)
+  assert.match(mermaidView, /requestFullscreen/)
+  assert.match(mermaidView, /is-fullscreen-fallback/)
+  assert.match(mermaidView, /event\.key !== 'Escape'/)
   assert.match(style, /\.mermaid-toolbar\s*\{[\s\S]*justify-content: space-between/)
   assert.match(style, /\.mermaid-canvas\s*\{[\s\S]*transform-origin: center/)
+  assert.match(style, /\.mermaid-block\.is-fullscreen-fallback/)
 })
 
 test('official Crepe code and image blocks retain their component layout instead of falling back to raw pre and img styling', () => {

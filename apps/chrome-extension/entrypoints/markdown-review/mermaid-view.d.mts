@@ -12,5 +12,10 @@ export function wireMermaidViewer(
   zoomOutButton: HTMLButtonElement,
   resetButton: HTMLButtonElement,
 ): { reset: () => void }
+export function wireMermaidFullscreen(
+  block: HTMLElement,
+  fullscreenButton: HTMLButtonElement,
+  closeButton: HTMLButtonElement,
+): { enter: () => Promise<void>; exit: () => Promise<void>; destroy: () => void }
 
 export function fitMermaidPreview(preview: HTMLElement): void

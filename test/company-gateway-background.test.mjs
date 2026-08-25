@@ -33,3 +33,9 @@ test('tool capability is verified for the requested catalog model within a bound
   assert.match(source, /probeCompanyGatewayToolCapability\(\{ apiKey, protocol, modelId, signal: controller\.signal \}\)/)
   assert.match(source, /quota\.usagePercent !== null && quota\.usagePercent >= 100/)
 })
+
+test('Thinking models retry capability detection without forced tool choice', () => {
+  assert.match(source, /thinking mode does not support this tool_choice/)
+  assert.match(source, /\.\.\.\(forceTool \? \{ tool_choice: toolChoice \} : \{\}\)/)
+  assert.match(source, /response = await request\(false\)/)
+})

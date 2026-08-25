@@ -63,7 +63,7 @@ test('reports observed, inferred, and default provenance without pretending defa
   assert.equal(full.find(item => item.id === 'motion').status, 'default')
   const responsive = designEvidenceCoverage(evidence({ colors: ['#fff'], fonts: ['Inter'], radius: ['8px'], spacing: ['8px'], responsiveBreakpoints: [640, 1024] }))
   assert.equal(responsive.find(item => item.id === 'responsive').status, 'inferred')
-  assert.match(responsive.find(item => item.id === 'responsive').detail, /CSS 声明，尚未多尺寸实测/)
+  assert.match(responsive.find(item => item.id === 'responsive').detail, /从 CSS 规则提取，尚未多尺寸实测/)
   const legacy = designEvidenceCoverage(evidence({ colors: ['#fff'], fonts: ['Inter'], radius: ['8px'], spacing: ['8px'] }))
   assert.equal(legacy.find(item => item.id === 'surfaces').status, 'default')
   assert.equal(legacy.find(item => item.id === 'typography').status, 'default')

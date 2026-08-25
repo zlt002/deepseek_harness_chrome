@@ -23,6 +23,8 @@ test('renders the picker child tree with no selected workspace session', () => {
   const props = {
     sessionId: undefined,
     bridge: undefined,
+    onOpenFile: async () => {},
+    refreshGeneration: 0,
     onClose: () => {},
   }
 

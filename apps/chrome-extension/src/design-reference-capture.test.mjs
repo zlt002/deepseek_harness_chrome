@@ -20,8 +20,10 @@ async function captureModule() {
 test('bounds DOM discovery before inspecting styles on very large pages', async () => {
   const source = await readFile(new URL('./design-reference-capture.ts', import.meta.url), 'utf8')
   assert.match(source, /const candidateLimit = 12_000/)
-  assert.match(source, /document\.createTreeWalker\(document\.body, NodeFilter\.SHOW_ELEMENT\)/)
-  assert.match(source, /candidateLimitReached = walker\.nextNode\(\) !== null/)
+  assert.match(source, /const collectCandidates = \(root: Node\)/)
+  assert.match(source, /document\.createTreeWalker\(root, NodeFilter\.SHOW_ELEMENT\)/)
+  assert.match(source, /next\.shadowRoot !== null/)
+  assert.match(source, /potentialClosedShadowHosts/)
   assert.doesNotMatch(source, /querySelectorAll<HTMLElement>\('\*'\)/)
   assert.match(source, /页面元素超过 \$\{candidateLimit\} 个/)
   assert.match(source, /const cssRuleLimit = 20_000/)
@@ -33,12 +35,12 @@ test('walks SVG elements as design evidence instead of dropping non-HTML element
   assert.match(source, /const priority = \(element: Element\)/)
   assert.match(source, /if \(!\(next instanceof Element\)\) break/)
   assert.doesNotMatch(source, /next instanceof HTMLElement/)
-  assert.match(source, /node instanceof HTMLElement \? node\.innerText : node\.textContent/)
+  assert.match(source, /node instanceof HTMLElement \? node\.innerText : ''/)
 })
 
 test('captures a real compact SVG from a synthetic DOM', async t => {
   const mediaRules = Array.from({ length: 13 }, (_, index) => `@media (min-width:${300 + index * 10}px){.item-${index}{display:block}}`).join('')
-  const dom = new JSDOM(`<!doctype html><html style="opacity:1"><head><style>${mediaRules}</style><style>button:focus{outline:2px solid rgb(1, 2, 3);outline-offset:2px}</style></head><body style="opacity:1"><button style="opacity:1">保存</button><svg aria-label="搜索" style="display:block;opacity:1;width:16px;height:16px" viewBox="0 0 16 16"><path d="M1 1h4" /></svg></body></html>`, { url: 'https://example.test/product', pretendToBeVisual: true })
+  const dom = new JSDOM(`<!doctype html><html style="opacity:1"><head><style>${mediaRules}</style><style>button:focus{outline:2px solid rgb(1, 2, 3);outline-offset:2px} button:hover{color:rgb(255, 255, 255);background-color:rgb(1, 2, 3);border-color:rgb(4, 5, 6);box-shadow:0 2px 4px rgba(0, 0, 0, .2);transition:160ms ease-out}</style></head><body style="opacity:1"><button style="opacity:1">保存</button><svg aria-label="搜索" style="display:block;opacity:1;width:16px;height:16px" viewBox="0 0 16 16"><path d="M1 1h4" /></svg></body></html>`, { url: 'https://example.test/product', pretendToBeVisual: true })
   const keys = ['window', 'document', 'location', 'innerWidth', 'innerHeight', 'scrollY', 'devicePixelRatio', 'Element', 'HTMLElement', 'NodeFilter', 'MediaList', 'getComputedStyle']
   const descriptors = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
   t.after(() => {
@@ -55,11 +57,20 @@ test('captures a real compact SVG from a synthetic DOM', async t => {
     const isIcon = this.tagName.toLowerCase() === 'svg'
     return { x: 0, y: 0, top: 0, right: isIcon ? 16 : 320, bottom: isIcon ? 16 : 40, left: 0, width: isIcon ? 16 : 320, height: isIcon ? 16 : 40, toJSON() { return this } }
   }
+  const openHost = window.document.createElement('x-open')
+  openHost.attachShadow({ mode: 'open' }).innerHTML = '<button style="opacity:1">Shadow 保存</button>'
+  const closedHost = window.document.createElement('x-closed')
+  closedHost.attachShadow({ mode: 'closed' }).innerHTML = '<button>不可访问</button>'
+  window.document.body.append(openHost, closedHost)
   const { captureDesignReferencePage } = await captureModule()
   const captured = captureDesignReferencePage()
   assert.equal(captured.samples.some(sample => sample.tag === 'svg' && sample.rect.width === 16 && sample.rect.height === 16), true)
-  assert.equal(captured.responsiveBreakpoints.length, 12)
+  assert.equal(captured.samples.some(sample => sample.text === 'Shadow 保存'), true)
+  assert.equal(captured.responsiveBreakpoints.length, 13)
   assert.deepEqual(captured.declaredFocusStyles, [{ width: '2px', style: 'solid', color: 'rgb(1, 2, 3)', offset: '2px' }])
+  assert.equal(captured.captureCoverage.openShadowRoots, 1)
+  assert.equal(captured.captureCoverage.potentialClosedShadowHosts >= 1, true)
+  assert.equal(captured.cssStateRuleTokens.some(token => token.component === 'button' && token.state === 'hover' && token.backgroundColor === 'rgb(1, 2, 3)'), true)
 })
 
 test('turns bounded computed styles and one screenshot into fingerprinted evidence', async () => {
@@ -118,7 +129,8 @@ test('turns bounded computed styles and one screenshot into fingerprinted eviden
   assert.deepEqual(result.designTokens.focusStyles, [{ width: '2px', style: 'solid', color: 'rgb(37, 99, 235)', offset: '2px' }])
   assert.equal(result.viewport.width, 1280)
   assert.deepEqual(result.pageSize, { width: 1280, height: 2880, sampledBands: 4 })
-  assert.deepEqual(result.captureCoverage, raw.captureCoverage)
+  assert.deepEqual(result.captureCoverage.responsive, { cssBreakpoints: [640, 768, 1024], observedViewportWidths: [1280] })
+  assert.deepEqual(result.captureCoverage.states, { observedTokens: ['button:disabled'], cssRuleTokens: [] })
   assert.match(result.observations[0], /跨 4 个纵向区域/)
   assert.match(result.observations[1], /候选元素 1323 个，检查 640 个/)
 })
@@ -142,6 +154,30 @@ test('collects easing only for active transitions and keeps a real ease curve', 
   assert.deepEqual(result.designTokens.motionDurations, ['160ms', '240ms'])
   assert.deepEqual(result.designTokens.motionEasings, ['cubic-bezier(0.2, 0, 0, 1)', 'ease'])
   assert.equal(result.designTokens.motionEasings.includes('linear'), false)
+})
+
+test('keeps responsive and CSS-state coverage bounded and drops unsafe CSS values', async () => {
+  const { buildReferenceEvidence } = await captureModule()
+  const base = {
+    tag: 'button', text: '保存', rect: { x: 0, y: 0, width: 120, height: 40 }, color: '#ffffff', backgroundColor: '#2563eb', borderColor: '#2563eb',
+    fontFamily: 'Inter', fontSize: '14px', fontWeight: '600', lineHeight: '20px', letterSpacing: '0px', borderRadius: '8px', borderWidth: '1px', borderStyle: 'solid', padding: '8px', margin: '0px', gap: '0px', boxShadow: 'none', backgroundImage: 'none', opacity: '1', transitionDuration: '0s', transitionTimingFunction: 'ease', display: 'block', position: 'static',
+  }
+  const raw = {
+    v: 1, source: { url: 'https://example.test/state-rules', title: '状态规则' }, viewport: { width: 1280, height: 720, deviceScaleFactor: 1 }, pageSize: { width: 1280, height: 720, sampledBands: 1 }, samples: [{ ...base, state: 'disabled' }],
+    responsiveBreakpoints: Array.from({ length: 25 }, (_, index) => 320 + index * 20),
+    cssStateRuleTokens: [
+      { component: 'button', state: 'hover', color: '#ffffff', backgroundColor: '#1d4ed8', borderColor: '#1d4ed8', boxShadow: '0 2px 8px rgba(0, 0, 0, .2)', transitionDuration: '160ms', transitionTimingFunction: 'ease-out' },
+      { component: 'button', state: 'hover', backgroundColor: 'url(https://example.test/tracker)' },
+      { component: 'other', state: 'active', boxShadow: 'expression(alert(1))' },
+    ],
+  }
+  const result = await buildReferenceEvidence(raw, 'data:image/jpeg;base64,YWJj')
+  assert.equal(result.designTokens.responsiveBreakpoints.length, 20)
+  assert.equal(result.captureCoverage.responsive.cssBreakpoints.length, 20)
+  assert.deepEqual(result.captureCoverage.states.cssRuleTokens, [raw.cssStateRuleTokens[0]])
+  assert.deepEqual(result.captureCoverage.states.observedTokens, ['button:disabled'])
+  assert.equal(JSON.stringify(result).includes('tracker'), false)
+  assert.equal(JSON.stringify(result).includes('expression('), false)
 })
 
 test('keeps the representative primary button pair instead of the first neutral button', async () => {

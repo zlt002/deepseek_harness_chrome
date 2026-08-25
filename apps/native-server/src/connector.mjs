@@ -736,7 +736,7 @@ function lightDocumentArgumentsHint(args) {
       return `light_document_write_preview ${args.operation} requires exactly one of text/markdown/html plus expectedSelectionFingerprint from a prior selection read.`
     }
     if (args.operation === 'insert_drawing' && lightDocumentInsertFragments('insert_drawing', args.payload) === null) {
-      return 'light_document_write_preview insert_drawing requires Mermaid source and an optional insertion position.'
+      return 'light_document_write_preview insert_drawing requires payload { mermaid: "flowchart TD\\n开始 --> 结束", position: "end" }. Mermaid source is required; SVG, text, image, and unknown payload fields are not accepted.'
     }
     if (args.operation === 'blocks_insert' && lightDocumentInsertFragments('blocks_insert', args.payload) === null) {
       return 'light_document_write_preview blocks_insert requires supported blocks and an optional insertion position.'
@@ -1053,33 +1053,28 @@ function validTeamKnowledgeBatchArguments(args) {
 function teamKnowledgeBatchFingerprint(items) {
   return hash(JSON.stringify(items.map((item) => ({ name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
 }
-const PMD_ANALYSIS_MARKERS = [
-  '# 需求分析与研发交付',
-  '## 1. 需求最终理解',
-  '## 2. 产品纠正',
-  '## 3. 最终业务规则',
-  '## 4. 代码修改位置',
-  '## 5. 具体修改方式',
-  '## 6. 验收清单',
+const PMD_PRD_MARKERS = [
+  '# PRD:',
+  '## 需求基本信息',
+  '## 修订记录',
+  '# 一、术语与缩写',
+  '# 二、背景与目标',
+  '# 三、整体流程',
+  '# 四、功能性需求',
+  '#### 现状',
+  '#### 调整方式',
+  '#### 调整后效果',
+  '# 五、角色权限',
+  '# 六、非功能性需求',
+  '# 七、配置与开关',
+  '# 八、测试关注点',
+  '## （三）验收清单',
   '### 正常情况',
   '### 异常情况',
   '### 边界情况',
   '### 权限情况',
   '### 兼容情况',
-]
-const PMD_PRD_MARKERS = [
-  '# PRD:',
-  '## 需求基本信息',
-  '## 修订记录 [必填]',
-  '# 一、术语与缩写 [建议填写]',
-  '# 二、背景与目标',
-  '# 三、整体流程',
-  '# 四、功能性需求 [必填]',
-  '# 五、角色权限 [必填]',
-  '# 六、非功能性需求 [必填]',
-  '# 七、配置与开关 【选填】',
-  '# 八、测试关注点 [必填]',
-  '# 九、参考文档 【选填】',
+  '# 九、参考文档',
 ]
 function markdownOutsideFences(body) {
   let fence = null
@@ -1100,22 +1095,19 @@ function orderedMarkdownMarkersMissing(body, markers) {
 }
 function pmdBatchTemplateFailure(batchId, items) {
   if (!batchId.startsWith('pmd:')) return null
-  if (items.length !== 2) return 'PMD delivery requires exactly two template documents'
-  const [analysis, prd] = items
-  if (!analysis.name.endsWith('_01_需求分析与研发交付') || !prd.name.endsWith('_02_PRD')) return 'PMD document names or order do not match the two-document contract'
-  for (const document of items) if (/\\n/.test(markdownOutsideFences(document.body))) return `${document.name} contains a literal \\n outside a fenced code block`
-  const missingAnalysis = orderedMarkdownMarkersMissing(analysis.body, PMD_ANALYSIS_MARKERS)
-  if (missingAnalysis) return `analysis document is missing or reorders: ${missingAnalysis}`
-  if (!analysis.body.includes('| 改什么 | 在哪里改 | 怎么改 | 改完效果 |')) return 'analysis document is missing the code-change table'
+  if (items.length !== 1) return 'PMD delivery requires exactly one PRD document'
+  const [prd] = items
+  if (!prd.name.endsWith('_PRD')) return 'PMD document name must end with _PRD'
+  if (/\\n/.test(markdownOutsideFences(prd.body))) return `${prd.name} contains a literal \\n outside a fenced code block`
   const missingPrd = orderedMarkdownMarkersMissing(prd.body, PMD_PRD_MARKERS)
   if (missingPrd) return `PRD document is missing or reorders: ${missingPrd}`
   for (const header of ['| 业务需求名称 |', '| 版本 | 日期 |', '| 角色 | 功能/页面 |', '| 指标项 | 目标值 |']) if (!prd.body.includes(header)) return `PRD document is missing required table: ${header}`
   const internalTerm = /\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/
-  const analysisInternalTerm = markdownOutsideFences(analysis.body).match(internalTerm)
-  if (analysisInternalTerm) return `analysis document exposes an internal delivery term: ${analysisInternalTerm[0]}`
   const visiblePrd = markdownOutsideFences(prd.body)
   const prdInternalTerm = visiblePrd.match(internalTerm)
   if (prdInternalTerm) return `PRD document exposes an internal delivery term: ${prdInternalTerm[0]}`
+  const fieldLabel = visiblePrd.match(/\[(?:必填|选填|建议填写|涉及多系统交互时必填)\]|【选填】/)
+  if (fieldLabel) return `PRD document exposes a field label: ${fieldLabel[0]}`
   if (/AccrUI\s*需求交接附录/.test(visiblePrd)) return 'PRD document appends a non-company-template handoff section'
   const codeLocator = visiblePrd.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs)\b/m)
   if (codeLocator) return `PRD document contains a code locator: ${codeLocator[0].trim()}`
@@ -1997,7 +1989,10 @@ export class BrowserConnector {
       return
     }
     if (!validFlatLightDocumentArguments(name, args)) {
-      this.#reply(response, errorResponse(message.id, -32602, `${name} received invalid arguments; use its flat schema exactly.`))
+      const hint = name === 'light_document_write_preview'
+        ? lightDocumentArgumentsHint({ action: 'inspect_write', ...args })
+        : `${name} received invalid arguments; use its flat schema exactly.`
+      this.#reply(response, errorResponse(message.id, -32602, hint))
       return
     }
     // All light-document tools reuse one internal routing path. The extension owns frame discovery and the model

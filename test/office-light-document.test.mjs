@@ -33,6 +33,46 @@ async function call(endpoint, name, arguments_, id = 1) {
   return response.json()
 }
 
+test('advertises and explains the recoverable insert_drawing Mermaid contract', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 11, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/99?id=99' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '流程图文档', fingerprint: 'before' }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+      result: { status: 'ok', resource, document: { blockCount: 0, offset: 0, limit: 1, hasMore: false, blocks: [] } },
+    })),
+  })
+  connector.bindBrowserTarget('light-doc-drawing-schema-run', target)
+  const endpoint = await connector.start()
+  try {
+    const listed = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    })
+    const tools = await listed.json()
+    const preview = tools.result.tools.find((tool) => tool.name === 'light_document_write_preview')
+    const drawingContract = preview.inputSchema.allOf.find((entry) => entry.if?.properties?.operation?.const === 'insert_drawing')
+    assert.deepEqual(drawingContract.then.properties.payload, {
+      type: 'object', additionalProperties: false, required: ['mermaid'],
+      properties: {
+        mermaid: { type: 'string', minLength: 1, maxLength: 20000, description: 'Mermaid source, such as flowchart TD.' },
+        position: { enum: ['start', 'end', 'before', 'after'], description: 'Defaults to end; before/after also requires id or index.' },
+        id: { type: 'string', minLength: 1, maxLength: 256 },
+        index: { type: 'integer', minimum: 0, maximum: 100000 },
+      },
+    })
+    assert.match(preview.description, /payload \{ mermaid, position: "end" \}/)
+
+    const rejected = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { svg: '<svg />' } }, 2)
+    assert.equal(rejected.error.code, -32602)
+    assert.match(rejected.error.message, /payload \{ mermaid: "flowchart TD/)
+    assert.match(rejected.error.message, /SVG.*not accepted/)
+  } finally {
+    await connector.stop()
+  }
+})
+
 test('dispatches a bounded light-document read through the Browser Target instead of routing it to spreadsheet A1 APIs', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/100?id=100' }
   let received

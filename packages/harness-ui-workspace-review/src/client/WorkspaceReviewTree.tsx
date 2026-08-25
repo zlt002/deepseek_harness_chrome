@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import {
-  IconChevronRightOutline14, IconFolderClose16, IconFolderOpenOutline16, IconRefreshOutline16,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronRightOutline14, IconFolderClose16, IconFolderOpenOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WorkspaceTreeEntry } from '../protocol.ts'
 import { listWorkspaceMarkdown, openWorkspaceMarkdown } from './api.ts'
 import { requestOpenReview, type WorkspaceReviewBridgeConfig } from './bridge.ts'
@@ -13,13 +11,17 @@ interface TreeState { readonly loading: boolean; readonly entries: readonly Work
 export interface WorkspaceReviewTreeProps {
   readonly sessionId: string | undefined
   readonly bridge: WorkspaceReviewBridgeConfig | undefined
+  /** Opens a listed ordinary file through the public workspace system opener. */
+  readonly onOpenFile: (displayPath: string) => Promise<void>
+  readonly refreshGeneration?: number
   readonly onClose: () => void
 }
 
-/** Read-only, lazily loaded Markdown tree. A generation makes an old workspace response inert. */
-export function WorkspaceReviewTree({ sessionId, bridge, onClose }: WorkspaceReviewTreeProps) {
+/** Read-only, lazily loaded workspace tree. A generation makes an old workspace response inert. */
+export function WorkspaceReviewTree({ sessionId, bridge, onOpenFile, refreshGeneration = 0, onClose }: WorkspaceReviewTreeProps) {
   const generation = useRef(new WorkspaceTreeRequestGeneration())
   const inFlight = useRef(new Set<string>())
+  const appliedRefreshGeneration = useRef(refreshGeneration)
   const [trees, setTrees] = useState<ReadonlyMap<string, TreeState>>(new Map())
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | undefined>()
@@ -58,6 +60,17 @@ export function WorkspaceReviewTree({ sessionId, bridge, onClose }: WorkspaceRev
     }
   }, [sessionId])
 
+  useEffect(() => {
+    if (appliedRefreshGeneration.current === refreshGeneration) return
+    appliedRefreshGeneration.current = refreshGeneration
+    const nextGeneration = generation.current.reset()
+    inFlight.current.clear()
+    setTrees(new Map())
+    setExpanded(new Set())
+    setError(undefined)
+    if (sessionId !== undefined) void load('', sessionId, nextGeneration)
+  }, [refreshGeneration, sessionId])
+
   const toggle = (path: string) => {
     setExpanded(current => {
       const next = new Set(current)
@@ -68,14 +81,6 @@ export function WorkspaceReviewTree({ sessionId, bridge, onClose }: WorkspaceRev
       }
       return next
     })
-  }
-  const refresh = () => {
-    const nextGeneration = generation.current.reset()
-    inFlight.current.clear()
-    setTrees(new Map())
-    setExpanded(new Set())
-    setError(undefined)
-    if (sessionId !== undefined) void load('', sessionId, nextGeneration)
   }
   const openMarkdown = async (path: string) => {
     if (sessionId === undefined) return
@@ -96,15 +101,18 @@ export function WorkspaceReviewTree({ sessionId, bridge, onClose }: WorkspaceRev
     const state = trees.get(path)
     if (state === undefined || state.loading) return <p className={css.status}>正在读取…</p>
     if (state.error !== undefined) return <p className={css.status}>{state.error}</p>
-    if (state.entries.length === 0 && path === '') return <p className={css.status}>此工作区没有可审阅的 Markdown 文件。</p>
+    if (state.entries.length === 0 && path === '') return <p className={css.status}>此工作区没有普通文件。</p>
     return <div className={path === '' ? undefined : css.nested}>{state.entries.map(entry => entry.kind === 'directory'
       ? <div key={entry.displayPath}><button className={css.entry} type="button" onClick={() => toggle(entry.displayPath)}><IconChevronRightOutline14 className={expanded.has(entry.displayPath) ? css.chevronExpanded : undefined} />{expanded.has(entry.displayPath) ? <IconFolderOpenOutline16 /> : <IconFolderClose16 />}{entry.name}</button>{expanded.has(entry.displayPath) ? render(entry.displayPath) : null}</div>
-      : <button key={entry.displayPath} className={css.entry} type="button" onClick={() => { void openMarkdown(entry.displayPath) }}><span className={css.markdownMark}>MD</span>{entry.name}</button>,
+      : entry.kind === 'markdown'
+        ? <button key={entry.displayPath} className={css.entry} type="button" onClick={() => { void openMarkdown(entry.displayPath) }}><span className={css.markdownMark}>MD</span>{entry.name}</button>
+        : <button key={entry.displayPath} className={css.entry} type="button" onClick={() => {
+          void onOpenFile(entry.displayPath).catch(reason => { setError(reason instanceof Error ? reason.message : String(reason)) })
+        }}><span className={css.fileMark}>FILE</span>{entry.name}</button>,
     )}</div>
   }
   if (sessionId === undefined) return <p className={css.status}>正在等待工作区目录就绪…</p>
-  return <div className={css.tree} aria-label="工作区 Markdown 文件">
-    <div className={css.treeToolbar}><span>Markdown 文件</span><button type="button" aria-label="刷新文件树" title="刷新文件树" onClick={refresh}><IconRefreshOutline16 size={15} /></button></div>
+  return <div className={css.tree} aria-label="工作区目录">
     {render('')}
     {error === undefined ? null : <p className={css.status}>{error}</p>}
   </div>

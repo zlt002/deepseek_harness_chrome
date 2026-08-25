@@ -429,6 +429,57 @@
     const blocks = markdownBlocks(item.markdown)
     return blocks.length ? blocks : null
   }
+  const TEAM_KNOWLEDGE_BATCH_REPLACE_MAX_MARKDOWN_CHARS = 500_000
+  const TEAM_KNOWLEDGE_BATCH_REPLACE_MAX_BLOCKS = 300
+  const teamKnowledgeBatchReplacement = (xml, markdown) => {
+    if (typeof markdown !== 'string' || !markdown.trim() || markdown.length > TEAM_KNOWLEDGE_BATCH_REPLACE_MAX_MARKDOWN_CHARS) return null
+    const parsed = editableBlocks(xml)
+    if (!parsed) return null
+    // A Team Knowledge child starts with a company template. Keep its title
+    // node (and therefore the document identity) but replace every editable
+    // block in one CanvasPatch transaction. Never emulate this with a clear
+    // followed by an insert: a mid-operation failure would leave a broken PRD.
+    const titles = parsed.all.filter((block) => block.tag.toLowerCase() === 'outlinetitle')
+    if (titles.length !== 1) return null
+    const requested = markdownBlocks(markdown)
+    if (requested.length < 1 || requested.length > TEAM_KNOWLEDGE_BATCH_REPLACE_MAX_BLOCKS) return null
+    const replacement = requested.map((block) => structuredBlockXml(block)).join('')
+    const expected = fragmentBlocks(replacement)
+    if (!replacement || !expected || expected.length !== requested.length) return null
+    return { parsed, title: titles[0], replacement, expected, inner: `${titles[0].xml}${replacement}` }
+  }
+  const verifyTeamKnowledgeBatchReplacement = (xml, expectedTitle, expectedBlocks) => {
+    const parsed = editableBlocks(xml)
+    if (!parsed) return null
+    const titles = parsed.all.filter((block) => block.tag.toLowerCase() === 'outlinetitle')
+    if (titles.length !== 1 || titles[0].text !== expectedTitle.text || parsed.list.length !== expectedBlocks.length) return null
+    for (let index = 0; index < expectedBlocks.length; index += 1) {
+      const actual = parsed.list[index]; const wanted = expectedBlocks[index]
+      if (!actual || actual.tag.toLowerCase() !== wanted.type || normalizedSelectionText(actual.text) !== normalizedSelectionText(wanted.text)) return null
+    }
+    return { blockCount: parsed.list.length, observedBody: decode(xml) }
+  }
+  const teamKnowledgeBatchReplace = async (markdown) => {
+    const current = await app()
+    if (!current) return fail('unsupported', 'WebEdit light-document runtime is not ready')
+    const beforeXml = await current.openApi.editor.canvas.getDocXml()
+    const plan = teamKnowledgeBatchReplacement(beforeXml, markdown)
+    if (!plan) return fail('invalid_range', 'Team Knowledge document replacement requires one bounded Markdown body and exactly one existing title')
+    const patched = await patchXml(current, beforeXml, plan.inner)
+    if (!patched.ok) return patched
+    const observed = verifyTeamKnowledgeBatchReplacement(patched.xml, plan.title, plan.expected)
+    if (!observed) return fail('readback_mismatch', 'WebEdit did not atomically replace the prefilled Team Knowledge document body')
+    return { ok: true, xml: patched.xml, observed }
+  }
+  const teamKnowledgeBatchVerify = async (markdown) => {
+    const current = await app()
+    if (!current) return fail('unsupported', 'WebEdit light-document runtime is not ready')
+    const xml = await current.openApi.editor.canvas.getDocXml()
+    const plan = teamKnowledgeBatchReplacement(xml, markdown)
+    if (!plan) return fail('readback_mismatch', 'WebEdit did not expose a readable Team Knowledge document body')
+    const observed = verifyTeamKnowledgeBatchReplacement(xml, plan.title, plan.expected)
+    return observed ? { ok: true, xml, observed } : fail('readback_mismatch', 'WebEdit persisted body differs from the generated Team Knowledge document')
+  }
   const fragmentBlocks = (xml) => {
     const parsed = editableBlocks(`<apcanvas>${xml}</apcanvas>`)
     return parsed ? parsed.list.map((block) => ({ type: block.tag.toLowerCase(), text: block.text })) : null
@@ -747,6 +798,19 @@
     const current = await app()
     const beforeXml = await current.openApi.editor.canvas.getDocXml()
     if (typeof beforeXml !== 'string' || JSON.stringify(expected) !== JSON.stringify(await documentResource(beforeXml, current))) return fail('fingerprint_mismatch', 'The light document changed before mutation')
+    if (input.operation === 'team_knowledge_batch_replace') {
+      // Internal batch-delivery operation. It is intentionally absent from the
+      // model-facing tool catalog; the background invokes it only for a newly
+      // created or recovered Team Knowledge child document.
+      if (input.payload?.replaceScope !== 'team_knowledge_batch_document') return fail('invalid_range', 'Team Knowledge batch replacement requires its internal delivery scope')
+      const plan = teamKnowledgeBatchReplacement(beforeXml, input.payload?.markdown)
+      if (!plan) return fail('invalid_range', 'Team Knowledge document replacement requires one bounded Markdown body and exactly one existing title')
+      const patched = await patchXml(current, beforeXml, plan.inner)
+      if (!patched.ok) return patched
+      const observed = verifyTeamKnowledgeBatchReplacement(patched.xml, plan.title, plan.expected)
+      if (!observed) return fail('readback_mismatch', 'WebEdit did not atomically replace the prefilled Team Knowledge document body')
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, count: plan.expected.length }, observed: { ...observed, verified: true } } }
+    }
     const markdown = typeof input.payload?.markdown === 'string' ? input.payload.markdown : typeof input.payload?.text === 'string' ? input.payload.text : ''
     if (input.operation === 'blocks_delete' || input.operation === 'blocks_format') {
       const items = batchBlockItems(input.operation, input.payload)
@@ -1006,7 +1070,11 @@
     return true
   }
   registerChannel(bridgeChannel)
-  globalThis[runtimeKey] = { registerChannel }
+  // These two methods are intentionally not part of the model-facing office
+  // operation catalog. They are used only by the Team Knowledge batch-create
+  // recovery path to replace a newly created, prefilled document as one
+  // verified transaction and to attest the same exact body after reopening.
+  globalThis[runtimeKey] = { registerChannel, teamKnowledgeBatchReplace, teamKnowledgeBatchVerify }
   const consumedRequestIds = new Set()
   const validRequestEnvelope = (value) => value && typeof value === 'object'
     && Object.keys(value).length === 4 && value.type === 'request'

@@ -1,9 +1,10 @@
 (function () {
   const root = document.getElementById('root')
   const buildId = document.documentElement?.dataset.prototypeStudioBuild || '未知'
-  const needsLocalDevServer = Array.from(document.scripts).some(script =>
-    script.src.includes('127.0.0.1:3101') || script.src.includes('localhost:3101'),
+  const localDevScripts = Array.from(document.scripts).filter(script =>
+    /(?:127\.0\.0\.1|localhost):\d+/.test(script.src),
   )
+  const needsLocalDevServer = localDevScripts.length > 0
   const startupTimeoutMs = Number.parseInt(root?.dataset.prototypeStartupTimeout || '1500', 10)
   let startupFailed = false
   let startupFailureMessage = ''
@@ -53,7 +54,7 @@
     const detail = document.createElement('p')
     const cause = document.createElement('span')
     cause.textContent = errorMessage(reason) || (needsLocalDevServer
-      ? '本地开发服务没有连接，页面组件无法加载。'
+      ? '页面脚本加载失败：可能是 Edge 仍在加载旧扩展页面或旧端口，也可能是本地开发服务不可达。'
       : '页面组件没有成功加载。')
     detail.append(cause, document.createTextNode(' 你的参考网页和已保存版本没有丢失。'))
     Object.assign(detail.style, { margin: '0 0 16px', color: '#5b6474' })
@@ -77,7 +78,7 @@
 
     const hint = document.createElement('small')
     hint.textContent = needsLocalDevServer
-      ? '请先恢复开发服务，再重新加载页面。'
+      ? '处理顺序：先打开 edge://extensions，点击本扩展“重新加载”；关闭当前旧原型页面并重新打开；如果仍失败，再恢复本地开发服务。'
       : '如果仍然失败，请保留控制台第一条红色错误，便于定位。'
     Object.assign(hint.style, { display: 'block', marginTop: '12px', color: '#7b8494' })
 

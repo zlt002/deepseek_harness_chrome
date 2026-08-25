@@ -798,6 +798,38 @@ test('replace parses markdown into structured blocks instead of dumping raw synt
   assert.match(state.xml, /<strong>要点<\/strong>/)
 })
 
+test('team-knowledge batch document replacement atomically removes a prefilled PRD template', async () => {
+  const state = {}
+  const initialXml = [
+    '<apcanvas><outlineTitle id="title">新建 PRD</outlineTitle>',
+    '<h1 id="legacy-heading">八、测试关注点</h1>',
+    '<h2 id="legacy-exception">（二）异常场景关注点</h2>',
+    '<p id="legacy-copy">列出需要重点测试的异常场景，包括服务异常、数据异常、网络异常等。</p>',
+    ...Array.from({ length: 55 }, (_, index) => `<p id="legacy-${index}">旧模板占位 ${index}</p>`),
+    '</apcanvas>',
+  ].join('')
+  const generatedPrd = [
+    '# 客户经理维护流程简化 PRD',
+    '## 八、测试关注点',
+    '### （二）验收清单',
+    '#### 异常情况',
+    '- 服务异常时提示用户稍后重试。',
+  ].join('\n')
+  const call = await runtime({ state, initialXml })
+  const before = await call({ action: 'read' })
+  const result = await call({
+    action: 'write', operation: 'team_knowledge_batch_replace', resource: before.result.resource,
+    payload: { markdown: generatedPrd, replaceScope: 'team_knowledge_batch_document' },
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.result.observed.verified, true)
+  assert.equal(state.patchCalls, 1)
+  assert.match(state.xml, /异常情况/)
+  assert.doesNotMatch(state.xml, /列出需要重点测试的异常场景/)
+  assert.equal((state.xml.match(/测试关注点/g) ?? []).length, 1)
+  assert.equal((state.xml.match(/旧模板占位/g) ?? []).length, 0)
+})
+
 test('reads keep inline closing tags on one line inside a paragraph', async () => {
   const call = await runtime({ initialXml: '<apcanvas><p id="b1"><span><strong>多级标题</strong>：清晰的内容层级结构</span></p></apcanvas>' })
   const read = await call({ action: 'read' })

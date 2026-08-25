@@ -1,155 +1,63 @@
+import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { promisify } from 'node:util'
 import { join, resolve } from 'node:path'
-import test from 'node:test'
+import { tmpdir } from 'node:os'
 
-const projectRoot = resolve(new URL('..', import.meta.url).pathname)
+const execFileAsync = promisify(execFile)
+const projectRoot = resolve(import.meta.dirname, '..')
 const authorityPath = resolve(projectRoot, 'skills/pmd-prd/references/templates.md')
 const validatorPath = resolve(projectRoot, 'skills/pmd-prd/scripts/validate-deliverables.mjs')
 
-function fenceToken(line) {
-  const match = line.match(/^\s*(`{3,}|~{3,})/)
-  return match === null ? null : { character: match[1][0], length: match[1].length }
+function prdTemplate(authority) {
+  return [...authority.matchAll(/```markdown\s*\n([\s\S]*?)\n```/g)].map((match) => match[1]).find((body) => body.includes('# PRD:'))
 }
 
-function extractBlock(markdown, marker) {
-  const blocks = []
-  let fence = null
-  let block = []
-  for (const line of markdown.replace(/\r\n?/g, '\n').split('\n')) {
-    const token = fenceToken(line)
-    if (token !== null) {
-      if (fence === null) {
-        fence = token
-        block = []
-      } else if (token.character === fence.character && token.length >= fence.length) {
-        blocks.push(block.join('\n'))
-        fence = null
-      }
-      continue
-    }
-    if (fence !== null) block.push(line)
-  }
-  return blocks.find((blockValue) => blockValue.includes(marker))
-}
-
-function materialiseTemplate(body) {
-  const filled = body
-    .replaceAll('{编号}', 'REQ-CONTRACT')
-    .replaceAll('{主题}', '模板完整性')
-    .replaceAll('{功能名称}', '合同校验')
-    .replaceAll('{requirementId}', 'req_contract')
+function materialise(body) {
+  return body.replaceAll('{编号}', 'REQ-CONTRACT').replaceAll('{编号及链接}', 'REQ-CONTRACT（需求链接待确认）').replaceAll('{主题}', '单一交付').replaceAll('{功能名称}', '客户维护')
     .replace(/\{[^{}\n]+\}/g, '[待确认]')
-  return filled.split('\n').map((line) => {
-    const trimmed = line.trim()
-    if (trimmed === '- [ ]') return '- [ ] [待确认]'
-    if (!trimmed.startsWith('|') || !trimmed.endsWith('|') || /^\|(?:\s*:?-{3,}:?\s*\|)+$/.test(trimmed)) return line
-    const cells = trimmed.slice(1, -1).split('|').map((cell) => cell.trim() || '[待确认]')
-    return `| ${cells.join(' | ')} |`
-  }).join('\n')
 }
 
-async function completeBodies() {
-  const authority = await readFile(authorityPath, 'utf8')
-  const analysis = extractBlock(authority, '# 需求分析与研发交付')
-  const prd = extractBlock(authority, '# PRD:')
-  assert.ok(analysis && prd, 'authoritative templates must expose both complete bodies')
-  return {
-    analysis: materialiseTemplate(analysis),
-    prd: materialiseTemplate(prd),
-  }
-}
-
-function runValidator(args) {
-  return new Promise((resolveResult) => {
-    execFile(process.execPath, [validatorPath, ...args], { cwd: projectRoot }, (error, stdout, stderr) => {
-      resolveResult({ code: error === null ? 0 : error.code, stdout, stderr })
-    })
-  })
-}
-
-async function runFixture({ analysis, prd, analysisName = 'req_contract_模板完整性_01_需求分析与研发交付.md', prdName = 'req_contract_模板完整性_02_PRD.md' }) {
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-pmd-template-contract-'))
+async function runFixture({ body, name = 'req_contract_单一交付_PRD.md' }) {
+  const directory = await mkdtemp(join(tmpdir(), 'pmd-prd-contract-'))
   try {
-    const analysisPath = join(directory, analysisName)
-    const prdPath = join(directory, prdName)
-    await Promise.all([writeFile(analysisPath, analysis), writeFile(prdPath, prd)])
-    return await runValidator(['--analysis', analysisPath, '--prd', prdPath])
-  } finally {
-    await rm(directory, { recursive: true, force: true })
-  }
+    const prdPath = join(directory, name)
+    await writeFile(prdPath, body)
+    return await execFileAsync(process.execPath, [validatorPath, '--prd', prdPath], { cwd: projectRoot })
+  } finally { await rm(directory, { recursive: true, force: true }) }
 }
 
-test('accepts complete frozen analysis and PRD bodies from the authoritative templates', async () => {
-  const bodies = await completeBodies()
-  const result = await runFixture(bodies)
-  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
-  assert.match(result.stdout, /PASS: PMD frozen deliverable contract/)
+test('accepts one complete product-readable PRD that preserves the company template and adds an acceptance checklist', async () => {
+  const authority = await readFile(authorityPath, 'utf8')
+  const template = prdTemplate(authority)
+  assert.ok(template, 'authoritative templates must expose one complete PRD body')
+  const body = materialise(template)
+  const result = await runFixture({ body })
+  assert.match(result.stdout, /PASS: PMD frozen PRD contract/)
+  assert.doesNotMatch(body, /\[(?:必填|选填|建议填写)\]|【选填】/)
+  for (const section of ['## （一）正常业务场景', '#### 现状', '#### 调整方式', '#### 输入/输出规则', '#### 调整后效果', '## 边界场景', '## （二）异常业务场景', '## （二）异常场景关注点', '## （三）验收清单', '### 正常情况', '### 异常情况', '### 边界情况', '### 权限情况', '### 兼容情况']) assert.match(body, new RegExp(section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(body, /\| 产品经理 \| \[待确认\] \| 预估人天 \| \[待确认\] \|/)
 })
 
-test('rejects summary, old complex analysis, missing six parts, unsupported numbers, filename, and literal backslash-n violations', async () => {
-  const bodies = await completeBodies()
-  const cases = [
-    {
-      name: 'summary',
-      fixture: { ...bodies, analysis: '# 需求分析与研发交付：REQ-CONTRACT - 模板完整性\n\n仅有摘要。' },
-      message: /analysis is missing or reorders/,
-    },
-    {
-      name: 'old complex analysis',
-      fixture: { ...bodies, analysis: bodies.analysis.replace('## 2. 产品纠正', '## 2. 证据分类\n| Evidence ID | 类型 |\n|---|---|') },
-      message: /analysis is missing or reorders|internal delivery term/,
-    },
-    {
-      name: 'missing six-part section',
-      fixture: { ...bodies, analysis: bodies.analysis.replace('## 6. 验收清单', '## 7. 验收清单') },
-      message: /analysis is missing or reorders/,
-    },
-    {
-      name: 'missing-information marker',
-      fixture: { ...bodies, analysis: bodies.analysis.replace('[待确认]', '待补充') },
-      message: /must mark missing information/,
-    },
-    {
-      name: 'filename suffix',
-      fixture: { ...bodies, analysisName: 'req_contract_模板完整性_analysis.md' },
-      message: /filename must end with/,
-    },
-    {
-      name: 'unsupported number',
-      fixture: { ...bodies, analysis: `${bodies.analysis}\n\n预计 12 人天完成。` },
-      message: /unsupported quantified claim/,
-    },
-    {
-      name: 'empty acceptance category',
-      fixture: { ...bodies, analysis: bodies.analysis.replace('- [ ] [待确认]', '- [ ]') },
-      message: /acceptance checklist is empty/,
-    },
-    {
-      name: 'technical PRD locator',
-      fixture: { ...bodies, prd: `${bodies.prd}\n\n实现位于 src/views/Home.vue。` },
-      message: /code locator that belongs in the handoff/,
-    },
-    {
-      name: 'literal backslash-n',
-      fixture: { ...bodies, analysis: `${bodies.analysis}\n字面量 \\n` },
-      message: /literal \\n outside a fenced code block/,
-    },
+test('rejects missing input/output rules, replaced exception focus, missing required basic information, code identifiers, field labels, and invalid names', async () => {
+  const authority = await readFile(authorityPath, 'utf8')
+  const body = materialise(prdTemplate(authority))
+  const fixtures = [
+    { body: body.replace('#### 输入/输出规则', '#### 交互说明'), message: /is missing or reorders: #### 输入\/输出规则/ },
+    { body: body.replace('## （二）异常场景关注点', '## （二）验收清单').replace('## （三）验收清单', '## （三）补充说明'), message: /PRD test focus is missing or reorders: ## （二）异常场景关注点/ },
+    { body: body.replace('| 产品经理 | [待确认] | 预估人天 | [待确认] |', '| 产品经理 | [待确认] | | |'), message: /PRD basic information is missing: 预估人天/ },
+    { body: body.replace('#### 调整后效果', '#### 调整后效果\n\n调用 confirmReceivingOrders 完成接单。'), message: /code-style identifier.*confirmReceivingOrders/ },
+    { body: body.replace('### 兼容情况\n- [ ] [待确认]', '### 兼容情况\n无'), message: /PRD acceptance checklist is empty: 兼容情况/ },
+    { body: body.replace('## 修订记录', '## 修订记录 [必填]'), message: /PRD exposes a field label: \[必填\]/ },
+    { body, name: 'req_contract_PRD_02.md', message: /PRD filename must end with _PRD/ },
   ]
-  for (const { name, fixture, message } of cases) {
-    const result = await runFixture(fixture)
-    assert.notEqual(result.code, 0, `${name} unexpectedly passed`)
-    assert.match(result.stderr, message, `${name}: ${result.stderr}`)
+  for (const fixture of fixtures) {
+    await assert.rejects(runFixture(fixture), (error) => {
+      assert.equal(error.code, 1)
+      assert.match(error.stderr, fixture.message)
+      return true
+    })
   }
-})
-
-test('allows a literal backslash-n only inside a fenced code block', async () => {
-  const bodies = await completeBodies()
-  const result = await runFixture({
-    ...bodies,
-    analysis: `${bodies.analysis}\n\n` + '```text\nliteral \\n\n```',
-  })
-  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
 })

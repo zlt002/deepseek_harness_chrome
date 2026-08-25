@@ -31,6 +31,7 @@ export interface BrowserTargetSnapshot {
   tabs: BrowserTargetTab[]
   activeTab?: BrowserTargetTab
   capturingDesignReferenceTabId?: number
+  capturingDesignReferenceProgress?: { current: number; total: number }
   error?: string
 }
 
@@ -41,6 +42,8 @@ export type BrowserTargetCommand =
   | { command: 'toggle-pinned-tab'; tabId: number; checked: boolean }
   | { command: 'set-primary'; tabId: number }
   | { command: 'capture-design-reference'; tabId: number; sessionId?: string }
+  | { command: 'capture-responsive-design-reference'; tabId: number; sessionId?: string }
+  | { command: 'capture-design-references'; tabIds: number[]; sessionId?: string }
 
 interface BrowserTargetSnapshotMessage extends BrowserTargetSnapshot {
   type: 'browser-target-snapshot/v1'
@@ -88,6 +91,7 @@ function isBrowserTargetSnapshotMessage(value: unknown): value is BrowserTargetS
     && (value as BrowserTargetSnapshotMessage).tabs.every(isBrowserTargetTab)
     && ((value as BrowserTargetSnapshotMessage).activeTab === undefined || isBrowserTargetTab((value as BrowserTargetSnapshotMessage).activeTab))
     && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId === undefined || isBoundedTabId((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId))
+    && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress === undefined || (typeof (value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress === 'object' && (value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress !== null && Number.isInteger((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current) && Number.isInteger((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.total) && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current ?? 0) >= 1 && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.total ?? 0) >= ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current ?? 0)))
     && ((value as BrowserTargetSnapshotMessage).error === undefined || typeof (value as BrowserTargetSnapshotMessage).error === 'string')
 }
 
@@ -109,7 +113,7 @@ export function createBrowserTargetBridge(nonce: string, parentOrigin: string): 
       if (event.source !== parent || event.origin !== parentOrigin) return false
       if (!isBrowserTargetSnapshotMessage(event.data) || event.data.nonce !== nonce || event.data.sequence <= incomingSequence) return false
       incomingSequence = event.data.sequence
-      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.capturingDesignReferenceTabId === undefined ? {} : { capturingDesignReferenceTabId: event.data.capturingDesignReferenceTabId }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
+      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.capturingDesignReferenceTabId === undefined ? {} : { capturingDesignReferenceTabId: event.data.capturingDesignReferenceTabId }), ...(event.data.capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress: event.data.capturingDesignReferenceProgress }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
       return true
     },
     send(command, parent): void {

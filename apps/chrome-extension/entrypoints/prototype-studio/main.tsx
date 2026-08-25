@@ -16,7 +16,7 @@ import {
   type ReferenceEvidenceV1,
 } from '../../../../packages/harness-ui-prototype-studio/src/prototype-document'
 import { PROTOTYPE_REFERENCE_STORAGE_KEY } from '../../src/design-reference-capture'
-import { createDesignSpecFromEvidence, designEvidenceCoverage } from './design-system'
+import { createDesignSpecFromEvidence, designEvidenceConflicts, designEvidenceCoverage, type DesignMergeStrategy } from './design-system'
 import { clearDesignSpecDraft, loadDesignSpecDraft, saveDesignSpecDraft } from './design-spec-draft'
 import { DesignSpecTweakPanel } from './DesignSpecTweakPanel'
 import { designSpecQualityWarnings } from './design-spec-quality'
@@ -24,10 +24,12 @@ import { designSpecChangedGroups, designSpecColor, designSpecTweakCount, type De
 import { extensionRequest } from './extension-request'
 import { generationOutcome, hasStoppedGeneration, type StudioAttempt, type StudioGenerationAttempt } from './generation-status'
 import { clearProductBriefDraft, loadProductBriefDraft, saveProductBriefDraft } from './product-brief-draft'
+import { clearPrototypeRequestDraft, loadPrototypeRequestDraft, savePrototypeRequestDraft } from './prototype-request-draft'
+import { createPrototypeExportArtifacts, downloadPrototypeArtifact } from './prototype-export'
 import { isSandboxPreviewAuditMessage, isSandboxSelectionClearMessage, isSandboxSelectionMessage, sandboxPreviewSrcDoc, type SandboxPreviewMode } from './sandbox-preview'
 import { summarizeAllPreviewAudits, summarizePreviewAudit, type PreviewAudit } from './preview-audit'
 import { PREVIEW_VIEWPORT_WIDTHS, previewStageLayout, type PreviewViewport } from './preview-stage'
-import { parseRevisionPreview, type RevisionPreview } from './revision-preview'
+import { parseRevisionPreview, visualRevisionDiff, type RevisionPreview } from './revision-preview'
 import { nextExampleTab, type ExampleTab } from './example-tab-navigation'
 import { productBrief, productBriefFromFields, productBriefPrompt, type ProductBriefV1 } from '../../../../packages/harness-ui-prototype-studio/src/product-brief.mjs'
 import { productRequirementCoverage, productRequirementCoverageValue, type ProductRequirementCoverageMatchV1, type ProductRequirementCoverageV1 } from '../../../../packages/harness-ui-prototype-studio/src/requirement-coverage.mjs'
@@ -35,8 +37,23 @@ import './style.css'
 
 type DesignExampleViewport = 'desktop' | 'tablet' | 'mobile'
 
-const PROTOTYPE_STUDIO_BUILD_ID = 'prototype-studio-2026-08-25-r2'
+const PROTOTYPE_STUDIO_BUILD_ID = 'prototype-studio-2026-08-25-r4'
 const PROTOTYPE_SELECTABLE_TYPES = new Set<PrototypeSelection['type']>(['text', 'icon', 'button', 'input', 'card', 'group', 'metric', 'badge', 'alert', 'progress', 'chart', 'table', 'tabs', 'list', 'breadcrumb', 'empty-state', 'pagination', 'modal', 'table-row', 'list-item', 'tab', 'navigation-item', 'breadcrumb-item'])
+
+/**
+ * Early V1 Hosts returned only the fingerprint for their one reference. It is
+ * safe to fill that shape from the verified local record, but never for a
+ * multi-page project: every auxiliary page must still be complete Host
+ * evidence, or the user must re-capture it.
+ */
+function legacySingleReferenceFingerprint(value: unknown, referenceId: string): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const fields = Object.keys(record)
+  if (!fields.includes('fingerprint') || !fields.every(field => field === 'id' || field === 'fingerprint') || typeof record.fingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(record.fingerprint)) return undefined
+  if (record.id !== undefined && record.id !== referenceId) return undefined
+  return record.fingerprint
+}
 
 function startupReason(cause: unknown): string {
   const value = cause instanceof Error ? cause.message : String(cause)
@@ -108,8 +125,9 @@ function StartupFailureView({ message }: { message: string }): React.JSX.Element
 
 interface StoredPrototypeReferences { v: 1; references: Record<string, unknown> }
 interface StudioRevisionSummary { id: string; parentRevisionId?: string; createdAt: string; changeSummary: string; current: boolean }
-interface StudioBundle { projectId: string; evidence: ReferenceEvidenceV1[]; designSpec: DesignSpecV1; document: PrototypeDocumentV1; revisions: StudioRevisionSummary[]; designConfirmed: boolean; screenshotUnavailable: boolean; productBrief?: ProductBriefV1; requirementCoverage?: ProductRequirementCoverageV1; currentRevisionId?: string; generationAttempt?: StudioGenerationAttempt; lastAttempt?: StudioAttempt }
-interface SnapshotResponse { ok: boolean; snapshot?: { projectId?: unknown; sessionId?: unknown; evidence?: unknown; confirmedDesignSpec?: unknown; designConfirmed?: unknown; productBrief?: unknown; requirementCoverage?: unknown; designSpec?: unknown; document?: unknown; revisions?: unknown; currentRevisionId?: unknown; generationAttempt?: unknown; lastAttempt?: unknown }; code?: string; recoveryAvailable?: boolean; error?: string }
+interface BriefSuggestionAttempt { status: 'pending' | 'saved'; requestId: string; expiresAt: number }
+interface StudioBundle { projectId: string; evidence: ReferenceEvidenceV1[]; designSpec: DesignSpecV1; document: PrototypeDocumentV1; revisions: StudioRevisionSummary[]; designConfirmed: boolean; screenshotUnavailable: boolean; productBrief?: ProductBriefV1; requirementCoverage?: ProductRequirementCoverageV1; currentRevisionId?: string; generationAttempt?: StudioGenerationAttempt; briefSuggestionAttempt?: BriefSuggestionAttempt; suggestedProductBrief?: ProductBriefV1; lastAttempt?: StudioAttempt }
+interface SnapshotResponse { ok: boolean; snapshot?: { projectId?: unknown; sessionId?: unknown; evidence?: unknown; confirmedDesignSpec?: unknown; designConfirmed?: unknown; productBrief?: unknown; suggestedProductBrief?: unknown; briefSuggestionAttempt?: unknown; requirementCoverage?: unknown; designSpec?: unknown; document?: unknown; revisions?: unknown; currentRevisionId?: unknown; generationAttempt?: unknown; lastAttempt?: unknown }; code?: string; recoveryAvailable?: boolean; error?: string }
 type LoadStage = 'reading-reference' | 'verifying-reference' | 'connecting-service' | 'preparing-studio'
 
 class RecoverablePrototypeAuthorizationError extends Error {}
@@ -154,6 +172,13 @@ function studioGenerationAttempt(value: unknown): StudioGenerationAttempt | unde
   return item as unknown as StudioGenerationAttempt
 }
 
+function briefSuggestionAttempt(value: unknown): BriefSuggestionAttempt | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  if (Object.keys(item).length !== 3 || (item.status !== 'pending' && item.status !== 'saved') || typeof item.requestId !== 'string' || !/^[A-Za-z0-9._:-]{8,160}$/.test(item.requestId) || !Number.isSafeInteger(item.expiresAt) || Number(item.expiresAt) <= Date.now()) return undefined
+  return item as unknown as BriefSuggestionAttempt
+}
+
 function studioRevisions(value: unknown, currentRevisionId: unknown): StudioRevisionSummary[] | undefined {
   if (!Array.isArray(value) || value.length > 20 || (currentRevisionId !== undefined && (typeof currentRevisionId !== 'string' || !/^rev-[a-z0-9-]{1,156}$/i.test(currentRevisionId)))) return undefined
   const revisions: StudioRevisionSummary[] = []
@@ -179,15 +204,15 @@ function revisionTime(value: string): string {
 }
 
 function coverageKind(kind: 'page' | 'module' | 'flow'): string { return ({ page: '页面', module: '模块', flow: '流程' })[kind] }
-function missingCoverageReason(kind: 'page' | 'module' | 'flow'): string { return ({ page: '没有找到同名或明确对应的页面。', module: '没有找到可见的对应模块、字段或内容。', flow: '没有找到可操作的对应入口。' })[kind] }
+function missingCoverageReason(kind: 'page' | 'module' | 'flow'): string { return ({ page: '没有找到同名或明确对应的页面。', module: '没有找到可见的对应模块、字段或内容。', flow: '没有找到能产生对应页面、弹窗或业务状态结果的固定动作。' })[kind] }
 
 function RequirementCoveragePanel({ coverage, historical, onFocus }: { coverage: ProductRequirementCoverageV1; historical: boolean; onFocus?: (match: ProductRequirementCoverageMatchV1) => void }): React.JSX.Element {
   const missing = coverage.items.filter(item => item.status === 'missing').length
   return <article className={`requirement-coverage ${historical ? 'historical' : ''}`} aria-label="需求验收">
-    <header><div><h3>需求验收</h3><small>{historical ? '这是该历史版本当时的验收结果。' : '按已确认清单自动核对，不采用 AI 自评。'}</small></div><b className={missing === 0 ? 'complete' : 'incomplete'}>{missing === 0 ? `✓ ${coverage.items.length} 项已满足` : `${missing} 项待补`}</b></header>
+    <header><div><h3>需求验收</h3><small>{historical ? '这是该历史版本当时的验收结果。' : '页面和模块核对真实结构；流程由可信运行器逐步骤回放，不采用 AI 自评。'}</small></div><b className={missing === 0 ? 'complete' : 'incomplete'}>{missing === 0 ? `✓ ${coverage.items.length} 项已通过` : `${missing} 项待补`}</b></header>
     <ol>{coverage.items.map(item => {
       const match = item.matches[0]
-      return <li key={item.id} className={item.status}><span aria-hidden="true">{item.status === 'satisfied' ? '✓' : '○'}</span><div><b>{coverageKind(item.kind)} · {item.requirement}</b>{match === undefined ? <small>{missingCoverageReason(item.kind)}</small> : <small>已匹配：{match.label}{match.screenId === undefined ? '' : ` · 页面 ${match.screenId}`}{match.nodeId === undefined ? '' : ` · 控件 ${match.nodeId}`}</small>}</div>{match !== undefined && !historical && onFocus !== undefined && <button type="button" className="secondary" onClick={() => onFocus(match)}>{match.nodeId === undefined ? '定位页面' : '定位控件'}</button>}</li>
+      return <li key={item.id} className={item.status}><span aria-hidden="true">{item.status === 'satisfied' ? '✓' : '○'}</span><div><b>{coverageKind(item.kind)} · {item.requirement}</b>{match === undefined ? <small>{missingCoverageReason(item.kind)}</small> : <><small>{item.kind === 'flow' ? '可信运行器回放通过' : '已匹配'}：{match.label}{match.screenId === undefined ? '' : ` · 页面 ${match.screenId}`}{match.nodeId === undefined ? '' : ` · 控件 ${match.nodeId}`}</small>{match.verification !== undefined && <small className="coverage-replay"><b>实际步骤：</b>{match.verification.steps.join(' → ')}<i>最后看到：{match.verification.final}</i></small>}</>}</div>{match !== undefined && !historical && onFocus !== undefined && <button type="button" className="secondary" onClick={() => onFocus(match)}>{match.nodeId === undefined ? '定位页面' : '定位控件'}</button>}</li>
     })}</ol>
   </article>
 }
@@ -309,8 +334,9 @@ function DesignSystemReview({ bundle, confirming, confirmError, reopening, reope
     saveDesignSpecDraft(window.sessionStorage, bundle.projectId, evidenceIds, next, bundle.designSpec)
     setDefaultAcknowledged(false)
   }
-  const legacyCapture = evidence[0]!.designTokens.fontSizes === undefined || evidence[0]!.designTokens.textStyles === undefined || evidence[0]!.designTokens.accentBackgroundColors === undefined
+  const legacyCapture = evidence.some(item => item.designTokens.fontSizes === undefined || item.designTokens.textStyles === undefined || item.designTokens.accentBackgroundColors === undefined)
   const designSpec = bundle.designConfirmed ? bundle.designSpec : draftSpec
+  const evidenceConflicts = designEvidenceConflicts(evidence)
   const designBreakpoints = designSpec.responsive?.breakpoints ?? [768, 1_024]
   const compactBreakpoint = designBreakpoints[0] ?? 768
   const wideBreakpoint = designBreakpoints.at(-1) ?? 1_024
@@ -324,7 +350,9 @@ function DesignSystemReview({ bundle, confirming, confirmError, reopening, reope
   const spacing = designSpec.spacing.scale ?? [designSpec.spacing.base, designSpec.spacing.base * 2, designSpec.spacing.base * 3]
   const radii = designSpec.borders?.radiusScale ?? [designSpec.spacing.cardRadius]
   const coverageGroup = (id: string): DesignSpecChangeGroup | undefined => ({ colors: 'colors', surfaces: 'colors', 'feedback-colors': 'colors', typography: 'typography', 'font-assets': 'typography', spacing: 'layout', layout: 'layout', responsive: 'responsive', borders: 'borders', effects: 'effects', controls: 'controls', components: 'controls', 'visual-assets': 'controls', focus: 'focus', motion: 'motion' } as Record<string, DesignSpecChangeGroup | undefined>)[id]
-  const coverage = designEvidenceCoverage(evidence[0]!).map(item => ({ ...item, adjusted: coverageGroup(item.id) !== undefined && changedGroupIds.has(coverageGroup(item.id)!) }))
+  const referencePageKeys = evidence.map(item => { try { const url = new URL(item.source.url); return `${url.origin}${url.pathname}` } catch { return item.source.url } })
+  const responsiveVariantWidths = new Set(referencePageKeys).size === 1 ? [...new Set(evidence.map(item => item.viewport.width))].sort((left, right) => right - left) : []
+  const coverage = designEvidenceCoverage(evidence[0]!).map(item => item.id === 'responsive' && responsiveVariantWidths.length > 1 ? { ...item, status: 'observed' as const, detail: `同一网页已分别实测 ${responsiveVariantWidths.join(' / ')}px，布局和组件 token 均来自各自真实视口`, adjusted: coverageGroup(item.id) !== undefined && changedGroupIds.has(coverageGroup(item.id)!) } : { ...item, adjusted: coverageGroup(item.id) !== undefined && changedGroupIds.has(coverageGroup(item.id)!) })
   const coverageById = new Map(coverage.map(item => [item.id, item]))
   // The generated spec always has safe fallback values so the preview can render.
   // Never present those fallbacks as if the reference page supplied them.
@@ -336,10 +364,19 @@ function DesignSystemReview({ bundle, confirming, confirmError, reopening, reope
   const defaultCoverageCount = defaultCoverage.length
   const requiresDefaultAcknowledgement = !bundle.designConfirmed && !legacyCapture && defaultCoverageCount >= 2
   const qualityWarnings = designSpecQualityWarnings(designSpec)
-  const observedComponents = evidence[0]!.designTokens.componentKinds ?? []
-  const observedStates = evidence[0]!.designTokens.componentStates ?? []
+  const observedComponents = [...new Set(evidence.flatMap(item => item.designTokens.componentKinds ?? []))]
+  const observedStates = [...new Set(evidence.flatMap(item => item.designTokens.componentStates ?? []))]
   const componentSamples = evidence[0]!.designTokens.componentSamples ?? []
   const captureCoverage = evidence[0]!.captureCoverage
+  const responsiveCoverage = captureCoverage?.responsive
+  const stateCoverage = captureCoverage?.states
+  const cssStateRuleTokens = stateCoverage?.cssRuleTokens ?? []
+  const responsiveSource = responsiveVariantWidths.length > 1 ? `同一网页实测 ${responsiveVariantWidths.join(' / ')}px` : responsiveCoverage !== undefined && responsiveCoverage.observedViewportWidths.length > 1 ? `实测 ${responsiveCoverage.observedViewportWidths.join(' / ')}px` : responsiveCoverage !== undefined && responsiveCoverage.cssBreakpoints.length > 0 ? `从 CSS 规则提取 ${responsiveCoverage.cssBreakpoints.join(' / ')}px` : captureCoverage !== undefined && captureCoverage.opaqueStylesheets > 0 ? '不可访问/默认（部分样式表受限）' : '不可访问/默认'
+  const interactionStateSource = stateCoverage !== undefined && stateCoverage.observedTokens.length > 0 ? `实测 ${stateCoverage.observedTokens.join('、')}` : cssStateRuleTokens.length > 0 ? `从 CSS 规则提取 ${cssStateRuleTokens.length} 条安全 token` : captureCoverage !== undefined && captureCoverage.opaqueStylesheets > 0 ? '不可访问/默认（部分样式表受限）' : '不可访问/默认'
+  const cssStateStyle = (component: string, state: string): React.CSSProperties | undefined => {
+    const token = cssStateRuleTokens.find(item => item.component === component && item.state === state)
+    return token === undefined ? undefined : { color: token.color, backgroundColor: token.backgroundColor, borderColor: token.borderColor, boxShadow: token.boxShadow, transitionDuration: token.transitionDuration, transitionTimingFunction: token.transitionTimingFunction }
+  }
   const captureCoverageWarnings = captureCoverage === undefined ? ['这条旧参考没有记录采集覆盖范围，请重新提取以查看 iframe、跨域样式、懒加载图片和元素丢弃情况。'] : captureCoverage.opaqueStylesheets > 0 || captureCoverage.iframeElements > 0 || captureCoverage.unloadedImages > 0 || captureCoverage.horizontalOverflow || captureCoverage.candidateElements > captureCoverage.inspectedElements ? captureCoverage.limitations : []
   const requiresReviewAcknowledgement = requiresDefaultAcknowledgement || qualityWarnings.length > 0 || captureCoverageWarnings.length > 0
   const reviewTokens = prototypeDesignTokens(designSpec)
@@ -352,13 +389,13 @@ function DesignSystemReview({ bundle, confirming, confirmError, reopening, reope
     {bundle.screenshotUnavailable && <section className="evidence-retention-note" role="status"><b>参考截图已清理</b><span>为了控制浏览器存储空间，旧截图已移除；完整设计规范、已确认需求和原型历史仍由可信服务保留，可以继续使用。</span></section>}
     {!bundle.designConfirmed && requiresReviewAcknowledgement && <section id="review-warnings" className="review-warnings" aria-labelledby="review-warnings-title"><header><div><span>确认前请核对</span><b id="review-warnings-title">采集结果存在需要你判断的项目</b></div><small>这些内容不会被偷偷当成参考网页证据</small></header><div className="review-warning-groups">{captureCoverageWarnings.length > 0 && <section><b>采集覆盖提醒</b><ul>{captureCoverageWarnings.map(item => <li key={item}>{item}</li>)}</ul></section>}{requiresDefaultAcknowledgement && <section><b>网页未识别，示例使用安全默认值</b><p>{defaultCoverage.map(item => item.label).join('、')}。</p></section>}{qualityWarnings.length > 0 && <section><b>可读性与操作提醒</b><ul>{qualityWarnings.map(item => <li key={item}>{item}</li>)}</ul></section>}</div><label className="review-acknowledgement"><input type="checkbox" checked={defaultAcknowledged} onChange={event => setDefaultAcknowledged(event.target.checked)} /><span><b>我已经看过右侧示例页面</b><small>示例效果符合预期，可以把当前规范交给 AI。</small></span></label></section>}
     <div className="review-layout">
-      <aside className="review-source">{evidence[0]!.screenshotDataUrl !== undefined && <figure><img src={evidence[0]!.screenshotDataUrl} alt="参考网页当前可见区域截图" /><figcaption>截图只展示当前可见区域</figcaption></figure>}<div className="source-copy"><span className="source-label">参考网页</span><h2>{evidence[0]!.source.title}</h2><small>{evidence[0]!.source.url}</small><a className="source-open" href={evidence[0]!.source.url} target="_blank" rel="noreferrer">打开原网页核对</a><p>{designSpec.summary}</p><details className="capture-details"><summary>采集范围与未覆盖内容</summary><p>设计规范来自整页多个纵向区域的样式采样，不是只看截图；但当前只在一个浏览器宽度实测。</p><b>已经采集</b><ul>{evidence[0]!.observations.map((observation, index) => <li key={`${index}-${observation}`}>{observation}</li>)}</ul>{captureCoverage !== undefined && <><b>未覆盖或仅作推导</b><ul className="capture-limitations">{captureCoverage.limitations.map((limitation, index) => <li key={`${index}-${limitation}`}>{limitation}</li>)}</ul></>}</details></div><div className="source-facts"><span><b>{captureCoverage === undefined ? evidence[0]!.pageSize === undefined ? `${evidence[0]!.viewport.width} × ${evidence[0]!.viewport.height}` : `${evidence[0]!.pageSize!.sampledBands} 个区域` : `${captureCoverage.sampledElements} / ${captureCoverage.inspectedElements}`}</b>{captureCoverage === undefined ? evidence[0]!.pageSize === undefined ? '采集视口' : '整页样式采样区域' : '采入 / 检查元素'}</span><span><b>{captureCoverage === undefined ? designSpec.colors.length : captureCoverage.accessibleStylesheets}</b>{captureCoverage === undefined ? '规范颜色' : '可读取样式表'}</span><span><b>{captureCoverage === undefined ? spacing.length : captureCoverage.opaqueStylesheets}</b>{captureCoverage === undefined ? '间距档位' : '受限样式表'}</span></div></aside>
-      <section className="review-spec">{legacyCapture && <div className="upgrade-notice"><b>这条参考是旧版采集结果</b><span>缺少文字样式组合或按钮前景/背景配对，直接确认可能出现主色、字号或按钮文字判断不准。请回到侧栏找到该网页，点击“提取设计规范”。</span></div>}<div className="section-heading"><div><span>完整设计规范</span><h2>{designSpec.name}</h2></div><div className="section-actions">{changedGroups > 0 && <strong>已调整 {changedGroups} 类</strong>}<small>每类标明数据来源</small>{!bundle.designConfirmed && <button type="button" className="secondary" onClick={() => setShowTweaks(value => !value)}>{showTweaks ? '收起调整' : '调整规范'}</button>}</div></div>{showTweaks && !bundle.designConfirmed && <DesignSpecTweakPanel original={bundle.designSpec} draft={designSpec} onChange={updateDraftSpec} onClose={() => setShowTweaks(false)} />}<div className="coverage-grid">{coverage.map(item => <div key={item.id}><span className={`coverage-status ${item.adjusted ? 'adjusted' : item.status}`}>{item.adjusted ? '用户已调整' : item.status === 'observed' ? '网页实测' : item.status === 'inferred' ? '根据实测推导' : '网页未识别（安全默认）'}</span><b>{item.label}</b><small>{item.adjusted ? `${item.detail}；当前值以你的调整为准` : item.detail}</small></div>)}</div><nav className="spec-index" aria-label="设计规范快速目录"><b>快速查看</b><a href="#spec-colors">颜色</a><a href="#spec-type">排版</a><a href="#spec-layout">间距与响应式</a><a href="#spec-effects">圆角与效果</a><a href="#spec-components">组件状态</a><a href="#spec-principles">设计原则</a>{defaultCoverageCount > 0 && <span>{defaultCoverageCount} 类未实测</span>}</nav>
+      <aside className="review-source">{evidence[0]!.screenshotDataUrl !== undefined && <figure><img src={evidence[0]!.screenshotDataUrl} alt="参考网页当前可见区域截图" /><figcaption>截图只展示当前可见区域</figcaption></figure>}<div className="source-copy"><span className="source-label">参考网页</span><h2>{evidence[0]!.source.title}</h2><small>{evidence[0]!.source.url}</small><a className="source-open" href={evidence[0]!.source.url} target="_blank" rel="noreferrer">打开原网页核对</a><p>{designSpec.summary}</p><details className="capture-details"><summary>采集范围与未覆盖内容</summary><p>设计规范来自整页多个纵向区域的样式采样，不是只看截图；{responsiveVariantWidths.length > 1 ? `并且同一网页已在 ${responsiveVariantWidths.join(' / ')}px 分别实测。` : '当前只在一个浏览器宽度实测。'}</p><b>已经采集</b><ul>{evidence[0]!.observations.map((observation, index) => <li key={`${index}-${observation}`}>{observation}</li>)}</ul>{captureCoverage !== undefined && <><b>未覆盖或仅作推导</b><ul className="capture-limitations">{captureCoverage.limitations.filter(limitation => responsiveVariantWidths.length < 2 || !limitation.startsWith('仅在当前')).map((limitation, index) => <li key={`${index}-${limitation}`}>{limitation}</li>)}</ul></>}</details></div><div className="source-facts"><span><b>{responsiveVariantWidths.length > 1 ? responsiveVariantWidths.length : captureCoverage === undefined ? evidence[0]!.pageSize === undefined ? `${evidence[0]!.viewport.width} × ${evidence[0]!.viewport.height}` : `${evidence[0]!.pageSize!.sampledBands} 个区域` : `${captureCoverage.sampledElements} / ${captureCoverage.inspectedElements}`}</b>{responsiveVariantWidths.length > 1 ? '真实采集尺寸' : captureCoverage === undefined ? evidence[0]!.pageSize === undefined ? '采集视口' : '整页样式采样区域' : '采入 / 检查元素'}</span><span><b>{captureCoverage === undefined ? designSpec.colors.length : captureCoverage.accessibleStylesheets}</b>{captureCoverage === undefined ? '规范颜色' : '可读取样式表'}</span><span><b>{captureCoverage === undefined ? spacing.length : captureCoverage.opaqueStylesheets}</b>{captureCoverage === undefined ? '间距档位' : '受限样式表'}</span></div></aside>
+      <section className="review-spec">{legacyCapture && <div className="upgrade-notice"><b>这条参考是旧版采集结果</b><span>缺少文字样式组合或按钮前景/背景配对，直接确认可能出现主色、字号或按钮文字判断不准。请回到侧栏找到该网页，点击“提取设计规范”。</span></div>}<div className="section-heading"><div><span>完整设计规范</span><h2>{designSpec.name}</h2></div><div className="section-actions">{changedGroups > 0 && <strong>已调整 {changedGroups} 类</strong>}<small>每类标明数据来源</small>{!bundle.designConfirmed && <button type="button" className="secondary" onClick={() => setShowTweaks(value => !value)}>{showTweaks ? '收起调整' : '调整规范'}</button>}</div></div>{evidence.length > 1 && <section className="multi-reference-review" aria-label="多页面参考"><b>多页面参考：{evidence.length} 页</b><p>主参考是“{evidence[0]!.source.title}”；其余页面作为辅助参考。不会把不同页面的值偷偷取平均。</p><ul>{evidence.map((item, index) => <li key={item.id}><strong>{index === 0 ? '主参考' : '辅助参考'}</strong><span>{item.source.title || item.source.url}</span>{item.screenshotDataUrl === undefined && <small>无截图，已使用可信服务中的设计证据</small>}</li>)}</ul>{evidenceConflicts.length > 0 && <div className="multi-reference-conflicts"><b>多页面差异</b><span>{evidenceConflicts.map(item => item.label).join('、')}在页面间不同。请选择合并规则后再确认。</span>{!bundle.designConfirmed && <div><button type="button" className={designSpec.merge?.strategy !== 'common' ? 'active' : ''} onClick={() => updateDraftSpec(createDesignSpecFromEvidence(evidence, 'primary' satisfies DesignMergeStrategy))}>主参考优先</button><button type="button" className={designSpec.merge?.strategy === 'common' ? 'active' : ''} onClick={() => updateDraftSpec(createDesignSpecFromEvidence(evidence, 'common' satisfies DesignMergeStrategy))}>常见值优先</button></div>}</div>}</section>}{showTweaks && !bundle.designConfirmed && <DesignSpecTweakPanel original={bundle.designSpec} draft={designSpec} onChange={updateDraftSpec} onClose={() => setShowTweaks(false)} />}<div className="coverage-grid">{coverage.map(item => <div key={item.id}><span className={`coverage-status ${item.adjusted ? 'adjusted' : item.status}`}>{item.adjusted ? '用户已调整' : item.status === 'observed' ? '网页实测' : item.status === 'inferred' ? '根据实测推导' : '网页未识别（安全默认）'}</span><b>{item.label}</b><small>{item.adjusted ? `${item.detail}；当前值以你的调整为准` : item.detail}</small></div>)}</div><nav className="spec-index" aria-label="设计规范快速目录"><b>快速查看</b><a href="#spec-colors">颜色</a><a href="#spec-type">排版</a><a href="#spec-layout">间距与响应式</a><a href="#spec-effects">圆角与效果</a><a href="#spec-components">组件状态</a><a href="#spec-principles">设计原则</a>{defaultCoverageCount > 0 && <span>{defaultCoverageCount} 类未实测</span>}</nav>
         <article id="spec-colors" className="spec-block"><h3>颜色系统</h3><h4>网页提取色板</h4><div className="color-grid">{designSpec.colors.map(item => <div className="color-token" key={`${item.name}-${item.value}`}><i style={{ background: item.value }} /><span><b>{item.name}</b><code>{item.value}</code><small>{item.usage}</small></span></div>)}</div><h4>页面语义颜色</h4><div className="semantic-color-grid">{semanticColors.map(item => <div key={item.name}><i style={{ background: item.value }} /><span><b>{item.name}</b><code>{item.value}</code></span></div>)}</div></article>
         <article id="spec-type" className="spec-block"><h3>排版系统</h3><div className="type-specimen"><div className="type-heading">页面标题 Typography</div><div className="type-body">正文用于承载主要产品信息，保持清晰、稳定的阅读节奏。</div><div className="type-caption">辅助说明与状态信息 Caption</div></div><div className="token-lines"><span><b>字号梯度</b>{measuredValue('typography', `${(designSpec.typography.fontSizeScale ?? [designSpec.typography.captionSize ?? 12, designSpec.typography.bodySize, designSpec.typography.headingSize ?? 28]).join(' / ')} px`)}</span><span><b>字重梯度</b>{measuredValue('typography', (designSpec.typography.fontWeightScale ?? [designSpec.typography.bodyWeight ?? 400, designSpec.typography.headingWeight]).join(' / '))}</span><span><b>行高梯度</b>{measuredValue('typography', designSpec.typography.lineHeightScale?.length ? `${designSpec.typography.lineHeightScale.join(' / ')} px` : '未识别')}</span></div><dl className="property-grid"><div><dt>字体</dt><dd>{measuredValue('typography', designSpec.typography.fontFamily)}</dd></div><div><dt>字体文件</dt><dd>{coverageById.get('font-assets')?.detail}</dd></div><div><dt>标题</dt><dd>{measuredValue('typography', `${designSpec.typography.headingSize ?? Math.round(designSpec.typography.bodySize * 2)}px / ${designSpec.typography.headingWeight}`)}</dd></div><div><dt>正文</dt><dd>{measuredValue('typography', `${designSpec.typography.bodySize}px / ${designSpec.typography.bodyWeight ?? 400} / ${designSpec.typography.bodyLineHeight ?? 1.5}`)}</dd></div><div><dt>辅助文字</dt><dd>{measuredValue('typography', `${designSpec.typography.captionSize ?? Math.max(10, designSpec.typography.bodySize - 2)}px`)}</dd></div><div><dt>字距</dt><dd>{measuredValue('typography', `${designSpec.typography.letterSpacing ?? 0}px`)}</dd></div></dl></article>
-        <article id="spec-layout" className="spec-block"><h3>间距、布局与响应式</h3><div className="spacing-scale">{spacing.map(value => <span key={value}><i style={{ width: `${Math.max(4, value * 2)}px` }} />{value}px</span>)}</div><dl className="property-grid"><div><dt>基础间距</dt><dd>{measuredValue('spacing', `${designSpec.spacing.base}px`)}</dd></div><div><dt>区块间距</dt><dd>{measuredValue('spacing', `${designSpec.spacing.sectionGap ?? spacing.at(-1)}px`)}</dd></div><div><dt>内容宽度</dt><dd>{measuredValue('layout', `${designSpec.spacing.contentWidth ?? 680}px`)}</dd></div><div><dt>响应式断点</dt><dd>{measuredValue('responsive', designSpec.responsive?.breakpoints.length ? `${designSpec.responsive.breakpoints.join(' / ')}px` : '未识别')}</dd></div><div><dt>页面布局</dt><dd>{measuredValue('layout', designSpec.responsive?.layoutPatterns.length ? designSpec.responsive.layoutPatterns.join('、') : '未识别')}</dd></div></dl></article>
+        <article id="spec-layout" className="spec-block"><h3>间距、布局与响应式</h3><div className="spacing-scale">{spacing.map(value => <span key={value}><i style={{ width: `${Math.max(4, value * 2)}px` }} />{value}px</span>)}</div><dl className="property-grid"><div><dt>基础间距</dt><dd>{measuredValue('spacing', `${designSpec.spacing.base}px`)}</dd></div><div><dt>区块间距</dt><dd>{measuredValue('spacing', `${designSpec.spacing.sectionGap ?? spacing.at(-1)}px`)}</dd></div><div><dt>内容宽度</dt><dd>{measuredValue('layout', `${designSpec.spacing.contentWidth ?? 680}px`)}</dd></div><div><dt>响应式断点</dt><dd>{measuredValue('responsive', designSpec.responsive?.breakpoints.length ? `${designSpec.responsive.breakpoints.join(' / ')}px` : '未识别')}</dd></div><div><dt>页面布局</dt><dd>{measuredValue('layout', designSpec.responsive?.layoutPatterns.length ? designSpec.responsive.layoutPatterns.join('、') : '未识别')}</dd></div></dl><p className="evidence-provenance"><b>响应式：</b>{responsiveSource}<small>{responsiveVariantWidths.length > 1 ? '每个尺寸都读取了当时真实 DOM 和计算样式；CSS 断点仍单独标为规则提取。' : '没有自动缩放或切换浏览器尺寸；CSS 规则提取不等于实测。'}</small></p></article>
         <article id="spec-effects" className="spec-block"><h3>边框、圆角与视觉效果</h3><div className="effect-grid"><div><b>圆角梯度</b><div className="radius-list">{radii.map(value => <i key={value} style={{ borderRadius: `${value}px` }}>{measuredValue('borders', `${value}px`)}</i>)}</div></div><div><b>投影</b><div className="shadow-list">{coverageById.get('effects')?.status === 'default' && !coverageById.get('effects')?.adjusted ? <i>未识别</i> : (designSpec.effects?.shadows.length ? designSpec.effects.shadows : ['none']).map((value, index) => <i key={`${value}-${index}`} style={{ boxShadow: value }}>{value === 'none' ? '无投影' : `层级 ${index + 1}`}</i>)}</div></div><div><b>渐变</b><div className="gradient-list">{coverageById.get('effects')?.status === 'default' && !coverageById.get('effects')?.adjusted ? <i>未识别</i> : (designSpec.effects?.gradients.length ? designSpec.effects.gradients : ['none']).map((value, index) => <i key={`${value}-${index}`} style={{ backgroundImage: value }}>{value === 'none' ? '未使用渐变' : `渐变 ${index + 1}`}</i>)}</div></div></div><dl className="property-grid"><div><dt>边框</dt><dd>{measuredValue('borders', `${designSpec.borders?.width ?? 1}px ${designSpec.borders?.style ?? 'solid'}`)}</dd></div><div><dt>卡片圆角</dt><dd>{measuredValue('borders', `${designSpec.spacing.cardRadius}px`)}</dd></div><div><dt>控件圆角</dt><dd>{measuredValue('controls', `${designSpec.controls?.radius ?? designSpec.spacing.cardRadius}px`)}</dd></div><div><dt>普通表面投影</dt><dd>{measuredValue('effects', designSpec.effects?.semantic?.surfaceShadow ?? '不使用')}</dd></div><div><dt>弹窗与菜单投影</dt><dd>{measuredValue('effects', designSpec.effects?.semantic?.elevatedShadow ?? '不使用')}</dd></div><div><dt>主按钮渐变</dt><dd>{measuredValue('effects', designSpec.effects?.semantic?.primaryControlGradient ?? '不使用')}</dd></div><div><dt>禁用控件透明度</dt><dd>{measuredValue('effects', designSpec.effects?.semantic?.disabledControlOpacity ?? '未识别')}</dd></div><div><dt>全部透明度</dt><dd>{measuredValue('effects', designSpec.effects?.opacities.length ? designSpec.effects.opacities.join(' / ') : '未识别')}</dd></div><div><dt>动效时长</dt><dd>{measuredValue('motion', designSpec.motion?.durations.length ? designSpec.motion.durations.join(' / ') : '未识别')}</dd></div><div><dt>动效曲线</dt><dd>{measuredValue('motion', designSpec.motion?.easings.length ? designSpec.motion.easings.join(' / ') : '未识别')}</dd></div></dl></article>
-        <article id="spec-components" className="spec-block"><h3>组件与交互状态</h3><p className="component-observation"><b>网页实际发现：</b>{observedComponents.length > 0 ? observedComponents.join('、') : '未识别到稳定组件'}<br /><b>显式状态：</b>{observedStates.length > 0 ? observedStates.join('、') : '未发现 disabled、selected、checked 等显式状态'}</p>{componentSamples.length > 0 ? <div className="component-evidence-grid">{componentSamples.map(sample => <div key={sample.kind}><span style={{ color: sample.color, background: sample.backgroundColor, borderColor: sample.borderColor, borderRadius: sample.borderRadius, boxShadow: sample.boxShadow }}>{sample.exampleText?.slice(0, 20) || sample.kind}</span><b>{sample.kind} · 实采 {sample.count} 个</b><small>{sample.width}×{sample.height}px · 圆角 {sample.borderRadius} · 边框 {sample.borderWidth}{sample.states.length > 0 ? ` · ${sample.states.join(' / ')}` : ''}</small></div>)}</div> : <p className="component-missing">未采到可稳定复现的组件样本，不代表网页不存在这些组件。</p>}<div className="component-rules"><div><b>按钮</b><span>{measuredValue('controls', `${designSpec.controls?.buttonHeight ?? designSpec.controls?.height ?? 38}px 高 · ${designSpec.controls?.radius ?? 8}px 圆角`)}</span><small>主要、次要、危险、禁用</small></div><div><b>输入框</b><span>{measuredValue('controls', `${designSpec.controls?.inputHeight ?? 38}px 高 · ${designSpec.borders?.width ?? 1}px 边框`)}</span><small>默认、聚焦、错误、禁用</small></div><div><b>图标</b><span>{measuredValue('controls', `${designSpec.controls?.iconSize ?? 16}px`)}</span><small>仅使用产品内置安全图标</small></div><div><b>图片 / Logo</b><span>{observedComponents.includes('image') ? '发现图片元素，不复制网页文件' : '未识别稳定图片素材'}</span><small>原型只继承布局位置；需要真实素材时由用户另行添加</small></div><div><b>卡片</b><span>{measuredValue('borders', `${designSpec.spacing.cardRadius}px 圆角 · 表面色`)}</span><small>边框、投影、内边距</small></div><div><b>表格 / 列表</b><span>{measuredValue('components', '行间距、分隔线和选中态')}</span><small>默认、悬停、空状态</small></div><div><b>弹窗 / 抽屉</b><span>{measuredValue('components', '遮罩、层级、标题和操作区')}</span><small>打开、关闭、确认、取消</small></div><div><b>标签 / 提示</b><span>{measuredValue('feedback-colors', '信息、成功、警告、危险')}</span><small>若未识别，右侧只展示安全默认</small></div><div><b>键盘焦点</b><span>{measuredValue('focus', `${designSpec.focus?.width ?? 2}px ${designSpec.focus?.style ?? 'solid'} · 外移 ${designSpec.focus?.offset ?? 2}px`)}</span><small>{measuredValue('focus', designSpec.focus?.color ?? designSpecColor(designSpec, 'primary'))}</small></div><div><b>导航与标签页</b><span>{measuredValue('components', '默认、悬停、选中')}</span><small>未识别时不把示例选中态当作网页证据</small></div></div><div className="state-legend"><b>{coverageById.get('components')?.status === 'default' ? '下列状态用于示例交互，网页未识别' : '示例状态'}</b><span>Default 默认</span><span>Hover 悬停</span><span>Focus 聚焦</span><span>Disabled 禁用</span><span>Selected 选中</span></div></article>
+        <article id="spec-components" className="spec-block"><h3>组件与交互状态</h3><p className="component-observation"><b>网页实际发现：</b>{observedComponents.length > 0 ? observedComponents.join('、') : '未识别到稳定组件'}<br /><b>显式状态：</b>{observedStates.length > 0 ? observedStates.join('、') : '未发现 disabled、selected、checked 等显式状态'}</p><p className="evidence-provenance"><b>交互状态：</b>{interactionStateSource}<small>“从 CSS 规则提取”只展示已校验的颜色、边框、投影和动效 token，不会标成网页实测。</small></p>{componentSamples.length > 0 ? <div className="component-evidence-grid">{componentSamples.map(sample => <div key={sample.kind}><span style={{ color: sample.color, background: sample.backgroundColor, borderColor: sample.borderColor, borderRadius: sample.borderRadius, boxShadow: sample.boxShadow }}>{sample.exampleText?.slice(0, 20) || sample.kind}</span><b>{sample.kind} · 实采 {sample.count} 个</b><small>{sample.width}×{sample.height}px · 圆角 {sample.borderRadius} · 边框 {sample.borderWidth}{sample.states.length > 0 ? ` · ${sample.states.join(' / ')}` : ''}</small></div>)}</div> : <p className="component-missing">未采到可稳定复现的组件样本，不代表网页不存在这些组件。</p>}<div className="component-rules"><div><b>按钮</b><span>{measuredValue('controls', `${designSpec.controls?.buttonHeight ?? designSpec.controls?.height ?? 38}px 高 · ${designSpec.controls?.radius ?? 8}px 圆角`)}</span><small>主要、次要、危险、禁用</small></div><div><b>输入框</b><span>{measuredValue('controls', `${designSpec.controls?.inputHeight ?? 38}px 高 · ${designSpec.borders?.width ?? 1}px 边框`)}</span><small>默认、聚焦、错误、禁用</small></div><div><b>图标</b><span>{measuredValue('controls', `${designSpec.controls?.iconSize ?? 16}px`)}</span><small>仅使用产品内置安全图标</small></div><div><b>图片 / Logo</b><span>{observedComponents.includes('image') ? '发现图片元素，不复制网页文件' : '未识别稳定图片素材'}</span><small>原型只继承布局位置；需要真实素材时由用户另行添加</small></div><div><b>卡片</b><span>{measuredValue('borders', `${designSpec.spacing.cardRadius}px 圆角 · 表面色`)}</span><small>边框、投影、内边距</small></div><div><b>表格 / 列表</b><span>{measuredValue('components', '行间距、分隔线和选中态')}</span><small>默认、悬停、空状态</small></div><div><b>弹窗 / 抽屉</b><span>{measuredValue('components', '遮罩、层级、标题和操作区')}</span><small>打开、关闭、确认、取消</small></div><div><b>标签 / 提示</b><span>{measuredValue('feedback-colors', '信息、成功、警告、危险')}</span><small>若未识别，右侧只展示安全默认</small></div><div><b>键盘焦点</b><span>{measuredValue('focus', `${designSpec.focus?.width ?? 2}px ${designSpec.focus?.style ?? 'solid'} · 外移 ${designSpec.focus?.offset ?? 2}px`)}</span><small>{measuredValue('focus', designSpec.focus?.color ?? designSpecColor(designSpec, 'primary'))}</small></div><div><b>导航与标签页</b><span>{measuredValue('components', '默认、悬停、选中')}</span><small>未识别时不把示例选中态当作网页证据</small></div></div><div className="state-legend"><b>{coverageById.get('components')?.status === 'default' ? '下列状态用于示例交互，网页未识别' : '示例状态'}</b><span>Default 默认</span><span>Hover 悬停</span><span>Focus 聚焦</span><span>Disabled 禁用</span><span>Selected 选中</span></div>{cssStateRuleTokens.length > 0 && <div className="css-state-samples"><b>右侧示例使用的 CSS 规则 token</b>{cssStateRuleTokens.slice(0, 8).map(token => <button type="button" key={`${token.component}-${token.state}-${token.color ?? ''}-${token.backgroundColor ?? ''}`} style={cssStateStyle(token.component, token.state)} onClick={() => showExampleFeedback(`已展示 ${token.component}:${token.state} 的 CSS 规则提取样式`)}>{token.component} · {token.state}<small>CSS 规则提取</small></button>)}</div>}</article>
         <p className="component-observation"><small>CSS 声明的 hover、focus、active 等状态未被主动触发；未测视觉值不计入网页实测。</small></p>
         <article id="spec-principles" className="spec-block"><h3>交给 AI 的设计原则</h3><p className="principles-intro">下列原则会与上面的具体数值一起锁定并发送给 AI，不包含隐藏规则。</p><ol className="principles-list">{designSpec.principles.map((principle, index) => <li key={`${index}-${principle}`}><i>{index + 1}</i><span>{principle}</span></li>)}</ol></article>
       </section>
@@ -378,59 +415,62 @@ async function loadCapturedReference(onStage: (stage: LoadStage) => void = () =>
     throw new Error(response.error ?? '无法读取原型项目。')
   }
   const snapshot = response.snapshot
-  const hostEvidence = Array.isArray(snapshot.evidence) ? snapshot.evidence[0] : undefined
-  const hostReferenceId = (hostEvidence as { id?: unknown } | undefined)?.id
-  const hostFingerprint = (hostReferenceId === undefined || hostReferenceId === referenceId) && typeof (hostEvidence as { fingerprint?: unknown } | undefined)?.fingerprint === 'string'
-    ? (hostEvidence as { fingerprint: string }).fingerprint
-    : undefined
+  const rawHostEvidence = Array.isArray(snapshot.evidence) ? snapshot.evidence : []
+  if (rawHostEvidence.length < 1 || rawHostEvidence.length > 3) throw new Error('原型项目的参考网页集合无效，请重新采集。')
+  const legacyFingerprint = rawHostEvidence.length === 1 ? legacySingleReferenceFingerprint(rawHostEvidence[0], referenceId) : undefined
+  if (legacyFingerprint === undefined && (rawHostEvidence[0] as { id?: unknown } | undefined)?.id !== referenceId) throw new Error('原型项目的参考网页集合无效，请重新采集。')
   onStage('reading-reference')
   const storedResult = await bounded(chrome.storage.local.get(PROTOTYPE_REFERENCE_STORAGE_KEY), 5_000, '读取参考网页超时，请点击重试。')
   const stored = storedResult[PROTOTYPE_REFERENCE_STORAGE_KEY] as StoredPrototypeReferences | undefined
-  const raw = stored?.v === 1 ? stored.references?.[referenceId] : undefined
-  const locallyChecked = validateReferenceEvidence(raw)
   onStage('verifying-reference')
-  const localUsable = locallyChecked.ok && hostFingerprint !== undefined && locallyChecked.value.fingerprint === hostFingerprint
-    && await bounded(verifyReferenceEvidenceFingerprint(locallyChecked.value), 5_000, '验证参考证据超时，请点击重试。')
-  // Local evidence is intentionally evicted under storage pressure. The Host
-  // snapshot remains the durable source for design tokens and history.
-  const hostChecked = validateReferenceEvidence(hostEvidence)
-  let evidence: ReferenceEvidenceV1
-  if (localUsable) evidence = locallyChecked.value
-  else {
-    if (!hostChecked.ok || hostChecked.value.id !== referenceId || !(await bounded(verifyReferenceEvidenceFingerprint(hostChecked.value), 5_000, '验证原型服务中的参考证据超时，请点击重试。'))) {
-      throw new Error('原型服务中的参考网页证据不存在或校验失败，请重新采集。')
-    }
-    evidence = hostChecked.value
+  const legacyLocal = legacyFingerprint === undefined ? undefined : validateReferenceEvidence(stored?.v === 1 ? stored.references?.[referenceId] : undefined)
+  if (legacyFingerprint !== undefined && (!legacyLocal?.ok || legacyLocal.value.fingerprint !== legacyFingerprint || !(await bounded(verifyReferenceEvidenceFingerprint(legacyLocal.value), 5_000, '验证本地参考证据超时，请点击重试。')))) throw new Error('原型服务中的参考网页证据不存在或校验失败，请重新采集。')
+  const hostEvidence: unknown[] = legacyLocal?.ok ? [legacyLocal.value] : rawHostEvidence
+  // Local screenshots may be evicted independently. Validate and fall back
+  // page-by-page so a three-page project never silently drops auxiliaries.
+  const evidence: ReferenceEvidenceV1[] = []
+  for (const rawHost of hostEvidence) {
+    const hostChecked = validateReferenceEvidence(rawHost)
+    if (!hostChecked.ok || !(await bounded(verifyReferenceEvidenceFingerprint(hostChecked.value), 5_000, '验证原型服务中的参考证据超时，请点击重试。'))) throw new Error('原型服务中的参考网页证据不存在或校验失败，请重新采集。')
+    const local = validateReferenceEvidence(stored?.v === 1 ? stored.references?.[hostChecked.value.id] : undefined)
+    const localUsable = local.ok && local.value.fingerprint === hostChecked.value.fingerprint && await bounded(verifyReferenceEvidenceFingerprint(local.value), 5_000, '验证本地参考证据超时，请点击重试。')
+    evidence.push(localUsable ? local.value : hostChecked.value)
   }
   onStage('preparing-studio')
   const revisions = studioRevisions(snapshot.revisions, snapshot.currentRevisionId)
   if (snapshot.projectId !== projectId || revisions === undefined) throw new Error('原型项目与当前参考网页或版本历史不匹配。')
   const lastAttempt = studioAttempt(snapshot.lastAttempt)
   const generationAttempt = studioGenerationAttempt(snapshot.generationAttempt)
+  const suggestionAttempt = briefSuggestionAttempt(snapshot.briefSuggestionAttempt)
+  const suggestedProductBrief = productBrief(snapshot.suggestedProductBrief)
   const savedBrief = snapshot.productBrief === undefined ? generationAttempt?.productBrief : productBrief(snapshot.productBrief)
   if (snapshot.generationAttempt !== undefined && generationAttempt === undefined) throw new Error('原型生成状态格式无效，请刷新后重试。')
+  if (snapshot.briefSuggestionAttempt !== undefined && suggestionAttempt === undefined) throw new Error('AI 产品需求草稿状态无效，请刷新后重试。')
+  if (snapshot.suggestedProductBrief !== undefined && suggestedProductBrief === undefined) throw new Error('AI 整理的产品需求草稿格式无效。')
+  if ((suggestionAttempt?.status === 'saved') !== (suggestedProductBrief !== undefined) || (suggestionAttempt?.status === 'pending' && suggestedProductBrief !== undefined)) throw new Error('AI 产品需求草稿与请求状态不一致，请重新整理。')
   if (snapshot.productBrief !== undefined && savedBrief === undefined) throw new Error('产品需求验收清单格式无效。')
   if (snapshot.designSpec !== undefined || snapshot.document !== undefined) {
-    const bundle = validatePrototypeBundle({ evidence: [evidence], designSpec: snapshot.designSpec, document: snapshot.document })
+    const bundle = validatePrototypeBundle({ evidence, designSpec: snapshot.designSpec, document: snapshot.document })
     if (!bundle.ok || typeof snapshot.currentRevisionId !== 'string') throw new Error('AI 保存的原型版本未通过安全校验。')
     const expectedCoverage = savedBrief === undefined ? undefined : productRequirementCoverage(bundle.value.document, savedBrief)
     const savedCoverage = snapshot.requirementCoverage === undefined ? expectedCoverage : productRequirementCoverageValue(snapshot.requirementCoverage)
     if ((expectedCoverage === undefined) !== (savedCoverage === undefined) || (savedCoverage !== undefined && JSON.stringify(savedCoverage) !== JSON.stringify(expectedCoverage))) throw new Error('当前版本的需求验收结果未通过确定性校验。')
-    return { projectId, ...bundle.value, revisions, designConfirmed: snapshot.designConfirmed === true, screenshotUnavailable: evidence.screenshotDataUrl === undefined, productBrief: savedBrief, ...(savedCoverage === undefined ? {} : { requirementCoverage: savedCoverage }), currentRevisionId: snapshot.currentRevisionId, ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
+    return { projectId, ...bundle.value, revisions, designConfirmed: snapshot.designConfirmed === true, screenshotUnavailable: evidence.some(item => item.screenshotDataUrl === undefined), productBrief: savedBrief, ...(savedCoverage === undefined ? {} : { requirementCoverage: savedCoverage }), currentRevisionId: snapshot.currentRevisionId, ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(suggestionAttempt === undefined ? {} : { briefSuggestionAttempt: suggestionAttempt }), ...(suggestedProductBrief === undefined ? {} : { suggestedProductBrief }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
   }
   let designSpec = createDesignSpecFromEvidence(evidence)
   let designConfirmed = false
   if (snapshot.designConfirmed === true && snapshot.confirmedDesignSpec !== undefined) {
-    const confirmed = validateDesignSpec(snapshot.confirmedDesignSpec, [evidence.id])
+    const confirmed = validateDesignSpec(snapshot.confirmedDesignSpec, evidence.map(item => item.id))
     if (!confirmed.ok) throw new Error('已确认的设计规范未通过安全校验，请重新采集。')
     designSpec = confirmed.value
     designConfirmed = true
   }
-  return { projectId, evidence: [evidence], designSpec, document: starterDocument(designSpec.id, evidence.source.title), revisions, designConfirmed, screenshotUnavailable: evidence.screenshotDataUrl === undefined, productBrief: savedBrief, ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
+  return { projectId, evidence, designSpec, document: starterDocument(designSpec.id, evidence[0]!.source.title), revisions, designConfirmed, screenshotUnavailable: evidence.some(item => item.screenshotDataUrl === undefined), productBrief: savedBrief, ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(suggestionAttempt === undefined ? {} : { briefSuggestionAttempt: suggestionAttempt }), ...(suggestedProductBrief === undefined ? {} : { suggestedProductBrief }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
 }
 
 function App(): React.JSX.Element {
   const frameRef = useRef<HTMLIFrameElement>(null)
+  const historyFrameRef = useRef<HTMLIFrameElement>(null)
   const previewStageRef = useRef<HTMLDivElement>(null)
   const [bundle, setBundle] = useState<StudioBundle>()
   const [error, setError] = useState<string>()
@@ -453,6 +493,7 @@ function App(): React.JSX.Element {
   const [checkingAllViewports, setCheckingAllViewports] = useState(false)
   const [previewStageSize, setPreviewStageSize] = useState({ width: 1_440, height: 720 })
   const [request, setRequest] = useState('')
+  const [requestDraftReadyProject, setRequestDraftReadyProject] = useState<string>()
   const [briefAudience, setBriefAudience] = useState('')
   const [briefTask, setBriefTask] = useState('')
   const [briefPages, setBriefPages] = useState('')
@@ -463,6 +504,8 @@ function App(): React.JSX.Element {
   const [requestStatus, setRequestStatus] = useState<string>()
   const [requestTone, setRequestTone] = useState<'info' | 'success' | 'error'>('info')
   const [confirmingBrief, setConfirmingBrief] = useState(false)
+  const [suggestingBrief, setSuggestingBrief] = useState(false)
+  const [exporting, setExporting] = useState<'html' | 'json'>()
   const [briefDraftReadyProject, setBriefDraftReadyProject] = useState<string>()
   const [sending, setSending] = useState(false)
   const [waitingForRevision, setWaitingForRevision] = useState(false)
@@ -479,12 +522,14 @@ function App(): React.JSX.Element {
   const pendingRevisionBaseline = useRef<string | undefined>(undefined)
   const generationRequestId = useRef<string | undefined>(undefined)
   const initializedBriefProject = useRef<string | undefined>(undefined)
+  const appliedBriefSuggestionRequest = useRef<string | undefined>(undefined)
   const requirementsUpdateProject = useRef<string | undefined>(undefined)
   const previewViewportRef = useRef<PreviewViewport>('desktop')
   const previewAuditQueueRef = useRef<PreviewViewport[]>([])
   const previewAuditReturnViewportRef = useRef<PreviewViewport | undefined>(undefined)
   const pendingPreviewAuditRef = useRef<{ viewport: PreviewViewport; requestId: string } | undefined>(undefined)
   const nonce = useMemo(() => crypto.randomUUID(), [])
+  const historyNonce = useMemo(() => crypto.randomUUID(), [])
   const populateBriefFields = (brief: ProductBriefV1): void => {
     setBriefAudience(brief.audience)
     setBriefTask(brief.coreTask)
@@ -537,6 +582,52 @@ function App(): React.JSX.Element {
     }
     setBriefDraftReadyProject(bundle.projectId)
   }, [bundle?.generationAttempt?.productBrief, bundle?.productBrief, bundle?.projectId])
+  useEffect(() => {
+    if (bundle?.currentRevisionId === undefined || bundle.generationAttempt !== undefined || requestDraftReadyProject === bundle.projectId) return
+    const draft = loadPrototypeRequestDraft(window.sessionStorage, bundle.projectId, bundle.currentRevisionId)
+    if (draft !== undefined) {
+      const ids = collectPrototypeElementIds(bundle.document)
+      if (draft.selection === undefined || ids.has(draft.selection.elementId)) {
+        setRequest(draft.request)
+        if (draft.selection !== undefined) { setSelection(draft.selection as PrototypeSelection); setPreviewMode('select') }
+        setRequestTone('info')
+        setRequestStatus('已恢复上次未发送的修改要求。')
+      } else clearPrototypeRequestDraft(window.sessionStorage, bundle.projectId)
+    }
+    setRequestDraftReadyProject(bundle.projectId)
+  }, [bundle?.currentRevisionId, bundle?.generationAttempt?.requestId, bundle?.projectId, requestDraftReadyProject])
+  useEffect(() => {
+    if (bundle?.currentRevisionId === undefined || requestDraftReadyProject !== bundle.projectId || waitingForRevision) return
+    savePrototypeRequestDraft(window.sessionStorage, bundle.projectId, bundle.currentRevisionId, { request, ...(selection === undefined ? {} : { selection }) })
+  }, [bundle?.currentRevisionId, bundle?.projectId, request, requestDraftReadyProject, selection, waitingForRevision])
+  useEffect(() => {
+    const attempt = bundle?.briefSuggestionAttempt
+    if (bundle === undefined || attempt === undefined) return
+    if (attempt.status === 'saved' && bundle.suggestedProductBrief !== undefined) {
+      if (appliedBriefSuggestionRequest.current !== attempt.requestId) {
+        appliedBriefSuggestionRequest.current = attempt.requestId
+        populateBriefFields(bundle.suggestedProductBrief)
+        if (bundle.currentRevisionId !== undefined) { requirementsUpdateProject.current = bundle.projectId; setEditingRequirements(true) }
+        setRequestTone('success'); setRequestStatus('AI 已根据当前对话整理成需求草稿。请检查和修改，确认后才会用于原型。')
+      }
+      setSuggestingBrief(false)
+      return
+    }
+    setSuggestingBrief(true)
+    let disposed = false; let inFlight = false
+    const refresh = (): void => {
+      if (disposed || inFlight) return
+      inFlight = true
+      void loadCapturedReference().then(next => {
+        if (disposed) return
+        setBundle(next)
+        if (next.briefSuggestionAttempt === undefined && Date.now() >= attempt.expiresAt) { setSuggestingBrief(false); setRequestTone('error'); setRequestStatus('AI 整理需求超时，没有改动当前草稿。可以重新整理。') }
+      }).catch((cause: unknown) => { if (!disposed) { setRequestTone('info'); setRequestStatus(`暂时无法读取需求草稿，系统会继续检查：${cause instanceof Error ? cause.message : String(cause)}`) } }).finally(() => { inFlight = false })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 2_000)
+    return () => { disposed = true; window.clearInterval(timer) }
+  }, [bundle?.briefSuggestionAttempt?.requestId, bundle?.briefSuggestionAttempt?.status, bundle?.projectId, bundle?.suggestedProductBrief])
   useEffect(() => {
     const shouldKeepDraft = bundle !== undefined && briefDraftReadyProject === bundle.projectId && ((bundle.currentRevisionId === undefined && bundle.productBrief === undefined) || editingRequirements || requirementsUpdateProject.current === bundle.projectId)
     if (!shouldKeepDraft || bundle === undefined) return
@@ -612,10 +703,11 @@ function App(): React.JSX.Element {
     const timer = window.setTimeout(() => { setGenerationTimedOut(true); setRequestTone('info'); setRequestStatus('尚未收到保存结果。原请求仍在等待处理，为避免晚到结果和新请求冲突，暂时不能再次发送。') }, 180_000)
     return () => window.clearTimeout(timer)
   }, [waitingForRevision])
-  const displayedDocument = historyPreview?.document ?? bundle?.document
-  const displayedDesignSpec = historyPreview?.designSpec ?? bundle?.designSpec
+  const displayedDocument = bundle?.document
+  const displayedDesignSpec = bundle?.designSpec
   const knownElementIds = useMemo(() => bundle === undefined || historyPreview !== undefined ? new Set<string>() : collectPrototypeElementIds(bundle.document), [bundle, historyPreview])
-  const srcDoc = useMemo(() => bundle === undefined || displayedDocument === undefined || displayedDesignSpec === undefined ? '' : sandboxPreviewSrcDoc(displayedDocument, displayedDesignSpec, bundle.evidence, nonce), [bundle, displayedDesignSpec, displayedDocument, nonce])
+  const srcDoc = useMemo(() => bundle === undefined || displayedDocument === undefined || displayedDesignSpec === undefined ? '' : sandboxPreviewSrcDoc(displayedDocument, displayedDesignSpec, bundle.evidence, nonce, historyPreview === undefined ? 'interact' : 'select'), [bundle, displayedDesignSpec, displayedDocument, historyPreview, nonce])
+  const historySrcDoc = useMemo(() => bundle === undefined || historyPreview === undefined ? '' : sandboxPreviewSrcDoc(historyPreview.document, historyPreview.designSpec, bundle.evidence, historyNonce, 'select'), [bundle, historyNonce, historyPreview])
   useEffect(() => {
     const stage = previewStageRef.current
     if (stage === null) return
@@ -671,14 +763,21 @@ function App(): React.JSX.Element {
     frameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-selection-sync/v1', schema: 'prototype-document/v1', nonce, elementId: selection?.elementId ?? null }, '*')
   }, [nonce, selection])
   useEffect(() => {
-    frameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: previewMode }, '*')
-  }, [nonce, previewMode])
+    const mode = historyPreview === undefined ? previewMode : 'select'
+    frameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode }, '*')
+    if (historyPreview !== undefined) historyFrameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce: historyNonce, mode: 'select' }, '*')
+  }, [historyNonce, historyPreview, nonce, previewMode])
 
   const syncPreviewState = (): void => {
     const target = frameRef.current?.contentWindow
     if (target === undefined || target === null) return
     target.postMessage({ v: 1, type: 'prototype-selection-sync/v1', schema: 'prototype-document/v1', nonce, elementId: selection?.elementId ?? null }, '*')
-    target.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: previewMode }, '*')
+    target.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: historyPreview === undefined ? previewMode : 'select' }, '*')
+  }
+
+  const syncHistoryPreviewState = (): void => {
+    historyFrameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-selection-sync/v1', schema: 'prototype-document/v1', nonce: historyNonce, elementId: null }, '*')
+    historyFrameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce: historyNonce, mode: 'select' }, '*')
   }
 
   const choosePreviewMode = (mode: SandboxPreviewMode): void => {
@@ -975,6 +1074,7 @@ function App(): React.JSX.Element {
   const allAuditSummary = summarizeAllPreviewAudits(previewAudits)
   const viewportLabel: Record<PreviewViewport, string> = { desktop: '桌面', tablet: '平板', mobile: '手机' }
   const stageLayout = previewStageLayout(previewStageSize.width, previewStageSize.height, previewViewport)
+  const compareStageLayout = previewStageLayout(previewStageSize.width >= 900 ? Math.max(240, (previewStageSize.width - 12) / 2) : previewStageSize.width, previewStageSize.height, previewViewport)
   const requirementsUpdateActive = currentRevisionId !== undefined && (editingRequirements || requirementsUpdateProject.current === bundle.projectId)
   const isBriefEditor = currentRevisionId === undefined || requirementsUpdateActive
   const draftBrief = isBriefEditor ? productBriefFromFields({ audience: briefAudience, coreTask: briefTask, pages: briefPages, modules: briefModules, flows: briefFlows, notes: briefNotes }) : undefined
@@ -982,21 +1082,48 @@ function App(): React.JSX.Element {
   const requirementsChanged = draftBrief !== undefined && bundle.productBrief !== undefined && canonicalJson(draftBrief) !== canonicalJson(bundle.productBrief)
   const requestReady = currentRevisionId === undefined ? draftBrief !== undefined : editingRequirements ? draftBrief !== undefined && requirementsChanged : request.trim() !== ''
   const historyPreviewReadOnly = historyPreview !== undefined
-  const displayedCoverage = historyPreview?.requirementCoverage ?? bundle.requirementCoverage
+  const displayedCoverage = bundle.requirementCoverage
+  const visualHistoryDiff = historyPreview === undefined ? undefined : visualRevisionDiff(document, historyPreview.document, bundle.requirementCoverage, historyPreview.requirementCoverage)
   const applyBriefExample = (kind: 'supplier' | 'project'): void => {
     if (kind === 'supplier') { setBriefAudience('采购经理、供应商管理员'); setBriefTask('筛选供应商并完成准入审批'); setBriefPages('工作台\n供应商列表\n审批详情'); setBriefModules('关键指标\n组合筛选\n供应商表格\n资质与风险\n审批记录'); setBriefFlows('组合条件筛选供应商\n打开供应商详情\n通过或驳回准入申请'); setBriefNotes('详情中展示负责人、风险、资质和审批记录。') }
     else { setBriefAudience('项目经理、团队负责人'); setBriefTask('查看项目进度并及时处理风险'); setBriefPages('项目总览\n项目列表\n风险详情'); setBriefModules('关键指标\n完成趋势\n项目筛选\n风险清单\n最近动态'); setBriefFlows('按负责人和状态筛选项目\n打开项目风险详情\n更新风险处理状态'); setBriefNotes('展示关键指标、完成趋势、负责人和最近动态。') }
+  }
+  const suggestBriefFromConversation = async (): Promise<void> => {
+    if (suggestingBrief || sending || waitingForRevision || historyPreview !== undefined) return
+    const requestId = `brief-${crypto.randomUUID()}`
+    setSuggestingBrief(true); setRequestTone('info'); setRequestStatus('正在让 AI 从当前对话整理产品需求草稿…')
+    try {
+      const response = await extensionRequest<{ ok: boolean; error?: string }>({ type: 'prototype-studio-suggest-brief/v1', projectId: bundle.projectId, requestId })
+      if (!response.ok) throw new Error(response.error ?? 'Harness 对话没有接受需求整理请求。')
+      const refreshed = await loadCapturedReference()
+      setBundle(refreshed)
+      if (refreshed.briefSuggestionAttempt?.requestId !== requestId) throw new Error('需求整理请求登记后未能完成同请求回读。')
+      setRequestStatus('AI 正在结合当前对话整理需求；完成后会自动填入下面的草稿。')
+    } catch (cause) {
+      setSuggestingBrief(false); setRequestTone('error'); setRequestStatus(`没有开始整理：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
+  const exportCurrentPrototype = async (kind: 'html' | 'json'): Promise<void> => {
+    if (currentRevisionId === undefined || exporting !== undefined) return
+    setExporting(kind)
+    try {
+      const artifact = await createPrototypeExportArtifacts({ projectId: bundle.projectId, revisionId: currentRevisionId, document, designSpec, evidence })
+      if (kind === 'html') downloadPrototypeArtifact(`${artifact.baseName}.html`, artifact.html, 'text/html')
+      else downloadPrototypeArtifact(`${artifact.baseName}.json`, artifact.json, 'application/json')
+      setRequestTone('success'); setRequestStatus(kind === 'html' ? `离线交互原型已导出（版本指纹 ${artifact.documentFingerprint.slice(0, 12)}…）。` : `原型与设计规范数据已导出（版本指纹 ${artifact.documentFingerprint.slice(0, 12)}…）。`)
+    } catch (cause) { setRequestTone('error'); setRequestStatus(`导出失败：${cause instanceof Error ? cause.message : String(cause)}`) } finally { setExporting(undefined) }
   }
   const askForResponsiveRepair = (): void => {
     setSelection(undefined)
     setPreviewMode('interact')
     setRequest(`请修复${viewportLabel[previewViewport]}尺寸的布局问题：${auditSummary.detail} 保持已确认的设计规范和现有业务流程不变，并重新检查所有操作区和弹窗。`)
   }
+  const previewSurface = currentRevisionId === undefined ? <div className="prototype-empty"><span>{briefConfirmed ? '设计规范和产品需求均已确认' : '设计规范已确认'}</span><h2>{briefConfirmed ? '需求已准备好，可以开始生成' : '你想做一个什么产品原型？'}</h2><p>{briefConfirmed ? '左侧已经显示确认后的需求清单。点击右侧“开始生成原型”，AI 才会收到这些内容。' : '说明使用者、核心任务和必须演示的流程。AI 会沿用刚才确认的完整设计规范。'}</p><div>{!briefConfirmed && <><button type="button" className="secondary" onClick={() => applyBriefExample('supplier')}>填入供应商管理示例</button><button type="button" className="secondary" onClick={() => applyBriefExample('project')}>填入项目看板示例</button></>}</div></div> : historyPreview === undefined ? <div ref={previewStageRef} className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: stageLayout.displayWidth, height: stageLayout.displayHeight }}><iframe ref={frameRef} title="安全交互原型" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} onLoad={syncPreviewState} style={{ width: stageLayout.viewportWidth, height: stageLayout.viewportHeight, transform: `scale(${stageLayout.scale})` }} /></div></div> : <div ref={previewStageRef} className="history-compare" aria-label="当前版本与历史版本对比"><section className="history-compare-column"><header><b>当前版本</b><small>只读对比，不会改变当前版本</small></header><div className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: compareStageLayout.displayWidth, height: compareStageLayout.displayHeight }}><iframe ref={frameRef} title="当前版本安全预览" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} onLoad={syncPreviewState} style={{ width: compareStageLayout.viewportWidth, height: compareStageLayout.viewportHeight, transform: `scale(${compareStageLayout.scale})` }} /></div></div></section><section className="history-compare-column"><header><b>历史版本</b><small>只读对比，不会改变历史版本</small></header><div className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: compareStageLayout.displayWidth, height: compareStageLayout.displayHeight }}><iframe ref={historyFrameRef} title="历史版本安全预览" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={historySrcDoc} onLoad={syncHistoryPreviewState} style={{ width: compareStageLayout.viewportWidth, height: compareStageLayout.viewportHeight, transform: `scale(${compareStageLayout.scale})` }} /></div></div></section></div>
   return <main className={`studio-shell ${currentRevisionId === undefined ? 'before-first-generation' : 'has-revision'}`}>
-    <header className="studio-header"><div><strong>AI 原型工具 · 生成与调整</strong><span><b className="confirmed-dot" />设计规范已确认　→　描述产品或选中元素　→　AI 生成安全交互原型</span></div><div className="studio-header-actions"><button className="secondary" type="button" onClick={() => setDesignConfirmed(false)}>查看完整规范</button></div></header>
+    <header className="studio-header"><div><strong>AI 原型工具 · 生成与调整</strong><span><b className="confirmed-dot" />设计规范已确认　→　描述产品或选中元素　→　AI 生成安全交互原型</span></div><div className="studio-header-actions">{currentRevisionId !== undefined && <><button className="secondary" type="button" disabled={exporting !== undefined} onClick={() => { void exportCurrentPrototype('html') }}>{exporting === 'html' ? '正在导出…' : '导出离线原型'}</button><button className="secondary" type="button" disabled={exporting !== undefined} onClick={() => { void exportCurrentPrototype('json') }}>{exporting === 'json' ? '正在导出…' : '导出规范数据'}</button></>}<button className="secondary" type="button" onClick={() => setDesignConfirmed(false)}>查看完整规范</button></div></header>
     <section className="studio-grid">
       <aside className="studio-panel evidence-panel"><h2>设计依据</h2>{bundle.screenshotUnavailable && <p className="evidence-retention-inline" role="status">截图已清理；设计规范和历史仍保留。</p>}<article>{evidence[0]!.screenshotDataUrl !== undefined && <img className="reference-shot" src={evidence[0]!.screenshotDataUrl} alt="参考网页截图" />}<b>{evidence[0]!.source.title}</b><small>{evidence[0]!.source.url}</small><div className="evidence-summary"><span>{evidence[0]!.pageSize?.sampledBands ?? 1} 个页面区域</span><span>{designSpec.colors.length} 个规范颜色</span><span>{designSpec.spacing.scale?.length ?? 1} 个间距档位</span></div></article><article><h3>{designSpec.name}</h3><p>当前原型必须沿用已确认的颜色、排版、间距、圆角、边框、效果和动效。</p><div className="swatches">{designSpec.colors.slice(0, 7).map(item => <span key={`${item.name}-${item.value}`}><i style={{ background: item.value }} /><b>{item.name}</b><small>{item.value}</small></span>)}</div></article>{bundle.productBrief !== undefined && <article className="accepted-brief"><div className="accepted-brief-heading"><h3>已确认的产品需求</h3>{currentRevisionId !== undefined && historyPreview === undefined && !requirementsUpdateActive && <button type="button" className="secondary" disabled={sending || waitingForRevision} onClick={startRequirementsUpdate}>更新产品需求</button>}</div><dl><div><dt>谁来使用</dt><dd>{bundle.productBrief.audience}</dd></div><div><dt>核心任务</dt><dd>{bundle.productBrief.coreTask}</dd></div><div><dt>必须页面</dt><dd>{bundle.productBrief.requiredPages.join('、')}</dd></div>{bundle.productBrief.requiredModules !== undefined && <div><dt>页面内关键模块</dt><dd>{bundle.productBrief.requiredModules.join('、')}</dd></div>}<div><dt>必须演示流程</dt><dd>{bundle.productBrief.requiredFlows.join('；')}</dd></div>{bundle.productBrief.notes !== undefined && <div><dt>补充说明</dt><dd>{bundle.productBrief.notes}</dd></div>}</dl>{requirementsUpdateActive && <p className="requirements-update-note" role="status">正在准备新需求。当前版本仍使用旧需求；新版本通过校验并保存后才会更新。</p>}</article>}{displayedCoverage !== undefined && <RequirementCoveragePanel coverage={displayedCoverage} historical={historyPreview !== undefined} onFocus={historyPreview === undefined ? focusCoverageMatch : undefined} />}</aside>
-      <section className="preview-panel"><div className="preview-heading"><div><h2>{currentRevisionId === undefined ? '准备生成产品原型' : displayedDocument?.title ?? document.title}</h2><p>{historyPreview !== undefined ? `只读预览 · ${revisionTime(historyPreview.createdAt)} · 不会改变当前版本` : currentRevisionId === undefined ? '在右侧描述产品、页面和关键流程。' : previewMode === 'interact' ? '操作原型：点击按钮、填写表单、切换页面。' : '选择修改：点击页面元素，再向 AI 说明要改什么。'}</p></div>{currentRevisionId === undefined ? <span>{briefConfirmed ? '需求已确认' : '等待需求'}</span> : <div className="preview-tools">{historyPreview === undefined && <div className="preview-mode-switch" aria-label="预览模式"><button type="button" className={previewMode === 'interact' ? 'active' : ''} aria-pressed={previewMode === 'interact'} onClick={() => choosePreviewMode('interact')}>操作原型</button><button type="button" className={previewMode === 'select' ? 'active' : ''} aria-pressed={previewMode === 'select'} onClick={() => choosePreviewMode('select')}>选择修改</button></div>}<div className="viewport-switch" aria-label="预览尺寸">{(['desktop', 'tablet', 'mobile'] as const).map(value => <button type="button" className={previewViewport === value ? 'active' : ''} aria-pressed={previewViewport === value} key={value} onClick={() => choosePreviewViewport(value)}>{viewportLabel[value]}</button>)}</div><span>{stageLayout.viewportWidth}px · {Math.round(stageLayout.scale * 100)}%</span></div>}</div>{historyPreview !== undefined && <div className="history-preview-banner"><div><b>正在预览：{historyPreview.changeSummary}</b><span>{historyPreview.comparison.screenCountBefore} → {historyPreview.comparison.screenCountAfter} 个页面 · {historyPreview.comparison.componentCountBefore} → {historyPreview.comparison.componentCountAfter} 个组件</span><small className="history-brief-note">{historyPreview.productBriefKnown ? '恢复后产品需求也会回到该版本。' : '旧版未记录当时需求，恢复时会做兼容校验，可能被拒绝。'}</small><ul>{historyPreview.comparison.details.map(detail => <li key={detail}>{detail}</li>)}</ul></div><button type="button" className="secondary" onClick={() => setHistoryPreview(undefined)}>返回当前版本</button></div>}{currentRevisionId !== undefined && historyPreview === undefined && <div className={`preview-audit ${checkingAllViewports ? 'checking' : allAuditSummary.tone}`} role="status"><div className="audit-copy"><b>基础布局检查：{(['desktop', 'tablet', 'mobile'] as const).map(value => <span key={value} className={previewAudits[value] === undefined ? 'checking' : summarizePreviewAudit(previewAudits[value]).tone}>{viewportLabel[value]} {previewAudits[value] === undefined ? '待检查' : summarizePreviewAudit(previewAudits[value]).tone === 'pass' ? '✓' : '⚠'}</span>)}</b><small>{checkingAllViewports || Object.keys(previewAudits).length === 3 ? `${allAuditSummary.label} · ${allAuditSummary.detail}` : `${auditSummary.label} · ${auditSummary.detail}`}</small></div><div className="audit-actions"><button type="button" className="secondary" disabled={checkingAllViewports} onClick={checkAllViewports}>{checkingAllViewports ? '正在逐个检查…' : '检查全部尺寸'}</button>{auditSummary.tone === 'warning' && <button type="button" className="secondary" onClick={askForResponsiveRepair}>让 AI 修复当前尺寸</button>}</div></div>}{currentRevisionId === undefined ? <div className="prototype-empty"><span>{briefConfirmed ? '设计规范和产品需求均已确认' : '设计规范已确认'}</span><h2>{briefConfirmed ? '需求已准备好，可以开始生成' : '你想做一个什么产品原型？'}</h2><p>{briefConfirmed ? '左侧已经显示确认后的需求清单。点击右侧“开始生成原型”，AI 才会收到这些内容。' : '说明使用者、核心任务和必须演示的流程。AI 会沿用刚才确认的完整设计规范。'}</p><div>{!briefConfirmed && <><button type="button" className="secondary" onClick={() => applyBriefExample('supplier')}>填入供应商管理示例</button><button type="button" className="secondary" onClick={() => applyBriefExample('project')}>填入项目看板示例</button></>}</div></div> : <div ref={previewStageRef} className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: stageLayout.displayWidth, height: stageLayout.displayHeight }}><iframe ref={frameRef} title="安全交互原型" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} onLoad={syncPreviewState} style={{ width: stageLayout.viewportWidth, height: stageLayout.viewportHeight, transform: `scale(${stageLayout.scale})` }} /></div></div>}</section>
+      <section className="preview-panel"><div className="preview-heading"><div><h2>{currentRevisionId === undefined ? '准备生成产品原型' : displayedDocument?.title ?? document.title}</h2><p>{historyPreview !== undefined ? `只读预览 · ${revisionTime(historyPreview.createdAt)} · 不会改变当前版本` : currentRevisionId === undefined ? '在右侧描述产品、页面和关键流程。' : previewMode === 'interact' ? '操作原型：点击按钮、填写表单、切换页面。' : '选择修改：点击页面元素，再向 AI 说明要改什么。'}</p></div>{currentRevisionId === undefined ? <span>{briefConfirmed ? '需求已确认' : '等待需求'}</span> : <div className="preview-tools">{historyPreview === undefined && <div className="preview-mode-switch" aria-label="预览模式"><button type="button" className={previewMode === 'interact' ? 'active' : ''} aria-pressed={previewMode === 'interact'} onClick={() => choosePreviewMode('interact')}>操作原型</button><button type="button" className={previewMode === 'select' ? 'active' : ''} aria-pressed={previewMode === 'select'} onClick={() => choosePreviewMode('select')}>选择修改</button></div>}<div className="viewport-switch" aria-label="预览尺寸">{(['desktop', 'tablet', 'mobile'] as const).map(value => <button type="button" className={previewViewport === value ? 'active' : ''} aria-pressed={previewViewport === value} key={value} onClick={() => choosePreviewViewport(value)}>{viewportLabel[value]}</button>)}</div><span>{stageLayout.viewportWidth}px · {Math.round(stageLayout.scale * 100)}%</span></div>}</div>{historyPreview !== undefined && <div className="history-preview-banner"><div><b>正在对比：当前版本与“{historyPreview.changeSummary}”</b><span>两边都是隔离的只读预览；点击不会改变任何版本。</span><small className="history-brief-note">{historyPreview.productBriefKnown ? '恢复后产品需求也会回到该版本。' : '旧版未记录当时需求，恢复时会做兼容校验，可能被拒绝。'}</small>{visualHistoryDiff !== undefined && <div className="history-diff-summary"><section><strong>页面与组件差异</strong><ul>{visualHistoryDiff.structure.length === 0 ? <li>页面和组件标识未变化</li> : visualHistoryDiff.structure.map(detail => <li key={detail}>{detail}</li>)}</ul></section><section><strong>需求覆盖差异</strong><ul>{visualHistoryDiff.coverage.length === 0 ? <li>两个版本都没有已确认需求清单</li> : visualHistoryDiff.coverage.map(detail => <li key={detail}>{detail}</li>)}</ul></section></div>}</div><button type="button" className="secondary" onClick={() => setHistoryPreview(undefined)}>返回当前版本</button></div>}{currentRevisionId !== undefined && historyPreview === undefined && <div className={`preview-audit ${checkingAllViewports ? 'checking' : allAuditSummary.tone}`} role="status"><div className="audit-copy"><b>基础布局检查：{(['desktop', 'tablet', 'mobile'] as const).map(value => <span key={value} className={previewAudits[value] === undefined ? 'checking' : summarizePreviewAudit(previewAudits[value]).tone}>{viewportLabel[value]} {previewAudits[value] === undefined ? '待检查' : summarizePreviewAudit(previewAudits[value]).tone === 'pass' ? '✓' : '⚠'}</span>)}</b><small>{checkingAllViewports || Object.keys(previewAudits).length === 3 ? `${allAuditSummary.label} · ${allAuditSummary.detail}` : `${auditSummary.label} · ${auditSummary.detail}`}</small></div><div className="audit-actions"><button type="button" className="secondary" disabled={checkingAllViewports} onClick={checkAllViewports}>{checkingAllViewports ? '正在逐个检查…' : '检查全部尺寸'}</button>{auditSummary.tone === 'warning' && <button type="button" className="secondary" onClick={askForResponsiveRepair}>让 AI 修复当前尺寸</button>}</div></div>}{previewSurface}</section>
       <aside className="studio-panel ai-panel">
         <h2>AI 原型助手</h2>
         <p className="conversation-context-note"><b>会结合当前 AI 对话</b><span>下面确认的需求清单优先；对话里的业务背景、规则和已确认决定会一起提供给 AI，不需要重复粘贴。</span></p>
@@ -1006,7 +1133,7 @@ function App(): React.JSX.Element {
           {historyPreviewReadOnly && <p className="history-preview-readonly" role="status">当前是只读历史预览，请先返回当前版本，或恢复该版本后再修改。</p>}
           <textarea aria-label={isBriefEditor ? '产品补充说明' : '原型修改要求'} maxLength={isBriefEditor ? 1_200 : 4_000} disabled={sending || waitingForRevision || confirmingBrief || historyPreviewReadOnly} value={isBriefEditor ? briefNotes : request} onChange={event => isBriefEditor ? setBriefNotes(event.target.value) : setRequest(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && requestReady && !sending && !waitingForRevision && !confirmingBrief && !historyPreviewReadOnly) { event.preventDefault(); if (currentRevisionId === undefined && !briefConfirmed && draftBrief !== undefined) void confirmBrief(draftBrief); else void askAi() } }} placeholder={isBriefEditor ? '补充说明（可选）：业务字段、状态、规则或异常情况' : selection === undefined ? '例如：增加负责人筛选和项目风险抽屉' : '例如：点击这行后打开详情弹窗，显示负责人、风险和审批记录'} />
           <div className="request-meta"><span>{(isBriefEditor ? briefNotes : request).length} / {isBriefEditor ? 1200 : 4000}</span><span>{historyPreviewReadOnly ? '历史预览只读' : waitingForRevision ? '要求已保留' : isBriefEditor && !briefConfirmed ? '未确认草稿保存在当前标签页' : '⌘/Ctrl + Enter 发送'}</span></div>
-          {isBriefEditor && <div className="prompt-examples"><button type="button" disabled={sending || waitingForRevision || confirmingBrief || historyPreviewReadOnly} onClick={() => applyBriefExample('supplier')}>填入供应商示例</button><button type="button" disabled={sending || waitingForRevision || confirmingBrief || historyPreviewReadOnly} onClick={() => applyBriefExample('project')}>填入项目看板示例</button>{requirementsUpdateActive && <button type="button" className="secondary" disabled={sending || waitingForRevision} onClick={cancelRequirementsUpdate}>取消更新</button>}</div>}
+          {isBriefEditor && <div className="prompt-examples"><button type="button" className="conversation-suggest" disabled={sending || waitingForRevision || confirmingBrief || suggestingBrief || historyPreviewReadOnly} onClick={() => { void suggestBriefFromConversation() }}>{suggestingBrief ? 'AI 正在整理对话…' : 'AI 从当前对话整理需求'}</button><button type="button" disabled={sending || waitingForRevision || confirmingBrief || suggestingBrief || historyPreviewReadOnly} onClick={() => applyBriefExample('supplier')}>填入供应商示例</button><button type="button" disabled={sending || waitingForRevision || confirmingBrief || suggestingBrief || historyPreviewReadOnly} onClick={() => applyBriefExample('project')}>填入项目看板示例</button>{requirementsUpdateActive && <button type="button" className="secondary" disabled={sending || waitingForRevision || suggestingBrief} onClick={cancelRequirementsUpdate}>取消更新</button>}</div>}
           {revisions.length >= 20 && confirmingRevisionEviction && <div className="revision-eviction-confirm"><b>将替换最旧的历史版本</b><span>这是保存第 21 个版本的必要操作；当前版本和其余 19 个版本会保留。</span><button type="button" className="secondary" onClick={() => { setConfirmingRevisionEviction(false); setRequestStatus(undefined) }}>暂不生成</button></div>}
           <button type="button" disabled={sending || waitingForRevision || confirmingBrief || historyPreviewReadOnly || !requestReady} onClick={() => { if (currentRevisionId === undefined && !briefConfirmed && draftBrief !== undefined) void confirmBrief(draftBrief); else void askAi() }}>{confirmingBrief ? '正在保存并回读需求…' : sending ? '正在发送…' : waitingForRevision ? 'AI 正在生成并校验…' : historyPreviewReadOnly ? '历史预览只读' : currentRevisionId === undefined && !briefConfirmed ? '保存并确认需求清单' : currentRevisionId === undefined ? '开始生成原型' : requirementsUpdateActive ? '确认需求变更并生成新版本' : revisions.length >= 20 && !confirmingRevisionEviction ? '继续并查看版本替换提醒' : revisions.length >= 20 ? '确认替换最旧版本并生成' : selection === undefined ? '完善整个原型' : '修改选中元素'}</button>
           {generationTimedOut && <div className="generation-timeout" role="status"><b>本次生成需要处理</b><span>可以继续等待；如果 AI 已停止工作，请安全结束本次生成后再重试。</span><div><button type="button" className="secondary" disabled={refreshingGeneration || cancellingGeneration} onClick={() => { void refreshGenerationStatus() }}>{refreshingGeneration ? '正在刷新…' : '刷新生成状态'}</button>{confirmingGenerationCancel ? <><button type="button" className="secondary" disabled={cancellingGeneration} onClick={() => setConfirmingGenerationCancel(false)}>继续等待</button><button type="button" className="danger-action" disabled={cancellingGeneration} onClick={() => { void cancelGeneration() }}>{cancellingGeneration ? '正在安全停止…' : '确认停止生成'}</button></> : <button type="button" className="secondary" onClick={() => setConfirmingGenerationCancel(true)}>停止本次生成</button>}</div>{confirmingGenerationCancel && <small>停止后，当前 AI 的晚到结果将被拒绝，但输入框里的要求会保留。</small>}</div>}

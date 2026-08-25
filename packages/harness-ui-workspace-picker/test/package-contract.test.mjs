@@ -13,6 +13,7 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.match(client, /sidebar\.workspaces\.compact/)
   assert.match(client, /children:\s*\{[\s\S]*accrui\.workspace-picker\.directory/)
   assert.match(directorySlot, /'accrui\.workspace-picker\.directory': \{ kind: 'single'; scope: 'root'/)
+  assert.match(directorySlot, /'accrui\.workspace-picker\.directory\.actions': \{ kind: 'single'; scope: 'root'/)
   assert.match(
     client,
     /name:\s*'sidebar\.workspaces\.compact'[\s\S]*?select:\s*_owner\s*=>\s*claudeImport[\s\S]*?CompactWorkspacePicker/,
@@ -68,6 +69,10 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.match(picker, /workspacePickerTabForKey/)
   assert.match(picker, /current\?\.focus\(\)/, 'keyboard tab changes must move focus with the roving tab stop')
   assert.match(picker, /owner\.renderSlot\(WORKSPACE_PICKER_DIRECTORY_SLOT/, 'directory rendering must cross the picker-owned child slot')
+  assert.match(directorySlot, /workspacePath: string/)
+  assert.match(picker, /workspacePath: selectedWorkspace\.path/)
+  assert.match(picker, /owner\.renderSlot\(WORKSPACE_PICKER_DIRECTORY_ACTIONS_SLOT/)
+  assert.match(picker, /refreshDirectory: \(\) => \{ setDirectoryRefreshGeneration/)
   assert.match(picker, /selectWorkspaceDirectorySession\(selectedWorkspace\.sessions, owner\.currentSessionId\)/, 'directory target must prefer the current workspace session')
   assert.match(picker, /visualViewport\?\.addEventListener\('resize'/)
   assert.match(picker, /window\.addEventListener\('scroll', updateMaxHeight, true\)/)

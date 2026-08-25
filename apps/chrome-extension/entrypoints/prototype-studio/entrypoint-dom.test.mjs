@@ -45,7 +45,7 @@ function canonical(value) {
   return value
 }
 
-function referenceEvidence() {
+function referenceEvidence(id = 'ref-dom') {
   const source = { url: 'https://example.test/dashboard', title: '参考工作台', capturedAt: '2026-08-24T00:00:00.000Z' }
   const viewport = { width: 1280, height: 720, deviceScaleFactor: 2 }
   const pageSize = { width: 1280, height: 2400, sampledBands: 4 }
@@ -60,7 +60,16 @@ function referenceEvidence() {
   }
   const fingerprintInput = { v: 1, source: { url: source.url, title: source.title }, viewport, pageSize, observations, designTokens }
   const fingerprint = createHash('sha256').update(JSON.stringify(canonical(fingerprintInput))).digest('hex')
-  return { v: 1, id: 'ref-dom', source, viewport, pageSize, observations, designTokens, fingerprint }
+  return { v: 1, id, source, viewport, pageSize, observations, designTokens, fingerprint }
+}
+
+function responsiveReferenceEvidence(id, width, height) {
+  const evidence = referenceEvidence(id)
+  evidence.viewport = { ...evidence.viewport, width, height }
+  evidence.pageSize = { ...evidence.pageSize, width }
+  const fingerprintInput = { v: 1, source: { url: evidence.source.url, title: evidence.source.title }, viewport: evidence.viewport, pageSize: evidence.pageSize, observations: evidence.observations, designTokens: evidence.designTokens }
+  evidence.fingerprint = createHash('sha256').update(JSON.stringify(canonical(fingerprintInput))).digest('hex')
+  return evidence
 }
 
 function savedPrototypeBundle(evidence) {
@@ -118,9 +127,32 @@ test('startup guard explains when the development server is unavailable', async 
   try {
     dom.window.eval(await bundledStartupGuard())
     dom.window.dispatchEvent(new dom.window.Event('error'))
-    await waitForText(dom.window.document.getElementById('root'), /本地开发服务没有连接/)
+    await waitForText(dom.window.document.getElementById('root'), /旧扩展页面或旧端口/)
     const failure = dom.window.document.querySelector('[data-prototype-startup-guard="failed"]')
-    assert.match(failure?.textContent ?? '', /请先恢复开发服务/)
+    assert.match(failure?.textContent ?? '', /edge:\/\/extensions/)
+    assert.match(failure?.textContent ?? '', /关闭当前旧原型页面并重新打开/)
+    assert.match(failure?.textContent ?? '', /如果仍失败，再恢复本地开发服务/)
+    assert.match(failure?.textContent ?? '', /本地开发服务不可达/)
+  } finally {
+    dom.window.close()
+  }
+})
+
+test('startup guard identifies an old extension page or dev port before blaming the server', async () => {
+  const dom = new JSDOM('<!doctype html><html data-prototype-studio-build="prototype-studio-2026-08-25-r2"><body><div id="root"></div><script src="http://127.0.0.1:3100/entrypoints/prototype-studio/main.tsx"></script></body></html>', {
+    url: 'chrome-extension://test-extension/prototype-studio.html',
+    runScripts: 'outside-only',
+  })
+  try {
+    dom.window.eval(await bundledStartupGuard())
+    dom.window.dispatchEvent(new dom.window.Event('error'))
+    await waitForText(dom.window.document.getElementById('root'), /旧扩展页面或旧端口/)
+    const failure = dom.window.document.querySelector('[data-prototype-startup-guard="failed"]')
+    assert.match(failure?.textContent ?? '', /本地开发服务不可达/)
+    assert.match(failure?.textContent ?? '', /edge:\/\/extensions/)
+    assert.match(failure?.textContent ?? '', /点击本扩展“重新加载”/)
+    assert.match(failure?.textContent ?? '', /关闭当前旧原型页面并重新打开/)
+    assert.match(failure?.textContent ?? '', /如果仍失败，再恢复本地开发服务/)
   } finally {
     dom.window.close()
   }
@@ -189,7 +221,7 @@ test('Prototype Studio refuses a stale page and shows the script build identity'
     dom.window.eval(await bundledEntrypoint())
     const root = dom.window.document.getElementById('root')
     await waitForText(root, /页面与脚本版本不一致/)
-    assert.match(root?.textContent ?? '', /构建版本：prototype-studio-2026-08-25-r2/)
+    assert.match(root?.textContent ?? '', /构建版本：prototype-studio-2026-08-25-r4/)
     assert.equal(root?.querySelector('button')?.textContent, '重新加载页面')
   } finally {
     dom.window.close()
@@ -199,7 +231,7 @@ test('Prototype Studio refuses a stale page and shows the script build identity'
 test('Prototype Studio converts a React render exception into a visible startup failure', async () => {
   const evidence = referenceEvidence()
   const projectId = 'prototype-dom-render-error'
-  const dom = new JSDOM('<!doctype html><html data-prototype-studio-build="prototype-studio-2026-08-25-r2"><body><div id="root"></div></body></html>', {
+  const dom = new JSDOM('<!doctype html><html data-prototype-studio-build="prototype-studio-2026-08-25-r4"><body><div id="root"></div></body></html>', {
     url: `chrome-extension://test-extension/prototype-studio.html?referenceId=${evidence.id}&projectId=${projectId}`,
     runScripts: 'outside-only',
     pretendToBeVisual: true,
@@ -218,7 +250,7 @@ test('Prototype Studio converts a React render exception into a visible startup 
     dom.window.eval(await bundledEntrypoint())
     const root = dom.window.document.getElementById('root')
     await waitForText(root, /React 渲染失败：测试 sessionStorage 故障/)
-    assert.match(root?.textContent ?? '', /构建版本：prototype-studio-2026-08-25-r2/)
+    assert.match(root?.textContent ?? '', /构建版本：prototype-studio-2026-08-25-r4/)
     assert.equal(root?.querySelector('button')?.textContent, '重新加载页面')
   } finally {
     dom.window.close()
@@ -259,9 +291,74 @@ test('Prototype Studio renders the complete design review from a verified refere
     assert.match(root.textContent, /边框、圆角与视觉效果/)
     assert.match(root.textContent, /组件与交互状态/)
     assert.equal([...root.querySelectorAll('button')].some(button => button.textContent === '确认并交给 AI'), true)
+    assert.equal([...root.querySelectorAll('button')].some(button => button.textContent === '调整规范'), true)
   } finally {
     dom.window.close()
   }
+})
+
+test('Prototype Studio labels three same-page viewport captures as measured responsive evidence', async () => {
+  const evidence = [responsiveReferenceEvidence('ref-responsive-desktop', 1280, 800), responsiveReferenceEvidence('ref-responsive-tablet', 768, 900), responsiveReferenceEvidence('ref-responsive-mobile', 390, 780)]
+  const projectId = 'prototype-responsive-review'
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: `chrome-extension://test-extension/prototype-studio.html?referenceId=${evidence[0].id}&projectId=${projectId}`, runScripts: 'outside-only', pretendToBeVisual: true })
+  Object.defineProperty(dom.window, 'crypto', { value: globalThis.crypto }); Object.defineProperty(dom.window, 'sessionStorage', { value: memoryStorage() }); dom.window.ResizeObserver = class { observe() {} disconnect() {} }
+  dom.window.chrome = { storage: { local: { get: async () => ({ harnessPrototypeReferencesV1: { v: 1, references: Object.fromEntries(evidence.map(item => [item.id, item])) } }) } }, runtime: { lastError: undefined, sendMessage(message, callback) { assert.equal(message.type, 'prototype-studio-snapshot/v1'); callback({ ok: true, snapshot: { projectId, evidence, revisions: [], designConfirmed: false } }) } } }
+  try {
+    dom.window.eval(await bundledEntrypoint()); const root = dom.window.document.getElementById('root'); await waitForText(root, /确认网页设计规范/)
+    assert.match(root.textContent, /同一网页实测 1280 \/ 768 \/ 390px/)
+    assert.match(root.textContent, /3真实采集尺寸/)
+    assert.doesNotMatch(root.textContent, /当前只在一个浏览器宽度实测/)
+  } finally { dom.window.close() }
+})
+
+test('opens a legacy single-reference project when its old Host snapshot has only the verified fingerprint', async () => {
+  const evidence = referenceEvidence()
+  const projectId = 'prototype-dom-legacy-single'
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: `chrome-extension://test-extension/prototype-studio.html?referenceId=${evidence.id}&projectId=${projectId}`,
+    runScripts: 'outside-only', pretendToBeVisual: true,
+  })
+  Object.defineProperty(dom.window, 'crypto', { value: globalThis.crypto })
+  Object.defineProperty(dom.window, 'sessionStorage', { value: memoryStorage() })
+  dom.window.ResizeObserver = class { observe() {} disconnect() {} }
+  dom.window.chrome = {
+    storage: { local: { get: async () => ({ harnessPrototypeReferencesV1: { v: 1, references: { [evidence.id]: evidence } } }) } },
+    runtime: { lastError: undefined, sendMessage(message, callback) {
+      assert.equal(message.type, 'prototype-studio-snapshot/v1')
+      callback({ ok: true, snapshot: { projectId, evidence: [{ fingerprint: evidence.fingerprint }], revisions: [], designConfirmed: false } })
+    } },
+  }
+  try {
+    dom.window.eval(await bundledEntrypoint())
+    const root = dom.window.document.getElementById('root')
+    await waitForText(root, /确认网页设计规范/)
+    assert.match(root?.textContent ?? '', /完整设计规范/)
+  } finally { dom.window.close() }
+})
+
+test('rejects a multi-reference Host snapshot when any page is only a legacy fingerprint', async () => {
+  const primary = referenceEvidence('ref-dom-primary')
+  const auxiliary = referenceEvidence('ref-dom-auxiliary')
+  const projectId = 'prototype-dom-strict-multi'
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: `chrome-extension://test-extension/prototype-studio.html?referenceId=${primary.id}&projectId=${projectId}`,
+    runScripts: 'outside-only', pretendToBeVisual: true,
+  })
+  Object.defineProperty(dom.window, 'crypto', { value: globalThis.crypto })
+  Object.defineProperty(dom.window, 'sessionStorage', { value: memoryStorage() })
+  dom.window.ResizeObserver = class { observe() {} disconnect() {} }
+  dom.window.chrome = {
+    storage: { local: { get: async () => ({ harnessPrototypeReferencesV1: { v: 1, references: { [primary.id]: primary, [auxiliary.id]: auxiliary } } }) } },
+    runtime: { lastError: undefined, sendMessage(_message, callback) {
+      callback({ ok: true, snapshot: { projectId, evidence: [primary, { fingerprint: auxiliary.fingerprint }], revisions: [], designConfirmed: false } })
+    } },
+  }
+  try {
+    dom.window.eval(await bundledEntrypoint())
+    const root = dom.window.document.getElementById('root')
+    await waitForText(root, /原型服务中的参考网页证据不存在或校验失败/)
+    assert.match(root?.textContent ?? '', /原型服务中的参考网页证据不存在或校验失败/)
+  } finally { dom.window.close() }
 })
 
 test('opens an old project from Host evidence after local reference eviction and explains the missing screenshot', async () => {
@@ -469,6 +566,29 @@ function confirmedProductBrief() {
   }
 }
 
+test('AI conversation suggestion fills an editable requirement draft without confirming it', async () => {
+  const evidence = referenceEvidence(); const projectId = 'prototype-dom-suggestion'; const saved = savedPrototypeBundle(evidence); const brief = confirmedProductBrief()
+  const snapshot = { projectId, evidence: [{ fingerprint: evidence.fingerprint }], designConfirmed: true, confirmedDesignSpec: saved.designSpec, revisions: [] }
+  const messages = []
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: `chrome-extension://test-extension/prototype-studio.html?referenceId=${evidence.id}&projectId=${projectId}`, runScripts: 'outside-only', pretendToBeVisual: true })
+  Object.defineProperty(dom.window, 'crypto', { value: globalThis.crypto }); Object.defineProperty(dom.window, 'sessionStorage', { value: memoryStorage() }); dom.window.ResizeObserver = class { observe() {} disconnect() {} }
+  dom.window.chrome = { storage: { local: { get: async () => ({ harnessPrototypeReferencesV1: { v: 1, references: { [evidence.id]: evidence } } }) } }, runtime: { lastError: undefined, sendMessage(message, callback) {
+    messages.push(message)
+    if (message.type === 'prototype-studio-snapshot/v1') { callback({ ok: true, snapshot: structuredClone(snapshot) }); return }
+    if (message.type === 'prototype-studio-suggest-brief/v1') { snapshot.briefSuggestionAttempt = { status: 'saved', requestId: message.requestId, expiresAt: Date.now() + 60_000 }; snapshot.suggestedProductBrief = brief; callback({ ok: true }); return }
+    throw new Error(`Unexpected message: ${message.type}`)
+  } } }
+  try {
+    dom.window.eval(await bundledEntrypoint()); const root = dom.window.document.getElementById('root'); await waitForText(root, /AI 从当前对话整理需求/)
+    const suggest = [...root.querySelectorAll('button')].find(button => button.textContent === 'AI 从当前对话整理需求'); assert.ok(suggest); suggest.click()
+    await waitForText(root, /AI 已根据当前对话整理成需求草稿/)
+    assert.equal(root.querySelector('.brief-builder input')?.value, brief.audience)
+    assert.match(root.querySelector('.brief-builder textarea')?.value ?? '', /供应商列表/)
+    assert.equal([...root.querySelectorAll('button')].some(button => button.textContent === '保存并确认需求清单'), true)
+    assert.equal(messages.some(message => message.type === 'prototype-studio-confirm-brief/v1'), false)
+  } finally { dom.window.close() }
+})
+
 async function mountRequirementsUpdateEditor(draftStore = memoryStorage()) {
   const evidence = referenceEvidence()
   const projectId = 'prototype-dom-update'
@@ -503,6 +623,23 @@ async function mountRequirementsUpdateEditor(draftStore = memoryStorage()) {
   await waitForText(root, /更新产品需求/)
   return { dom, root, messages, draftStore, snapshot }
 }
+
+test('an unsent whole-prototype modification survives a tab refresh', async () => {
+  const draftStore = memoryStorage()
+  const first = await mountRequirementsUpdateEditor(draftStore)
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const request = first.root.querySelector('textarea[aria-label="原型修改要求"]')
+    assert.ok(request); replaceControlValue(first.dom.window, request, '改成打开供应商风险抽屉')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.match(draftStore.getItem('prototype-studio-request-draft:v1:prototype-dom-update') ?? '', /供应商风险抽屉/)
+  } finally { first.dom.window.close() }
+  const restored = await mountRequirementsUpdateEditor(draftStore)
+  try {
+    await waitForText(restored.root, /已恢复上次未发送的修改要求/)
+    assert.match(restored.root.querySelector('textarea[aria-label="原型修改要求"]')?.value ?? '', /供应商风险抽屉/)
+  } finally { restored.dom.window.close() }
+})
 
 test('an existing prototype updates requirements as a whole-prototype request without replacing the saved brief early', async () => {
   const { dom, root, messages, snapshot } = await mountRequirementsUpdateEditor()

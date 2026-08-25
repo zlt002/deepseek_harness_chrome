@@ -52,7 +52,7 @@ Release，但不会执行完整安装、升级和回滚验收。
 2. 选择 **Build Windows Lite**。
 3. 点击 **Run workflow**。
 4. 选择需要打包的分支。
-5. 填写三段式版本号，例如 `1.1.63`。
+5. 填写三段式版本号，例如 `1.1.75`。
 6. 保持 `full_validation` 关闭并运行。
 
 也可以使用 GitHub CLI：
@@ -60,7 +60,7 @@ Release，但不会执行完整安装、升级和回滚验收。
 ```sh
 gh workflow run build-windows-lite.yml \
   --ref codex/windows-lite-1.1.63 \
-  -f version=1.1.63 \
+  -f version=1.1.75 \
   -f full_validation=false
 ```
 
@@ -72,7 +72,7 @@ gh run watch <RUN_ID> --interval 10 --exit-status
 ```
 
 推送到 `codex/windows-lite-*` 分支也会自动出包，但自动推送使用工作流中的默认
-版本。目前默认值是 `1.1.63`。发布新版本时应手动传入 `version`，或者同步修改
+版本。目前默认值是 `1.1.75`。发布新版本时应手动传入 `version`，或者同步修改
 [build-windows-lite.yml](../.github/workflows/build-windows-lite.yml) 中的默认版本，避免
 包内容和预期版本不一致。
 
@@ -83,7 +83,7 @@ gh run watch <RUN_ID> --interval 10 --exit-status
 ```sh
 gh workflow run build-windows-lite.yml \
   --ref codex/windows-lite-1.1.63 \
-  -f version=1.1.63 \
+  -f version=1.1.75 \
   -f full_validation=true
 ```
 
@@ -131,7 +131,7 @@ pnpm build
 ```sh
 node release/windows-lite/windows-release.mjs \
   --harness-runtime release/windows-lite/harness-static-win32-x64 \
-  --version 1.1.63
+  --version 1.1.75
 ```
 
 没有 Windows x64 runtime 时，不要在 macOS 上跑
@@ -192,7 +192,7 @@ Windows 静态 runtime 由
 查看 Release：
 
 ```sh
-gh release view windows-lite-v1.1.63-candidate \
+gh release view windows-lite-v1.1.75-candidate \
   --json tagName,isDraft,targetCommitish,assets,url
 ```
 

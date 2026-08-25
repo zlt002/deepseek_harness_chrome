@@ -15,12 +15,30 @@ mermaid.initialize({
  * injecting HTML here would also leak into Mermaid's generated state IDs.
  */
 export function normalizeMermaidSource(source) {
-  return source.replace(/\\n/g, ' ')
+  return source
+    .replace(/\\n/g, ' ')
+    // Mermaid 11 rejects the otherwise harmless space between an unquoted
+    // node ID and its square-bracket label (`C [label]`). This temporary
+    // rendering copy leaves the document's stored Markdown untouched.
+    .replace(/\b([A-Za-z_][A-Za-z0-9_-]*)[ \t]+\[/g, '$1[')
+}
+
+/** Mermaid puts HTML labels in foreignObject but emits HTML `<br>` tags. */
+function repairMermaidForeignObjectMarkup(svg) {
+  return svg.replace(/<foreignObject\b[^>]*>[\s\S]*?<\/foreignObject>/gi, (foreignObject) => (
+    foreignObject.replace(/<br\s*\/?>/gi, '<br />')
+  ))
+}
+
+function hasUnsafeStyle(value) {
+  if (/expression\s*\(|@import|javascript\s*:/i.test(value)) return true
+  return [...value.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)]
+    .some((match) => !match[2].trim().startsWith('#'))
 }
 
 /** Mermaid returns SVG markup; retain only SVG drawing primitives and local references. */
 export function sanitizeMermaidSvg(svg) {
-  const document = new DOMParser().parseFromString(svg, 'image/svg+xml')
+  const document = new DOMParser().parseFromString(repairMermaidForeignObjectMarkup(svg), 'image/svg+xml')
   const root = document.documentElement
   if (root.localName !== 'svg' || document.querySelector('parsererror') !== null) throw new Error('Mermaid did not return valid SVG')
 
@@ -32,7 +50,7 @@ export function sanitizeMermaidSvg(svg) {
     for (const attribute of [...element.attributes]) {
       const name = attribute.name.toLowerCase()
       const value = attribute.value.trim()
-      if (name.startsWith('on') || name === 'src' || ((name === 'href' || name === 'xlink:href') && !value.startsWith('#')) || /url\(\s*(?:https?:|data:)/i.test(value)) {
+      if (name.startsWith('on') || name === 'src' || ((name === 'href' || name === 'xlink:href') && !value.startsWith('#')) || (name === 'style' && hasUnsafeStyle(value))) {
         element.removeAttribute(attribute.name)
       }
     }

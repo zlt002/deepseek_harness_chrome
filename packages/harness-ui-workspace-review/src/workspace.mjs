@@ -126,6 +126,9 @@ export class WorkspaceReviewRuntime {
       } else if (entry.isFile() && isMarkdownPath(entry.name)) {
         const details = await lstat(resolve(directory, entry.name))
         if (details.size <= MAX_FILE_BYTES) visible.push({ kind: 'markdown', name: entry.name, displayPath: child, size: details.size })
+        else visible.push({ kind: 'file', name: entry.name, displayPath: child })
+      } else if (entry.isFile()) {
+        visible.push({ kind: 'file', name: entry.name, displayPath: child })
       }
     }
     return { v: 1, relativePath: displayPath, entries: visible, truncated: entries.length > visible.length }

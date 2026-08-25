@@ -28,6 +28,17 @@ export function apply(ctx: ClientContext): void {
     },
   }), 'accrui-browser-target: open-fullscreen action')
   if (config === undefined) return
+  if (config.surface === 'sidepanel') {
+    ctx.effect(() => quickActions.register({
+      id: 'prototype-studio',
+      label: '原型',
+      order: 20,
+      requiresSession: false,
+      run: () => {
+        window.parent.postMessage({ type: 'open-recent-prototypes/v1', nonce: config.nonce }, config.parentOrigin)
+      },
+    }), 'accrui-browser-target: open recent prototypes action')
+  }
   if (fullscreenTab) {
     ctx.effect(() => {
       const reportSelectedSession = (): void => {
@@ -51,7 +62,7 @@ export function apply(ctx: ClientContext): void {
   const injected = (): BrowserTargetInjected => ({
     hooks: { browserTarget: bridge.source, browserTargetPanel: panel },
     onBrowserTargetCommand: command => {
-      if (command.command !== 'capture-design-reference') { bridge.send(command, window.parent); return }
+      if (command.command !== 'capture-design-reference' && command.command !== 'capture-responsive-design-reference' && command.command !== 'capture-design-references') { bridge.send(command, window.parent); return }
       const sessionId = ctx.sessions.list.getSnapshot().current
       bridge.send({ ...command, ...(sessionId === undefined ? {} : { sessionId: String(sessionId) }) }, window.parent)
     },

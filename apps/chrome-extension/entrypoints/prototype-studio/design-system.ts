@@ -122,8 +122,49 @@ function observedComponentRadius(samples: NonNullable<ReferenceEvidenceV1['desig
   return undefined
 }
 
-export function createDesignSpecFromEvidence(evidence: ReferenceEvidenceV1): DesignSpecV1 {
-  const tokens = evidence.designTokens
+export type DesignMergeStrategy = 'primary' | 'common'
+export interface DesignEvidenceConflict { id: 'colors' | 'typography' | 'spacing' | 'radius' | 'controls'; label: string; pages: string[] }
+
+function tokenKey(value: unknown): string { return JSON.stringify(value) }
+
+/**
+ * Keep page evidence separate, but make the proposed spec deterministic. The
+ * primary page always wins by default; common mode keeps only repeated token
+ * values and falls back to the primary page when there is no common value.
+ */
+function mergedTokens(evidence: readonly ReferenceEvidenceV1[], strategy: DesignMergeStrategy): ReferenceEvidenceV1['designTokens'] {
+  const primary = evidence[0]!.designTokens
+  if (evidence.length === 1) return primary
+  const result = { ...primary } as Record<string, unknown>
+  for (const key of Object.keys(primary) as Array<keyof ReferenceEvidenceV1['designTokens']>) {
+    const primaryValue = primary[key]
+    if (!Array.isArray(primaryValue)) continue
+    const pages = evidence.map(item => Array.isArray(item.designTokens[key]) ? item.designTokens[key] as unknown[] : [])
+    const ordered = pages.flat()
+    const unique = [...new Map(ordered.map(value => [tokenKey(value), value])).values()]
+    const repeated = unique.filter(value => pages.filter(page => page.some(item => tokenKey(item) === tokenKey(value))).length >= 2)
+    result[key] = strategy === 'common' && repeated.length > 0 ? repeated : unique
+  }
+  return result as unknown as ReferenceEvidenceV1['designTokens']
+}
+
+export function designEvidenceConflicts(evidence: readonly ReferenceEvidenceV1[]): DesignEvidenceConflict[] {
+  if (evidence.length < 2) return []
+  const duplicateSources = new Set(evidence.map(item => item.source.url)).size < evidence.length
+  const checks: Array<[DesignEvidenceConflict['id'], DesignEvidenceConflict['label'], keyof ReferenceEvidenceV1['designTokens']]> = [
+    ['colors', '颜色', 'colors'], ['typography', '字体与字号', 'fontSizes'], ['spacing', '间距', 'spacing'], ['radius', '圆角', 'radius'], ['controls', '控件尺寸', 'buttonHeights'],
+  ]
+  return checks.flatMap(([id, label, key]) => {
+    const values = evidence.map(item => tokenKey(item.designTokens[key] ?? []))
+    return new Set(values).size > 1 ? [{ id, label, pages: evidence.map(item => `${item.source.title || item.source.url}${duplicateSources ? ` · ${item.viewport.width}px` : ''}`) }] : []
+  })
+}
+
+export function createDesignSpecFromEvidence(input: ReferenceEvidenceV1 | readonly ReferenceEvidenceV1[], strategy: DesignMergeStrategy = 'primary'): DesignSpecV1 {
+  const evidence = Array.isArray(input) ? input : [input]
+  const primaryEvidence = evidence[0]
+  if (primaryEvidence === undefined) throw new Error('至少需要一页参考网页。')
+  const tokens = mergedTokens(evidence, strategy)
   const page = tokens.pageBackgroundColors?.[0] ?? tokens.backgroundColors?.[0] ?? '#f5f6f8'
   const surface = tokens.backgroundColors?.find(value => value !== page) ?? '#ffffff'
   const elevated = tokens.elevatedBackgroundColors?.[0] ?? surface
@@ -184,7 +225,7 @@ export function createDesignSpecFromEvidence(evidence: ReferenceEvidenceV1): Des
   const iconSize = numericToken(tokens.iconSizes ?? [], 16)
   const borderStyle = tokens.borderStyles?.find((value): value is 'solid' | 'dashed' | 'dotted' => ['solid', 'dashed', 'dotted'].includes(value)) ?? 'solid'
   const focusStyle = tokens.focusStyles?.[0]
-  const responsiveBreakpoints = [...new Set(tokens.responsiveBreakpoints ?? [768, 1_024])].sort((left, right) => left - right).slice(0, 12)
+  const responsiveBreakpoints = [...new Set(tokens.responsiveBreakpoints ?? [768, 1_024])].sort((left, right) => left - right).slice(0, 20)
   const layoutPatterns: NonNullable<DesignSpecV1['responsive']>['layoutPatterns'] = tokens.layoutPatterns?.length ? tokens.layoutPatterns : ['block']
   const theme = (colorLightness(page) ?? .9) < .45 ? '深色' : '浅色'
   const density = controlHeight <= 34 || spacingBase <= 6 ? '紧凑' : controlHeight >= 46 || spacingBase >= 12 ? '舒展' : '适中密度'
@@ -201,13 +242,14 @@ export function createDesignSpecFromEvidence(evidence: ReferenceEvidenceV1): Des
   const controlMotion = observedControlMotion(componentSamples, tokens.motionDurations ?? [], tokens.motionEasings ?? [])
   return {
     v: 1,
-    id: `design-${evidence.id}`.slice(0, 80),
-    name: `${evidence.source.title || '参考网页'}设计规范`,
-    basedOnEvidenceIds: [evidence.id],
+    id: `design-${primaryEvidence.id}`.slice(0, 80),
+    name: `${primaryEvidence.source.title || '参考网页'}设计规范`,
+    basedOnEvidenceIds: evidence.map(item => item.id),
+    ...(evidence.length === 1 ? {} : { merge: { primaryEvidenceId: primaryEvidence.id, auxiliaryEvidenceIds: evidence.slice(1).map(item => item.id), strategy } }),
     summary,
     colors: [...semanticColors, ...extraColors],
     typography: { fontFamily: tokens.fonts[0] ?? 'system-ui', headingWeight: numericToken(headingStyle === undefined ? [] : [headingStyle.fontWeight], weights.at(-1) ?? 700), bodyWeight: numericToken(bodyStyle === undefined ? tokens.fontWeights ?? [] : [bodyStyle.fontWeight], 400), bodySize, headingSize, captionSize, fontSizeScale: fontSizes, fontWeightScale: weights, lineHeightScale, bodyLineHeight: ratioToken(bodyStyle?.lineHeight ?? tokens.lineHeights?.[0], bodySize, 1.5), headingLineHeight: ratioToken(headingStyle?.lineHeight, headingSize, 1.15), letterSpacing: numericToken((bodyStyle === undefined ? tokens.letterSpacings ?? [] : [bodyStyle.letterSpacing]).filter(value => value !== 'normal'), 0) },
-    spacing: { base: spacingBase, cardRadius, scale: spacingScale, sectionGap: spacingScale.at(-1) ?? 32, contentWidth: Math.min(1_440, Math.max(480, numericToken(tokens.contentWidths ?? [], evidence.viewport.width - 80))) },
+    spacing: { base: spacingBase, cardRadius, scale: spacingScale, sectionGap: spacingScale.at(-1) ?? 32, contentWidth: Math.min(1_440, Math.max(480, numericToken(tokens.contentWidths ?? [], primaryEvidence.viewport.width - 80))) },
     surfaces: { page, surface, elevated, text, textMuted, border },
     borders: { width: numericToken(tokens.borderWidths ?? [], 1), style: borderStyle, radiusScale },
     effects: { shadows: tokens.shadows ?? [], gradients: tokens.gradients ?? [], opacities: (tokens.opacities ?? []).map(Number).filter(value => Number.isFinite(value) && value >= 0 && value <= 1), ...(Object.keys(semantic).length === 0 ? {} : { semantic }) },
@@ -234,11 +276,11 @@ export function designEvidenceCoverage(evidence: ReferenceEvidenceV1): DesignCov
     { id: 'font-assets', label: '字体资源', status: hasValues(token.fonts) ? 'inferred' : 'default', detail: hasValues(token.fonts) ? `识别到 ${token.fonts.slice(0, 4).join('、')}；只记录字体名称，不复制网页字体文件，预览不可用时会回退系统字体` : '未识别字体名称，预览使用系统字体' },
     { id: 'spacing', label: '间距', status: token.spacing.length > 0 ? 'observed' : 'default', detail: `${token.spacing.length} 个间距档位` },
     { id: 'layout', label: '页面布局', status: hasValues(token.layoutPatterns) || hasValues(token.contentWidths) ? 'observed' : 'inferred', detail: `${token.contentWidths?.length ?? 0} 个内容宽度；${token.layoutPatterns?.join('、') || '未识别稳定布局模式'}` },
-    { id: 'responsive', label: '响应式断点', status: token.responsiveBreakpoints === undefined || token.responsiveBreakpoints.length === 0 ? 'default' : 'inferred', detail: token.responsiveBreakpoints?.length ? `${token.responsiveBreakpoints.join(' / ')} px · 来自 CSS 声明，尚未多尺寸实测` : `当前只实测 ${evidence.viewport.width}px 视口，使用安全默认断点` },
+    { id: 'responsive', label: '响应式断点', status: token.responsiveBreakpoints === undefined || token.responsiveBreakpoints.length === 0 ? 'default' : 'inferred', detail: token.responsiveBreakpoints?.length ? `${token.responsiveBreakpoints.join(' / ')} px · 从 CSS 规则提取，尚未多尺寸实测` : `当前只实测 ${evidence.viewport.width}px 视口，使用安全默认断点` },
     { id: 'borders', label: '边框圆角', status: token.radius.length > 0 || hasValues(token.borderWidths) ? 'observed' : 'default', detail: `${token.radius.length} 个圆角，${token.borderWidths?.length ?? 0} 个边框宽度` },
     { id: 'effects', label: '投影渐变', status: captured(token.shadows), detail: `${token.shadows?.length ?? 0} 种投影，${token.gradients?.length ?? 0} 种渐变` },
     { id: 'controls', label: '组件尺寸', status: controls, detail: controlValues.length > 0 ? `${token.buttonHeights?.length ?? 0} 个按钮高度，${token.inputHeights?.length ?? 0} 个普通输入高度（不含文本域），${token.iconSizes?.length ?? 0} 个图标尺寸` : token.controlHeights?.length ? `${token.controlHeights.length} 个控件高度；未采到普通输入或图标尺寸` : '依据排版与间距推导' },
-    { id: 'components', label: '组件与状态', status: hasValues(token.componentKinds) ? 'observed' : 'default', detail: `${token.componentKinds?.length ?? 0} 类组件，${token.componentStates?.length ?? 0} 种显式状态` },
+    { id: 'components', label: '组件与状态', status: hasValues(token.componentKinds) ? 'observed' : 'default', detail: `${token.componentKinds?.length ?? 0} 类组件，${token.componentStates?.length ?? 0} 种显式状态；${evidence.captureCoverage?.states?.cssRuleTokens.length ?? 0} 条从 CSS 规则提取` },
     { id: 'visual-assets', label: '图标与图片素材', status: hasValues(token.componentKinds) ? 'inferred' : 'default', detail: token.componentKinds?.includes('image') ? `网页中识别到图片元素；不会复制原网页图片文件或 Logo，原型仅继承其布局位置并使用安全占位` : token.componentKinds?.includes('icon') ? `识别到图标及 ${token.iconSizes?.length ?? 0} 个图标尺寸；原型使用内置安全图标，不复制网页图标文件` : '未识别稳定的图片或图标样式；原型使用内置安全图标' },
     { id: 'focus', label: '键盘焦点', status: hasValues(token.focusStyles) ? 'inferred' : 'default', detail: token.focusStyles?.length ? `${token.focusStyles.length} 组焦点描边，来自当前焦点或可读取 CSS 声明，未逐个主动触发` : '使用主要操作色和 2px 安全焦点环' },
     { id: 'motion', label: '动效', status: hasValues(token.motionDurations) && hasValues(token.motionEasings) ? 'observed' : 'default', detail: `${token.motionDurations?.length ?? 0} 个时长，${token.motionEasings?.length ?? 0} 个缓动` },

@@ -60,3 +60,19 @@ test('rejects forged counts, extra fields, and unsafe prototype content', async 
   const unsafe = structuredClone(base); unsafe.document.screens[0].nodes[0].html = '<script>'
   assert.equal(preview.parseRevisionPreview(unsafe, context).ok, false)
 })
+
+test('summarizes current versus historical structure and requirement coverage without mutating either document', async () => {
+  const { preview } = await modules(); const { document } = fixtures()
+  const current = structuredClone(document)
+  current.screens.push({ id: 'settings', title: '设置', nodes: [{ id: 'save-settings', type: 'button', label: '保存设置' }] })
+  current.screens[0].nodes.push({ id: 'new-card', type: 'card', children: [] })
+  const historicalCoverage = { v: 1, items: [{ id: 'page-1', kind: 'page', requirement: '项目列表', status: 'satisfied', matches: [{ label: '首页', screenId: 'home' }] }, { id: 'flow-1', kind: 'flow', requirement: '打开风险详情', status: 'missing', matches: [] }] }
+  const currentCoverage = { v: 1, items: [{ id: 'page-1', kind: 'page', requirement: '项目列表', status: 'satisfied', matches: [{ label: '首页', screenId: 'home' }] }, { id: 'flow-1', kind: 'flow', requirement: '打开风险详情', status: 'satisfied', matches: [{ label: '打开', screenId: 'home', nodeId: 'open', nodeType: 'button' }] }] }
+  const result = preview.visualRevisionDiff(current, document, currentCoverage, historicalCoverage)
+  assert.ok(result.structure.includes('当前新增页面：设置'))
+  assert.ok(result.structure.includes('当前新增组件：new-card'))
+  assert.ok(result.coverage.includes('需求覆盖：当前 2/2，历史 1/2'))
+  assert.ok(result.coverage.includes('当前补齐：打开风险详情'))
+  assert.equal(document.screens.length, 1)
+  assert.equal(current.screens.length, 2)
+})

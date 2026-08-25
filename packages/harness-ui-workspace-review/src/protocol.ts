@@ -28,7 +28,13 @@ export interface WorkspaceMarkdownEntry {
   readonly size: number
 }
 
-export type WorkspaceTreeEntry = WorkspaceDirectoryEntry | WorkspaceMarkdownEntry
+export interface WorkspaceFileEntry {
+  readonly kind: 'file'
+  readonly displayPath: string
+  readonly name: string
+}
+
+export type WorkspaceTreeEntry = WorkspaceDirectoryEntry | WorkspaceMarkdownEntry | WorkspaceFileEntry
 
 export interface WorkspaceReviewResource {
   readonly resourceId: string

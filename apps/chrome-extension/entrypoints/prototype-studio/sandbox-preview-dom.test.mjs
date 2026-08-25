@@ -148,3 +148,141 @@ test('generated srcdoc really navigates, validates forms, opens modals, and keep
   assert.equal(posted.some(message => message.type === 'prototype-selection/v1' && message.selection.elementId === 'open-help'), true)
   dom.window.close()
 })
+
+test('a preview can start in select mode, before an iframe receives postMessage', async () => {
+  const { sandboxPreviewSrcDoc } = await sandboxModule()
+  const nonce = '1234567890abcdef1234567890abcdef'
+  const posted = []
+  const dom = new JSDOM(sandboxPreviewSrcDoc(document, designSpec, [evidence], nonce, 'select'), {
+    runScripts: 'dangerously', pretendToBeVisual: true,
+    beforeParse(window) {
+      window.requestAnimationFrame = callback => { callback(0); return 1 }
+      window.parent.postMessage = message => posted.push(message)
+    },
+  })
+  await flush()
+  const byId = id => dom.window.document.querySelector(`[data-prototype-element-id="${id}"]`)
+  assert.equal(dom.window.document.body.dataset.previewMode, 'select')
+  byId('submit').click()
+  assert.equal(dom.window.document.querySelector('main')?.getAttribute('aria-label'), '首页')
+  assert.equal(posted.some(message => message.type === 'prototype-selection/v1' && message.selection.elementId === 'submit'), true)
+  dom.window.close()
+})
+
+test('generated srcdoc really filters, sorts, paginates table rows, and keeps table controls read-only in select mode', async () => {
+  const { sandboxPreviewSrcDoc } = await sandboxModule()
+  const nonce = '1234567890abcdef1234567890abcdef'
+  const tableDocument = structuredClone(document)
+  const home = tableDocument.screens.find(screen => screen.id === 'home')
+  home.nodes.splice(home.nodes.findIndex(node => node.id === 'records'), 0, { id: 'record-filter', type: 'input', label: '搜索名称', inputType: 'search', value: '' })
+  const records = home.nodes.find(node => node.id === 'records')
+  records.columns = [{ key: 'name', label: '名称' }, { key: 'owner', label: '负责人' }]
+  records.rows = [
+    ['Zulu', '张三'], ['Alfa', '李四'], ['Bravo', '张三'], ['Delta', '李四'], ['Echo', '张三'], ['Foxtrot', '李四'], ['Golf', '张三'],
+  ].map(([name, owner], index) => ({ id: `record-${index + 1}`, values: [name, owner] }))
+  records.filters = [{ inputId: 'record-filter', columnKey: 'name', operator: 'contains' }]
+  records.sort = { columnKey: 'name', direction: 'asc' }
+  records.pagination = { pageSize: 5 }
+  const posted = []
+  const dom = new JSDOM(sandboxPreviewSrcDoc(tableDocument, designSpec, [evidence], nonce), {
+    runScripts: 'dangerously', pretendToBeVisual: true,
+    beforeParse(window) { window.requestAnimationFrame = callback => { callback(0); return 1 }; window.parent.postMessage = message => posted.push(message) },
+  })
+  await flush()
+  const table = () => dom.window.document.querySelector('[data-prototype-element-id="records"]')
+  const names = () => [...table().querySelectorAll('tbody tr td:first-child')].map(cell => cell.textContent)
+  assert.deepEqual(names(), ['Alfa', 'Bravo', 'Delta', 'Echo', 'Foxtrot'])
+  const filter = dom.window.document.querySelector('[data-prototype-element-id="record-filter"] input')
+  filter.value = 'br'
+  filter.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  assert.deepEqual(names(), ['Bravo'])
+  filter.value = ''
+  filter.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  table().querySelector('.table-sort').click()
+  assert.deepEqual(names(), ['Zulu', 'Golf', 'Foxtrot', 'Echo', 'Delta'])
+  table().querySelector('.table-pagination button:last-child').click()
+  assert.deepEqual(names(), ['Bravo', 'Alfa'])
+
+  dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window, data: { v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: 'select' } }))
+  table().querySelector('.table-sort').click()
+  table().querySelector('.table-pagination button:last-child').click()
+  assert.deepEqual(names(), ['Bravo', 'Alfa'])
+  assert.equal(posted.some(message => message.type === 'prototype-selection/v1' && message.selection.elementId === 'records'), true)
+  dom.window.close()
+})
+
+test('generated srcdoc applies fixed field rules and text variables without changing state in select mode', async () => {
+  const { sandboxPreviewSrcDoc } = await sandboxModule()
+  const nonce = '1234567890abcdef1234567890abcdef'
+  const ruleDocument = structuredClone(document)
+  const home = ruleDocument.screens.find(screen => screen.id === 'home')
+  home.nodes.unshift(
+    { id: 'kind', type: 'input', label: '类型', inputType: 'select', options: [{ label: '企业', value: 'company' }, { label: '个人', value: 'person' }] },
+    { id: 'owner', type: 'input', label: '负责人', inputType: 'select', options: [{ label: '默认', value: 'default' }], required: true },
+    { id: 'rule-copy', type: 'text', text: '当前类型：${kind}' },
+    { id: 'person-note', type: 'text', text: '个人类型不需要负责人' },
+  )
+  ruleDocument.fieldRules = [
+    { targetId: 'owner', conditions: [{ fieldId: 'kind', operator: 'equals', value: 'company' }], effect: { type: 'set-options', options: [{ label: '张三', value: 'zhang-san' }] } },
+    { targetId: 'owner', conditions: [{ fieldId: 'kind', operator: 'equals', value: 'person' }], effect: { type: 'disable' } },
+    { targetId: 'person-note', conditions: [{ fieldId: 'kind', operator: 'empty' }], effect: { type: 'hide' } },
+  ]
+  const posted = []
+  const dom = new JSDOM(sandboxPreviewSrcDoc(ruleDocument, designSpec, [evidence], nonce), { runScripts: 'dangerously', pretendToBeVisual: true, beforeParse(window) { window.requestAnimationFrame = callback => { callback(0); return 1 }; window.parent.postMessage = message => posted.push(message) } })
+  await flush()
+  const byId = id => dom.window.document.querySelector(`[data-prototype-element-id="${id}"]`)
+  const kind = byId('kind').querySelector('select')
+  assert.equal(byId('person-note'), null)
+  kind.value = 'company'; kind.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+  assert.match(byId('rule-copy').textContent, /company/)
+  assert.equal([...byId('owner').querySelectorAll('option')].some(option => option.value === 'zhang-san'), true)
+  kind.value = 'person'; kind.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+  assert.equal(byId('owner').querySelector('select').disabled, true)
+  assert.match(byId('person-note').textContent, /不需要负责人/)
+  dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window, data: { v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: 'select' } }))
+  const selectedKind = byId('kind').querySelector('select')
+  selectedKind.value = 'company'; selectedKind.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+  assert.match(byId('rule-copy').textContent, /person/)
+  assert.equal(posted.some(message => message.type === 'prototype-selection/v1' && message.selection.elementId === 'kind'), false)
+  dom.window.close()
+})
+
+test('generated srcdoc performs bounded CRUD with confirmation, validation, and select-mode safety', async () => {
+  const { sandboxPreviewSrcDoc } = await sandboxModule()
+  const nonce = '1234567890abcdef1234567890abcdef'
+  const crudDocument = structuredClone(document)
+  const home = crudDocument.screens.find(screen => screen.id === 'home')
+  home.nodes.unshift(
+    { id: 'project-name', type: 'input', label: '项目名称', required: true },
+    { id: 'add-project', type: 'button', label: '新增项目', action: { type: 'add-row', tableId: 'crud-records', fieldMap: [{ fieldId: 'project-name', columnKey: 'name' }] } },
+    { id: 'crud-records', type: 'table', label: '可编辑项目', columns: [{ key: 'name', label: '名称' }], rows: [
+      { id: 'crud-edit', values: ['旧名称'], action: { type: 'edit-row', tableId: 'crud-records', fieldMap: [{ fieldId: 'project-name', columnKey: 'name' }] } },
+      { id: 'crud-delete', values: ['待删除'], action: { type: 'delete-row', tableId: 'crud-records', businessName: '项目' } },
+    ], pagination: { pageSize: 5 } },
+  )
+  const dom = new JSDOM(sandboxPreviewSrcDoc(crudDocument, designSpec, [evidence], nonce), { runScripts: 'dangerously', pretendToBeVisual: true, beforeParse(window) { window.requestAnimationFrame = callback => { callback(0); return 1 }; window.parent.postMessage = () => {} } })
+  await flush()
+  const byId = id => dom.window.document.querySelector(`[data-prototype-element-id="${id}"]`)
+  const rows = () => [...byId('crud-records').querySelectorAll('tbody tr')].map(row => row.textContent)
+  byId('add-project').click()
+  assert.equal(byId('project-name').querySelector('[aria-invalid="true"]') !== null, true)
+  const name = byId('project-name').querySelector('input')
+  name.value = '新项目'; name.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  byId('add-project').click()
+  assert.equal(rows().some(value => value.includes('新项目')), true)
+  name.value = '已编辑'; name.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  byId('crud-edit').querySelector('button').click()
+  assert.equal(rows().some(value => value.includes('已编辑')), true)
+  byId('crud-delete').querySelector('button').click()
+  assert.match(dom.window.document.body.textContent, /确认删除项目/)
+  dom.window.document.querySelector('[role="dialog"] button').click()
+  assert.equal(rows().some(value => value.includes('待删除')), true)
+  byId('crud-delete').querySelector('button').click()
+  ;[...dom.window.document.querySelectorAll('[role="dialog"] button')].find(button => button.textContent === '确认删除').click()
+  assert.equal(rows().some(value => value.includes('待删除')), false)
+  dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window, data: { v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: 'select' } }))
+  const before = rows().length
+  byId('add-project').click()
+  assert.equal(rows().length, before)
+  dom.window.close()
+})

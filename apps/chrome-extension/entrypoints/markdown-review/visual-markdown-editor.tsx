@@ -11,7 +11,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import type { VisualSelection } from './visual-selection'
 import { canRestoreVisualSelection, visualSelectionFor } from './visual-selection'
 import { renderMermaidSvg } from './mermaid-renderer.mjs'
-import { fitMermaidPreview, wireMermaidViewer, wireMermaidViewToggle } from './mermaid-view.mjs'
+import { fitMermaidPreview, wireMermaidFullscreen, wireMermaidViewer, wireMermaidViewToggle } from './mermaid-view.mjs'
 import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/classic.css'
 
@@ -113,6 +113,17 @@ function mermaidPreview(source: string, sourceId: string): HTMLElement {
   resetButton.textContent = '适应'
   resetButton.title = '重置并适应画布'
   resetButton.setAttribute('aria-label', '重置并适应流程图')
+  const fullscreenButton = document.createElement('button')
+  fullscreenButton.type = 'button'
+  fullscreenButton.textContent = '全屏'
+  fullscreenButton.title = '全屏查看流程图'
+  fullscreenButton.setAttribute('aria-label', '全屏查看流程图')
+  const closeFullscreenButton = document.createElement('button')
+  closeFullscreenButton.type = 'button'
+  closeFullscreenButton.textContent = '退出全屏'
+  closeFullscreenButton.title = '退出全屏查看'
+  closeFullscreenButton.setAttribute('aria-label', '退出全屏查看流程图')
+  closeFullscreenButton.hidden = true
   const toolbar = document.createElement('div')
   toolbar.className = 'mermaid-toolbar'
   const preview = document.createElement('div')
@@ -120,7 +131,7 @@ function mermaidPreview(source: string, sourceId: string): HTMLElement {
   preview.textContent = '正在渲染 Mermaid 图…'
   const setView = wireMermaidViewToggle(block, sourceId, visualButton, sourceButton)
   controls.append(visualButton, sourceButton)
-  viewerControls.append(zoomOutButton, zoomInButton, resetButton)
+  viewerControls.append(zoomOutButton, zoomInButton, resetButton, fullscreenButton, closeFullscreenButton)
   toolbar.append(controls, viewerControls)
   block.append(toolbar, preview)
   setView('visual')
@@ -134,6 +145,7 @@ function mermaidPreview(source: string, sourceId: string): HTMLElement {
     preview.append(canvas)
     fitMermaidPreview(preview)
     wireMermaidViewer(block, preview, canvas, zoomInButton, zoomOutButton, resetButton)
+    wireMermaidFullscreen(block, fullscreenButton, closeFullscreenButton)
   }).catch(() => {
     preview.className = 'mermaid-preview mermaid-fallback'
     preview.replaceChildren('Mermaid 图无法渲染；已保留源码。')

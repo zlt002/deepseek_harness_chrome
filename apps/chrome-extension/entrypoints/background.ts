@@ -55,12 +55,16 @@ import {
 } from '../src/prototype-studio-authorization'
 import type { PrototypeStudioAuthorization } from '../src/prototype-studio-authorization'
 import {
+  PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY,
   PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY,
+  retainedPrototypeStudioPendingRecoveries,
   retainedPrototypeStudioRecoveryBindings,
+  storedPrototypeStudioPendingRecoveries,
   storedPrototypeStudioRecoveries,
+  validPrototypeStudioPendingRecovery,
   validPrototypeStudioRecoveryBinding,
 } from '../src/prototype-studio-recovery'
-import type { PrototypeStudioRecoveryBinding } from '../src/prototype-studio-recovery'
+import type { PrototypeStudioPendingRecovery, PrototypeStudioRecoveryBinding } from '../src/prototype-studio-recovery'
 import { retainedPrototypeReferences } from '../src/prototype-reference-storage'
 import { sha256Fingerprint, validateReferenceEvidence, verifyReferenceEvidenceFingerprint } from '../../../packages/harness-ui-prototype-studio/src/prototype-document'
 import { productBrief } from '../../../packages/harness-ui-prototype-studio/src/product-brief.mjs'
@@ -649,8 +653,12 @@ const NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
 const START_TIMEOUT_MS = 30_000
 const PROTOTYPE_STUDIO_OPEN_PATH = '/api/prototype-studio/open'
 const PROTOTYPE_STUDIO_RECOVER_PATH = '/api/prototype-studio/recover'
+const PROTOTYPE_STUDIO_REBIND_SESSION_PATH = '/api/prototype-studio/rebind-session'
+const PROTOTYPE_STUDIO_RENAME_PATH = '/api/prototype-studio/rename'
+const PROTOTYPE_STUDIO_DELETE_PATH = '/api/prototype-studio/delete'
 const PROTOTYPE_STUDIO_CONFIRM_DESIGN_PATH = '/api/prototype-studio/confirm-design'
 const PROTOTYPE_STUDIO_CONFIRM_BRIEF_PATH = '/api/prototype-studio/confirm-brief'
+const PROTOTYPE_STUDIO_BEGIN_BRIEF_SUGGESTION_PATH = '/api/prototype-studio/begin-brief-suggestion'
 const PROTOTYPE_STUDIO_REOPEN_DESIGN_PATH = '/api/prototype-studio/reopen-design'
 const PROTOTYPE_STUDIO_SNAPSHOT_PATH = '/api/prototype-studio/snapshot'
 const PROTOTYPE_STUDIO_REVISION_PREVIEW_PATH = '/api/prototype-studio/revision-preview'
@@ -742,6 +750,23 @@ interface PrototypeRecoverySignature {
 }
 const pendingPrototypeRecoverySignatures = new Map<string, { resolve: (value: PrototypeRecoverySignature) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
 let prototypeStudioRecoveryMutation: Promise<void> = Promise.resolve()
+// A project lifecycle operation may rotate the Host capability, read its
+// snapshot, or promote a session-only candidate. Keep these operations on one
+// per-project lane; otherwise a snapshot can mistake a pre-commit candidate's
+// temporary 401 for a final rejection and delete it under a live recovery.
+const pendingPrototypeStudioProjectFlows = new Map<string, Promise<unknown>>()
+const pendingPrototypeStudioRecoveryFlows = new Map<string, Promise<Record<string, unknown>>>()
+
+function queuePrototypeStudioProjectFlow<T>(projectId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = pendingPrototypeStudioProjectFlows.get(projectId) ?? Promise.resolve()
+  const next = previous.catch(() => undefined).then(operation)
+  pendingPrototypeStudioProjectFlows.set(projectId, next)
+  void next.then(
+    () => { if (pendingPrototypeStudioProjectFlows.get(projectId) === next) pendingPrototypeStudioProjectFlows.delete(projectId) },
+    () => { if (pendingPrototypeStudioProjectFlows.get(projectId) === next) pendingPrototypeStudioProjectFlows.delete(projectId) },
+  )
+  return next
+}
 
 function runtimeIdentitySummary(value: unknown): RuntimeIdentitySummary | undefined {
   return validRuntimeIdentitySummary(value) ? value : undefined
@@ -1140,15 +1165,26 @@ async function probeCompanyGatewayToolCapability(options: { apiKey: string; prot
   const toolChoice = options.protocol === 'anthropic-messages'
     ? { type: 'tool', name: COMPANY_GATEWAY_CAPABILITY_TOOL }
     : { type: 'function', function: { name: COMPANY_GATEWAY_CAPABILITY_TOOL } }
-  const response = await fetch(endpoint, {
+  const request = (forceTool: boolean) => fetch(endpoint, {
     method: 'POST',
     headers,
     signal: options.signal,
-    body: JSON.stringify({ model: options.modelId, max_tokens: 32, messages: [{ role: 'user', content: 'Call the capability probe tool exactly once.' }], tools: [tool], tool_choice: toolChoice }),
+    body: JSON.stringify({ model: options.modelId, max_tokens: 32, messages: [{ role: 'user', content: 'Call the capability probe tool exactly once.' }], tools: [tool], ...(forceTool ? { tool_choice: toolChoice } : {}) }),
   })
+  let response = await request(true)
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 1_000)
-    throw new Error(`当前模型或协议不支持 Agent 工具调用：${detail || `HTTP ${String(response.status)}`}`)
+    const normalized = detail.toLowerCase()
+    const thinkingRejectsForcedToolChoice = normalized.includes('thinking mode does not support this tool_choice')
+      || (detail.includes('Thinking mode') && detail.includes('不支持') && detail.includes('tool_choice'))
+    if (!thinkingRejectsForcedToolChoice) {
+      throw new Error(`当前模型或协议不支持 Agent 工具调用：${detail || `HTTP ${String(response.status)}`}`)
+    }
+    response = await request(false)
+    if (!response.ok) {
+      const retryDetail = (await response.text()).slice(0, 1_000)
+      throw new Error(`当前模型或协议不支持 Agent 工具调用：${retryDetail || `HTTP ${String(response.status)}`}`)
+    }
   }
   const value = await response.json() as Record<string, unknown>
   const returned = options.protocol === 'anthropic-messages'
@@ -1634,6 +1670,19 @@ async function rememberPrototypeStudio(authorization: PrototypeStudioAuthorizati
   })
 }
 
+async function forgetPrototypeStudio(projectId: string): Promise<void> {
+  await queuePrototypeStudioAuthorizationMutation(async () => {
+    const storage = chrome.storage?.session
+    const persisted = storage === undefined ? [] : Object.values(storedPrototypeStudioAuthorizations((await storage.get(PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY))[PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY]).authorizations)
+    const retained = replaceRememberedPrototypeStudios([...prototypeStudioAuthorizations.values(), ...persisted].filter(item => item.projectId !== projectId))
+    if (storage !== undefined) {
+      await storage.set({ [PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY]: { v: 1, authorizations: Object.fromEntries(retained.map(item => [item.projectId, item])) } })
+      const readback = storedPrototypeStudioAuthorizations((await storage.get(PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY))[PROTOTYPE_STUDIO_AUTHORIZATION_STORAGE_KEY])
+      if (readback.authorizations[projectId] !== undefined) throw new Error('浏览器未能回读并确认原型临时授权已清理。')
+    }
+  })
+}
+
 function queuePrototypeStudioRecoveryMutation(operation: () => Promise<void>): Promise<void> {
   const queued = prototypeStudioRecoveryMutation.then(operation)
   prototypeStudioRecoveryMutation = queued.then(() => undefined, () => undefined)
@@ -1644,6 +1693,10 @@ function recoveryBindingFromSnapshot(snapshot: Record<string, unknown>, projectI
   const evidence = Array.isArray(snapshot.evidence) ? snapshot.evidence[0] as { id?: unknown; fingerprint?: unknown; source?: { title?: unknown; url?: unknown } } | undefined : undefined
   const referenceTitle = typeof evidence?.source?.title === 'string' ? evidence.source.title.trim().slice(0, 240) : undefined
   const referenceUrl = typeof evidence?.source?.url === 'string' ? evidence.source.url : undefined
+  const document = snapshot.document !== null && typeof snapshot.document === 'object' && !Array.isArray(snapshot.document) ? snapshot.document as { title?: unknown } : undefined
+  const projectName = typeof snapshot.projectName === 'string' && snapshot.projectName.trim() !== '' ? snapshot.projectName.trim().slice(0, 160) : typeof document?.title === 'string' && document.title.trim() !== '' ? document.title.trim().slice(0, 160) : undefined
+  const revisions = Array.isArray(snapshot.revisions) ? snapshot.revisions : []
+  const currentRevisionId = typeof snapshot.currentRevisionId === 'string' ? snapshot.currentRevisionId : undefined
   const candidate: PrototypeStudioRecoveryBinding = {
     projectId,
     referenceId,
@@ -1653,6 +1706,9 @@ function recoveryBindingFromSnapshot(snapshot: Record<string, unknown>, projectI
     updatedAt: Date.now(),
     ...(referenceTitle === undefined ? {} : { referenceTitle }),
     ...(referenceUrl === undefined ? {} : { referenceUrl }),
+    ...(projectName === undefined ? {} : { projectName }),
+    ...(currentRevisionId === undefined ? {} : { currentRevisionId }),
+    revisionCount: revisions.length,
   }
   return evidence?.id === referenceId && validPrototypeStudioRecoveryBinding(candidate) ? candidate : undefined
 }
@@ -1670,6 +1726,9 @@ async function rememberPrototypeStudioRecoveryBinding(binding: PrototypeStudioRe
       ...binding,
       ...(binding.referenceTitle === undefined && previous?.referenceTitle !== undefined ? { referenceTitle: previous.referenceTitle } : {}),
       ...(binding.referenceUrl === undefined && previous?.referenceUrl !== undefined ? { referenceUrl: previous.referenceUrl } : {}),
+      ...(binding.projectName === undefined && previous?.projectName !== undefined ? { projectName: previous.projectName } : {}),
+      ...(binding.currentRevisionId === undefined && previous?.currentRevisionId !== undefined ? { currentRevisionId: previous.currentRevisionId } : {}),
+      ...(binding.revisionCount === undefined && previous?.revisionCount !== undefined ? { revisionCount: previous.revisionCount } : {}),
     }
     const retained = retainedPrototypeStudioRecoveryBindings([...Object.values(current.projects), enriched])
     const next = { v: 1 as const, projects: Object.fromEntries(retained.map(item => [item.projectId, item])) }
@@ -1677,9 +1736,21 @@ async function rememberPrototypeStudioRecoveryBinding(binding: PrototypeStudioRe
     const readback = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
     const stored = readback.projects[binding.projectId]
     if (stored === undefined || stored.referenceId !== enriched.referenceId || stored.sessionId !== enriched.sessionId || stored.evidenceFingerprint !== enriched.evidenceFingerprint || stored.recoveryEpoch !== enriched.recoveryEpoch
-      || stored.referenceTitle !== enriched.referenceTitle || stored.referenceUrl !== enriched.referenceUrl) {
+      || stored.referenceTitle !== enriched.referenceTitle || stored.referenceUrl !== enriched.referenceUrl || stored.projectName !== enriched.projectName || stored.currentRevisionId !== enriched.currentRevisionId || stored.revisionCount !== enriched.revisionCount) {
       throw new Error('浏览器未能回读并确认项目恢复绑定，请重试。')
     }
+  })
+}
+
+async function forgetPrototypeStudioRecoveryBinding(projectId: string): Promise<void> {
+  await queuePrototypeStudioRecoveryMutation(async () => {
+    const storage = chrome.storage?.local
+    if (storage === undefined) return
+    const current = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
+    const retained = Object.values(current.projects).filter(item => item.projectId !== projectId)
+    await storage.set({ [PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY]: { v: 1, projects: Object.fromEntries(retained.map(item => [item.projectId, item])) } })
+    const readback = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
+    if (readback.projects[projectId] !== undefined) throw new Error('浏览器未能回读并确认最近原型已删除。')
   })
 }
 
@@ -1698,9 +1769,9 @@ async function prototypeStudioRecoveryBinding(projectId: string, referenceId: st
   return selected
 }
 
-type RecentPrototypeStudio = Pick<PrototypeStudioRecoveryBinding, 'projectId' | 'referenceId' | 'referenceTitle' | 'referenceUrl' | 'updatedAt'> & { authorizationActive: boolean }
+type RecentPrototypeStudio = Pick<PrototypeStudioRecoveryBinding, 'projectId' | 'referenceId' | 'referenceTitle' | 'referenceUrl' | 'projectName' | 'currentRevisionId' | 'revisionCount' | 'updatedAt'> & { authorizationActive: boolean; boundToCurrentSession?: boolean }
 
-async function recentPrototypeStudios(): Promise<RecentPrototypeStudio[]> {
+async function recentPrototypeStudios(currentSessionId?: string): Promise<RecentPrototypeStudio[]> {
   const storage = chrome.storage?.local
   if (storage === undefined) return []
   const stored = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
@@ -1718,8 +1789,12 @@ async function recentPrototypeStudios(): Promise<RecentPrototypeStudio[]> {
       referenceId: binding.referenceId,
       ...(binding.referenceTitle === undefined ? {} : { referenceTitle: binding.referenceTitle }),
       ...(binding.referenceUrl === undefined ? {} : { referenceUrl: binding.referenceUrl }),
+      ...(binding.projectName === undefined ? {} : { projectName: binding.projectName }),
+      ...(binding.currentRevisionId === undefined ? {} : { currentRevisionId: binding.currentRevisionId }),
+      ...(binding.revisionCount === undefined ? {} : { revisionCount: binding.revisionCount }),
       updatedAt: binding.updatedAt,
       authorizationActive,
+      ...(currentSessionId === undefined ? {} : { boundToCurrentSession: binding.sessionId === currentSessionId }),
     }))
 }
 
@@ -1732,6 +1807,60 @@ async function openRecentPrototypeStudio(projectId: string): Promise<void> {
   url.searchParams.set('projectId', project.projectId)
   const window = await chrome.windows?.getLastFocused().catch(() => undefined)
   await chrome.tabs.create({ active: true, ...(Number.isInteger(window?.id) ? { windowId: window!.id } : {}), url: url.toString() })
+}
+
+async function continueRecentPrototypeStudioInSession(projectId: string, sessionId: string): Promise<void> {
+  const project = (await recentPrototypeStudios()).find(item => item.projectId === projectId)
+  if (project === undefined) throw new Error('这个最近原型已不存在或未通过安全校验。')
+  let authorization = await prototypeStudioAuthorization(projectId)
+  if (authorization === undefined) {
+    await recoverPrototypeStudio(projectId, project.referenceId)
+    authorization = await prototypeStudioAuthorization(projectId)
+  }
+  if (authorization === undefined) throw new Error('原型恢复后仍无法取得临时授权，请重试。')
+  const before = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+  if (!recoveredPrototypeSnapshot(before, projectId, project.referenceId, (await prototypeStudioRecoveryBinding(projectId, project.referenceId))?.evidenceFingerprint ?? '') || before.sessionId !== authorization.sessionId) throw new Error('继续项目之前无法确认原项目身份，请重试。')
+  if (authorization.sessionId !== sessionId) {
+    const result = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_REBIND_SESSION_PATH, { expectedSessionId: authorization.sessionId, sessionId })
+    const snapshot = result.snapshot
+    if (result.status !== 'verified_write' || result.projectId !== projectId || result.previousSessionId !== authorization.sessionId || result.sessionId !== sessionId || snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot) || (snapshot as Record<string, unknown>).sessionId !== sessionId) throw new Error('原型没有完成当前对话绑定和回读，请重试。')
+    authorization = { ...authorization, sessionId, openedAt: Date.now() }
+    await rememberPrototypeStudio(authorization)
+    const binding = recoveryBindingFromSnapshot(snapshot as Record<string, unknown>, projectId, project.referenceId)
+    if (binding === undefined || binding.sessionId !== sessionId) throw new Error('原型对话绑定没有生成可恢复记录，请重试。')
+    await rememberPrototypeStudioRecoveryBinding(binding)
+  } else {
+    const binding = recoveryBindingFromSnapshot(before, projectId, project.referenceId)
+    if (binding !== undefined) await rememberPrototypeStudioRecoveryBinding(binding)
+  }
+  await openRecentPrototypeStudio(projectId)
+}
+
+async function authorizedRecentPrototypeStudio(projectId: string): Promise<{ project: RecentPrototypeStudio; authorization: PrototypeStudioAuthorization }> {
+  const project = (await recentPrototypeStudios()).find(item => item.projectId === projectId)
+  if (project === undefined) throw new Error('这个最近原型已不存在或未通过安全校验。')
+  let authorization = await prototypeStudioAuthorization(projectId)
+  if (authorization === undefined) { await recoverPrototypeStudio(projectId, project.referenceId); authorization = await prototypeStudioAuthorization(projectId) }
+  if (authorization === undefined) throw new Error('原型恢复后仍无法取得临时授权，请重试。')
+  return { project, authorization }
+}
+
+async function renameRecentPrototypeStudio(projectId: string, projectName: string): Promise<void> {
+  const { project, authorization } = await authorizedRecentPrototypeStudio(projectId)
+  const result = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_RENAME_PATH, { projectName })
+  const snapshot = result.snapshot
+  if (result.status !== 'verified_write' || result.projectId !== projectId || result.projectName !== projectName.trim() || snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('原型名称没有完成保存和回读，请重试。')
+  const binding = recoveryBindingFromSnapshot(snapshot as Record<string, unknown>, projectId, project.referenceId)
+  if (binding === undefined || binding.projectName !== projectName.trim()) throw new Error('原型名称没有同步到最近项目，请重试。')
+  await rememberPrototypeStudioRecoveryBinding(binding)
+}
+
+async function deleteRecentPrototypeStudio(projectId: string, confirmationProjectId: string): Promise<void> {
+  const { authorization } = await authorizedRecentPrototypeStudio(projectId)
+  const result = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_DELETE_PATH, { confirmationProjectId })
+  if (result.status !== 'verified_delete' || result.projectId !== projectId) throw new Error('原型项目没有完成删除回读，请重试。')
+  await forgetPrototypeStudio(projectId)
+  await forgetPrototypeStudioRecoveryBinding(projectId)
 }
 
 async function prototypeStudioAuthorization(projectId: string): Promise<PrototypeStudioAuthorization | undefined> {
@@ -1751,6 +1880,58 @@ async function prototypeStudioAuthorization(projectId: string): Promise<Prototyp
   return restored
 }
 
+function samePendingPrototypeRecovery(left: PrototypeStudioPendingRecovery, right: PrototypeStudioPendingRecovery): boolean {
+  return left.projectId === right.projectId && left.referenceId === right.referenceId && left.sessionId === right.sessionId
+    && left.evidenceFingerprint === right.evidenceFingerprint && left.expectedRecoveryEpoch === right.expectedRecoveryEpoch
+    && left.capability === right.capability && left.createdAt === right.createdAt && left.expiresAt === right.expiresAt && left.nonce === right.nonce
+}
+
+async function writePendingPrototypeStudioRecoveries(storage: chrome.storage.StorageArea, values: Iterable<unknown>, expected?: PrototypeStudioPendingRecovery): Promise<void> {
+  const retained = retainedPrototypeStudioPendingRecoveries(values)
+  const next = { v: 1 as const, projects: Object.fromEntries(retained.map(item => [item.projectId, item])) }
+  await storage.set({ [PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY]: next })
+  const readback = storedPrototypeStudioPendingRecoveries((await storage.get(PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY])
+  if (expected !== undefined) {
+    const persisted = readback.projects[expected.projectId]
+    if (persisted === undefined || !samePendingPrototypeRecovery(persisted, expected)) throw new Error('浏览器未能回读并确认待恢复授权，请重试。')
+  }
+}
+
+async function rememberPendingPrototypeStudioRecovery(pending: PrototypeStudioPendingRecovery): Promise<void> {
+  await queuePrototypeStudioAuthorizationMutation(async () => {
+    const storage = chrome.storage?.session
+    if (storage === undefined) throw new Error('浏览器不支持临时恢复授权保存，请重试。')
+    const current = storedPrototypeStudioPendingRecoveries((await storage.get(PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY])
+    await writePendingPrototypeStudioRecoveries(storage, [...Object.values(current.projects), pending], pending)
+  })
+}
+
+async function pendingPrototypeStudioRecovery(projectId: string, referenceId?: string): Promise<PrototypeStudioPendingRecovery | undefined> {
+  const storage = chrome.storage?.session
+  if (storage === undefined) return undefined
+  let selected: PrototypeStudioPendingRecovery | undefined
+  await queuePrototypeStudioAuthorizationMutation(async () => {
+    const current = storedPrototypeStudioPendingRecoveries((await storage.get(PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY])
+    await writePendingPrototypeStudioRecoveries(storage, Object.values(current.projects))
+    const candidate = current.projects[projectId]
+    selected = candidate !== undefined && validPrototypeStudioPendingRecovery(candidate) && (referenceId === undefined || candidate.referenceId === referenceId) ? candidate : undefined
+  })
+  return selected
+}
+
+async function clearPendingPrototypeStudioRecovery(pending: PrototypeStudioPendingRecovery): Promise<void> {
+  await queuePrototypeStudioAuthorizationMutation(async () => {
+    const storage = chrome.storage?.session
+    if (storage === undefined) return
+    const current = storedPrototypeStudioPendingRecoveries((await storage.get(PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY])
+    const retained = Object.values(current.projects).filter(item => !samePendingPrototypeRecovery(item, pending))
+    await writePendingPrototypeStudioRecoveries(storage, retained)
+    const readback = storedPrototypeStudioPendingRecoveries((await storage.get(PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_PENDING_RECOVERY_STORAGE_KEY])
+    const remaining = readback.projects[pending.projectId]
+    if (remaining !== undefined && samePendingPrototypeRecovery(remaining, pending)) throw new Error('浏览器未能清理已完成的待恢复授权，请重试。')
+  })
+}
+
 async function sha256TextFingerprint(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
@@ -1761,71 +1942,196 @@ function recoveredPrototypeSnapshot(value: Record<string, unknown>, projectId: s
     && Array.isArray(value.evidence) && (value.evidence[0] as { id?: unknown; fingerprint?: unknown } | undefined)?.id === referenceId
     && (value.evidence[0] as { fingerprint?: unknown } | undefined)?.fingerprint === evidenceFingerprint
 }
+function advancedRecoveryEpoch(value: unknown, expectedRecoveryEpoch: number): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > expectedRecoveryEpoch
+}
+
+function definitelyRejectedPendingRecovery(error: unknown): boolean {
+  const message = asError(error)
+  return /capability is invalid|authorization.*invalid|HTTP (?:401|403|404|409)|does not exist|recovery authority does not match/i.test(message)
+}
+
+async function promotePendingPrototypeStudioRecoveryFlow(projectId: string, referenceId?: string): Promise<Record<string, unknown> | undefined> {
+  const pending = await pendingPrototypeStudioRecovery(projectId, referenceId)
+  if (pending === undefined) return undefined
+  const authorization: PrototypeStudioAuthorization = {
+    projectId: pending.projectId,
+    referenceId: pending.referenceId,
+    sessionId: pending.sessionId,
+    capability: pending.capability,
+    openedAt: pending.createdAt,
+  }
+  let snapshot: Record<string, unknown>
+  try {
+    snapshot = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+  } catch (error) {
+    // Preserve an ambiguous candidate for the next worker wake-up. A definite
+    // Host rejection proves the Host did not commit this candidate, so remove
+    // it before asking Native Host to sign a fresh recovery assertion.
+    if (definitelyRejectedPendingRecovery(error)) {
+      await clearPendingPrototypeStudioRecovery(pending)
+      return undefined
+    }
+    throw error
+  }
+  if (!recoveredPrototypeSnapshot(snapshot, pending.projectId, pending.referenceId, pending.evidenceFingerprint)
+    || snapshot.sessionId !== pending.sessionId || !advancedRecoveryEpoch(snapshot.recoveryEpoch, pending.expectedRecoveryEpoch)) {
+    await clearPendingPrototypeStudioRecovery(pending)
+    return undefined
+  }
+  const binding = recoveryBindingFromSnapshot(snapshot, pending.projectId, pending.referenceId)
+  if (binding === undefined || binding.sessionId !== pending.sessionId || binding.evidenceFingerprint !== pending.evidenceFingerprint || !advancedRecoveryEpoch(binding.recoveryEpoch, pending.expectedRecoveryEpoch)) {
+    await clearPendingPrototypeStudioRecovery(pending)
+    return undefined
+  }
+  // Promotion precedes cleanup. If MV3 stops between these two writes, the
+  // active authorization is already usable; the harmless pending candidate is
+  // removed during a later successful readback.
+  await rememberPrototypeStudio(authorization)
+  await rememberPrototypeStudioRecoveryBinding(binding)
+  await clearPendingPrototypeStudioRecovery(pending)
+  return snapshot
+}
+
+function promotePendingPrototypeStudioRecovery(projectId: string, referenceId?: string): Promise<Record<string, unknown> | undefined> {
+  const activeRecovery = pendingPrototypeStudioRecoveryFlows.get(projectId)
+  if (activeRecovery !== undefined) return activeRecovery
+  return queuePrototypeStudioProjectFlow(projectId, () => promotePendingPrototypeStudioRecoveryFlow(projectId, referenceId))
+}
+
+async function prototypeStudioSnapshotFlow(projectId: string): Promise<Record<string, unknown> | undefined> {
+  const authorization = await prototypeStudioAuthorization(projectId)
+  if (authorization === undefined) return promotePendingPrototypeStudioRecoveryFlow(projectId)
+  try {
+    const snapshot = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+    const binding = recoveryBindingFromSnapshot(snapshot, authorization.projectId, authorization.referenceId)
+    if (binding !== undefined) await rememberPrototypeStudioRecoveryBinding(binding)
+    const pending = await pendingPrototypeStudioRecovery(projectId, authorization.referenceId)
+    if (pending?.capability === authorization.capability) await clearPendingPrototypeStudioRecovery(pending)
+    return snapshot
+  } catch (error) {
+    if (!definitelyRejectedPendingRecovery(error)) throw error
+    // An old active capability can be invalid precisely because the Host
+    // committed the pending rotation immediately before MV3 stopped. Check
+    // that candidate before treating the project as normally expired.
+    return promotePendingPrototypeStudioRecoveryFlow(projectId)
+  }
+}
+
+function prototypeStudioSnapshot(projectId: string): Promise<Record<string, unknown> | undefined> {
+  const activeRecovery = pendingPrototypeStudioRecoveryFlows.get(projectId)
+  if (activeRecovery !== undefined) return activeRecovery
+  return queuePrototypeStudioProjectFlow(projectId, () => prototypeStudioSnapshotFlow(projectId))
+}
 
 async function readLateRecoveredPrototypeSnapshot(base: string, authorization: PrototypeStudioAuthorization, binding: PrototypeStudioRecoveryBinding): Promise<Record<string, unknown> | undefined> {
   const deadline = Date.now() + prototypeRecoveryLateCommitWindowMs()
   while (true) {
     const snapshot = await requestPrototypeHost(base, authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {}).catch(() => undefined)
-    if (snapshot !== undefined && recoveredPrototypeSnapshot(snapshot, authorization.projectId, authorization.referenceId, binding.evidenceFingerprint) && snapshot.sessionId === binding.sessionId && snapshot.recoveryEpoch === binding.recoveryEpoch + 1) return snapshot
+    if (snapshot !== undefined && recoveredPrototypeSnapshot(snapshot, authorization.projectId, authorization.referenceId, binding.evidenceFingerprint) && snapshot.sessionId === binding.sessionId && advancedRecoveryEpoch(snapshot.recoveryEpoch, binding.recoveryEpoch)) return snapshot
     if (Date.now() >= deadline) return undefined
     await delayPrototypeRecoveryReadback(PROTOTYPE_RECOVERY_LATE_COMMIT_POLL_MS)
   }
 }
 
-async function recoverPrototypeStudio(projectId: string, referenceId: string): Promise<Record<string, unknown>> {
+async function recoverPrototypeStudioFlow(projectId: string, referenceId: string): Promise<Record<string, unknown>> {
+  const resumed = await promotePendingPrototypeStudioRecoveryFlow(projectId, referenceId)
+  if (resumed !== undefined) return resumed
   const binding = await prototypeStudioRecoveryBinding(projectId, referenceId)
   if (binding === undefined) throw new Error('恢复所需的项目绑定不存在或校验失败，请重新提取设计规范。')
   const authorization: PrototypeStudioAuthorization = { projectId, referenceId, sessionId: binding.sessionId, capability: `${crypto.randomUUID()}${crypto.randomUUID()}`, openedAt: Date.now() }
   const capabilityFingerprint = await sha256TextFingerprint(authorization.capability)
   const base = nativeUrl ?? await startHarnessForSettings()
   const signed = await requestPrototypeRecoverySignature({ ...binding, capabilityFingerprint })
+  const assertion = signed.assertion
+  const pending: PrototypeStudioPendingRecovery = {
+    projectId,
+    referenceId,
+    sessionId: binding.sessionId,
+    evidenceFingerprint: binding.evidenceFingerprint,
+    expectedRecoveryEpoch: binding.recoveryEpoch,
+    capability: authorization.capability,
+    createdAt: Date.now(),
+    expiresAt: typeof assertion.expiresAt === 'number' ? assertion.expiresAt : Number.NaN,
+    nonce: typeof assertion.nonce === 'string' ? assertion.nonce : '',
+  }
+  if (assertion.projectId !== projectId || assertion.expectedSessionId !== binding.sessionId || assertion.referenceId !== referenceId
+    || assertion.evidenceFingerprint !== binding.evidenceFingerprint || assertion.expectedRecoveryEpoch !== binding.recoveryEpoch
+    || assertion.capabilityFingerprint !== capabilityFingerprint || !validPrototypeStudioPendingRecovery(pending)) {
+    throw new Error('本机恢复授权签名与项目绑定不一致，请重试。')
+  }
+  // This durable candidate is written before the Host request. It never
+  // replaces the working grant, and makes a Host commit recoverable if MV3 is
+  // suspended between `/recover` and the active-authorization write.
+  await rememberPendingPrototypeStudioRecovery(pending)
   const recoveryBody = { assertion: signed.assertion, signature: signed.signature, capability: authorization.capability }
-  // Persist this session-only capability before sending. If the HTTP response
-  // is lost after the Host commits, a Service Worker restart still retains the
-  // exact capability needed for the next snapshot readback.
-  await rememberPrototypeStudio(authorization)
+  // This is deliberately only a local candidate until both the Host's
+  // Verified Write and the new-capability snapshot readback succeed. In
+  // particular, it must not replace an already-working authorization if this
+  // request later loses an epoch race or arrives after another tab's recovery.
   let recovery: Record<string, unknown> | undefined
   try {
     recovery = await requestPrototypeRecovery(base, recoveryBody)
   } catch (error) {
+    // Only a client timeout is ambiguous: the Host may have committed after
+    // the browser stopped waiting. A definite HTTP rejection (for example an
+    // epoch conflict from a late second tab) must fail immediately and leave
+    // the current authorization untouched.
+    if (!(error instanceof PrototypeHostTimeoutError)) {
+      await clearPendingPrototypeStudioRecovery(pending)
+      throw error
+    }
     // A timed-out client can race a Host write that is still committing. Poll
     // with the new session capability, then safely retry the exact signed
     // request once: Host-side nonce handling makes that retry idempotent.
     let uncertainReadback = await readLateRecoveredPrototypeSnapshot(base, authorization, binding)
-    if (uncertainReadback === undefined && error instanceof PrototypeHostTimeoutError) {
+    if (uncertainReadback === undefined) {
       try { recovery = await requestPrototypeRecovery(base, recoveryBody) } catch (retryError) {
         uncertainReadback = await readLateRecoveredPrototypeSnapshot(base, authorization, binding)
-        if (uncertainReadback === undefined) throw retryError
+        if (uncertainReadback === undefined) {
+          if (definitelyRejectedPendingRecovery(retryError)) await clearPendingPrototypeStudioRecovery(pending)
+          throw retryError
+        }
       }
     }
-    if (uncertainReadback !== undefined) recovery = { status: 'verified_write', projectId, sessionId: uncertainReadback.sessionId, referenceId, evidenceFingerprint: binding.evidenceFingerprint, capabilityFingerprint, recoveryEpoch: binding.recoveryEpoch + 1 }
+    if (uncertainReadback !== undefined) recovery = { status: 'verified_write', projectId, sessionId: uncertainReadback.sessionId, referenceId, evidenceFingerprint: binding.evidenceFingerprint, capabilityFingerprint, recoveryEpoch: uncertainReadback.recoveryEpoch }
     else if (recovery === undefined) throw error
   }
-  if (recovery === undefined || recovery.status !== 'verified_write' || recovery.projectId !== projectId || recovery.sessionId !== binding.sessionId || recovery.referenceId !== referenceId || recovery.evidenceFingerprint !== binding.evidenceFingerprint || recovery.capabilityFingerprint !== capabilityFingerprint || recovery.recoveryEpoch !== binding.recoveryEpoch + 1) throw new Error('原型恢复结果没有通过身份和指纹校验，请重试。')
+  if (recovery === undefined || recovery.status !== 'verified_write' || recovery.projectId !== projectId || recovery.sessionId !== binding.sessionId || recovery.referenceId !== referenceId || recovery.evidenceFingerprint !== binding.evidenceFingerprint || recovery.capabilityFingerprint !== capabilityFingerprint || !advancedRecoveryEpoch(recovery.recoveryEpoch, binding.recoveryEpoch)) throw new Error('原型恢复结果没有通过身份和指纹校验，请重试。')
   authorization.sessionId = recovery.sessionId
   const snapshot = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
-  if (!recoveredPrototypeSnapshot(snapshot, projectId, referenceId, binding.evidenceFingerprint) || snapshot.sessionId !== authorization.sessionId || snapshot.recoveryEpoch !== binding.recoveryEpoch + 1) throw new Error('原型恢复后未能完成同项目回读，请勿继续操作并重试。')
+  if (!recoveredPrototypeSnapshot(snapshot, projectId, referenceId, binding.evidenceFingerprint) || snapshot.sessionId !== authorization.sessionId || snapshot.recoveryEpoch !== recovery.recoveryEpoch) throw new Error('原型恢复后未能完成同项目回读，请勿继续操作并重试。')
   await rememberPrototypeStudio(authorization)
   const rebound = recoveryBindingFromSnapshot(snapshot, projectId, referenceId)
   if (rebound === undefined) throw new Error('原型恢复后未能确认项目绑定，请勿继续操作并重试。')
   await rememberPrototypeStudioRecoveryBinding(rebound)
+  await clearPendingPrototypeStudioRecovery(pending)
   return snapshot
 }
 
-async function captureDesignReference(browserTarget: BrowserTarget, sessionId: string): Promise<{ referenceId: string; projectId: string }> {
+function recoverPrototypeStudio(projectId: string, referenceId: string): Promise<Record<string, unknown>> {
+  const active = pendingPrototypeStudioRecoveryFlows.get(projectId)
+  if (active !== undefined) return active
+  const flow = queuePrototypeStudioProjectFlow(projectId, () => recoverPrototypeStudioFlow(projectId, referenceId))
+  pendingPrototypeStudioRecoveryFlows.set(projectId, flow)
+  void flow.then(
+    () => { if (pendingPrototypeStudioRecoveryFlows.get(projectId) === flow) pendingPrototypeStudioRecoveryFlows.delete(projectId) },
+    () => { if (pendingPrototypeStudioRecoveryFlows.get(projectId) === flow) pendingPrototypeStudioRecoveryFlows.delete(projectId) },
+  )
+  return flow
+}
+
+/** Read an explicitly selected Browser Target without changing the user's tab.
+ * Chrome only permits a visible screenshot of the already active tab; inactive
+ * pages retain verified DOM/CSS evidence and are clearly shown without a shot.
+ */
+async function captureDesignReferenceEvidence(browserTarget: BrowserTarget) {
   const before = await chrome.tabs.get(browserTarget.tabId)
   const liveBefore = targetFromActionTab(before)
   if (liveBefore === undefined || !sameBrowserTarget(liveBefore, browserTarget)) {
     throw new Error('参考网页已经切换或关闭。请刷新 Browser Target 后重试。')
   }
   if (before.status !== 'complete') throw new Error('参考网页仍在加载，请等待页面加载完成后重试。')
-  await chrome.tabs.update(browserTarget.tabId, { active: true })
-  const [active] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
-  const activeTarget = active === undefined ? undefined : targetFromActionTab(active)
-  if (activeTarget === undefined || !sameBrowserTarget(activeTarget, browserTarget)) {
-    throw new Error('浏览器无法切换到要截图的参考网页，请刷新 Browser Target 后重试。')
-  }
-
   const captureModule = await import('../src/design-reference-capture')
   const executions = await chrome.scripting.executeScript({
     target: { tabId: browserTarget.tabId },
@@ -1835,27 +2141,13 @@ async function captureDesignReference(browserTarget: BrowserTarget, sessionId: s
   const raw = executions[0]?.result
   const [visibleBeforeScreenshot] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
   const visibleTargetBeforeScreenshot = visibleBeforeScreenshot === undefined ? undefined : targetFromActionTab(visibleBeforeScreenshot)
-  if (visibleTargetBeforeScreenshot === undefined || !sameBrowserTarget(visibleTargetBeforeScreenshot, browserTarget)) {
-    throw new Error('截图前参考网页被切换，本次没有保存。请保持该标签页不动后重试。')
-  }
-  let activeTabChangedDuringScreenshot = false
-  const recordScreenshotTabChange = (activeInfo: { tabId: number; windowId: number }): void => {
-    if (activeInfo.windowId === browserTarget.windowId && activeInfo.tabId !== browserTarget.tabId) activeTabChangedDuringScreenshot = true
-  }
-  chrome.tabs.onActivated.addListener(recordScreenshotTabChange)
-  let screenshotDataUrl: string
-  try {
+  // Older single-reference builds rejected "截图前参考网页被切换" here. Multi-reference capture deliberately skips the screenshot instead, so it never activates another tab.
+  let screenshotDataUrl: string | undefined
+  if (visibleTargetBeforeScreenshot !== undefined && sameBrowserTarget(visibleTargetBeforeScreenshot, browserTarget)) {
     screenshotDataUrl = await chrome.tabs.captureVisibleTab(browserTarget.windowId, { format: 'jpeg', quality: 60 })
-  } finally {
-    chrome.tabs.onActivated.removeListener(recordScreenshotTabChange)
-  }
-  if (activeTabChangedDuringScreenshot) {
-    throw new Error('截图期间参考网页曾被切换，本次没有保存。请保持该标签页不动后重试。')
-  }
-  const [visibleAfterScreenshot] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
-  const visibleTargetAfterScreenshot = visibleAfterScreenshot === undefined ? undefined : targetFromActionTab(visibleAfterScreenshot)
-  if (visibleTargetAfterScreenshot === undefined || !sameBrowserTarget(visibleTargetAfterScreenshot, browserTarget)) {
-    throw new Error('截图时参考网页被切换，本次没有保存。请保持该标签页不动后重试。')
+    const [visibleAfterScreenshot] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
+    const visibleTargetAfterScreenshot = visibleAfterScreenshot === undefined ? undefined : targetFromActionTab(visibleAfterScreenshot)
+    if (visibleTargetAfterScreenshot === undefined || !sameBrowserTarget(visibleTargetAfterScreenshot, browserTarget)) throw new Error('截图期间参考网页被切换，本次没有保存。请保持该标签页不动后重试。')
   }
   const after = await chrome.tabs.get(browserTarget.tabId)
   const liveAfter = targetFromActionTab(after)
@@ -1863,43 +2155,151 @@ async function captureDesignReference(browserTarget: BrowserTarget, sessionId: s
     throw new Error('提取过程中参考网页发生变化，本次没有保存。请等待页面稳定后重试。')
   }
   const evidence = await captureModule.buildReferenceEvidence(raw, screenshotDataUrl)
+  return evidence
+}
+
+async function persistCapturedReferenceEvidence(evidence: Awaited<ReturnType<typeof captureDesignReferenceEvidence>>[]): Promise<{ storageKey: string; previous: unknown }> {
+  const captureModule = await import('../src/design-reference-capture')
   const storageKey = captureModule.PROTOTYPE_REFERENCE_STORAGE_KEY
-  const current = storedPrototypeReferences((await chrome.storage.local.get(storageKey))[storageKey])
-  const references = { ...current.references, [evidence.id]: evidence }
+  const before = await chrome.storage.local.get(storageKey)
+  const previous = before[storageKey]
+  const current = storedPrototypeReferences(previous)
+  const references = { ...current.references, ...Object.fromEntries(evidence.map(item => [item.id, item])) }
   const retained = retainedPrototypeReferences(references)
   await chrome.storage.local.set({ [storageKey]: { v: 1, references: retained } })
-  const readback = storedPrototypeReferences((await chrome.storage.local.get(storageKey))[storageKey]).references[evidence.id] as { fingerprint?: unknown; screenshotFingerprint?: unknown } | undefined
-  if (readback?.fingerprint !== evidence.fingerprint || readback.screenshotFingerprint !== evidence.screenshotFingerprint) {
-    throw new Error('浏览器未能回读并确认刚才保存的设计规范，请重试。')
+  const readback = storedPrototypeReferences((await chrome.storage.local.get(storageKey))[storageKey]).references
+  for (const item of evidence) {
+    const stored = readback[item.id] as { fingerprint?: unknown; screenshotFingerprint?: unknown } | undefined
+    if (stored?.fingerprint !== item.fingerprint || stored.screenshotFingerprint !== item.screenshotFingerprint) throw new Error('浏览器未能回读并确认刚才保存的设计规范，请重试。')
   }
-  const authorization: PrototypeStudioAuthorization = { projectId: `prototype-${crypto.randomUUID()}`, referenceId: evidence.id, sessionId, capability: `${crypto.randomUUID()}${crypto.randomUUID()}`, openedAt: Date.now() }
-  const { screenshotDataUrl: _screenshot, ...hostEvidence } = evidence
-  const opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId, evidence: [hostEvidence] })
+  return { storageKey, previous }
+}
+
+async function restoreCapturedReferenceEvidence(snapshot: { storageKey: string; previous: unknown }): Promise<void> {
+  if (snapshot.previous === undefined) await chrome.storage.local.remove(snapshot.storageKey)
+  else await chrome.storage.local.set({ [snapshot.storageKey]: snapshot.previous })
+  const readback = (await chrome.storage.local.get(snapshot.storageKey))[snapshot.storageKey]
+  if (JSON.stringify(readback) !== JSON.stringify(snapshot.previous)) throw new Error('合并提取失败后无法恢复原有参考网页存储，请停止重试并检查浏览器存储。')
+}
+
+async function openCapturedPrototype(evidence: Awaited<ReturnType<typeof captureDesignReferenceEvidence>>[], sessionId: string, windowId: number): Promise<{ referenceId: string; projectId: string }> {
+  const primary = evidence[0]
+  if (primary === undefined) throw new Error('没有可用于创建原型项目的参考网页。')
+  const storageSnapshot = await persistCapturedReferenceEvidence(evidence)
+  const authorization: PrototypeStudioAuthorization = { projectId: `prototype-${crypto.randomUUID()}`, referenceId: primary.id, sessionId, capability: `${crypto.randomUUID()}${crypto.randomUUID()}`, openedAt: Date.now() }
+  const hostEvidence = evidence.map(item => { const { screenshotDataUrl: _screenshot, ...safe } = item; return safe })
+  let opened: Record<string, unknown>
+  try { opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId, evidence: hostEvidence }) } catch (error) {
+    await restoreCapturedReferenceEvidence(storageSnapshot)
+    throw error
+  }
   await rememberPrototypeStudio(authorization)
   const binding = recoveryBindingFromSnapshot(opened, authorization.projectId, authorization.referenceId)
   if (binding === undefined) throw new Error('原型项目未能确认恢复绑定，请重试。')
   await rememberPrototypeStudioRecoveryBinding(binding)
   const studioUrl = new URL(chrome.runtime.getURL('prototype-studio.html'))
-  studioUrl.searchParams.set('referenceId', evidence.id)
+  studioUrl.searchParams.set('referenceId', primary.id)
   studioUrl.searchParams.set('projectId', authorization.projectId)
-  await chrome.tabs.create({ windowId: browserTarget.windowId, active: true, url: studioUrl.toString() })
-  return { referenceId: evidence.id, projectId: authorization.projectId }
+  await chrome.tabs.create({ windowId, active: true, url: studioUrl.toString() })
+  return { referenceId: primary.id, projectId: authorization.projectId }
+}
+
+async function captureDesignReference(browserTarget: BrowserTarget, sessionId: string): Promise<{ referenceId: string; projectId: string }> {
+  const evidence = await captureDesignReferenceEvidence(browserTarget)
+  return openCapturedPrototype([evidence], sessionId, browserTarget.windowId)
+}
+
+async function waitForResponsiveCaptureTab(tabId: number, expected: URL, timeoutMs = 20_000): Promise<chrome.tabs.Tab> {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const tab = await chrome.tabs.get(tabId)
+    if (tab.status === 'complete' && typeof tab.url === 'string') {
+      const actual = new URL(tab.url)
+      if (actual.origin !== expected.origin || actual.pathname !== expected.pathname) throw new Error('临时测试窗口被重定向到其他页面，多尺寸实测已停止。')
+      return tab
+    }
+    if (Date.now() >= deadline) throw new Error('临时测试窗口加载超时，多尺寸实测已停止。')
+    await new Promise(resolve => setTimeout(resolve, 80))
+  }
+}
+
+function measureResponsiveViewport(): { width: number; height: number } { return { width: Math.round(innerWidth), height: Math.round(innerHeight) } }
+
+async function responsiveViewport(tabId: number): Promise<{ width: number; height: number }> {
+  const measured = (await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', func: measureResponsiveViewport }))[0]?.result
+  if (measured === null || typeof measured !== 'object' || !Number.isSafeInteger((measured as { width?: unknown }).width) || !Number.isSafeInteger((measured as { height?: unknown }).height)) throw new Error('无法读取临时测试窗口的实际页面尺寸。')
+  return measured as { width: number; height: number }
+}
+
+async function setResponsiveViewport(windowId: number, tabId: number, width: number, height: number): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const measured = await responsiveViewport(tabId)
+    if (Math.abs(measured.width - width) <= 2 && Math.abs(measured.height - height) <= 2) return
+    const current = await chrome.windows.get(windowId)
+    await chrome.windows.update(windowId, { width: Math.max(320, (current.width ?? width) + width - measured.width), height: Math.max(480, (current.height ?? height) + height - measured.height) })
+    await new Promise(resolve => setTimeout(resolve, 80))
+  }
+  const measured = await responsiveViewport(tabId)
+  if (Math.abs(measured.width - width) > 2 || Math.abs(measured.height - height) > 2) throw new Error(`无法把临时测试窗口校准到 ${width}×${height}px。`)
+}
+
+async function captureResponsiveDesignReference(browserTarget: BrowserTarget, sessionId: string, onProgress: (current: number) => void): Promise<{ referenceId: string; projectId: string }> {
+  const sourceTab = await chrome.tabs.get(browserTarget.tabId)
+  const live = targetFromActionTab(sourceTab)
+  if (live === undefined || !sameBrowserTarget(live, browserTarget) || sourceTab.status !== 'complete') throw new Error('参考网页已经切换、关闭或仍在加载，请刷新后重试。')
+  const expected = new URL(browserTarget.url)
+  if (!['http:', 'https:'].includes(expected.protocol)) throw new Error('只有普通网页可以进行多尺寸实测。')
+  const targets = [{ label: '桌面', width: 1280, height: 800 }, { label: '平板', width: 768, height: 900 }, { label: '手机', width: 390, height: 780 }]
+  const created = await chrome.windows.create({ url: browserTarget.url, type: 'popup', focused: false, width: 1280, height: 900 })
+  if (created === undefined) throw new Error('无法创建临时多尺寸测试窗口。')
+  const windowId = created.id; const tabId = created.tabs?.[0]?.id
+  if (!Number.isSafeInteger(windowId) || !Number.isSafeInteger(tabId)) { if (Number.isSafeInteger(windowId)) await chrome.windows.remove(windowId!); throw new Error('无法创建临时多尺寸测试窗口。') }
+  const evidence = [] as Awaited<ReturnType<typeof captureDesignReferenceEvidence>>[]
+  try {
+    await waitForResponsiveCaptureTab(tabId!, expected)
+    const captureModule = await import('../src/design-reference-capture')
+    for (const [index, target] of targets.entries()) {
+      onProgress(index + 1)
+      await setResponsiveViewport(windowId!, tabId!, target.width, target.height)
+      const raw = (await chrome.scripting.executeScript({ target: { tabId: tabId! }, world: 'ISOLATED', func: captureModule.captureDesignReferencePage }))[0]?.result
+      const item = await captureModule.buildReferenceEvidence(raw, undefined)
+      if (Math.abs(item.viewport.width - target.width) > 2 || Math.abs(item.viewport.height - target.height) > 2) throw new Error(`${target.label}尺寸没有按实际 ${target.width}×${target.height}px 完成采集。`)
+      evidence.push(item)
+    }
+  } finally {
+    await chrome.windows.remove(windowId!).catch(() => {})
+  }
+  return openCapturedPrototype(evidence, sessionId, browserTarget.windowId)
+}
+
+async function captureDesignReferences(browserTargets: BrowserTarget[], sessionId: string, onProgress: (current: number, tabId: number) => void): Promise<{ referenceId: string; projectId: string }> {
+  if (browserTargets.length < 2 || browserTargets.length > 3 || new Set(browserTargets.map(item => item.tabId)).size !== browserTargets.length) throw new Error('请独立选择 2 到 3 个不同网页后再合并提取。')
+  const evidence = [] as Awaited<ReturnType<typeof captureDesignReferenceEvidence>>[]
+  for (const [index, target] of browserTargets.entries()) {
+    onProgress(index + 1, target.tabId)
+    try { evidence.push(await captureDesignReferenceEvidence(target)) } catch (error) { throw new Error(`第 ${index + 1} 页“${target.url}”提取失败；没有创建原型项目。${asError(error)}`) }
+  }
+  return openCapturedPrototype(evidence, sessionId, browserTargets[0]!.windowId)
 }
 
 async function createPrototypeVariant(source: PrototypeStudioAuthorization, windowId: number): Promise<{ referenceId: string; projectId: string }> {
-  const captureModule = await import('../src/design-reference-capture')
-  const stored = storedPrototypeReferences((await chrome.storage.local.get(captureModule.PROTOTYPE_REFERENCE_STORAGE_KEY))[captureModule.PROTOTYPE_REFERENCE_STORAGE_KEY])
-  const checked = validateReferenceEvidence(stored.references[source.referenceId])
-  if (!checked.ok || !(await verifyReferenceEvidenceFingerprint(checked.value))) throw new Error('已保存的参考网页证据不存在或校验失败，请重新提取设计规范。')
+  const sourceSnapshot = await prototypeHostRequest(source, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+  const sourceEvidence = [] as Awaited<ReturnType<typeof captureDesignReferenceEvidence>>[]
+  if (!Array.isArray(sourceSnapshot.evidence) || sourceSnapshot.evidence.length < 1 || sourceSnapshot.evidence.length > 3) throw new Error('已保存的参考网页证据不存在或校验失败，请重新提取设计规范。')
+  for (const item of sourceSnapshot.evidence) {
+    const checked = validateReferenceEvidence(item)
+    if (!checked.ok || !(await verifyReferenceEvidenceFingerprint(checked.value))) throw new Error('已保存的参考网页证据不存在或校验失败，请重新提取设计规范。')
+    sourceEvidence.push(checked.value)
+  }
   const authorization: PrototypeStudioAuthorization = {
     projectId: `prototype-${crypto.randomUUID()}`,
-    referenceId: source.referenceId,
+    referenceId: sourceEvidence[0]!.id,
     sessionId: source.sessionId,
     capability: `${crypto.randomUUID()}${crypto.randomUUID()}`,
     openedAt: Date.now(),
   }
-  const { screenshotDataUrl: _screenshot, ...hostEvidence } = checked.value
-  const opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId: authorization.sessionId, evidence: [hostEvidence] })
+  const hostEvidence = sourceEvidence.map(item => { const { screenshotDataUrl: _screenshot, ...safe } = item; return safe })
+  const opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId: authorization.sessionId, evidence: hostEvidence })
   await rememberPrototypeStudio(authorization)
   const binding = recoveryBindingFromSnapshot(opened, authorization.projectId, authorization.referenceId)
   if (binding === undefined) throw new Error('新设计方案未能确认恢复绑定，请重试。')
@@ -3419,89 +3819,30 @@ async function writeTeamDocInWebEdit(body: string, readOnly = false): Promise<un
     return { ok: false, failedAt: readOnly ? 'readback' : 'write', error: readOnly ? 'team_knowledge_document_persisted_readback_wrong_origin' : 'team_doc_wrong_webedit_origin' }
   }
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
-  const decodeXml = (xml: string) => {
-    const text = xml.replace(/<codeBlock\b[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/codeBlock>/gi, '$1\n')
-      .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>\s*<\/(t[dh])>/gi, '</$1>')
-      .replace(/<\/t[dh]>/gi, '\t').replace(/<\/tr>/gi, '\n')
-      .replace(/<\/(p|outlineTitle|li|table|blockquote|pre|h[1-6])>/gi, '\n')
-      .replace(/<[^>]+>/g, '').replace(/\t+\n/g, '\n').replace(/\n{2,}/g, '\n').trim()
-    const decoder = document.createElement('textarea'); decoder.innerHTML = text
-    return decoder.value
-  }
   try {
     let app: any = null
+    let batchRuntime: {
+      teamKnowledgeBatchReplace?: (markdown: string) => Promise<unknown>
+      teamKnowledgeBatchVerify?: (markdown: string) => Promise<unknown>
+    } | undefined
     const deadline = Date.now() + 30_000
     while (Date.now() < deadline) {
       app = (globalThis as typeof globalThis & { APP?: unknown }).APP
-      if (app?.openApi?.editor?.canvas?.getDocXml && (readOnly || app?.openApi?.editor?.document?.selection?.insertContent)) break
+      batchRuntime = (globalThis as typeof globalThis & { __deepseekHarnessLightDocumentRuntime?: typeof batchRuntime }).__deepseekHarnessLightDocumentRuntime
+      if (app?.openApi?.editor?.canvas?.getDocXml && typeof (readOnly ? batchRuntime?.teamKnowledgeBatchVerify : batchRuntime?.teamKnowledgeBatchReplace) === 'function') break
       await wait(100)
     }
-    const selection = app?.openApi?.editor?.document?.selection
-    const canvas = app?.openApi?.editor?.canvas
-    if (!canvas?.getDocXml || (!readOnly && !selection?.insertContent)) return { ok: false, failedAt: readOnly ? 'readback' : 'write', error: readOnly ? 'team_knowledge_document_persisted_readback_unavailable' : 'team_doc_webedit_runtime_unavailable' }
-    const beforeXml = await canvas.getDocXml()
-    let afterXml = beforeXml
+    const batchOperation = readOnly ? batchRuntime?.teamKnowledgeBatchVerify : batchRuntime?.teamKnowledgeBatchReplace
+    if (!app?.openApi?.editor?.canvas?.getDocXml || typeof batchOperation !== 'function') return { ok: false, failedAt: readOnly ? 'readback' : 'write', error: readOnly ? 'team_knowledge_document_persisted_readback_unavailable' : 'team_doc_webedit_runtime_unavailable' }
+    const outcome = await batchOperation(body) as {
+      ok?: unknown; error?: { code?: unknown }; observed?: { observedBody?: unknown }
+    }
+    if (outcome?.ok !== true || typeof outcome.observed?.observedBody !== 'string') {
+      const code = typeof outcome?.error?.code === 'string' ? outcome.error.code : 'runtime_error'
+      const failedAt = code === 'readback_mismatch' ? 'readback' : readOnly ? 'readback' : 'write'
+      return { ok: false, failedAt, error: readOnly ? `team_knowledge_document_persisted_${code}` : `team_doc_batch_replace_${code}` }
+    }
     if (!readOnly) {
-      // Match the public WebEdit Markdown call shape. Explicit false
-      // positioning flags can move editor selection state without inserting
-      // the content, which is observable only through the strict readback.
-      await selection!.insertContent({ markdown: body })
-    }
-    const visibleText = (value: string) => value
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-      .replace(/`([^`]*)`/g, '$1')
-      .replace(/\*\*([^*]+)\*\*/g, '$1')
-      .replace(/__([^_]+)__/g, '$1')
-      .replace(/~~([^~]+)~~/g, '$1')
-      .trim()
-    const visibleFragments = body.replace(/<!--[\s\S]*?-->/g, '').split(/\n+/).flatMap((sourceLine) => {
-      const line = sourceLine.trim()
-      if (!line) return []
-      if (/^(?:`{3,}|~{3,}|-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return []
-      if (/^\|.*\|$/.test(line)) {
-        const cells = line.slice(1, -1).split('|').map((cell) => visibleText(cell))
-        if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) return []
-        return [cells.join('\t')]
-      }
-      const heading = /^#{1,6}\s+/.test(line)
-      const withoutBlockPrefix = line.replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
-        .replace(/^(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, '')
-      const withoutHeadingNumber = heading
-        ? withoutBlockPrefix.replace(/^\d+(?:\.\d+)*[.)、．]?\s+/, '')
-        : withoutBlockPrefix
-      const fragment = visibleText(withoutHeadingNumber)
-      return fragment ? [fragment] : []
-    }).filter(Boolean)
-    // WebEdit serializes a large insert in several XML updates. A first XML
-    // change proves only that serialization started, not that every visible
-    // fragment (including tables and Mermaid text) can be read back.
-    const readbackStartedAt = Date.now()
-    const readbackDeadline = readbackStartedAt + 15_000
-    const minimumObservationMs = 5_000
-    const stableXmlMs = 2_000
-    let lastXml: string | undefined
-    let lastXmlChangedAt = readbackStartedAt
-    let observedBody = ''
-    let readbackMatches = false
-    while (Date.now() <= readbackDeadline) {
-      afterXml = await canvas.getDocXml()
-      if (typeof afterXml === 'string') {
-        if (afterXml !== lastXml) {
-          lastXml = afterXml
-          lastXmlChangedAt = Date.now()
-        }
-        observedBody = decodeXml(afterXml)
-        readbackMatches = observedBody.length > 0 && visibleFragments.length > 0 && visibleFragments.every((fragment) => observedBody.includes(fragment))
-        if (readbackMatches) break
-      }
-      const elapsed = Date.now() - readbackStartedAt
-      if (elapsed >= minimumObservationMs && Date.now() - lastXmlChangedAt >= stableXmlMs) break
-      await wait(100)
-    }
-    if (typeof afterXml !== 'string') return { ok: false, failedAt: 'readback', error: readOnly ? 'team_knowledge_document_persisted_readback_unavailable' : 'team_doc_readback_mismatch' }
-    if (!readOnly && afterXml === beforeXml) return { ok: false, failedAt: 'write', error: 'team_doc_write_not_observed' }
-    if (readbackMatches && !readOnly) {
       // An XML change proves only the editor's in-memory state. Give WebEdit's
       // asynchronous save/sync cycle a bounded chance to settle before the
       // caller leaves this page. The caller still reopens the same catalogId
@@ -3528,9 +3869,7 @@ async function writeTeamDocInWebEdit(body: string, readOnly = false): Promise<un
         await wait(100)
       }
     }
-    return readbackMatches
-      ? { ok: true, readbackMatches: true, observedBody }
-      : { ok: false, failedAt: 'readback', error: readOnly ? 'team_knowledge_document_persisted_readback_mismatch' : 'team_doc_readback_mismatch', observedBody }
+    return { ok: true, readbackMatches: true, observedBody: outcome.observed.observedBody }
   } catch {
     return { ok: false, failedAt: readOnly ? 'readback' : 'write', error: readOnly ? 'team_knowledge_document_persisted_readback_failed' : 'team_doc_webedit_write_failed' }
   }
@@ -3743,9 +4082,15 @@ function teamDocWebEditReadbackMatches(result: TeamDocWebEditReadback | undefine
   return result?.ok === true && result.readbackMatches === true && typeof result.observedBody === 'string'
 }
 
+function teamDocWebEditReadbackPollWindowMs(): number {
+  // Test-only bounded override; production has no such global and keeps 10s.
+  const configured = Number((globalThis as typeof globalThis & { __DSH_TEAM_DOC_READBACK_POLL_WINDOW_MS?: unknown }).__DSH_TEAM_DOC_READBACK_POLL_WINDOW_MS)
+  return Number.isFinite(configured) && configured >= 0 ? Math.min(configured, 10_000) : 10_000
+}
+
 async function pollTeamDocWebEditReadback(tabId: number, frameId: number, body: string, first: TeamDocWebEditReadback | undefined): Promise<TeamDocWebEditReadback | undefined> {
   let result = first
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + teamDocWebEditReadbackPollWindowMs()
   while (true) {
     if (teamDocWebEditReadbackMatches(result)) return result
     if (result?.failedAt !== 'readback' || Date.now() >= deadline) return result
@@ -3873,7 +4218,11 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
     await chrome.tabs.update(request.browserTarget.tabId, { url: created.url }); await waitForTeamDocTab(request.browserTarget.tabId, created.url)
     const reopenedFrame = await waitForTeamDocWritableFrame(request.browserTarget.tabId)
     if (!reopenedFrame) throw new Error('team_knowledge_webedit_frame_unavailable')
-    const persistedReadback = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [reopenedFrame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!, true] }))[0]?.result as TeamDocWebEditReadback | undefined
+    const initialPersistedReadback = (await chrome.scripting.executeScript({ target: { tabId: request.browserTarget.tabId, frameIds: [reopenedFrame.frameId] }, world: 'MAIN', func: writeTeamDocInWebEdit, args: [request.body!, true] }))[0]?.result as TeamDocWebEditReadback | undefined
+    // Reopening reaches the same resource, but WebEdit can expose its frame
+    // before its persisted XML has hydrated. Reuse the bounded read-only poll;
+    // an empty or mismatched body remains a failed Verified Write after 10s.
+    const persistedReadback = await pollTeamDocWebEditReadback(request.browserTarget.tabId, reopenedFrame.frameId, request.body!, initialPersistedReadback)
     if (!teamDocWebEditReadbackMatches(persistedReadback)) throw new Error(typeof persistedReadback?.error === 'string' ? persistedReadback.error : 'team_knowledge_document_persisted_readback_mismatch')
     readback = { body: persistedReadback.observedBody }
     if (!stages.includes('readback_verified')) stages.push('readback_verified')
@@ -4522,7 +4871,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown; projectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -4764,9 +5113,34 @@ export default defineBackground(() => {
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
+    if (request.type === 'capture-responsive-design-reference/v1') {
+      if (!isSidePanelSender(sender) || !isBrowserTarget(request.browserTarget) || !validSessionIdentity(request.sessionId)) {
+        sendResponse({ ok: false, error: '多尺寸实测需要可信侧栏、Harness 对话和明确参考网页。' })
+        return false
+      }
+      const browserTarget = request.browserTarget
+      void captureResponsiveDesignReference(browserTarget, request.sessionId, current => { void chrome.runtime.sendMessage({ type: 'design-reference-capture-progress/v1', current, total: 3, tabId: browserTarget.tabId }).catch(() => {}) })
+        .then(({ referenceId, projectId }) => sendResponse({ ok: true, referenceId, projectId }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'capture-design-references/v1') {
+      if (!isSidePanelSender(sender) || !Array.isArray(request.browserTargets) || request.browserTargets.length < 2 || request.browserTargets.length > 3 || !request.browserTargets.every(isBrowserTarget) || new Set(request.browserTargets.map(item => item.tabId)).size !== request.browserTargets.length || !validSessionIdentity(request.sessionId)) {
+        sendResponse({ ok: false, error: 'A trusted Side Panel, Harness session, and two to three explicit Browser Targets are required.' })
+        return false
+      }
+      const browserTargets = request.browserTargets as BrowserTarget[]
+      void captureDesignReferences(browserTargets, request.sessionId, (current, tabId) => {
+        void chrome.runtime.sendMessage({ type: 'design-reference-capture-progress/v1', current, total: browserTargets.length, tabId }).catch(() => {})
+      })
+        .then(({ referenceId, projectId }) => sendResponse({ ok: true, referenceId, projectId }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
     if (request.type === 'prototype-studio-recent/v1') {
-      if (!isSidePanelSender(sender) || Object.keys(request).length !== 1) { sendResponse({ ok: false, error: '最近原型请求无效。' }); return false }
-      void recentPrototypeStudios()
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || !keys.every(key => ['type', 'sessionId'].includes(key)) || keys.length > 2 || (request.sessionId !== undefined && !validSessionIdentity(request.sessionId))) { sendResponse({ ok: false, error: '最近原型请求无效。' }); return false }
+      void recentPrototypeStudios(typeof request.sessionId === 'string' ? request.sessionId : undefined)
         .then(projects => sendResponse({ ok: true, projects }))
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
@@ -4778,18 +5152,34 @@ export default defineBackground(() => {
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
+    if (request.type === 'prototype-studio-continue-current/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'projectId', 'sessionId'].includes(key)) || typeof request.projectId !== 'string' || !validSessionIdentity(request.sessionId)) { sendResponse({ ok: false, error: '在当前对话继续的请求无效。' }); return false }
+      void continueRecentPrototypeStudioInSession(request.projectId, request.sessionId)
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-rename/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'projectId', 'projectName'].includes(key)) || typeof request.projectId !== 'string' || typeof request.projectName !== 'string' || request.projectName.trim().length < 1 || request.projectName.trim().length > 80) { sendResponse({ ok: false, error: '重命名原型的请求无效。' }); return false }
+      void renameRecentPrototypeStudio(request.projectId, request.projectName.trim()).then(() => sendResponse({ ok: true })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-delete/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'projectId', 'confirmationProjectId'].includes(key)) || typeof request.projectId !== 'string' || request.confirmationProjectId !== request.projectId) { sendResponse({ ok: false, error: '删除原型需要确认当前项目。' }); return false }
+      void deleteRecentPrototypeStudio(request.projectId, request.confirmationProjectId).then(() => sendResponse({ ok: true })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
     if (request.type === 'prototype-studio-snapshot/v1') {
       if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId)) { sendResponse({ ok: false, error: '原型页面身份或项目参数无效，请重新打开原型工具。' }); return false }
-      void prototypeStudioAuthorization(request.projectId).then(authorization => {
-        if (authorization === undefined) {
+      void prototypeStudioSnapshot(request.projectId).then(snapshot => {
+        if (snapshot === undefined) {
           sendResponse({ ok: false, code: 'prototype_authorization_expired', recoveryAvailable: true, error: '当前浏览器授权已过期，但原型和历史版本仍安全保留。请点击“恢复已有项目”。' })
           return undefined
         }
-        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {}).then(async snapshot => {
-          const binding = recoveryBindingFromSnapshot(snapshot, authorization.projectId, authorization.referenceId)
-          if (binding !== undefined) await rememberPrototypeStudioRecoveryBinding(binding)
-          return snapshot
-        })
+        return snapshot
       })
         .then(snapshot => { if (snapshot !== undefined) sendResponse({ ok: true, snapshot }) })
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
@@ -4869,6 +5259,28 @@ export default defineBackground(() => {
         if (result.status !== 'verified_write' || productBrief(result.productBrief) === undefined || result.productBriefFingerprint !== expectedFingerprint || await sha256Fingerprint(result.productBrief) !== expectedFingerprint) throw new Error('产品需求清单没有完成安全保存和同内容回读，请重试。')
         return result
       }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-suggest-brief/v1') {
+      const keys = Object.keys(request)
+      if (keys.length !== 3 || !keys.every(key => ['type', 'projectId', 'requestId'].includes(key)) || typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.requestId !== 'string' || !/^[A-Za-z0-9._:-]{8,160}$/.test(request.requestId)) { sendResponse({ ok: false, error: 'AI 整理产品需求的请求无效，请刷新后重试。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(async authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请先恢复已有项目。')
+        const snapshot = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+        if (snapshot.designConfirmed !== true) throw new Error('请先确认参考网页的设计规范。')
+        if (snapshot.generationAttempt !== undefined) throw new Error('当前正在生成原型，请完成或停止后再整理需求。')
+        const began = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_BEGIN_BRIEF_SUGGESTION_PATH, { requestId: request.requestId })
+        if (began.status !== 'verified_write' || began.requestId !== request.requestId) throw new Error('需求整理请求没有完成安全登记，请重试。')
+        try {
+          const response = await chrome.runtime.sendMessage({ type: 'prototype-studio-brief-suggestion-forward/v1', payload: { projectId: authorization.projectId, sessionId: authorization.sessionId, requestId: request.requestId } }) as { ok?: boolean; error?: string } | undefined
+          if (response?.ok !== true) throw new Error(response?.error ?? 'Harness 对话没有接受需求整理请求。')
+        } catch (error) {
+          // The short-lived Host request expires automatically. It deliberately
+          // remains pending here so a late, already accepted Agent result can
+          // still be validated against the same request id.
+          throw error
+        }
+      }).then(() => sendResponse({ ok: true })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
     if (request.type === 'prototype-studio-prompt/v1') {
