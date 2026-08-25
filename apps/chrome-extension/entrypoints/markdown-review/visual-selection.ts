@@ -32,6 +32,9 @@ export interface VisualTableContext {
   selectedColumnStart: number
   selectedColumnEnd: number
   isWholeTable: boolean
+  /** First row and data rows are editor-native cell text, not source offsets. */
+  header: string[]
+  rows: string[][]
 }
 
 export interface VisualSelection {
@@ -41,7 +44,7 @@ export interface VisualSelection {
   to: number
   blocks: VisualBlockContext[]
   table?: VisualTableContext
-  limitReason?: 'quote_too_long' | 'too_many_blocks' | 'multiple_tables' | 'table_selection_requires_whole_table' | 'invalid_table_structure'
+  limitReason?: 'quote_too_long' | 'too_many_blocks' | 'multiple_tables' | 'table_context_too_large' | 'invalid_table_structure'
 }
 
 type SelectionDocument = Pick<ProseNode, 'textBetween'> & { content: { size: number } }
@@ -68,6 +71,8 @@ const BLOCK_KINDS = new Set<VisualBlockKind>([
 ])
 const MAX_SELECTION_BLOCKS = 24
 const MAX_SELECTION_QUOTE_LENGTH = 8_000
+const MAX_TABLE_CONTEXT_ROWS = 100
+const MAX_TABLE_CONTEXT_TEXT_LENGTH = 8_000
 
 function blockKind(node: ProseNode): VisualBlockKind {
   if (node.type.name === 'table_header') return 'table_cell'
@@ -88,6 +93,28 @@ function intersects(from: number, to: number, rangeFrom: number, rangeTo: number
   return from < rangeTo && to > rangeFrom
 }
 
+function focusPositions(selection: Selection): number[] {
+  const selectionWithEndpoints = selection as Selection & {
+    anchor?: unknown
+    head?: unknown
+    $anchor?: { pos?: unknown }
+    $head?: { pos?: unknown }
+    $anchorCell?: { pos?: unknown }
+    $headCell?: { pos?: unknown }
+  }
+  const cellEndpoints = [
+    selectionWithEndpoints.$anchorCell?.pos,
+    selectionWithEndpoints.$headCell?.pos,
+  ].filter((position): position is number => typeof position === 'number' && Number.isSafeInteger(position) && position >= 0)
+  if (cellEndpoints.length > 0) return [...new Set(cellEndpoints)]
+  return [...new Set([
+    selectionWithEndpoints.anchor,
+    selectionWithEndpoints.head,
+    selectionWithEndpoints.$anchor?.pos,
+    selectionWithEndpoints.$head?.pos,
+  ].filter((position): position is number => typeof position === 'number' && Number.isSafeInteger(position) && position >= 0))]
+}
+
 function tableContextFor(doc: ProseNode, selection: Selection): { table?: VisualTableContext; limitReason?: VisualSelection['limitReason'] } {
   if (typeof doc.descendants !== 'function') return {}
   const tables: Array<{ node: ProseNode; from: number }> = []
@@ -98,17 +125,19 @@ function tableContextFor(doc: ProseNode, selection: Selection): { table?: Visual
   if (tables.length > 1) return { limitReason: 'multiple_tables' }
 
   const { node: table, from } = tables[0]
-  const rows: Array<Array<{ from: number; to: number }>> = []
+  const rows: Array<Array<{ from: number; to: number; text: string }>> = []
   let rowPosition = from + 1
   let columnCount: number | undefined
   let invalid = false
   table.forEach((row) => {
-    if (row.type.name !== 'table_row') { invalid = true; return }
-    const cells: Array<{ from: number; to: number }> = []
+    // Milkdown GFM serializes the Markdown header as a distinct
+    // `table_header_row`, followed by ordinary `table_row` data rows.
+    if (row.type.name !== 'table_header_row' && row.type.name !== 'table_row') { invalid = true; return }
+    const cells: Array<{ from: number; to: number; text: string }> = []
     let cellPosition = rowPosition + 1
     row.forEach((cell) => {
       if (cell.type.name !== 'table_cell' && cell.type.name !== 'table_header') invalid = true
-      cells.push({ from: cellPosition, to: cellPosition + cell.nodeSize })
+      cells.push({ from: cellPosition, to: cellPosition + cell.nodeSize, text: nodeText(cell) })
       cellPosition += cell.nodeSize
     })
     if (cells.length === 0 || (columnCount !== undefined && columnCount !== cells.length)) invalid = true
@@ -117,10 +146,23 @@ function tableContextFor(doc: ProseNode, selection: Selection): { table?: Visual
     rowPosition += row.nodeSize
   })
   if (invalid || rows.length === 0 || columnCount === undefined) return { limitReason: 'invalid_table_structure' }
+  const cellTextLength = rows.flat().reduce((total, cell) => total + cell.text.length, 0)
+  if (rows.length > MAX_TABLE_CONTEXT_ROWS || cellTextLength > MAX_TABLE_CONTEXT_TEXT_LENGTH) return { limitReason: 'table_context_too_large' }
 
-  const selected = rows.flatMap((cells, row) => cells.flatMap((cell, column) =>
+  const intersected = rows.flatMap((cells, row) => cells.flatMap((cell, column) =>
     intersects(selection.from, selection.to, cell.from + 1, cell.to - 1) ? [{ row, column }] : [],
   ))
+  // CellSelection exposes endpoint positions before cells, while TextSelection
+  // uses text positions inside them. Prefer those endpoints so a rectangular
+  // multi-row cell selection does not accidentally claim every intervening
+  // linear cell as the user's focus.
+  const focused = focusPositions(selection).flatMap(position => rows.flatMap((cells, row) => {
+    const column = cells.findIndex(cell => position === cell.from)
+    if (column >= 0) return [{ row, column }]
+    const textColumn = cells.findIndex(cell => position > cell.from && position < cell.to)
+    return textColumn >= 0 ? [{ row, column: textColumn }] : []
+  }))
+  const selected = focused.length === 0 ? intersected : [...new Map(focused.map(item => [`${item.row}:${item.column}`, item])).values()]
   if (selected.length === 0) return { limitReason: 'invalid_table_structure' }
   const firstCell = rows[0][0]
   const lastCell = rows.at(-1)?.at(-1)
@@ -135,10 +177,10 @@ function tableContextFor(doc: ProseNode, selection: Selection): { table?: Visual
     selectedColumnStart: Math.min(...selected.map(({ column }) => column)),
     selectedColumnEnd: Math.max(...selected.map(({ column }) => column)),
     isWholeTable: selection.from <= firstCell.from + 1 && selection.to >= lastCell.to - 1,
+    header: rows[0].map(cell => cell.text),
+    rows: rows.slice(1).map(row => row.map(cell => cell.text)),
   }
-  return tableContext.isWholeTable
-    ? { table: tableContext }
-    : { table: tableContext, limitReason: 'table_selection_requires_whole_table' }
+  return { table: tableContext }
 }
 
 function markdownTableCells(line: string): string[] | undefined {

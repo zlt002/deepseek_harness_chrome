@@ -71,8 +71,21 @@ export interface VisualSelectionAnchor {
   to: number
   quote: string
   blocks: Array<{ kind: string; text: string }>
-  table?: { from: number; to: number; rowCount: number; columnCount: number; selectedRowStart: number; selectedRowEnd: number; selectedColumnStart: number; selectedColumnEnd: number; isWholeTable: boolean }
+  table?: VisualTableContext
   sourceFingerprint: string
+}
+export interface VisualTableContext {
+  from: number
+  to: number
+  rowCount: number
+  columnCount: number
+  selectedRowStart: number
+  selectedRowEnd: number
+  selectedColumnStart: number
+  selectedColumnEnd: number
+  isWholeTable: boolean
+  header: string[]
+  rows: string[][]
 }
 
 export type MarkdownSelectionAnchor = SelectionAnchor | VisualSelectionAnchor
@@ -267,7 +280,7 @@ export function isVisualSelectionAnchor(value: unknown): value is VisualSelectio
 }
 
 function isVisualTableContext(value: unknown): boolean {
-  if (!isRecord(value) || !Object.keys(value).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable'].includes(key))) return false
+  if (!isRecord(value) || !Object.keys(value).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable', 'header', 'rows'].includes(key))) return false
   const table = value as Record<string, unknown>
   return Number.isSafeInteger(table.from) && Number.isSafeInteger(table.to) && (table.from as number) >= 0 && (table.to as number) > (table.from as number)
     && Number.isSafeInteger(table.rowCount) && (table.rowCount as number) > 0
@@ -277,6 +290,12 @@ function isVisualTableContext(value: unknown): boolean {
     && Number.isSafeInteger(table.selectedColumnStart) && Number.isSafeInteger(table.selectedColumnEnd)
     && (table.selectedColumnStart as number) >= 0 && (table.selectedColumnEnd as number) >= (table.selectedColumnStart as number) && (table.selectedColumnEnd as number) < (table.columnCount as number)
     && typeof table.isWholeTable === 'boolean'
+    && validTableRow(table.header, table.columnCount as number)
+    && Array.isArray(table.rows) && table.rows.length + 1 === table.rowCount && table.rows.every(row => validTableRow(row, table.columnCount as number))
+}
+
+function validTableRow(value: unknown, columnCount: number): boolean {
+  return Array.isArray(value) && value.length === columnCount && value.every(cell => boundedText(cell, 2_000, true))
 }
 
 export function isMarkdownSelectionAnchor(value: unknown): value is MarkdownSelectionAnchor {

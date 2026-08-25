@@ -86,12 +86,12 @@ test('serializes whole-table bounds and tells AI not to return a single table ro
     displayPath: 'docs/table.md', revision: 'revision-table', fingerprint: 'fingerprint-table', comment: '删除客户系，保留客户名称',
     anchor: {
       version: 2, editorRevision: 7, from: 12, to: 72, quote: '字段\n客户系\n客户名称(全称)', blocks: [{ kind: 'table_cell', text: '客户系' }],
-      table: { from: 10, to: 80, rowCount: 3, columnCount: 2, selectedRowStart: 0, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: true },
+      table: { from: 10, to: 80, rowCount: 3, columnCount: 2, selectedRowStart: 1, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: false, header: ['字段', '类型'], rows: [['客户系', '文本输入'], ['客户名称(全称)', '文本输入']] },
       sourceFingerprint: 'fingerprint-table',
     },
   }])
   const payload = JSON.parse(prompt.match(/<workspace_markdown_annotations>\n([\s\S]*?)\n<\/workspace_markdown_annotations>/)?.[1] ?? '')
-  assert.deepEqual(payload.annotations[0].table, { from: 10, to: 80, rowCount: 3, columnCount: 2, selectedRowStart: 0, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: true })
+  assert.deepEqual(payload.annotations[0].table, { from: 10, to: 80, rowCount: 3, columnCount: 2, selectedRowStart: 1, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: false, header: ['字段', '类型'], rows: [['客户系', '文本输入'], ['客户名称(全称)', '文本输入']] })
   assert.match(prompt, /不要返回单独的一行表格/)
 })
 

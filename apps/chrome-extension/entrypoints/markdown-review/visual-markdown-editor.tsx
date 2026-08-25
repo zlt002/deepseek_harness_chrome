@@ -3,7 +3,7 @@ import { commandsCtx, editorViewCtx } from '@milkdown/kit/core'
 import { acceptAllDiffsCmd, clearDiffReviewCmd, diffPluginKey, getPendingChanges, startDiffReviewCmd, startDiffReviewFromDocCmd } from '@milkdown/kit/plugin/diff'
 import { redoCommand, undoCommand } from '@milkdown/kit/plugin/history'
 import { endStreamingCmd, pushChunkCmd, startStreamingCmd } from '@milkdown/kit/plugin/streaming'
-import { Plugin, PluginKey, TextSelection, type Selection } from '@milkdown/kit/prose/state'
+import { NodeSelection, Plugin, PluginKey, TextSelection, type Selection } from '@milkdown/kit/prose/state'
 import { Decoration, DecorationSet, type EditorView } from '@milkdown/kit/prose/view'
 import { $prose } from '@milkdown/kit/utils'
 import type React from 'react'
@@ -212,7 +212,7 @@ function selectionLimitMessage(selection: VisualSelection): string | undefined {
   if (selection.limitReason === 'too_many_blocks') return '选区超过 24 个内容块，请缩小范围'
   if (selection.limitReason === 'multiple_tables') return '一次只能批注一张表格，请缩小选区'
   if (selection.limitReason === 'invalid_table_structure') return '该表格结构无法安全修改，请改用完整、规范的 Markdown 表格'
-  if (selection.limitReason === 'table_selection_requires_whole_table') return '表格批注需选中完整表格；AI 必须返回含表头和分隔行的完整 Markdown 表格'
+  if (selection.limitReason === 'table_context_too_large') return '表格内容过大，暂不能安全提交给 AI；请缩小到一张较小表格'
   return undefined
 }
 
@@ -401,16 +401,18 @@ export const VisualMarkdownEditor = forwardRef<VisualMarkdownEditorHandle, Visua
       reviewSelectionReplacement(selection, replacementMarkdown) {
         const crepe = readyCrepe()
         if (crepe === undefined || replacementMarkdown.length > 2_000_000) return false
-        if (selection.table !== undefined && (!selection.table.isWholeTable || !isCompleteTableMarkdown(replacementMarkdown, selection.table.columnCount))) return false
+        if (selection.table !== undefined && !isCompleteTableMarkdown(replacementMarkdown, selection.table.columnCount)) return false
         const started = crepe.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx)
           if (!canRestoreVisualSelection(view.state.doc, selection, revisionRef.current)) return false
           const commands = ctx.get(commandsCtx)
+          const replacementFrom = selection.table?.from ?? selection.from
+          const replacementTo = selection.table?.to ?? selection.to
           if (replacementMarkdown === '') {
             // `pushChunkCmd('')` has no candidate document to hand to the diff
             // plugin. A deletion is nevertheless a real proposal, so create its
             // candidate directly and enter the same review state as any other AI edit.
-            const candidateDoc = view.state.tr.delete(selection.from, selection.to).doc
+            const candidateDoc = view.state.tr.delete(replacementFrom, replacementTo).doc
             return commands.call(startDiffReviewFromDocCmd.key, candidateDoc)
           }
 
@@ -418,9 +420,10 @@ export const VisualMarkdownEditor = forwardRef<VisualMarkdownEditorHandle, Visua
           // its candidate in a detached EditorState, then start review against the
           // untouched visible document. That prevents an intermediate full-document
           // restore from dropping inline review decorations.
-          let candidateState = view.state.apply(
-            view.state.tr.setSelection(TextSelection.create(view.state.doc, selection.from, selection.to)),
-          )
+          const candidateSelection = selection.table === undefined
+            ? TextSelection.create(view.state.doc, replacementFrom, replacementTo)
+            : NodeSelection.create(view.state.doc, replacementFrom)
+          let candidateState = view.state.apply(view.state.tr.setSelection(candidateSelection))
           const callOnCandidate = <Payload,>(key: Parameters<typeof commands.get>[0], payload: Payload): boolean => {
             const command = commands.get(key)(payload)
             return command(candidateState, (transaction) => { candidateState = candidateState.apply(transaction) })

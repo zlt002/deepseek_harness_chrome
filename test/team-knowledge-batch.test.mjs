@@ -33,6 +33,21 @@ function verified(request, id) {
   return { status: 'verified_write', item: { catalogId: id, kind: 'light_document', name: request.name, url: `https://doc.midea.com/teamKnowledge/detail/docOnline/${id}?id=${id}`, fingerprint: `item-${id}` }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readback: { body: request.body } }
 }
 
+function lightDocumentRead(request) {
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: 'Batch document', fingerprint: 'light-document-v1' }
+  if (request.action === 'write') {
+    const fragments = request.payload.blocks.map((block) => block.text)
+    return {
+      status: 'verified_write', resource: { ...resource, fingerprint: 'light-document-v2' }, requested: { operation: request.operation, payload: request.payload },
+      observed: { verified: true, verifiedFragments: fragments, fragmentEvidence: fragments.map((fragment) => ({ fragment, blockIds: ['block-1'] })), observedBlocks: [{ id: 'block-1', type: 'p', text: fragments.join(' ') }], replacedTagIds: ['block-1'] },
+    }
+  }
+  const selection = request.action === 'selection'
+    ? { supported: true, stable: true, truncated: false, hasSelection: true, isCollapsed: false, wholeBlockReplaceable: true, selectionFingerprint: 'selection-v4-1234567890abcdef1234567890abcdef', selectedTagIds: ['block-1'], content: { text: '旧内容' } }
+    : undefined
+  return { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ id: 'block-1', type: 'p', text: '旧内容' }], ...(selection ? { selection } : {}) } }
+}
+
 async function open(responder, responseTarget = (request) => request.browserTarget) {
   const directory = await mkdtemp(join(tmpdir(), 'team-knowledge-batch-'))
   const batchStore = new TeamKnowledgeBatchRecordStore({ recordPath: join(directory, 'batch.json') })
@@ -364,13 +379,13 @@ test('resumes the same document when persisted reopen readback is empty once', a
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('resumes the same empty document when the initial WebEdit body readback mismatches', async () => {
+test('resumes the same empty document after the exact batch replace invalid-range failure', async () => {
   let createAttempts = 0
   const recoveries = []
   const harness = await open((request) => request.action === 'inspect_parent'
     ? { status: 'ok', parent, capabilities: { light_document: true } }
     : (recoveries.push(request.recovery), ++createAttempts === 1)
-      ? { status: 'partial_delivery', item: { catalogId: '92', kind: 'light_document', name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/92?id=92', fingerprint: 'item-92' }, stages: ['parent_inspected', 'created', 'rediscovered'], failedAt: 'readback', error: 'team_doc_readback_mismatch' }
+      ? { status: 'partial_delivery', item: { catalogId: '92', kind: 'light_document', name: request.name, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/92?id=92', fingerprint: 'item-92' }, stages: ['parent_inspected', 'created', 'rediscovered'], failedAt: 'readback', error: 'team_doc_batch_replace_invalid_range' }
       : verified(request, '92'))
   try {
     const items = [{ name: 'Empty PRD recovery', body: '# Empty PRD recovery' }]
@@ -378,7 +393,7 @@ test('resumes the same empty document when the initial WebEdit body readback mis
     const failed = await create(harness, 'batch-empty-prd-retry', first.result.structuredContent.challenge)
     assert.equal(failed.result.isError, true)
     assert.match(failed.result.content[0].text, /^未完成：/)
-    assert.match(failed.result.content[0].text, /正文未通过编辑器回读校验[\s\S]*可重试：是/)
+    assert.match(failed.result.content[0].text, /新建空白文档没有可替换的标题区块[\s\S]*可重试：是/)
     const second = await preview(harness, 'batch-empty-prd-retry', items, 3)
     const resumed = await create(harness, 'batch-empty-prd-retry', second.result.structuredContent.challenge, 4)
     assert.equal(resumed.result.structuredContent.status, 'verified_write')
@@ -386,6 +401,96 @@ test('resumes the same empty document when the initial WebEdit body readback mis
     assert.equal(recoveries[0], undefined)
     assert.deepEqual(recoveries[1], { catalogId: '92', stages: ['parent_inspected', 'created', 'rediscovered'] })
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('fences generic light-document mutations for an incomplete batch target, but permits reads and same-batch recovery', async () => {
+  const documentTarget = { ...target, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/92?id=92' }
+  let createAttempts = 0
+  const genericRequests = []
+  const harness = await open((request) => {
+    if (request.tool === 'light_document') {
+      genericRequests.push(request)
+      return lightDocumentRead(request)
+    }
+    if (request.action === 'inspect_parent') return { status: 'ok', parent, capabilities: { light_document: true } }
+    return ++createAttempts === 1
+      ? { status: 'partial_delivery', item: { catalogId: '92', kind: 'light_document', name: request.name, url: documentTarget.url, fingerprint: 'item-92' }, stages: ['parent_inspected', 'created', 'rediscovered'], failedAt: 'readback', error: 'team_doc_readback_mismatch' }
+      : verified(request, '92')
+  })
+  try {
+    const items = [{ name: 'Empty PRD recovery', body: '# Empty PRD recovery' }]
+    const first = await preview(harness, 'batch-empty-prd-fence', items)
+    const failed = await create(harness, 'batch-empty-prd-fence', first.result.structuredContent.challenge)
+    assert.equal(failed.result.structuredContent.status, 'partial_delivery')
+    assert.match(failed.result.content[0].text, /可重试：是/)
+    assert.equal(failed.result.structuredContent.batch.items[0].retryable, true)
+
+    harness.connector.bindBrowserTarget('batch-run', documentTarget)
+    const read = await harness.callTool('light_document_read', 3, {})
+    assert.equal(read.result.structuredContent.status, 'ok', 'reads remain available for diagnosis')
+    for (const [name, arguments_] of [
+      ['light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'p', text: '不得绕过批量恢复' }] } }],
+      ['light_document_write_commit', { challenge: 'stale-generic-challenge' }],
+      ['light_document_selection_replace_preview', { blocks: [{ type: 'p', text: '不得绕过批量恢复' }] }],
+      ['light_document_selection_replace_commit', { challenge: 'stale-selection-challenge' }],
+    ]) {
+      const blocked = await harness.callTool(name, 4 + genericRequests.length, arguments_)
+      assert.equal(blocked.result.isError, true, `${name} must fail closed`)
+      assert.match(blocked.result.content[0].text, /team_knowledge_batch_incomplete_write_fence[\s\S]*batch-empty-prd-fence/)
+    }
+    assert.equal(genericRequests.length, 1, 'only the read may reach the Extension while recovery is incomplete')
+
+    const second = await preview(harness, 'batch-empty-prd-fence', items, 9)
+    const resumed = await create(harness, 'batch-empty-prd-fence', second.result.structuredContent.challenge, 10)
+    assert.equal(resumed.result.structuredContent.status, 'verified_write')
+    assert.equal(createAttempts, 2)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('does not fence stage-eight selection edits after the batch is fully completed', async () => {
+  const documentTarget = { ...target, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/93?id=93' }
+  const genericRequests = []
+  const harness = await open((request) => {
+    if (request.tool === 'light_document') {
+      genericRequests.push(request)
+      return lightDocumentRead(request)
+    }
+    return request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '93')
+  })
+  try {
+    const items = [{ name: 'Completed PRD', body: '# Completed PRD' }]
+    const first = await preview(harness, 'batch-completed-stage-eight', items)
+    const completed = await create(harness, 'batch-completed-stage-eight', first.result.structuredContent.challenge)
+    assert.equal(completed.result.structuredContent.status, 'verified_write')
+    harness.connector.bindBrowserTarget('batch-run', documentTarget)
+    const previewSelectionEdit = await harness.callTool('light_document_selection_replace_preview', 3, { blocks: [{ type: 'p', text: '阶段8选区更新' }] })
+    assert.equal(previewSelectionEdit.result.isError, undefined)
+    assert.equal(typeof previewSelectionEdit.result.structuredContent.challenge, 'string')
+    const commitSelectionEdit = await harness.callTool('light_document_selection_replace_commit', 4, { challenge: previewSelectionEdit.result.structuredContent.challenge })
+    assert.equal(commitSelectionEdit.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(genericRequests.map((request) => request.action), ['selection', 'write'])
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('keeps the incomplete-batch write fence after a Native Connector restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'team-knowledge-batch-fence-restart-'))
+  const batchStore = new TeamKnowledgeBatchRecordStore({ recordPath: join(directory, 'batch.json') })
+  const documentTarget = { ...target, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/94?id=94' }
+  await batchStore.create({
+    batchId: 'batch-persisted-fence', targetFingerprint: 'target-fingerprint', contentFingerprint: 'content-fingerprint',
+    items: [{ index: 0, name: 'Interrupted PRD', idempotencyIdentity: 'batch-item-94', contentHash: 'content-hash', status: 'failed', catalogId: '94', stages: ['parent_inspected', 'created', 'rediscovered'], error: 'team_doc_batch_replace_invalid_range' }],
+  })
+  let extensionRequests = 0
+  const connector = new BrowserConnector({ teamKnowledgeBatchStore: batchStore, requestExtension: () => { extensionRequests += 1 } })
+  connector.bindBrowserTarget('restarted-batch-run', documentTarget)
+  const endpoint = await connector.start()
+  try {
+    const response = await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'light_document_write_preview', arguments: { operation: 'blocks_insert', payload: { blocks: [{ type: 'p', text: '不得绕过恢复' }] } } } }), signal: AbortSignal.timeout(5_000) })
+    const blocked = await response.json()
+    assert.equal(blocked.result.isError, true)
+    assert.match(blocked.result.content[0].text, /team_knowledge_batch_incomplete_write_fence[\s\S]*batch-persisted-fence/)
+    assert.equal(extensionRequests, 0)
+  } finally { await connector.stop(); await rm(directory, { recursive: true, force: true }) }
 })
 
 test('uses the inspect-migrated Browser Target for batch grants, fingerprints, and every create', async () => {

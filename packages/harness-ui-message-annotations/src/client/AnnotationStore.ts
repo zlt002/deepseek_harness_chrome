@@ -38,6 +38,8 @@ export interface VisualMarkdownTableContext {
   readonly selectedColumnStart: number
   readonly selectedColumnEnd: number
   readonly isWholeTable: boolean
+  readonly header: readonly string[]
+  readonly rows: readonly (readonly string[])[]
 }
 export type WorkspaceMarkdownAnchor = MarkdownSelectionAnchor | VisualMarkdownSelectionAnchor
 
@@ -207,7 +209,7 @@ function validWorkspaceFeedback(value: WorkspaceMarkdownFeedbackInput): boolean 
 function validVisualTableContext(value: unknown): value is VisualMarkdownTableContext {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const table = value as Record<string, unknown>
-  return Object.keys(table).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable'].includes(key))
+  return Object.keys(table).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable', 'header', 'rows'].includes(key))
     && Number.isSafeInteger(table.from) && Number.isSafeInteger(table.to) && (table.from as number) >= 0 && (table.to as number) > (table.from as number)
     && Number.isSafeInteger(table.rowCount) && (table.rowCount as number) > 0 && Number.isSafeInteger(table.columnCount) && (table.columnCount as number) > 0
     && Number.isSafeInteger(table.selectedRowStart) && Number.isSafeInteger(table.selectedRowEnd)
@@ -215,4 +217,10 @@ function validVisualTableContext(value: unknown): value is VisualMarkdownTableCo
     && Number.isSafeInteger(table.selectedColumnStart) && Number.isSafeInteger(table.selectedColumnEnd)
     && (table.selectedColumnStart as number) >= 0 && (table.selectedColumnEnd as number) >= (table.selectedColumnStart as number) && (table.selectedColumnEnd as number) < (table.columnCount as number)
     && typeof table.isWholeTable === 'boolean'
+    && validVisualTableRow(table.header, table.columnCount as number)
+    && Array.isArray(table.rows) && table.rows.length + 1 === table.rowCount && table.rows.every(row => validVisualTableRow(row, table.columnCount as number))
+}
+
+function validVisualTableRow(value: unknown, columnCount: number): boolean {
+  return Array.isArray(value) && value.length === columnCount && value.every(cell => boundedText(cell, 2_000, true))
 }

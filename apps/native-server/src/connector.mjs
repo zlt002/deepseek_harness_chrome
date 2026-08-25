@@ -1123,6 +1123,16 @@ function teamKnowledgeVisibleText(value) {
     .replace(/~~([^~]+)~~/g, '$1')
     .trim()
 }
+function teamKnowledgeCatalogIdFromBrowserTarget(browserTarget) {
+  if (!validBrowserTarget(browserTarget)) return null
+  try {
+    const url = new URL(browserTarget.url)
+    const match = /^\/teamKnowledge\/detail\/docOnline\/(\d+)\/?$/.exec(url.pathname)
+    if (url.origin !== 'https://doc.midea.com' || !match) return null
+    const queryCatalogId = url.searchParams.get('id')
+    return queryCatalogId === null || queryCatalogId === match[1] ? match[1] : null
+  } catch { return null }
+}
 function teamKnowledgeLightDocumentReadbackMatches(body, observedBody) {
   if (typeof observedBody !== 'string' || observedBody.trim().length === 0) return false
   const fragments = body.replace(/<!--[\s\S]*?-->/g, '').split(/\n+/).flatMap((sourceLine) => {
@@ -1160,6 +1170,9 @@ function teamKnowledgeBatchFailure(item) {
   }
   if (/team_doc_readback_mismatch/i.test(error) && item.catalogId && item.stages.includes('rediscovered')) {
     return { stage, reason: '文档目录已创建，但正文未通过编辑器回读校验；将复用同一文档继续写入。', retryable: true }
+  }
+  if (error === 'team_doc_batch_replace_invalid_range') {
+    return { stage, reason: '新建空白文档没有可替换的标题区块；将复用同一文档按原批次恢复写入。', retryable: true }
   }
   if (/team_knowledge_user_confirmation_(?:stopped|declined|timeout|page_unloaded|unavailable)/i.test(error)) {
     return { stage, reason: '该文档尚未获得用户页面确认，已停止后续文档处理。', retryable: true }
@@ -2008,6 +2021,12 @@ export class BrowserConnector {
     const runId = currentBinding?.runId
     const browserTarget = currentBinding?.browserTarget
     if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    let batchWriteFence
+    try { batchWriteFence = await this.#incompleteTeamKnowledgeBatchWriteFence(browserTarget) } catch (error) {
+      this.#toolError(response, message.id, error instanceof Error ? error.message : 'Could not read the Team Knowledge batch recovery fence.')
+      return
+    }
+    if (batchWriteFence) { this.#toolError(response, message.id, batchWriteFence); return }
     if (this.uncertainSelectionWrite?.runId === runId && this.uncertainSelectionWrite.generation === this.generation
       && sameBrowserTarget(this.uncertainSelectionWrite.browserTarget, browserTarget)) {
       this.#toolError(response, message.id, 'Selected-content write is uncertain after failed readback. Stop automatic recovery, report the exact error, and wait for a new Browser Target or Run before another write.')
@@ -2072,6 +2091,15 @@ export class BrowserConnector {
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document selection preview failed')
     }
+  }
+
+  async #incompleteTeamKnowledgeBatchWriteFence(browserTarget) {
+    const catalogId = teamKnowledgeCatalogIdFromBrowserTarget(browserTarget)
+    if (!catalogId) return null
+    const matches = await this.teamKnowledgeBatchStore.findIncompleteItemsByCatalogId(catalogId)
+    if (matches.length === 0) return null
+    const batchIds = [...new Set(matches.map((match) => match.batchId))]
+    return `team_knowledge_batch_incomplete_write_fence: This docOnline/${catalogId} document belongs to unfinished batch ${batchIds.join(', ')}. Do not use generic light_document mutation tools; reads remain available. Resume the same batch with team_knowledge_batch_preview and team_knowledge_batch_create using batchId ${batchIds.join(', ')}.`
   }
 
   async #lightDocument(message, response) {

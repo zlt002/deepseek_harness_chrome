@@ -830,6 +830,43 @@ test('team-knowledge batch document replacement atomically removes a prefilled P
   assert.equal((state.xml.match(/旧模板占位/g) ?? []).length, 0)
 })
 
+test('team-knowledge batch document replacement initializes a completely blank child document in one CanvasPatch', async () => {
+  const state = {}
+  const generatedPrd = '# 产业带摸排表格线上化 PRD\n\n## 背景与目标\n\n完成线上化。'
+  const call = await runtime({ state, initialXml: '<apcanvas></apcanvas>' })
+  const before = await call({ action: 'read' })
+  const result = await call({
+    action: 'write', operation: 'team_knowledge_batch_replace', resource: before.result.resource,
+    payload: { markdown: generatedPrd, replaceScope: 'team_knowledge_batch_document' },
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.result.observed.verified, true)
+  assert.equal(state.patchCalls, 1)
+  assert.equal((state.xml.match(/<outlineTitle\b/gi) ?? []).length, 1)
+  const after = await call({ action: 'read' })
+  assert.equal(after.result.document.blocks.map((block) => `${block.type}:${block.text}`).join('|'), 'h1:产业带摸排表格线上化 PRD|h2:背景与目标|p:完成线上化。')
+})
+
+test('team-knowledge batch document replacement fails closed for ambiguous title structure', async () => {
+  const markdown = '# PRD\n\n正文'
+  for (const initialXml of [
+    '<apcanvas><outlineTitle id="one">标题一</outlineTitle><outlineTitle id="two">标题二</outlineTitle></apcanvas>',
+    '<apcanvas><p id="body">已有正文</p></apcanvas>',
+  ]) {
+    const state = {}
+    const call = await runtime({ state, initialXml })
+    const before = await call({ action: 'read' })
+    const result = await call({
+      action: 'write', operation: 'team_knowledge_batch_replace', resource: before.result.resource,
+      payload: { markdown, replaceScope: 'team_knowledge_batch_document' },
+    })
+    assert.equal(result.ok, false, JSON.stringify(result))
+    assert.equal(result.error.code, 'invalid_range')
+    assert.equal(state.patchCalls ?? 0, 0)
+    assert.equal(state.xml, initialXml)
+  }
+})
+
 test('reads keep inline closing tags on one line inside a paragraph', async () => {
   const call = await runtime({ initialXml: '<apcanvas><p id="b1"><span><strong>多级标题</strong>：清晰的内容层级结构</span></p></apcanvas>' })
   const read = await call({ action: 'read' })

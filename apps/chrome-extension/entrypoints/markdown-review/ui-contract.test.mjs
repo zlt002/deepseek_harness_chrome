@@ -76,6 +76,13 @@ test('official Crepe code and image blocks retain their component layout instead
   assert.match(style, /\.mermaid-preview\s*\{[\s\S]*width: 100%(?![\s\S]*max-width: 960px)/)
 })
 
+test('table cell text does not inherit a rounded editor box from generic node selection styling', () => {
+  assert.match(style, /\.visual-markdown-editor \.milkdown \.ProseMirror table\s*\{[\s\S]*border-collapse:\s*collapse/)
+  assert.match(style, /\.visual-markdown-editor \.milkdown \.ProseMirror th,\s*\.visual-markdown-editor \.milkdown \.ProseMirror td\s*\{[\s\S]*border:\s*1px solid/)
+  assert.match(style, /\.visual-markdown-editor \.milkdown \.ProseMirror table (?:th|td)\s*>\s*\.ProseMirror-selectednode\s*\{[\s\S]*outline:\s*none !important;[\s\S]*box-shadow:\s*none !important;[\s\S]*border-radius:\s*0 !important/)
+  assert.match(style, /\.visual-markdown-editor \.milkdown \.ProseMirror table (?:th|td):has\(> \.ProseMirror-selectednode\)\s*\{[\s\S]*outline:\s*1px solid/)
+})
+
 test('active AI diffs show before and after with visible accept and reject controls', () => {
   assert.match(main, /candidateReviewActive/)
   assert.match(main, /修改前/)

@@ -93,6 +93,20 @@ export class TeamKnowledgeBatchRecordStore {
   #serial(work) { const next = this.queue.then(work, work); this.queue = next.then(() => undefined, () => undefined); return next }
 
   async load(batchId) { const data = await this.#read(); const value = data.batches?.[batchId]; return value ? clone(value) : null }
+  /** Return every unfinished batch item that owns this exact Team Knowledge catalog id. */
+  async findIncompleteItemsByCatalogId(catalogId) {
+    if (typeof catalogId !== 'string' || !/^\d+$/.test(catalogId)) return []
+    const data = await this.#read()
+    const matches = []
+    for (const [batchId, value] of Object.entries(data.batches ?? {})) {
+      const batch = normalizeRecord(value)
+      if (batch.status === 'completed') continue
+      for (const item of batch.items) {
+        if (item.catalogId === catalogId) matches.push({ batchId, batchStatus: batch.status, item })
+      }
+    }
+    return clone(matches)
+  }
   async create(input) {
     return this.#serial(async () => {
       const candidate = normalizeRecord(input); const data = await this.#read(); data.batches ??= {}

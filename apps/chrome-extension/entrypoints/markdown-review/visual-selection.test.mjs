@@ -92,8 +92,44 @@ test('table selections retain cell-level structure without treating inner paragr
     from: 5, to: 52, rowCount: 3, columnCount: 2,
     selectedRowStart: 1, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1,
     isWholeTable: false,
+    header: ['表头 A', '表头 B'],
+    rows: [['客户系', '文本输入'], ['客户名称(全称)', '文本输入']],
   })
-  assert.equal(selection.limitReason, 'table_selection_requires_whole_table')
+  assert.equal(selection.limitReason, undefined)
+})
+
+test('normalizes a TextSelection inside one Milkdown GFM table cell to its table row and column focus', () => {
+  const cell = (text, name = 'table_cell') => ({ isBlock: true, type: { name }, content: { size: text.length }, nodeSize: text.length + 2, textBetween: () => text })
+  const row = (cells, name) => ({ type: { name }, nodeSize: cells.reduce((size, item) => size + item.nodeSize, 2), forEach: (visit) => cells.forEach(visit) })
+  const header = row(['字段', '类型', '是否必填', '范围', '条件'].map(text => cell(text, 'table_header')), 'table_header_row')
+  const first = row([cell('行业'), cell('下拉'), cell('否'), cell('字典'), cell('无')], 'table_row')
+  const second = row([cell('名称'), cell('文本'), cell('否'), cell('100'), cell('匹配')], 'table_row')
+  const table = { type: { name: 'table' }, nodeSize: 2 + header.nodeSize + first.nodeSize + second.nodeSize, forEach: (visit) => [header, first, second].forEach(visit) }
+  const document = {
+    content: { size: 100 }, textBetween: () => '否',
+    nodesBetween: (_from, _to, visit) => { visit(cell('否'), 39, first); visit({ isBlock: true, type: { name: 'paragraph' }, content: { size: 1 }, nodeSize: 3, textBetween: () => '否' }, 40, cell('否')) },
+    descendants: (visit) => { visit(table, 5) },
+  }
+  // The anchor/head are inside the third data-cell text, not at any cell or row boundary.
+  const selection = visualSelectionFor(document, { empty: false, from: 40, to: 41 }, 2)
+  assert.equal(selection.limitReason, undefined)
+  assert.deepEqual(JSON.parse(JSON.stringify(selection.table?.header)), ['字段', '类型', '是否必填', '范围', '条件'])
+  assert.deepEqual(JSON.parse(JSON.stringify(selection.table?.rows)), [['行业', '下拉', '否', '字典', '无'], ['名称', '文本', '否', '100', '匹配']])
+  assert.deepEqual(JSON.parse(JSON.stringify({ rowStart: selection.table?.selectedRowStart, rowEnd: selection.table?.selectedRowEnd, columnStart: selection.table?.selectedColumnStart, columnEnd: selection.table?.selectedColumnEnd })), { rowStart: 1, rowEnd: 1, columnStart: 2, columnEnd: 2 })
+})
+
+test('normalizes CellSelection endpoints across rows without treating intervening columns as selected', () => {
+  const cell = (text, name = 'table_cell') => ({ isBlock: true, type: { name }, content: { size: text.length }, nodeSize: text.length + 2, textBetween: () => text })
+  const row = (cells, name) => ({ type: { name }, nodeSize: cells.reduce((size, item) => size + item.nodeSize, 2), forEach: (visit) => cells.forEach(visit) })
+  const header = row(['一', '二', '三', '四', '五'].map(text => cell(text, 'table_header')), 'table_header_row')
+  const first = row(['a', 'b', '否', 'd', 'e'].map(text => cell(text)), 'table_row')
+  const second = row(['f', 'g', '否', 'i', 'j'].map(text => cell(text)), 'table_row')
+  const table = { type: { name: 'table' }, nodeSize: 2 + header.nodeSize + first.nodeSize + second.nodeSize, forEach: (visit) => [header, first, second].forEach(visit) }
+  const document = { content: { size: 100 }, textBetween: () => '否\n否', nodesBetween: () => {}, descendants: (visit) => { visit(table, 5) } }
+  // GFM table layout: first data row's third cell begins at 30, second at 47.
+  const selection = visualSelectionFor(document, { empty: false, from: 30, to: 50, $anchorCell: { pos: 30 }, $headCell: { pos: 47 } }, 2)
+  assert.equal(selection.limitReason, undefined)
+  assert.deepEqual(JSON.parse(JSON.stringify({ rowStart: selection.table?.selectedRowStart, rowEnd: selection.table?.selectedRowEnd, columnStart: selection.table?.selectedColumnStart, columnEnd: selection.table?.selectedColumnEnd })), { rowStart: 1, rowEnd: 2, columnStart: 2, columnEnd: 2 })
 })
 
 test('table replacement accepts only a complete column-consistent Markdown table', () => {

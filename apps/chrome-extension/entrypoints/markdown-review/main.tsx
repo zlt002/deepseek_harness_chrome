@@ -49,6 +49,12 @@ function visualAnchorFor(snapshot: MarkdownReviewSnapshot | undefined, selection
   }
 }
 
+function reviewQuoteFor(selection: VisualSelection): string {
+  return selection.table === undefined
+    ? selection.quote
+    : [selection.table.header, ...selection.table.rows].map(row => row.join(' | ')).join('\n')
+}
+
 function App(): React.JSX.Element {
   const reviewId = useMemo(() => reviewIdFromLocation(), [])
   const [state, dispatch] = useReducer(reduceReviewState, initialState)
@@ -145,7 +151,7 @@ function App(): React.JSX.Element {
     if (saved === undefined || saved.editorRevision !== proposal.editorRevision || saved.from !== proposal.from || saved.to !== proposal.to) {
       setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：选区已变化，请重新选择后再请求。`)
     } else if (editor.reviewSelectionReplacement(saved, proposal.replacementMarkdown)) {
-      setActiveDiff({ before: saved.quote, after: proposal.replacementMarkdown })
+      setActiveDiff({ before: reviewQuoteFor(saved), after: proposal.replacementMarkdown })
       setProposalNotice(`AI 针对当前选区的候选待审阅：${proposal.summary}`)
     } else {
       setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：编辑版本、范围或选中文本已变化。`)

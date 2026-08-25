@@ -228,7 +228,6 @@ export class WorkspaceReviewRuntime {
     if (snapshot.truncated || snapshot.fingerprint !== selection.sourceFingerprint) throw new Error('Markdown file changed after the selection was sent; no proposal was queued')
     if (selection.version === 2 && (selection.table !== undefined || selection.blocks.some(block => block.kind === 'table_cell'))) {
       if (selection.table === undefined) throw new Error('Table selection context is missing; reselect the complete table before asking AI to edit it')
-      if (!selection.table.isWholeTable) throw new Error('Table edits require the user to select the complete table; partial rows or cells cannot be safely replaced')
       if (!isCompleteMarkdownTable(replacement, selection.table.columnCount)) {
         throw new Error(`Table edit proposals must be one complete Markdown table with a header, separator, and exactly ${String(selection.table.columnCount)} columns`)
       }
@@ -371,7 +370,7 @@ function boundedText(value, maximum, label, allowEmpty = false) {
 function visualTableContext(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('visual Markdown table context is invalid')
   const table = value
-  if (!Object.keys(table).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable'].includes(key))) throw new Error('visual Markdown table context is invalid')
+  if (!Object.keys(table).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable', 'header', 'rows'].includes(key))) throw new Error('visual Markdown table context is invalid')
   const integer = (name) => {
     const item = table[name]
     if (!Number.isSafeInteger(item)) throw new Error('visual Markdown table context is invalid')
@@ -384,7 +383,14 @@ function visualTableContext(value) {
     || selectedRowStart < 0 || selectedRowEnd < selectedRowStart || selectedRowEnd >= rowCount
     || selectedColumnStart < 0 || selectedColumnEnd < selectedColumnStart || selectedColumnEnd >= columnCount
     || typeof table.isWholeTable !== 'boolean') throw new Error('visual Markdown table context is invalid')
-  return { from, to, rowCount, columnCount, selectedRowStart, selectedRowEnd, selectedColumnStart, selectedColumnEnd, isWholeTable: table.isWholeTable }
+  const tableRow = (value) => {
+    if (!Array.isArray(value) || value.length !== columnCount) throw new Error('visual Markdown table context is invalid')
+    return value.map(cell => boundedText(cell, 2_000, 'visual Markdown table cell', true))
+  }
+  const header = tableRow(table.header)
+  if (!Array.isArray(table.rows) || table.rows.length + 1 !== rowCount) throw new Error('visual Markdown table context is invalid')
+  const rows = table.rows.map(tableRow)
+  return { from, to, rowCount, columnCount, selectedRowStart, selectedRowEnd, selectedColumnStart, selectedColumnEnd, isWholeTable: table.isWholeTable, header, rows }
 }
 
 function markdownTableCells(line) {

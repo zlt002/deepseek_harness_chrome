@@ -440,13 +440,20 @@
     // block in one CanvasPatch transaction. Never emulate this with a clear
     // followed by an insert: a mid-operation failure would leave a broken PRD.
     const titles = parsed.all.filter((block) => block.tag.toLowerCase() === 'outlinetitle')
-    if (titles.length !== 1) return null
+    // Freshly created Team Knowledge documents can be entirely blank rather
+    // than carrying the usual title/template scaffold. That is the only
+    // title-less shape we can initialize safely: emit the same minimal title
+    // node used by the public title operation, then replace the full canvas in
+    // this single transaction. Any non-empty title-less document remains
+    // ambiguous and must fail closed.
+    if (titles.length !== 1 && !(titles.length === 0 && parsed.list.length === 0)) return null
     const requested = markdownBlocks(markdown)
     if (requested.length < 1 || requested.length > TEAM_KNOWLEDGE_BATCH_REPLACE_MAX_BLOCKS) return null
     const replacement = requested.map((block) => structuredBlockXml(block)).join('')
     const expected = fragmentBlocks(replacement)
     if (!replacement || !expected || expected.length !== requested.length) return null
-    return { parsed, title: titles[0], replacement, expected, inner: `${titles[0].xml}${replacement}` }
+    const title = titles[0] ?? { xml: '<outlineTitle id=""></outlineTitle>', text: '' }
+    return { parsed, title, replacement, expected, inner: `${title.xml}${replacement}` }
   }
   const verifyTeamKnowledgeBatchReplacement = (xml, expectedTitle, expectedBlocks) => {
     const parsed = editableBlocks(xml)
@@ -464,7 +471,7 @@
     if (!current) return fail('unsupported', 'WebEdit light-document runtime is not ready')
     const beforeXml = await current.openApi.editor.canvas.getDocXml()
     const plan = teamKnowledgeBatchReplacement(beforeXml, markdown)
-    if (!plan) return fail('invalid_range', 'Team Knowledge document replacement requires one bounded Markdown body and exactly one existing title')
+    if (!plan) return fail('invalid_range', 'Team Knowledge document replacement requires one bounded Markdown body and either one existing title or a completely blank document')
     const patched = await patchXml(current, beforeXml, plan.inner)
     if (!patched.ok) return patched
     const observed = verifyTeamKnowledgeBatchReplacement(patched.xml, plan.title, plan.expected)
@@ -804,7 +811,7 @@
       // created or recovered Team Knowledge child document.
       if (input.payload?.replaceScope !== 'team_knowledge_batch_document') return fail('invalid_range', 'Team Knowledge batch replacement requires its internal delivery scope')
       const plan = teamKnowledgeBatchReplacement(beforeXml, input.payload?.markdown)
-      if (!plan) return fail('invalid_range', 'Team Knowledge document replacement requires one bounded Markdown body and exactly one existing title')
+      if (!plan) return fail('invalid_range', 'Team Knowledge document replacement requires one bounded Markdown body and either one existing title or a completely blank document')
       const patched = await patchXml(current, beforeXml, plan.inner)
       if (!patched.ok) return patched
       const observed = verifyTeamKnowledgeBatchReplacement(patched.xml, plan.title, plan.expected)
