@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +11,16 @@ const React = extensionRequire('react')
 const { createRoot } = extensionRequire('react-dom/client')
 const { flushSync } = extensionRequire('react-dom')
 
-function loadClient(output, modules) {
+function pluginClientPath(output, plugin) {
+  return fileURLToPath(new URL(`../../../apps/chrome-extension/.output/${output}/plugins/${plugin}/client.js`, import.meta.url))
+}
+
+function resolveWxtOutput(plugin, { env = process.env, exists = existsSync } = {}) {
+  if (env.ACCRUI_WXT_OUTPUT) return env.ACCRUI_WXT_OUTPUT
+  return ['chrome-mv3-dev', 'chrome-mv3'].find(output => exists(pluginClientPath(output, plugin))) ?? 'chrome-mv3-dev'
+}
+
+function loadClient(modules) {
   globalThis.window.__ModuleLoader__ = {
     load: ({ id, factory }) => { modules.set(id, factory((specifier) => {
       if (specifier === 'react') return React
@@ -19,7 +29,7 @@ function loadClient(output, modules) {
     })) },
   }
   require(process.env.ACCRUI_WORKSPACE_REVIEW_CLIENT ?? fileURLToPath(new URL('../lib/client.js', import.meta.url)))
-  require(`../../../apps/chrome-extension/.output/${output}/plugins/@deepseek-ai/dsh-client-ui-deliverables/client.js`)
+  require(pluginClientPath(resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables'), '@deepseek-ai/dsh-client-ui-deliverables'))
 }
 
 /**
@@ -28,6 +38,16 @@ function loadClient(output, modules) {
  * ProducedFiles button bypassed the Review-open message entirely.
  */
 test('a produced workspace Markdown chip emits the Markdown Review open event', async () => {
+  assert.equal(
+    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: {}, exists: path => path.includes('chrome-mv3') && !path.includes('chrome-mv3-dev') }),
+    'chrome-mv3',
+    'a production-only artifact must be selected when the development artifact is absent',
+  )
+  assert.equal(
+    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: { ACCRUI_WXT_OUTPUT: 'custom-output' }, exists: () => false }),
+    'custom-output',
+    'an explicit output target must take precedence over filesystem detection',
+  )
   const dom = new JSDOM('<!doctype html><body><div id="app"></div></body>', {
     url: 'http://127.0.0.1:3101/?dshWorkspaceReviewNonce=nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   })
@@ -59,7 +79,7 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
 
   try {
     const modules = new Map()
-    loadClient(process.env.ACCRUI_WXT_OUTPUT ?? 'chrome-mv3-dev', modules)
+    loadClient(modules)
     const { apply: applyWorkspaceReview } = modules.get('@accrui/harness-ui-workspace-review')
     const { ProducedFiles } = modules.get('@deepseek-ai/dsh-client-ui-deliverables')
     const providers = []

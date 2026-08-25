@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 const extensionRequire = createRequire(new URL('../../../apps/chrome-extension/package.json', import.meta.url))
 const require = createRequire(import.meta.url)
@@ -8,6 +10,15 @@ const { JSDOM } = extensionRequire('jsdom')
 const React = extensionRequire('react')
 const { createRoot } = extensionRequire('react-dom/client')
 const { flushSync } = extensionRequire('react-dom')
+
+function pluginClientPath(output) {
+  return fileURLToPath(new URL(`../../../apps/chrome-extension/.output/${output}/plugins/@deepseek-ai/dsh-client-ui-tool/client.js`, import.meta.url))
+}
+
+function resolveWxtOutput({ env = process.env, exists = existsSync } = {}) {
+  if (env.ACCRUI_WXT_OUTPUT) return env.ACCRUI_WXT_OUTPUT
+  return ['chrome-mv3-dev', 'chrome-mv3'].find(output => exists(pluginClientPath(output))) ?? 'chrome-mv3-dev'
+}
 
 function loadClient(path, modules) {
   globalThis.window.__ModuleLoader__ = {
@@ -70,7 +81,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
       ['@deepseek-ai/dsh-client-ui-primitives', primitives()],
       ['@deepseek-ai/dsh-client-runtime/client', {}],
     ])
-    loadClient('../../../apps/chrome-extension/.output/chrome-mv3-dev/plugins/@deepseek-ai/dsh-client-ui-tool/client.js', modules)
+    loadClient(pluginClientPath(resolveWxtOutput()), modules)
     loadClient('../lib/client.js', modules)
     const tool = modules.get('@deepseek-ai/dsh-client-ui-tool')
     const workspace = modules.get('@accrui/harness-ui-workspace-review')
