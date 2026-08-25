@@ -44,6 +44,7 @@ function visualAnchorFor(snapshot: MarkdownReviewSnapshot | undefined, selection
     to: selection.to,
     quote: selection.quote,
     blocks: selection.blocks.map(({ kind, text }) => ({ kind, text })),
+    ...(selection.table === undefined ? {} : { table: selection.table }),
     sourceFingerprint: snapshot.resource.fingerprint,
   }
 }

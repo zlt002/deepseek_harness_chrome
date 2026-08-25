@@ -80,6 +80,21 @@ test('serializes a dirty visual cross-block selection without inventing UTF-16 s
   assert.equal('range_utf16' in payload.annotations[0], false)
 })
 
+test('serializes whole-table bounds and tells AI not to return a single table row', () => {
+  const prompt = reviewFeedbackPrompt('', [{
+    id: 'workspace-table', selectionId: 'selection-table', source: 'workspace-markdown', reviewId: 'review-table', resourceId: 'resource-table',
+    displayPath: 'docs/table.md', revision: 'revision-table', fingerprint: 'fingerprint-table', comment: '删除客户系，保留客户名称',
+    anchor: {
+      version: 2, editorRevision: 7, from: 12, to: 72, quote: '字段\n客户系\n客户名称(全称)', blocks: [{ kind: 'table_cell', text: '客户系' }],
+      table: { from: 10, to: 80, rowCount: 3, columnCount: 2, selectedRowStart: 0, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: true },
+      sourceFingerprint: 'fingerprint-table',
+    },
+  }])
+  const payload = JSON.parse(prompt.match(/<workspace_markdown_annotations>\n([\s\S]*?)\n<\/workspace_markdown_annotations>/)?.[1] ?? '')
+  assert.deepEqual(payload.annotations[0].table, { from: 10, to: 80, rowCount: 3, columnCount: 2, selectedRowStart: 0, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: true })
+  assert.match(prompt, /不要返回单独的一行表格/)
+})
+
 test('submits one workspace annotation directly through its scoped conversation then clears it', async () => {
   const store = memoryStore(); const sent = []
   const submitter = new WorkspaceMarkdownSubmitter(store, { scope: () => ({ get: () => ({ send: async prompt => { sent.push(prompt) } }) }) })

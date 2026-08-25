@@ -73,6 +73,7 @@ export interface WorkspaceReviewSelection {
   readonly from?: number
   readonly to?: number
   readonly blocks?: ReadonlyArray<{ readonly kind: string; readonly text: string }>
+  readonly table?: { readonly from: number; readonly to: number; readonly rowCount: number; readonly columnCount: number; readonly selectedRowStart: number; readonly selectedRowEnd: number; readonly selectedColumnStart: number; readonly selectedColumnEnd: number; readonly isWholeTable: boolean }
 }
 
 export interface WorkspaceReviewProposal {

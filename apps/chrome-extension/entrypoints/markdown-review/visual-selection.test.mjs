@@ -13,7 +13,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText
 const module = { exports: {} }
 vm.runInNewContext(compiled, { module, exports: module.exports })
-const { canRestoreVisualSelection, visualSelectionFor } = module.exports
+const { canRestoreVisualSelection, isCompleteTableMarkdown, visualSelectionFor } = module.exports
 
 test('visual selection carries structured block context and never claims Markdown source offsets', () => {
   for (const kind of ['heading', 'paragraph', 'list_item', 'table_cell', 'code_block']) assert.match(source, new RegExp(`'${kind}'`))
@@ -61,6 +61,45 @@ test('visual selection deduplicates block context and caps it at 24 blocks', () 
   assert.equal(selection.blocks.length, 24)
   assert.equal(selection.blocks.filter(({ from, to }) => from === 1 && to === 3).length, 1)
   assert.equal(selection.limitReason, 'too_many_blocks')
+})
+
+test('table selections retain cell-level structure without treating inner paragraphs as peer blocks', () => {
+  const cell = (text) => ({ isBlock: true, type: { name: 'table_cell' }, content: { size: text.length }, nodeSize: text.length + 2, textBetween: () => text })
+  const paragraph = (text) => ({ isBlock: true, type: { name: 'paragraph' }, content: { size: text.length }, nodeSize: text.length + 2, textBetween: () => text })
+  const row = (cells) => ({ type: { name: 'table_row' }, nodeSize: cells.reduce((size, item) => size + item.nodeSize, 2), forEach: (visit) => cells.forEach(visit) })
+  const rows = [row([cell('表头 A'), cell('表头 B')]), row([cell('客户系'), cell('文本输入')]), row([cell('客户名称(全称)'), cell('文本输入')])]
+  const table = { type: { name: 'table' }, nodeSize: rows.reduce((size, item) => size + item.nodeSize, 2), forEach: (visit) => rows.forEach(visit) }
+  const document = {
+    content: { size: 80 },
+    textBetween: () => '客户系\n文本输入\n客户名称(全称)\n文本输入',
+    nodesBetween: (_from, _to, visit) => {
+      visit(table, 5, { type: { name: 'doc' } })
+      visit(rows[1], 20, table)
+      visit(cell('客户系'), 21, rows[1])
+      visit(paragraph('客户系'), 22, { type: { name: 'table_cell' } })
+      visit(rows[2], 33, table)
+      visit(cell('客户名称(全称)'), 34, rows[2])
+      visit(paragraph('客户名称(全称)'), 35, { type: { name: 'table_cell' } })
+    },
+    descendants: (visit) => { visit(table, 5) },
+  }
+  const selection = visualSelectionFor(document, { empty: false, from: 21, to: 50 }, 2)
+  assert.deepEqual(JSON.parse(JSON.stringify(selection.blocks.map(({ kind, text }) => ({ kind, text })))), [
+    { kind: 'table_cell', text: '客户系' },
+    { kind: 'table_cell', text: '客户名称(全称)' },
+  ])
+  assert.deepEqual(JSON.parse(JSON.stringify(selection.table)), {
+    from: 5, to: 52, rowCount: 3, columnCount: 2,
+    selectedRowStart: 1, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1,
+    isWholeTable: false,
+  })
+  assert.equal(selection.limitReason, 'table_selection_requires_whole_table')
+})
+
+test('table replacement accepts only a complete column-consistent Markdown table', () => {
+  assert.equal(isCompleteTableMarkdown('| 字段 | 类型 |\n| --- | --- |', 2), false)
+  assert.equal(isCompleteTableMarkdown('| 字段 | 类型 |\n| --- | --- |\n| 客户 | 文本 |', 2), true)
+  assert.equal(isCompleteTableMarkdown('| 字段 | 类型 |\n| --- | --- |\n| 客户 |', 2), false)
 })
 
 test('an overlong quote is visibly invalid instead of being truncated and delivered', () => {

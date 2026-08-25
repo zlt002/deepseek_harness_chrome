@@ -14,7 +14,7 @@ export function reviewFeedbackPrompt(text, feedback) {
     })
   }
   if (markdown.length > 0) {
-    next = appendSection(next, '以下是用户从工作区 Markdown 可视化编辑页送入的待处理批注。请根据批注生成替换当前选区的 Markdown 片段，并调用 propose_workspace_markdown_edit；该工具只把可接受或拒绝的候选修改送回编辑页，不直接写文件', 'workspace_markdown_annotations', {
+    next = appendSection(next, '以下是用户从工作区 Markdown 可视化编辑页送入的待处理批注。请根据批注生成替换当前选区的 Markdown 片段，并调用 propose_workspace_markdown_edit；该工具只把可接受或拒绝的候选修改送回编辑页，不直接写文件。若 annotation 带 table，必须选择完整表格，并返回一张含表头、分隔行且列数严格一致的完整 Markdown 表格；不要返回单独的一行表格。', 'workspace_markdown_annotations', {
       annotations: markdown.map(item => ({
         review_id: item.reviewId,
         selection_id: item.selectionId,
@@ -29,6 +29,7 @@ export function reviewFeedbackPrompt(text, feedback) {
               editor_revision: item.anchor.editorRevision,
               prose_mirror_range: [item.anchor.from, item.anchor.to],
               blocks: item.anchor.blocks,
+              ...(item.anchor.table === undefined ? {} : { table: item.anchor.table }),
             }
           : {
               range_utf16: [item.anchor.startUtf16, item.anchor.endUtf16],

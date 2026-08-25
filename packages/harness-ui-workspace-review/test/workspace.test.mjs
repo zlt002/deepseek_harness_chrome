@@ -95,6 +95,32 @@ test('queues visual draft selections without pretending ProseMirror positions ar
   assert.equal('candidateMarkdown' in proposal, false)
 })
 
+test('rejects partial-table visual proposals before a pipe-delimited row can enter ordinary text replacement', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  await runtime.registerSelection(opened.reviewId, opened.capability, {
+    id: 'table-partial', version: 2, editorRevision: 3, from: 10, to: 30, quote: '客户系\n客户名称(全称)',
+    blocks: [{ kind: 'table_cell', text: '客户系' }, { kind: 'table_cell', text: '客户名称(全称)' }],
+    table: { from: 5, to: 50, rowCount: 3, columnCount: 2, selectedRowStart: 1, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: false },
+    sourceFingerprint: opened.fingerprint,
+  })
+  await assert.rejects(runtime.proposeEdit('session-a', opened.reviewId, 'table-partial', '| 客户名称(全称) | 文本输入 |'), /select the complete table/i)
+})
+
+test('requires a complete, column-consistent Markdown table before queuing a whole-table visual proposal', async (t) => {
+  const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
+  const opened = await runtime.open('session-a', root, 'README.md')
+  await runtime.registerSelection(opened.reviewId, opened.capability, {
+    id: 'table-whole', version: 2, editorRevision: 3, from: 5, to: 50, quote: '表头\n客户系\n客户名称(全称)',
+    blocks: [{ kind: 'table_cell', text: '表头' }, { kind: 'table_cell', text: '客户名称(全称)' }],
+    table: { from: 5, to: 50, rowCount: 3, columnCount: 2, selectedRowStart: 0, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: true },
+    sourceFingerprint: opened.fingerprint,
+  })
+  await assert.rejects(runtime.proposeEdit('session-a', opened.reviewId, 'table-whole', '| 客户名称(全称) | 文本输入 |'), /complete Markdown table/i)
+  await runtime.proposeEdit('session-a', opened.reviewId, 'table-whole', '| 字段 | 类型 |\n| --- | --- |\n| 客户名称(全称) | 文本输入 |')
+  assert.equal(runtime.proposals(opened.reviewId, opened.capability, 0).proposals.length, 1)
+})
+
 test('refuses stale selection proposals after the workspace file changes', async (t) => {
   const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
   const opened = await runtime.open('session-a', root, 'README.md')

@@ -9,7 +9,7 @@ import { $prose } from '@milkdown/kit/utils'
 import type React from 'react'
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { VisualSelection } from './visual-selection'
-import { canRestoreVisualSelection, visualSelectionFor } from './visual-selection'
+import { canRestoreVisualSelection, isCompleteTableMarkdown, visualSelectionFor } from './visual-selection'
 import { renderMermaidSvg } from './mermaid-renderer.mjs'
 import { fitMermaidPreview, wireMermaidFullscreen, wireMermaidViewer, wireMermaidViewToggle } from './mermaid-view.mjs'
 import '@milkdown/crepe/theme/common/style.css'
@@ -210,6 +210,9 @@ const AI_SELECTION_QUICK_ACTIONS = [
 function selectionLimitMessage(selection: VisualSelection): string | undefined {
   if (selection.limitReason === 'quote_too_long') return '选区超过 8,000 字，请缩小范围'
   if (selection.limitReason === 'too_many_blocks') return '选区超过 24 个内容块，请缩小范围'
+  if (selection.limitReason === 'multiple_tables') return '一次只能批注一张表格，请缩小选区'
+  if (selection.limitReason === 'invalid_table_structure') return '该表格结构无法安全修改，请改用完整、规范的 Markdown 表格'
+  if (selection.limitReason === 'table_selection_requires_whole_table') return '表格批注需选中完整表格；AI 必须返回含表头和分隔行的完整 Markdown 表格'
   return undefined
 }
 
@@ -398,6 +401,7 @@ export const VisualMarkdownEditor = forwardRef<VisualMarkdownEditorHandle, Visua
       reviewSelectionReplacement(selection, replacementMarkdown) {
         const crepe = readyCrepe()
         if (crepe === undefined || replacementMarkdown.length > 2_000_000) return false
+        if (selection.table !== undefined && (!selection.table.isWholeTable || !isCompleteTableMarkdown(replacementMarkdown, selection.table.columnCount))) return false
         const started = crepe.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx)
           if (!canRestoreVisualSelection(view.state.doc, selection, revisionRef.current)) return false

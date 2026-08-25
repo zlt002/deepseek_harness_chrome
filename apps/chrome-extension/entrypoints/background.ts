@@ -4788,7 +4788,7 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Deli
     selectionId: request.annotation.id,
     ...(anchor.version === 1
       ? { startUtf16: anchor.startUtf16, endUtf16: anchor.endUtf16, prefix: anchor.prefix, suffix: anchor.suffix }
-      : { editorRevision: anchor.editorRevision, from: anchor.from, to: anchor.to, blocks: anchor.blocks }),
+      : { editorRevision: anchor.editorRevision, from: anchor.from, to: anchor.to, blocks: anchor.blocks, ...(anchor.table === undefined ? {} : { table: anchor.table }) }),
   }
   await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_SELECTION_PATH, { selection: { id: request.annotation.id, ...anchor } }, 'selection delivery')
   const response = await chrome.runtime.sendMessage({ type: 'markdown-review-feedback-forward/v1', feedback }) as { ok?: boolean; error?: string } | undefined

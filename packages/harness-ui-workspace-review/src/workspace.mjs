@@ -201,7 +201,8 @@ export class WorkspaceReviewRuntime {
         if (!block || typeof block !== 'object') throw new Error('visual Markdown selection block is invalid')
         return { kind: boundedText(block.kind, 32, 'selection block kind'), text: boundedText(block.text, 2_000, 'selection block text', true) }
       })
-      registered = { id, version: 2, quote, sourceFingerprint, editorRevision, from, to, blocks, createdAt: Date.now() }
+      const table = selection.table === undefined ? undefined : visualTableContext(selection.table)
+      registered = { id, version: 2, quote, sourceFingerprint, editorRevision, from, to, blocks, ...(table === undefined ? {} : { table }), createdAt: Date.now() }
     } else {
       const start = selection.startUtf16; const end = selection.endUtf16
       if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > snapshot.content.length || snapshot.content.slice(start, end) !== quote) {
@@ -225,6 +226,13 @@ export class WorkspaceReviewRuntime {
     const safeSummary = boundedText(summary, 1_000, 'proposal summary', true)
     const snapshot = await fileSnapshot(record.root, record.displayPath)
     if (snapshot.truncated || snapshot.fingerprint !== selection.sourceFingerprint) throw new Error('Markdown file changed after the selection was sent; no proposal was queued')
+    if (selection.version === 2 && (selection.table !== undefined || selection.blocks.some(block => block.kind === 'table_cell'))) {
+      if (selection.table === undefined) throw new Error('Table selection context is missing; reselect the complete table before asking AI to edit it')
+      if (!selection.table.isWholeTable) throw new Error('Table edits require the user to select the complete table; partial rows or cells cannot be safely replaced')
+      if (!isCompleteMarkdownTable(replacement, selection.table.columnCount)) {
+        throw new Error(`Table edit proposals must be one complete Markdown table with a header, separator, and exactly ${String(selection.table.columnCount)} columns`)
+      }
+    }
     const base = {
       proposalId: opaqueId(),
       selectionId: selection.id,
@@ -358,6 +366,53 @@ function boundedId(value, label) {
 function boundedText(value, maximum, label, allowEmpty = false) {
   if (typeof value !== 'string' || value.length > maximum || (!allowEmpty && value.length === 0)) throw new Error(`${label} is invalid or exceeds its limit`)
   return value
+}
+
+function visualTableContext(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('visual Markdown table context is invalid')
+  const table = value
+  if (!Object.keys(table).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable'].includes(key))) throw new Error('visual Markdown table context is invalid')
+  const integer = (name) => {
+    const item = table[name]
+    if (!Number.isSafeInteger(item)) throw new Error('visual Markdown table context is invalid')
+    return item
+  }
+  const from = integer('from'); const to = integer('to'); const rowCount = integer('rowCount'); const columnCount = integer('columnCount')
+  const selectedRowStart = integer('selectedRowStart'); const selectedRowEnd = integer('selectedRowEnd')
+  const selectedColumnStart = integer('selectedColumnStart'); const selectedColumnEnd = integer('selectedColumnEnd')
+  if (from < 0 || to <= from || rowCount < 1 || columnCount < 1
+    || selectedRowStart < 0 || selectedRowEnd < selectedRowStart || selectedRowEnd >= rowCount
+    || selectedColumnStart < 0 || selectedColumnEnd < selectedColumnStart || selectedColumnEnd >= columnCount
+    || typeof table.isWholeTable !== 'boolean') throw new Error('visual Markdown table context is invalid')
+  return { from, to, rowCount, columnCount, selectedRowStart, selectedRowEnd, selectedColumnStart, selectedColumnEnd, isWholeTable: table.isWholeTable }
+}
+
+function markdownTableCells(line) {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return undefined
+  const cells = []
+  let cell = ''
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    const character = trimmed[index]
+    if (character === '\\' && index + 1 < trimmed.length - 1) {
+      cell += character + trimmed[index + 1]
+      index += 1
+    } else if (character === '|') {
+      cells.push(cell.trim())
+      cell = ''
+    } else cell += character
+  }
+  cells.push(cell.trim())
+  return cells
+}
+
+function isCompleteMarkdownTable(candidate, columnCount) {
+  const lines = candidate.trim().split(/\r?\n/)
+  if (lines.length < 3 || lines.some(line => line.trim() === '')) return false
+  const header = markdownTableCells(lines[0]); const separator = markdownTableCells(lines[1])
+  return header?.length === columnCount && separator?.length === columnCount
+    && separator.every(cell => /^:?-{3,}:?$/.test(cell))
+    && lines.slice(2).every(line => markdownTableCells(line)?.length === columnCount)
 }
 
 function boundedMarkdownContent(value) {

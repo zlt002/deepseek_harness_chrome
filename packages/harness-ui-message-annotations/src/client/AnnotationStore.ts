@@ -25,7 +25,19 @@ export interface VisualMarkdownSelectionAnchor {
   readonly to: number
   readonly quote: string
   readonly blocks: ReadonlyArray<{ readonly kind: string; readonly text: string }>
+  readonly table?: VisualMarkdownTableContext
   readonly sourceFingerprint: string
+}
+export interface VisualMarkdownTableContext {
+  readonly from: number
+  readonly to: number
+  readonly rowCount: number
+  readonly columnCount: number
+  readonly selectedRowStart: number
+  readonly selectedRowEnd: number
+  readonly selectedColumnStart: number
+  readonly selectedColumnEnd: number
+  readonly isWholeTable: boolean
 }
 export type WorkspaceMarkdownAnchor = MarkdownSelectionAnchor | VisualMarkdownSelectionAnchor
 
@@ -53,6 +65,7 @@ export interface VisualWorkspaceMarkdownFeedbackInput extends WorkspaceMarkdownF
   readonly from: number
   readonly to: number
   readonly blocks: ReadonlyArray<{ readonly kind: string; readonly text: string }>
+  readonly table?: VisualMarkdownTableContext
 }
 export type WorkspaceMarkdownFeedbackInput = SourceWorkspaceMarkdownFeedbackInput | VisualWorkspaceMarkdownFeedbackInput
 
@@ -118,7 +131,7 @@ export class ReviewFeedbackStore {
       fingerprint: feedback.fingerprint,
       comment: feedback.comment,
       anchor: feedback.anchorKind === 'visual'
-        ? { version: 2, editorRevision: feedback.editorRevision, from: feedback.from, to: feedback.to, quote: feedback.quote, blocks: feedback.blocks.map(({ kind, text }) => ({ kind, text })), sourceFingerprint: feedback.fingerprint }
+        ? { version: 2, editorRevision: feedback.editorRevision, from: feedback.from, to: feedback.to, quote: feedback.quote, blocks: feedback.blocks.map(({ kind, text }) => ({ kind, text })), ...(feedback.table === undefined ? {} : { table: feedback.table }), sourceFingerprint: feedback.fingerprint }
         : { version: 1, startUtf16: feedback.startUtf16, endUtf16: feedback.endUtf16, quote: feedback.quote, prefix: feedback.prefix, suffix: feedback.suffix, sourceFingerprint: feedback.fingerprint },
     }
     bySession.set(sessionId, addAnnotation(items, normalized))
@@ -186,6 +199,20 @@ function validWorkspaceFeedback(value: WorkspaceMarkdownFeedbackInput): boolean 
     return Number.isSafeInteger(value.editorRevision) && value.editorRevision >= 0
       && Number.isSafeInteger(value.from) && value.from >= 0 && Number.isSafeInteger(value.to) && value.to > value.from
       && Array.isArray(value.blocks) && value.blocks.length <= 24 && value.blocks.every(block => boundedText(block.kind, 32) && boundedText(block.text, 2_000, true))
+      && (value.table === undefined || validVisualTableContext(value.table))
   }
   return false
+}
+
+function validVisualTableContext(value: unknown): value is VisualMarkdownTableContext {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const table = value as Record<string, unknown>
+  return Object.keys(table).every(key => ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable'].includes(key))
+    && Number.isSafeInteger(table.from) && Number.isSafeInteger(table.to) && (table.from as number) >= 0 && (table.to as number) > (table.from as number)
+    && Number.isSafeInteger(table.rowCount) && (table.rowCount as number) > 0 && Number.isSafeInteger(table.columnCount) && (table.columnCount as number) > 0
+    && Number.isSafeInteger(table.selectedRowStart) && Number.isSafeInteger(table.selectedRowEnd)
+    && (table.selectedRowStart as number) >= 0 && (table.selectedRowEnd as number) >= (table.selectedRowStart as number) && (table.selectedRowEnd as number) < (table.rowCount as number)
+    && Number.isSafeInteger(table.selectedColumnStart) && Number.isSafeInteger(table.selectedColumnEnd)
+    && (table.selectedColumnStart as number) >= 0 && (table.selectedColumnEnd as number) >= (table.selectedColumnStart as number) && (table.selectedColumnEnd as number) < (table.columnCount as number)
+    && typeof table.isWholeTable === 'boolean'
 }
