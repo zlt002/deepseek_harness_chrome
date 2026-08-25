@@ -16,8 +16,8 @@ function pluginClientPath(output, plugin) {
 }
 
 function resolveWxtOutput(plugin, { env = process.env, exists = existsSync } = {}) {
-  if (env.ACCRUI_WXT_OUTPUT) return env.ACCRUI_WXT_OUTPUT
-  return ['chrome-mv3-dev', 'chrome-mv3'].find(output => exists(pluginClientPath(output, plugin))) ?? 'chrome-mv3-dev'
+  const candidates = [env.ACCRUI_WXT_OUTPUT, 'chrome-mv3-dev', 'chrome-mv3'].filter(Boolean)
+  return candidates.find(output => exists(pluginClientPath(output, plugin))) ?? 'chrome-mv3-dev'
 }
 
 function loadClient(modules) {
@@ -44,9 +44,14 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
     'a production-only artifact must be selected when the development artifact is absent',
   )
   assert.equal(
-    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: { ACCRUI_WXT_OUTPUT: 'custom-output' }, exists: () => false }),
+    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: { ACCRUI_WXT_OUTPUT: 'chrome-mv3-dev' }, exists: path => path.includes('chrome-mv3') && !path.includes('chrome-mv3-dev') }),
+    'chrome-mv3',
+    'a stale explicit development target must fall back to the production artifact',
+  )
+  assert.equal(
+    resolveWxtOutput('@deepseek-ai/dsh-client-ui-deliverables', { env: { ACCRUI_WXT_OUTPUT: 'custom-output' }, exists: path => path.includes('custom-output') }),
     'custom-output',
-    'an explicit output target must take precedence over filesystem detection',
+    'an explicit output target with a matching plugin artifact must take precedence over fallback detection',
   )
   const dom = new JSDOM('<!doctype html><body><div id="app"></div></body>', {
     url: 'http://127.0.0.1:3101/?dshWorkspaceReviewNonce=nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',

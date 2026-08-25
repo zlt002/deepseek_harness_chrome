@@ -12,8 +12,8 @@ function pluginClientPath(output) {
 }
 
 function resolveWxtOutput({ env = process.env, exists = existsSync } = {}) {
-  if (env.ACCRUI_WXT_OUTPUT) return env.ACCRUI_WXT_OUTPUT
-  return ['chrome-mv3-dev', 'chrome-mv3'].find(output => exists(pluginClientPath(output))) ?? 'chrome-mv3-dev'
+  const candidates = [env.ACCRUI_WXT_OUTPUT, 'chrome-mv3-dev', 'chrome-mv3'].filter(Boolean)
+  return candidates.find(output => exists(pluginClientPath(output))) ?? 'chrome-mv3-dev'
 }
 
 function fakeReactElement(type, props) { return { type, props: props ?? {} } }
