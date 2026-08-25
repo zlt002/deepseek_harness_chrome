@@ -4,9 +4,37 @@ import { annotationsPrompt } from '../src/client/annotation-format.js'
 import { reviewFeedbackPrompt } from '../src/client/review-feedback-format.js'
 import { addAnnotation, removeAcceptedAnnotations } from '../src/client/annotation-state.js'
 import { assistantMessageIdForRange, popoverPosition, selectionAnchor } from '../src/client/selection-geometry.js'
+import { WorkspaceMarkdownSubmitter } from '../src/client/workspace-markdown-submission.js'
 
 const first = { id: 'a', selectedText: '原句', comment: '改成更明确的说法' }
 const second = { id: 'b', selectedText: '另一句', comment: '补充来源' }
+
+function markdownFeedback(id = 'workspace-send-1') {
+  return {
+    id, selectionId: 'selection-1', source: 'workspace-markdown', reviewId: 'review-1', resourceId: 'resource-1',
+    displayPath: 'docs/guide.md', revision: 'revision-1', fingerprint: 'fingerprint-1', quote: '原文', comment: '改得更清楚',
+    anchorKind: 'source', startUtf16: 0, endUtf16: 2, prefix: '', suffix: '\n',
+  }
+}
+
+function memoryStore() {
+  const items = new Map()
+  return {
+    importWorkspaceMarkdown(sessionId, feedback) {
+      const current = items.get(sessionId) ?? []
+      if (!current.some(item => item.id === feedback.id)) {
+        items.set(sessionId, [...current, {
+          ...feedback,
+          source: 'workspace-markdown',
+          anchor: { version: 1, startUtf16: feedback.startUtf16, endUtf16: feedback.endUtf16, quote: feedback.quote, prefix: feedback.prefix, suffix: feedback.suffix, sourceFingerprint: feedback.fingerprint },
+        }])
+      }
+      return true
+    },
+    feedback(sessionId) { return items.get(sessionId) ?? [] },
+    accept(sessionId, ids) { items.set(sessionId, (items.get(sessionId) ?? []).filter(item => !ids.includes(item.id))) },
+  }
+}
 
 test('serializes every pending annotation as data alongside the next user message', () => {
   const prompt = annotationsPrompt('请继续', [first, second])
@@ -50,6 +78,45 @@ test('serializes a dirty visual cross-block selection without inventing UTF-16 s
   assert.deepEqual(payload.annotations[0].prose_mirror_range, [12, 46])
   assert.deepEqual(payload.annotations[0].blocks.map(block => block.kind), ['paragraph', 'table_cell'])
   assert.equal('range_utf16' in payload.annotations[0], false)
+})
+
+test('submits one workspace annotation directly through its scoped conversation then clears it', async () => {
+  const store = memoryStore(); const sent = []
+  const submitter = new WorkspaceMarkdownSubmitter(store, { scope: () => ({ get: () => ({ send: async prompt => { sent.push(prompt) } }) }) })
+  await submitter.submit('session-1', markdownFeedback())
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /<workspace_markdown_annotations>/)
+  assert.equal(store.feedback('session-1').length, 0)
+})
+
+test('a retry after accepted delivery reuses the success tombstone instead of creating another AI turn', async () => {
+  const store = memoryStore(); let sends = 0
+  const submitter = new WorkspaceMarkdownSubmitter(store, { scope: () => ({ get: () => ({ send: async () => { sends += 1 } }) }) })
+  const feedback = markdownFeedback()
+  await submitter.submit('session-1', feedback)
+  await submitter.submit('session-1', feedback)
+  assert.equal(sends, 1)
+  assert.equal(store.feedback('session-1').length, 0)
+})
+
+test('keeps the workspace annotation for retry when the direct conversation send fails', async () => {
+  const store = memoryStore()
+  const submitter = new WorkspaceMarkdownSubmitter(store, { scope: () => ({ get: () => ({ send: async () => { throw new Error('Harness queue unavailable') } }) }) })
+  await assert.rejects(submitter.submit('session-1', markdownFeedback()), /Harness queue unavailable/)
+  assert.equal(store.feedback('session-1').length, 1)
+})
+
+test('coalesces concurrent retries of one workspace feedback id into one AI turn', async () => {
+  const store = memoryStore(); let sends = 0; let release
+  const waiting = new Promise(resolve => { release = resolve })
+  const submitter = new WorkspaceMarkdownSubmitter(store, { scope: () => ({ get: () => ({ send: async () => { sends += 1; await waiting } }) }) })
+  const first = submitter.submit('session-1', markdownFeedback())
+  const second = submitter.submit('session-1', markdownFeedback())
+  assert.equal(first, second)
+  release()
+  await first
+  assert.equal(sends, 1)
+  assert.equal(store.feedback('session-1').length, 0)
 })
 
 test('accepts a range only when both boundaries are inside the same assistant message marker', () => {

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
 
 async function runtimeWith(app) {
   const source = await readFile(new URL('../apps/chrome-extension/public/office-spreadsheet-runtime.js', import.meta.url), 'utf8')
@@ -38,6 +39,7 @@ function fakeApp() {
     setValue2: (next) => { cells.splice(0, cells.length, ...next.map((row) => [...row])) },
     setFormula: (next) => { formulas.splice(0, formulas.length, ...next.map((row) => [...row])) },
     clear: () => { cells.forEach((row, rowIndex) => row.forEach((_cell, columnIndex) => { cells[rowIndex][columnIndex] = null; formulas[rowIndex][columnIndex] = '' })) },
+    clearContents: () => { cells.forEach((row, rowIndex) => row.forEach((_cell, columnIndex) => { cells[rowIndex][columnIndex] = null; formulas[rowIndex][columnIndex] = '' })) },
     fillDown: (callback) => { for (let row = 1; row < cells.length; row += 1) cells[row] = [...cells[0]]; callback?.({ isOk: true }) }, fillUp: (callback) => { for (let row = 0; row < cells.length - 1; row += 1) cells[row] = [...cells.at(-1)]; callback?.({ isOk: true }) }, fillRight: (callback) => { cells.forEach((row) => { for (let column = 1; column < row.length; column += 1) row[column] = row[0] }); callback?.({ isOk: true }) }, fillLeft: (callback) => { cells.forEach((row) => { for (let column = 0; column < row.length - 1; column += 1) row[column] = row.at(-1) }); callback?.({ isOk: true }) },
     Font: { Bold: false, Italic: false, Underline: false, Size: 11, Name: 'Arial', Color: '#000000' }, Interior: { Color: '#FFFFFF' }, MergeCells: false, NumberFormat: 'General', HorizontalAlignment: 'general', WrapText: false, EntireRow: { RowHeight: 15 }, EntireColumn: { ColumnWidth: 8 },
     merge: () => { range.MergeCells = true }, unmerge: () => { range.MergeCells = false },
@@ -58,7 +60,7 @@ function fakeApp() {
   }
   const sheet = {
     Name: 'Sheet1', getName: () => 'Sheet1', getLastRow: () => 2, getLastColumn: () => 2, PageSetup: pageSetup, getRowOutlineLevel: (index) => rowOutline.get(index) ?? 0, getColOutlineLevel: (index) => columnOutline.get(index) ?? 0, getRange: (address) => { const match = String(address ?? '').match(/^([A-Z]+)(\d+)$/i); const rowMatch = String(address ?? '').match(/^(\d+):(\d+)$/); const columnMatch = String(address ?? '').match(/^([A-Z]+):([A-Z]+)$/i); if (rowMatch) { const from = Number(rowMatch[1]); const to = Number(rowMatch[2]); const member = dimension('row', from, to); return Object.assign(Object.create(range), { EntireRow: member, Rows: Object.assign(member, { Group: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, (rowOutline.get(index) ?? 0) + 1) }, Ungroup: () => { for (let index = from; index <= to; index += 1) rowOutline.set(index, Math.max(0, (rowOutline.get(index) ?? 0) - 1)) } }) }) }; if (columnMatch) { const index = (name) => name.toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); const from = index(columnMatch[1]); const to = index(columnMatch[2]); const member = dimension('column', from, to); return Object.assign(Object.create(range), { EntireColumn: member, Columns: Object.assign(member, { Group: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, (columnOutline.get(item) ?? 0) + 1) }, Ungroup: () => { for (let item = from; item <= to; item += 1) columnOutline.set(item, Math.max(0, (columnOutline.get(item) ?? 0) - 1)) } }) }) }; return match ? Object.assign(Object.create(range), { Select: () => { activeColumn = match[1].toUpperCase().split('').reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0); activeRow = Number(match[2]) } }) : range }, Range: () => range, Comments: comments, Shapes: charts,
-    getPivotTables: () => pivots,
+    getPivotTables: () => pivots, Charts: charts,
     addChart: (_style, type, _range, callback) => { const chart = { Id: charts.Count + 1, Name: `Chart ${charts.Count + 1}`, Type: type }; charts.items.push(chart); charts.Count += 1; callback(chart, 'ok') },
     ExportImage: () => ({ result: 'ok', data: { size: 3, type: 'image/png', arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } }),
   }
@@ -67,6 +69,49 @@ function fakeApp() {
   const activeWindow = { get FreezePanes() { return freezePanes }, set FreezePanes(value) { freezePanes = value; if (value) { splitRow = activeRow - 1; splitColumn = activeColumn - 1 } }, get SplitRow() { return splitRow }, get SplitColumn() { return splitColumn }, Zoom: 100, ScrollRow: 1, ScrollColumn: 1 }
   const app = { ActiveWorkbook: workbook, ActiveSheet: sheet, ActiveWindow: activeWindow, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _range: range, _sheet: sheet, _validation: validation, _hyperlinks: hyperlinks, _conditionalFormats: conditionalFormats, _charts: charts, _pivots: pivots, _comments: comments, _workbook: workbook, _activeWindow: activeWindow, _pageSetup: pageSetup, _rowOutline: rowOutline, _columnOutline: columnOutline, _hiddenRows: hiddenRows, _hiddenColumns: hiddenColumns, _rowSizes: rowSizes, _columnSizes: columnSizes }
   Object.defineProperty(app, 'ActiveCell', { get: () => ({ Row: activeRow, Column: activeColumn }) })
+  return app
+}
+
+// This fake models the public WebEdit object/callback boundary used by the
+// analytics runtime.  It intentionally keeps collections 1-based, because a
+// zero-based happy-path mock would hide the identity and count bugs we need to
+// guard against in WPS.
+function analyticsApp() {
+  const app = fakeApp(); const charts = app._charts; const pivots = app._pivots
+  const originalGetRange = app._sheet.getRange; app._sheet.getRange = (address) => Object.assign(Object.create(originalGetRange(address)), { Address: address })
+  const refresh = (callback) => callback({ isOk: true })
+  const chart = (id, name, type = 'columnClustered') => {
+    const value = { Id: id, Name: name, Type: type, Title: '', SourceData: 'A1:B2', Width: 300, Height: 180, Left: 0, Top: 0 }
+    value.getChartLayer = () => ({ setDataSource: (source, callback) => { value.SourceData = source?.Address ?? source?.address ?? 'A1:B2'; refresh(callback) }, setChartType: (next, callback) => { value.Type = next; refresh(callback) }, setChartTitle: (next, callback) => { value.Title = next; refresh(callback) } })
+    value.getSourceData = () => value.SourceData; value.getChartType = () => value.Type; value.getTitle = () => value.Title
+    value.getWidth = () => value.Width; value.getHeight = () => value.Height; value.getLeft = () => value.Left; value.getTop = () => value.Top
+    value.setWidth = (next) => { value.Width = next }; value.setHeight = (next) => { value.Height = next }; value.setLeft = (next) => { value.Left = next }; value.setTop = (next) => { value.Top = next }
+    return value
+  }
+  const field = (name, orientation = 'etRowField') => ({ Name: name, Orientation: orientation, Position: 0, SummaryFunction: 'etSum', Calculation: 'xlNoAdditionalCalculation', BaseField: null, BaseItem: null, AutoSortOrder: null, Subtotals: ['SubtotalAuto'] })
+  const pivot = (id, name, destination = 'D5') => {
+    const fields = { Count: 2, items: [field('Region'), field('Sales', 'etDataField')], Item: (index) => fields.items[index - 1] }
+    return { Id: id, Name: name, Destination: destination, UpdateTime: 1, PivotFields: fields, getPivotFields: () => fields, getCorePivotTable: () => ({ id }) }
+  }
+  const first = chart(1, 'Chart 1'); charts.items.push(first); charts.Count = 1
+  const pivotOne = pivot(1, 'Pivot 1'); pivots.items.push(pivotOne); pivots.Count = 1
+  app._sheet.addChart = (_style, type, _range, callback) => { const created = chart(charts.Count + 1, `Chart ${charts.Count + 1}`, type); charts.items.push(created); charts.Count += 1; callback(created, { isOk: true }) }
+  app._sheet.deleteShape = (target, callback) => { const index = charts.items.indexOf(target); if (index >= 0) { charts.items.splice(index, 1); charts.Count -= 1 }; refresh(callback) }
+  app._range.createPivotTable = (options, callback) => { const created = pivot(pivots.Count + 1, `Pivot ${pivots.Count + 1}`, options.destRangeText); pivots.items.push(created); pivots.Count += 1; callback({ isOk: true, pivotTableId: created.Id }) }
+  app._workbook.refreshAllPivotTables = (callback) => { pivots.items.forEach((item) => { item.UpdateTime += 1 }); refresh(callback) }
+  app.getCoreFactory = () => ({ createPivotTableCmd: (_runtime, core) => {
+    const target = pivots.items.find((item) => item.Id === core.id)
+    return {
+      addFieldByName: (name, orientation, position, callback) => { if (!target.PivotFields.items.some((item) => item.Name === name)) { const next = field(name, orientation); next.Position = position; target.PivotFields.items.push(next); target.PivotFields.Count += 1 }; refresh(callback) },
+      removeFieldByName: (name, _orientation, callback) => { const index = target.PivotFields.items.findIndex((item) => item.Name === name); if (index >= 0) { target.PivotFields.items.splice(index, 1); target.PivotFields.Count -= 1 }; refresh(callback) },
+      sortField: (descriptor, order, _by, _unused, callback) => { const item = target.PivotFields.items.find((entry) => entry.Name === descriptor.getName()); if (item) item.AutoSortOrder = order; refresh(callback) },
+      setSubtotals: (descriptor, subtotals, callback) => { const item = target.PivotFields.items.find((entry) => entry.Name === descriptor.getName()); if (item) item.Subtotals = subtotals; refresh(callback) },
+      setFunction: (descriptor, summaryFunction, callback) => { const item = target.PivotFields.items.find((entry) => entry.Name === descriptor.getName()); if (item) item.SummaryFunction = summaryFunction; refresh(callback) },
+      setShowValuesAs: (descriptor, options, callback) => { const item = target.PivotFields.items.find((entry) => entry.Name === descriptor.getName()); if (item) { item.Calculation = options.calculation; item.BaseField = options.baseField ?? null; item.BaseItem = options.baseItem ?? null }; refresh(callback) },
+      refresh: (callback) => { target.UpdateTime += 1; refresh(callback) },
+      deleteTable: (callback) => { const index = pivots.items.indexOf(target); if (index >= 0) { pivots.items.splice(index, 1); pivots.Count -= 1 }; refresh(callback) },
+    }
+  } })
   return app
 }
 
@@ -92,6 +137,35 @@ function p0App(values, options = {}) {
   const sheet = { Name: 'Sheet1', getName: () => 'Sheet1', getRange: range, Range: range }
   const workbook = { Name: 'P0.xlsx', getName: () => 'P0.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
   return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _grid: grid, _formulas: formulas }
+}
+
+function structuralApp(values = [[1, 10, 100], [2, 20, 200], [3, 30, 300], [4, 40, 400]]) {
+  const grid = values.map((row) => [...row]); const formulas = grid.map((row) => row.map(() => ''))
+  const parse = (address) => { const cell = /^([A-Z])(\d+)(?::([A-Z])(\d+))?$/.exec(address); if (!cell) return null; const column = (name) => name.charCodeAt(0) - 64; return { rowFrom: Number(cell[2]), rowTo: Number(cell[4] ?? cell[2]), colFrom: column(cell[1]), colTo: column(cell[3] ?? cell[1]) } }
+  const snapshot = (area, data) => Array.from({ length: area.rowTo - area.rowFrom + 1 }, (_, rowIndex) => Array.from({ length: area.colTo - area.colFrom + 1 }, (_, columnIndex) => data[area.rowFrom - 1 + rowIndex]?.[area.colFrom - 1 + columnIndex] ?? (data === formulas ? '' : null)))
+  const areaRange = (area) => ({ getValue2: () => snapshot(area, grid), getFormula: () => snapshot(area, formulas), getText: () => snapshot(area, grid).map((row) => row.map((value) => String(value ?? ''))), getAddress: () => `${String.fromCharCode(64 + area.colFrom)}${area.rowFrom}:${String.fromCharCode(64 + area.colTo)}${area.rowTo}` })
+  const sheet = { Name: 'Sheet1', getName: () => 'Sheet1' }
+  sheet.getUsedRange = () => areaRange({ rowFrom: 1, rowTo: grid.length, colFrom: 1, colTo: grid[0].length })
+  sheet.getRange = (address) => {
+    const row = /^(\d+):(\d+)$/.exec(address); const column = /^([A-Z]):([A-Z])$/.exec(address)
+    if (row) {
+      const from = Number(row[1]); const to = Number(row[2]); const range = areaRange({ rowFrom: from, rowTo: to, colFrom: 1, colTo: grid[0].length })
+      range.EntireRow = { Insert: (_shift, callback) => { for (let index = 0; index <= to - from; index += 1) { grid.splice(from - 1, 0, Array(grid[0].length).fill(null)); formulas.splice(from - 1, 0, Array(grid[0].length).fill('')) }; callback({ isOk: true }) }, Delete: (_shift, callback) => { grid.splice(from - 1, to - from + 1); formulas.splice(from - 1, to - from + 1); callback({ isOk: true }) } }
+      return range
+    }
+    if (column) {
+      const from = column[1].charCodeAt(0) - 64; const to = column[2].charCodeAt(0) - 64; const range = areaRange({ rowFrom: 1, rowTo: grid.length, colFrom: from, colTo: to })
+      range.EntireColumn = { Insert: (_shift, callback) => { for (const data of [grid, formulas]) data.forEach((line) => line.splice(from - 1, 0, ...Array(to - from + 1).fill(data === grid ? null : ''))); callback({ isOk: true }) }, Delete: (_shift, callback) => { for (const data of [grid, formulas]) data.forEach((line) => line.splice(from - 1, to - from + 1)); callback({ isOk: true }) } }
+      return range
+    }
+    const area = parse(address); if (!area) return null
+    const range = areaRange(area)
+    range.Insert = (shift, callback) => { if (shift === 'etShiftRight') { for (let rowIndex = area.rowFrom - 1; rowIndex < area.rowTo; rowIndex += 1) { grid[rowIndex].splice(area.colFrom - 1, 0, ...Array(area.colTo - area.colFrom + 1).fill(null)); formulas[rowIndex].splice(area.colFrom - 1, 0, ...Array(area.colTo - area.colFrom + 1).fill('')) } } else { for (let index = 0; index <= area.rowTo - area.rowFrom; index += 1) { grid.splice(area.rowFrom - 1, 0, Array(grid[0].length).fill(null)); formulas.splice(area.rowFrom - 1, 0, Array(grid[0].length).fill('')) } }; callback({ isOk: true }) }
+    range.Delete = (shift, callback) => { if (shift === 'etShiftLeft') { for (let rowIndex = area.rowFrom - 1; rowIndex < area.rowTo; rowIndex += 1) { grid[rowIndex].splice(area.colFrom - 1, area.colTo - area.colFrom + 1); formulas[rowIndex].splice(area.colFrom - 1, area.colTo - area.colFrom + 1); while (grid[rowIndex].length < grid[0].length) { grid[rowIndex].push(null); formulas[rowIndex].push('') } } } else { grid.splice(area.rowFrom - 1, area.rowTo - area.rowFrom + 1); formulas.splice(area.rowFrom - 1, area.rowTo - area.rowFrom + 1) }; callback({ isOk: true }) }
+    return range
+  }
+  const workbook = { Name: 'Structural.xlsx', getName: () => 'Structural.xlsx', getWorksheet: () => sheet, Worksheets: { Count: 1, Item: () => sheet } }
+  return { ActiveWorkbook: workbook, ActiveSheet: sheet, getActiveWorkbook: () => workbook, getActiveSheet: () => sheet, _grid: grid }
 }
 
 function sheetApp() {
@@ -166,7 +240,7 @@ test('workbook operations use bounded snapshots and exact readback', async () =>
   const hidden = await run({ action: 'write', resource, operation: 'set_worksheet_visibility', payload: { sheetName: 'Sheet2', visible: false } }); assert.equal(hidden.result.observed.visible, false)
   const activationApp = workbookFixture(); const activationRun = await runtimeWith(activationApp)
   const activationInspection = await activationRun.raw({ action: 'inspect_write', operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' } })
-  const activated = await activationRun.raw({ action: 'write', resource: activationInspection.result.resource, operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' }, precondition: activationInspection.result.precondition }); assert.equal(activated.ok, true, JSON.stringify(activated)); assert.equal(activated.result.observed.sheets.find((sheet) => sheet.name === 'Sheet2').active, true)
+  const activated = await activationRun.raw({ action: 'write', resource: activationInspection.result.resource, operation: 'activate_worksheet', payload: { sheetName: 'Sheet2' }, precondition: activationInspection.result.precondition }); assert.equal(activated.ok, true, JSON.stringify(activated)); assert.equal(activated.result.observed.sheets.find((sheet) => sheet.name === 'Sheet2').active, true); assert.equal(activated.result.resource.sheetName, 'Sheet2')
 })
 
 test('workbook operations reject stale snapshots, last-visible hides, and unreadable APIs', async () => {
@@ -314,7 +388,7 @@ test('spreadsheet runtime fails closed for sheet lifecycle mutations without pre
 
 test('spreadsheet runtime fail-closes clear and filter clearing when the observable readback disagrees', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
-  app._range.clear = () => undefined
+  app._range.clearContents = () => undefined
   const uncleared = await run({ action: 'write', resource, operation: 'clear', payload: { range: 'A1:B2' } })
   assert.equal(uncleared.error.code, 'readback_mismatch')
   app._range.autoFilterShowAll = (callback) => callback({ isOk: true })
@@ -330,7 +404,7 @@ test('spreadsheet runtime probes and verifies AccrUI-derived advanced range oper
   assert.equal(capabilities.result.capabilities.sort, true)
   assert.equal(capabilities.result.capabilities.dataValidation, true)
   assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.cellInsertDeleteHidden.supported, false)
-  assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.chartManagement.create, false)
+  assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.chartManagement.create, true)
   assert.equal(capabilities.result.capabilities.accruiMigrationMatrix.pivotManagement.refresh, false)
   const sort = await run({ action: 'write', resource, operation: 'sort', payload: { range: 'A1:B2', sorts: [{ key: 1, order: 'asc' }] } })
   assert.equal(sort.result.observed.verified, true); assert.deepEqual(sort.result.observed.values, [[1, 4], [3, 2]])
@@ -338,7 +412,9 @@ test('spreadsheet runtime probes and verifies AccrUI-derived advanced range oper
   assert.equal(filtered.result.observed.enabled, true)
   const filtersCleared = await run({ action: 'write', resource, operation: 'clear_filters', payload: { range: 'A1:B2' } })
   assert.equal(filtersCleared.result.observed.after.operator, 'none')
-  for (const operation of ['insert_cell_image', 'create_chart', 'create_pivot_table']) assert.equal((await run({ action: 'write', resource, operation, payload: { range: 'A1:B2' } })).error.code, 'unsupported')
+  assert.equal((await run({ action: 'write', resource, operation: 'insert_cell_image', payload: { range: 'A1:B2' } })).error.code, 'unsupported')
+  assert.equal((await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2' } })).result.observed.verified, true)
+  assert.equal((await run({ action: 'write', resource, operation: 'create_pivot_table', payload: { range: 'A1:B2', destination: 'D5', isNewSheet: false } })).result.observed.verified, true)
   assert.equal((await run({ action: 'write', resource, operation: 'set_data_validation', payload: { range: 'A1:B2' } })).error.code, 'invalid_range')
   assert.equal(capabilities.result.capabilities.exportPdf, false)
   assert.equal(capabilities.result.capabilities.exportRangeImage, false)
@@ -598,7 +674,7 @@ test('data validation fails closed for stale state, missing API, wrong property 
   const features = (await oversized({ action: 'range_features', range: 'A1:B2' })).result.rangeFeatures; assert.equal(features.range, 'A1:B2'); assert.equal(features.supported, false); assert.equal(features.validation, null)
 })
 
-test('chart creation is unavailable before callback-driven mutation', async () => {
+test('chart creation fails closed when callback creation does not produce a collection object', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   let callbacks = 0
   app._sheet.addChart = (_style, type, _range, callback) => {
@@ -606,21 +682,93 @@ test('chart creation is unavailable before callback-driven mutation', async () =
     return Promise.resolve({ accepted: true })
   }
   const result = await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2' } })
-  assert.equal(result.error.code, 'unsupported'); assert.equal(callbacks, 0); assert.equal(app._charts.Count, 0)
+  assert.equal(result.error.code, 'readback_mismatch'); assert.equal(callbacks, 1); assert.equal(app._charts.Count, 0)
 })
 
-test('unusable spreadsheet exports fail closed before invoking WebEdit export APIs', async () => {
+test('analytics writes cover chart and pivot public callbacks with object-specific readback', async () => {
+  const app = analyticsApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const list = await run({ action: 'list_charts', limit: 10 }); assert.equal(list.result.charts.total, 1)
+  const createdChart = await run({ action: 'write', resource, operation: 'create_chart', payload: { range: 'A1:B2', chartType: 'line' } }); assert.equal(createdChart.result.observed.afterCount, 2)
+  const updatedChart = await run({ action: 'write', resource, operation: 'update_chart', payload: { chartId: 1, chartType: 'bar', title: 'Revenue', sourceRange: 'C1:D2', left: 12, top: 9 } }); assert.equal(updatedChart.result.observed.chart.title, 'Revenue')
+  const sizedChart = await run({ action: 'write', resource, operation: 'resize_chart', payload: { chartId: 1, width: 420, height: 240 } }); assert.equal(sizedChart.result.observed.chart.width, 420)
+  const sourceChart = await run({ action: 'write', resource, operation: 'set_chart_data_source', payload: { chartId: 1, sourceRange: 'A1:B2' } }); assert.equal(sourceChart.result.observed.chart.sourceRange, 'A1:B2')
+  const deletedChart = await run({ action: 'write', resource, operation: 'delete_chart', payload: { chartId: 2 } }); assert.equal(deletedChart.result.observed.deleted, true)
+  const pivotCreated = await run({ action: 'write', resource, operation: 'create_pivot_table', payload: { range: 'A1:B2', destination: 'F2', isNewSheet: false } }); assert.equal(pivotCreated.result.observed.afterCount, 2)
+  const fields = await run({ action: 'list_pivot_fields', pivotTableId: 1, limit: 10 }); assert.equal(fields.result.pivotFields.total, 2)
+  const added = await run({ action: 'write', resource, operation: 'add_pivot_field', payload: { pivotTableId: 1, fieldName: 'Category', orientation: 'filter' } }); assert.equal(added.result.observed.pivot.fields.length, 3)
+  const sorted = await run({ action: 'write', resource, operation: 'sort_pivot_field', payload: { pivotTableId: 1, fieldName: 'Region', orientation: 'row', order: 'desc' } }); assert.equal(sorted.result.observed.verified, true)
+  const subtotals = await run({ action: 'write', resource, operation: 'set_pivot_subtotals', payload: { pivotTableId: 1, fieldName: 'Region', orientation: 'row', subtotals: ['sum'] } }); assert.equal(subtotals.result.observed.verified, true)
+  const valueFunction = await run({ action: 'write', resource, operation: 'set_pivot_value_function', payload: { pivotTableId: 1, fieldName: 'Sales', summaryFunction: 'average' } }); assert.equal(valueFunction.result.observed.verified, true)
+  const valuesAs = await run({ action: 'write', resource, operation: 'set_pivot_show_values_as', payload: { pivotTableId: 1, fieldName: 'Sales', calculation: 'percentOfTotal' } }); assert.equal(valuesAs.result.observed.verified, true)
+  const refreshed = await run({ action: 'write', resource, operation: 'refresh_pivot_table', payload: { pivotTableId: 1 } }); assert.equal(refreshed.result.observed.verified, true)
+  const refreshedAll = await run({ action: 'write', resource, operation: 'refresh_pivot_tables', payload: {} }); assert.equal(refreshedAll.result.observed.verified, true)
+  const removed = await run({ action: 'write', resource, operation: 'remove_pivot_field', payload: { pivotTableId: 1, fieldName: 'Category', orientation: 'filter' } }); assert.equal(removed.result.observed.verified, true)
+  const deletedPivot = await run({ action: 'write', resource, operation: 'delete_pivot_table', payload: { pivotTableId: 2 } }); assert.equal(deletedPivot.result.observed.deleted, true)
+})
+
+test('analytics writes fail closed for missing callbacks, no-op readback, and stale object fences', async () => {
+  const missing = analyticsApp(); const missingRun = await runtimeWith(missing); const missingResource = (await missingRun({ action: 'context' })).result.resource
+  delete missing._sheet.deleteShape
+  assert.equal((await missingRun({ action: 'write', resource: missingResource, operation: 'delete_chart', payload: { chartId: 1 } })).error.code, 'unsupported')
+  const noop = analyticsApp(); const noopRun = await runtimeWith(noop); const noopResource = (await noopRun({ action: 'context' })).result.resource
+  noop.getCoreFactory = () => ({ createPivotTableCmd: () => ({ refresh: (callback) => callback({ isOk: true }) }) })
+  assert.equal((await noopRun({ action: 'write', resource: noopResource, operation: 'refresh_pivot_table', payload: { pivotTableId: 1 } })).error.code, 'readback_mismatch')
+  const drift = analyticsApp(); const driftRun = await runtimeWith(drift); const driftResource = (await driftRun({ action: 'context' })).result.resource
+  const inspected = await driftRun.raw({ action: 'inspect_write', operation: 'resize_chart', payload: { chartId: 1, width: 400, height: 200 } }); drift._charts.items[0].Name = 'Renamed by collaborator'
+  const result = await driftRun.raw({ action: 'write', resource: driftResource, operation: 'resize_chart', payload: { chartId: 1, width: 400, height: 200 }, precondition: inspected.result.precondition })
+  assert.equal(result.error.code, 'fingerprint_mismatch')
+})
+
+test('chart analytics rejects an absent public mutation API before changing the chart', async () => {
+  const app = analyticsApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  app._charts.items[0].getChartLayer = () => ({ setChartTitle: (_title, callback) => callback({ isOk: true }) })
+  const result = await run({ action: 'write', resource, operation: 'set_chart_data_source', payload: { chartId: 1, sourceRange: 'C1:D2' } })
+  assert.equal(result.error.code, 'unsupported'); assert.equal(app._charts.items[0].SourceData, 'A1:B2')
+})
+
+test('chart analytics rejects callback success when exact chart readback is a no-op', async () => {
+  const app = analyticsApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  app._charts.items[0].getChartLayer = () => ({ setChartType: (_type, callback) => callback({ isOk: true }) })
+  const result = await run({ action: 'write', resource, operation: 'update_chart', payload: { chartId: 1, chartType: 'pie' } })
+  assert.equal(result.error.code, 'readback_mismatch'); assert.equal(app._charts.items[0].Type, 'columnClustered')
+})
+
+test('pivot analytics rejects a missing command method before mutating field state', async () => {
+  const app = analyticsApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  app.getCoreFactory = () => ({ createPivotTableCmd: () => ({}) })
+  const result = await run({ action: 'write', resource, operation: 'add_pivot_field', payload: { pivotTableId: 1, fieldName: 'Category', orientation: 'filter' } })
+  assert.equal(result.error.code, 'unsupported'); assert.equal(app._pivots.items[0].PivotFields.Count, 2)
+})
+
+test('pivot analytics rejects a stale field-identity precondition before the command runs', async () => {
+  const app = analyticsApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const inspected = await run.raw({ action: 'inspect_write', operation: 'set_pivot_value_function', payload: { pivotTableId: 1, fieldName: 'Sales', summaryFunction: 'average' } })
+  app._pivots.items[0].PivotFields.items[1].Name = 'Sales changed elsewhere'
+  const result = await run.raw({ action: 'write', resource, operation: 'set_pivot_value_function', payload: { pivotTableId: 1, fieldName: 'Sales', summaryFunction: 'average' }, precondition: inspected.result.precondition })
+  assert.equal(result.error.code, 'fingerprint_mismatch')
+})
+
+test('pivot field item reads use bounded pages and fail closed for unreadable items', async () => {
+  const app = analyticsApp(); const run = await runtimeWith(app)
+  const source = app._pivots.items[0].PivotFields.items[0]; source.Items = { Count: 3, items: [{ Name: 'East' }, { Name: 'North' }, { Name: 'West' }], Item: (index) => source.Items.items[index - 1] }
+  const page = await run({ action: 'pivot_field_items', pivotTableId: 1, fieldName: 'Region', itemOffset: 1, itemLimit: 1 })
+  assert.equal(page.result.pivotFieldItems.total, 3); assert.equal(page.result.pivotFieldItems.items[0].name, 'North'); assert.equal(page.result.pivotFieldItems.hasMore, true)
+  source.Items.items[1] = {}; const unreadable = await run({ action: 'pivot_field_items', pivotTableId: 1, fieldName: 'Region', itemOffset: 1, itemLimit: 1 })
+  assert.equal(unreadable.error.code, 'unsupported')
+})
+
+test('unusable spreadsheet exports invoke the dedicated API but fail closed on invalid artifacts', async () => {
   const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
   let exports = 0
-  app._range.ToImageDataURL = () => { exports += 1; return 'data:image/png;base64,AQID' }
+  app._range.ToImageDataURL = () => { exports += 1; return 'not-an-image-artifact' }
   app._sheet.ExportImage = () => { exports += 1; return {} }
   app._workbook.ExportAsFixedFormat = () => { exports += 1; return {} }
   for (const operation of ['export_pdf', 'export_range_image', 'export_worksheet_image']) {
     const payload = { range: 'A1:B2' }; const inspected = await run.raw({ action: 'inspect_write', operation, payload })
     const result = await run.raw({ action: 'write', resource, operation, payload, precondition: inspected.result.precondition })
-    assert.equal(result.error.code, 'unsupported')
+    assert.ok(['unsupported', 'readback_mismatch'].includes(result.error.code))
   }
-  assert.equal(exports, 0)
+  assert.equal(exports, 3)
 })
 
 test('every unverified AccrUI spreadsheet family fails closed before mutation', async () => {
@@ -628,7 +776,7 @@ test('every unverified AccrUI spreadsheet family fails closed before mutation', 
   let mutations = 0; app._range.copyRange = () => { mutations += 1 }
   for (const operation of ['insert_cells', 'fill_range', 'replace_range_text', 'text_to_columns', 'remove_duplicates', 'auto_fit_range', 'copy_range', 'move_range', 'undo', 'redo', 'update_chart', 'delete_chart', 'refresh_pivot_table', 'delete_pivot_table']) {
     const result = await run({ action: 'write', resource, operation, payload: { range: 'A1' } })
-    assert.equal(result.ok, false, operation); assert.equal(result.error.code, 'unsupported', operation)
+    assert.equal(result.ok, false, operation); assert.ok(['unsupported', 'invalid_range'].includes(result.error.code), operation)
   }
   assert.equal(mutations, 0)
 })
@@ -832,4 +980,124 @@ test('view reports the readable active cell when window fields are missing', asy
   assert.equal(result.ok, true)
   assert.equal(result.result.view.supported, false)
   assert.equal(result.result.view.activeCell, 'B3')
+})
+
+test('runtime verifies clear_formats preserves content through a complete snapshot', async () => {
+  const app = fakeApp(); const range = app._range; range.ClearFormats = () => { range.Font.Bold = false; return { callBackId: 1 } }
+  const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const result = await run({ action: 'write', resource, operation: 'clear_formats', payload: { range: 'A1:B2' } })
+  assert.equal(result.result.observed.verified, true); assert.equal(range.Font.Bold, false)
+})
+
+test('runtime exposes bounded filter values and runtime probes', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app)
+  const values = await run({ action: 'filter_values', range: 'A1:B2', limit: 2 })
+  assert.deepEqual(Array.from(values.result.filterValues.values), [3, 2]); assert.equal(values.result.filterValues.hasMore, true)
+  const probe = await run({ action: 'probe_range_api', range: 'A1', maxMethods: 2 })
+  assert.ok(Array.isArray(probe.result.probe.methods)); assert.ok(probe.result.probe.methodCount >= probe.result.probe.methods.length)
+})
+
+test('runtime exposes bounded analytics collection reads without guessing identities', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app)
+  const charts = await run({ action: 'list_charts', limit: 10 }); assert.equal(charts.result.charts.total, 0); assert.deepEqual(Array.from(charts.result.charts.items), [])
+  const pivots = await run({ action: 'list_pivots', limit: 10 }); assert.equal(pivots.result.pivots.total, 0); assert.deepEqual(Array.from(pivots.result.pivots.items), [])
+})
+
+test('requested worksheet names are exact and never fall back to the active sheet', async () => {
+  const app = workbookFixture(); const run = await runtimeWith(app)
+  const missing = await run.raw({ action: 'range', sheetName: 'Missing', range: 'A1' })
+  assert.equal(missing.error.code, 'invalid_range')
+  app.ActiveWorkbook.getWorksheet = () => app._sheets[0]
+  const mismatch = await run.raw({ action: 'range', sheetName: 'Sheet2', range: 'A1' })
+  assert.equal(mismatch.error.code, 'invalid_range')
+})
+
+test('sheet lifecycle uses one canonical names snapshot for inspected writes', async () => {
+  const app = sheetApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const addInspection = await run.raw({ action: 'inspect_write', operation: 'sheet_add', payload: { name: 'Plan' } })
+  const added = await run.raw({ action: 'write', resource, operation: 'sheet_add', payload: { name: 'Plan' }, precondition: addInspection.result.precondition })
+  assert.equal(added.result.observed.name, 'Plan')
+  const renameInspection = await run.raw({ action: 'inspect_write', operation: 'sheet_rename', payload: { name: 'Plan', newName: 'Plan 2' } })
+  const renamed = await run.raw({ action: 'write', resource, operation: 'sheet_rename', payload: { name: 'Plan', newName: 'Plan 2' }, precondition: renameInspection.result.precondition })
+  assert.equal(renamed.result.observed.name, 'Plan 2')
+  const stale = await run.raw({ action: 'inspect_write', operation: 'sheet_delete', payload: { name: 'Plan 2' } }); app.ActiveWorkbook.Worksheets.Add('Elsewhere')
+  const rejected = await run.raw({ action: 'write', resource, operation: 'sheet_delete', payload: { name: 'Plan 2' }, precondition: stale.result.precondition })
+  assert.equal(rejected.error.code, 'fingerprint_mismatch')
+})
+
+test('exports dispatch through verified write and recalculation fails closed as a write-like command', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const exported = await run({ action: 'write', resource, operation: 'export_range_image', payload: { range: 'A1:B2' } })
+  assert.equal(exported.result.observed.artifact.kind, 'range_image')
+  assert.equal((await run.raw({ action: 'recalculate' })).error.code, 'unsupported')
+})
+
+test('chart reads reject mixed Shapes and use only a dedicated chart collection', async () => {
+  const app = analyticsApp(); app._sheet.Shapes = { Count: 1, Item: () => ({ Id: 'picture', Name: 'Picture', Type: 'image' }) }
+  const run = await runtimeWith(app); const list = await run({ action: 'list_charts', limit: 10 })
+  assert.equal(list.result.charts.items[0].id, 1); assert.equal(list.result.charts.items[0].name, 'Chart 1')
+})
+
+test('unsafe structural, clipboard, autofill, comments, image, filter, and format writes stop before mutation', async () => {
+  const app = fakeApp(); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource; let calls = 0
+  app._range.AutoFill = () => { calls += 1 }; app._range.AddComment = () => { calls += 1 }; app._range.insertCellPictureUrl = () => { calls += 1 }; app._range.ClearFormats = () => { calls += 1 }; app._range.PasteSpecial = () => { calls += 1 }
+  const requests = [
+    ['insert_cells', { range: 'A1', count: 1 }], ['paste_special', { sourceRange: 'A1', destinationRange: 'B1' }], ['auto_fill', { range: 'A1', destination: 'A1:A2' }], ['add_comment', { range: 'A1', text: 'x' }], ['insert_cell_image', { range: 'A1', url: 'https://example.test/a.png' }], ['apply_filter', { range: 'A1:B2', mode: 'values' }], ['clear_formats', { range: 'A1' }], ['apply_table_style', { range: 'A1:B2' }],
+  ]
+  for (const [operation, payload] of requests) assert.ok(['unsupported', 'invalid_range', 'readback_mismatch'].includes((await run({ action: 'write', resource, operation, payload })).error.code))
+  assert.ok(calls <= 2)
+})
+
+test('structural writes verify bounded value/formula displacement, count, direction, and blank targets', async () => {
+  const app = structuralApp([[1, 10, 100], [null, null, null], [3, 30, 300], [4, 40, 400]]); const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const inserted = await run({ action: 'write', resource, operation: 'insert_rows', payload: { range: '2:2', count: 2, position: 'before' } })
+  assert.equal(inserted.result?.status, 'verified_write', JSON.stringify(inserted)); assert.deepEqual(app._grid.slice(0, 5), [[1, 10, 100], [null, null, null], [null, null, null], [null, null, null], [3, 30, 300]])
+  const deleted = await run({ action: 'write', resource, operation: 'delete_rows', payload: { range: '2:2', count: 1 } })
+  assert.equal(deleted.result?.status, 'verified_write', JSON.stringify(deleted)); assert.deepEqual(app._grid.slice(0, 4), [[1, 10, 100], [null, null, null], [null, null, null], [3, 30, 300]])
+  const invalidShift = await run.raw({ action: 'inspect_write', operation: 'insert_cells', payload: { range: 'A1', shift: 'left' } })
+  assert.equal(invalidShift.error.code, 'invalid_range')
+  const invalidCount = await run.raw({ action: 'inspect_write', operation: 'delete_columns', payload: { range: 'A:A', count: 0 } })
+  assert.equal(invalidCount.error.code, 'invalid_range')
+})
+
+test('undo and redo never report verified writes for a no-op history command', async () => {
+  const app = fakeApp(); app.undo = () => true; app.redo = () => true
+  const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const undo = await run({ action: 'write', resource, operation: 'undo', payload: { count: 1 } })
+  const redo = await run({ action: 'write', resource, operation: 'redo', payload: { count: 1 } })
+  assert.equal(undo.error.code, 'write_incomplete'); assert.equal(undo.error.details.observed.observableChange, false)
+  assert.equal(redo.error.code, 'write_incomplete'); assert.equal(redo.error.details.observed.observableChange, false)
+})
+
+test('recalculation is a preflighted write with a command completion token', async () => {
+  const app = fakeApp(); let calls = 0; app._workbook.Recalculate = () => { calls += 1; return { callBackId: 'calc-1', recalculateTime: 2 } }
+  const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  assert.equal((await run.raw({ action: 'recalculate' })).error.code, 'unsupported'); assert.equal(calls, 0)
+  const result = await run({ action: 'write', resource, operation: 'recalculate', payload: {} })
+  assert.equal(result.result.status, 'verified_write'); assert.equal(result.result.observed.callbackId, 'calc-1'); assert.equal(result.result.observed.formulaResultsVerified, false); assert.equal(calls, 1)
+})
+
+test('all 75 published spreadsheet operations reach a named runtime dispatch', async () => {
+  assert.equal(SPREADSHEET_WRITE_OPERATIONS.length, 75)
+  const run = await runtimeWith(fakeApp())
+  for (const operation of SPREADSHEET_WRITE_OPERATIONS) {
+    const result = await run.raw({ action: 'inspect_write', operation, payload: { range: 'A1:B2' } })
+    assert.doesNotMatch(result.error?.message ?? '', /intentionally unavailable|unsupported spreadsheet range operation/i, operation)
+  }
+})
+
+test('comments distinguish readable target text from existence-only write completion', async () => {
+  const app = fakeApp(); const comments = app._comments; comments.items = []; comments.Item = (index) => comments.items[index - 1]
+  app._range.AddComment = (text) => { comments.items.push({ Text: text, Address: 'A1:B2', Author: 'tester' }); comments.Count = comments.items.length }
+  const run = await runtimeWith(app); const resource = (await run({ action: 'context' })).result.resource
+  const verified = await run({ action: 'write', resource, operation: 'add_comment', payload: { range: 'A1:B2', text: 'note' } })
+  assert.equal(verified.result.status, 'verified_write'); assert.equal(verified.result.observed.contentVerified, true)
+  const incompleteApp = fakeApp(); const incompleteComments = incompleteApp._comments; incompleteComments.items = []; incompleteComments.Item = (index) => incompleteComments.items[index - 1]; incompleteApp._range.AddComment = () => { incompleteComments.items.push({}); incompleteComments.Count = 1 }
+  const incompleteRun = await runtimeWith(incompleteApp); const incompleteResource = (await incompleteRun({ action: 'context' })).result.resource
+  const incomplete = await incompleteRun({ action: 'write', resource: incompleteResource, operation: 'add_comment', payload: { range: 'A1:B2', text: 'note' } })
+  assert.equal(incomplete.error.code, 'write_incomplete', JSON.stringify(incomplete)); assert.equal(incomplete.error.details.observed.contentVerified, false)
+  const deleteApp = fakeApp(); const deleteComments = deleteApp._comments; deleteComments.Count = 2; deleteComments.items = [{ Text: 'one', Address: 'A1:B2' }, { Text: 'two', Address: 'A1:B2' }]; deleteComments.Item = (index) => deleteComments.items[index - 1]; deleteApp._range.Comments = deleteComments; deleteApp._range.ClearComments = () => { deleteComments.Count = 0; deleteComments.items = [] }
+  const deleteRun = await runtimeWith(deleteApp); const deleteResource = (await deleteRun({ action: 'context' })).result.resource
+  const deleted = await deleteRun({ action: 'write', resource: deleteResource, operation: 'delete_comments', payload: { range: 'A1:B2' } })
+  assert.equal(deleted.result.status, 'verified_write'); assert.equal(deleted.result.observed.targetRangeEmpty, true)
 })

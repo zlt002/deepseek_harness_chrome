@@ -1,10 +1,43 @@
 ---
 name: pptx
-description: "Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations; reading, parsing, or extracting text from any .pptx or .potx file (even if the extracted content will be used elsewhere, like in an email or summary); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates (.potx), layouts, speaker notes, or comments. Trigger whenever the user mentions \"deck,\" \"slides,\" \"presentation,\" or references a .pptx or .potx filename, regardless of what they plan to do with the content afterward. If a .pptx or .potx file needs to be opened, created, or touched, use this skill."
+description: "Use this skill for local .pptx or .potx files: create, read, edit, template work, OOXML validation, or conversion. If the task targets a bound Browser Target whose documentIdentity.kind is webedit_presentation, use the online presentation route in this skill—presentation_get_capabilities, contextual reads, then presentation_write_preview → explicit user confirmation → presentation_write_commit → same-target readback—instead of local OOXML/pptxgenjs."
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
 # PPTX creation, editing, and analysis
+
+## Scope gate: online Browser Target vs local file
+
+When the user is working in a bound online WebEdit presentation, first confirm `documentIdentity.kind=webedit_presentation` from the Browser Target roster. Use the model-facing online tools:
+
+1. Call `mcp__chrome__presentation_get_capabilities({})` before planning an advanced write. Plan only an operation/action listed in the returned `operations`; an empty action list means the bound runtime cannot perform that action. The returned `resource` binds this capability snapshot to the current presentation.
+2. Read with `mcp__chrome__presentation_get_context({})`, `mcp__chrome__presentation_get_selection({})`, and `mcp__chrome__presentation_get_text_boxes({ slideIndex? })` as needed.
+3. For a change, call `mcp__chrome__presentation_write_preview({ operation, payload })`. Preview is read-only and returns the bounded impact summary, current presentation identity, and one-time `challenge`. Before asking for confirmation, show the table rows/columns/position or every scene element type and bounded text preview from `summary.confirmation`, not merely payload keys.
+4. Show the preview to the user and wait for explicit confirmation. Without confirmation, stop.
+5. After confirmation, call only `mcp__chrome__presentation_write_commit({ challenge })`. Do not resend `operation`, `payload`, target identity, or a replacement challenge.
+6. Verify on the same Browser Target with `presentation_get_context` and, when text is involved, `presentation_get_text_boxes`; compare presentation fingerprint, slide/object counts, target text/bounds, and the requested effect. Report completion only after same-target structured readback.
+
+The `presentation_write_preview` tool schema is the payload source of truth. `slideIndex`, `objectIndex`, `textBoxIndex`, and `toIndex` are zero-based; supply no Browser Target, resource, precondition, or generic script:
+
+| Operation | Payload |
+|---|---|
+| `manage_slides` | `{action:"add", index?:number}` (omit `index` or use `-1` to append), or `{action:"delete"\|"select", slideIndex}` |
+| `render_scene` | `{action:"replace_scene", slideIndex, elements:[1-50]}`; every element has `type,left,top,width,height`, plus `text`, image `fileName`, table `rows,columns`, or an allowed `chartType` |
+| `render_slide_visual` | `{action:"replace_visual", slideIndex, svg, left, top, width, height}`; use this preferred single-image route for a naturally described, visually designed slide when the runtime advertises it. `svg` must be self-contained and bounded: no URL, image reference, script, iframe, event handler, external font, or browser target. Preview returns only SVG format, byte length, hash, and bounds; it never returns the SVG source. |
+| `edit_selection` | `{action:"update", slideIndex, edit:{x?,y?,width?,height?,rotation?,replaceText?}}`; `slideIndex` must identify the active slide |
+| `manage_objects` | `{action:"delete"\|"update", slideIndex, objectIndex, object?:{x?,y?,width?,height?,rotation?}}` |
+| `manage_tables` | `{action:"insert", slideIndex, rows, columns, left, top, width, height}` |
+| `manage_charts` | `{action:"insert", slideIndex, chartType, left, top, width, height}`; `chartType` is only `area`, `barClustered`, `columnClustered`, `doughnut`, `line`, `pie`, `radar`, `scatter`, or its WPS numeric enum `1,57,51,-4120,4,5,-4151,-4169` (numeric strings are normalized) |
+| `manage_notes` | `{action:"replace", slideIndex, text}` |
+| `manage_comments` | `{action:"add", slideIndex, text, replyer?, slideId?}`; `replyer` follows WPS Comments.Add: a nonempty author string or non-negative integer identity |
+| `manage_metadata` | `{action:"set_builtin", name, value}` |
+| `manage_structure` | `{action:"move_slide", slideIndex, toIndex}` or `{action:"move_section", sectionIndex, toPos}` |
+| `replace_text_box` | `{action:"replace", slideIndex, textBoxIndex, text}` |
+| `save` | `{action:"save"}` |
+
+Fields shown in a row are required unless marked `?`. Never omit a listed `slideIndex`, `objectIndex`, or `textBoxIndex`, and never infer the first slide, object, or text box.
+
+The online route is challenge-scoped and fail-closed: an expired challenge, resource/selection drift, unsupported operation, timeout, or uncertain readback requires a fresh read → preview → user confirmation. Do not create a local `.pptx` as a substitute for an online edit. Only a local `.pptx`/`.potx` file uses the OOXML and `pptxgenjs` workflow below.
 
 A `.pptx` is a ZIP archive of XML files. Choose your approach by task:
 

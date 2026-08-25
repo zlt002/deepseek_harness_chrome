@@ -60,6 +60,18 @@ export function feedbackMessage(event: MessageEvent, parent: Window, config: Wor
   return data.feedback
 }
 
+/** Return bounded delivery status to the extension review page. */
+export function respondFeedback(parent: Window, config: WorkspaceReviewBridgeConfig, deliveryId: string, accepted: boolean, error?: unknown): void {
+  const message = typeof error === 'string' ? error.trim().slice(0, 4_000) : ''
+  parent.postMessage({
+    type: 'markdown-review-feedback-accepted/v1',
+    nonce: config.nonce,
+    deliveryId,
+    accepted,
+    ...(accepted || message === '' ? {} : { error: message }),
+  }, config.parentOrigin)
+}
+
 export interface WorkspaceReviewRehydrateRequest {
   readonly requestId: string
   readonly reviewId: string

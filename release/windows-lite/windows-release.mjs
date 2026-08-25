@@ -234,7 +234,7 @@ function startVbs() {
 }
 
 function releaseReadme(version) {
-  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- Harness 核心为静态 JavaScript bundle，不包含 \`runtime/harness/node_modules\`。\n- 内置 skill 在 \`runtime/skills\`，启动器通过 \`DSH_PRODUCT_SKILLS_ROOT\` 挂载；产品 \`/pmd-prd\`、\`/pptx\`、\`/xlsx\`、\`/docx\`、\`/pdf\` 优先于 \`%USERPROFILE%\\.claude\\skills\` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。\n- 原生 Windows 文件仅在 \`runtime/native\`；用户后安装的插件写入 \`%APPDATA%\\accr-ui-harness\\profile\`，升级主程序不会删除。\n- 在 \`runtime\` 目录可执行 \`dsh-plugin.bat add <插件包名>\` 安装兼容插件，无需重新发布主包。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
+  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- Harness 核心为静态 JavaScript bundle，不包含 \`runtime/harness/node_modules\`。\n- 内置 skill 在 \`runtime/skills\`，启动器通过 \`DSH_PRODUCT_SKILLS_ROOT\` 挂载；产品 \`/product-prototype\`、\`/pmd-prd\`、\`/pptx\`、\`/xlsx\`、\`/docx\`、\`/pdf\` 优先于 \`%USERPROFILE%\\.claude\\skills\` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。\n- 原生 Windows 文件仅在 \`runtime/native\`；用户后安装的插件写入 \`%APPDATA%\\accr-ui-harness\\profile\`，升级主程序不会删除。\n- 在 \`runtime\` 目录可执行 \`dsh-plugin.bat add <插件包名>\` 安装兼容插件，无需重新发布主包。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
 }
 
 function runZip(cwd, outputPath, input) {
@@ -334,6 +334,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     `runtime/${LEGACY_NATIVE_HOST_NAME}.json`,
   ]
   const productSkillEntries = [
+    'runtime/skills/product-prototype/SKILL.md',
     'runtime/skills/pmd-prd/SKILL.md',
     'runtime/skills/pptx/SKILL.md',
     'runtime/skills/xlsx/SKILL.md',

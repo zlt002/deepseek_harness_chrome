@@ -311,7 +311,7 @@ export async function prepareProductUiPackages(env = process.env) {
  * Spawn and supervise one `dsh --profile web` process.
  */
 export class HarnessWebProcess {
-  /** @param {{ cliPath?: string, runtimePluginPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string, mcpConnector?: { url: string, token: string }, extraPatchPaths?: string[] }} [options] */
+  /** @param {{ cliPath?: string, runtimePluginPath?: string, port?: number, env?: NodeJS.ProcessEnv, cwd?: string, mcpConnector?: { url: string, token: string }, prototypeRecoveryPublicKey?: string, prototypeRecoveryRunId?: string, extraPatchPaths?: string[] }} [options] */
   constructor(options = {}) {
     this.env = options.env ?? process.env
     this.cliPath = options.cliPath ?? resolveHarnessCli(this.env)
@@ -319,6 +319,8 @@ export class HarnessWebProcess {
     this.port = options.port ?? 0
     this.cwd = options.cwd ?? resolveHarnessCwd(this.env)
     this.mcpConnector = options.mcpConnector
+    this.prototypeRecoveryPublicKey = options.prototypeRecoveryPublicKey
+    this.prototypeRecoveryRunId = options.prototypeRecoveryRunId
     this.extraPatchPaths = options.extraPatchPaths ?? []
     this.connectorPatchDir = undefined
     this.connectorPatchPath = undefined
@@ -377,6 +379,10 @@ export class HarnessWebProcess {
         // but disabling telemetry keeps the development process deterministic.
         DSH_TELEMETRY_DISABLED: this.env.DSH_TELEMETRY_DISABLED ?? '1',
         DSH_PRODUCT_SCHEMATERY_URL: this.env.DSH_PRODUCT_SCHEMATERY_URL ?? resolveSchemasteryUrl(this.cliPath),
+        // Only the public verification material enters the model-facing
+        // Harness process. The signing key remains inside Native Host memory.
+        ...(this.prototypeRecoveryPublicKey === undefined ? {} : { DSH_PROTOTYPE_RECOVERY_PUBLIC_KEY: this.prototypeRecoveryPublicKey }),
+        ...(this.prototypeRecoveryRunId === undefined ? {} : { DSH_PROTOTYPE_RECOVERY_RUN_ID: this.prototypeRecoveryRunId }),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })

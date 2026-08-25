@@ -48,7 +48,7 @@ function verifyLoadedExtensionTarget() {
     throw new Error(`Chrome Profile 1 dev extension ${devExtensionId} is registered from ${String(configuredPath)}, expected ${wxtDev}`)
   }
   const wxt = execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8' })
-  if (!wxt.includes('wxt/bin/wxt.mjs --port 3001')) throw new Error('No WXT development server is running on port 3001')
+  if (!wxt.includes('wxt/bin/wxt.mjs --port 3101')) throw new Error('No WXT development server is running on port 3101')
 }
 
 // Source -> built plugin -> public copy -> the WXT directory Chrome Profile 1

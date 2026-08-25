@@ -1,3 +1,5 @@
+改任何代码前，必须完整读取 `docs/agents/development-loop.md`，按其中的刷新规则验证最新效果。
+
 ### 领域文档
 
 本仓库是单上下文仓库，使用根目录 `CONTEXT.md` 与 `docs/adr/`。详见 `docs/agents/domain.md`。
@@ -7,36 +9,7 @@
 以下实践对本仓库内所有 AI 驱动的开发都是强制性的。
 它们来自本代码库真实调试会话中验证过的教训。
 
-### 1. 改代码前先分清层
-
-本仓库有四个代码层，各层的生效方式不同。改任何东西之前，先确认你改的是哪一层：
-
-| 层 | 位置 | 改动如何生效 |
-| --- | --- | --- |
-| 扩展 UI | `apps/chrome-extension` | WXT HMR（自动） |
-| Native Server | `apps/native-server` | 重新注册 + 重启 host（`pnpm dev:watch`，或 `pnpm dev:restart -- --skip-harness-build`） |
-| 产品插件 | `packages/*` | `pnpm dev:refresh -- --fast` |
-| Harness 基座 / seam 补丁 | `upstream-contributions/`、物化产物树 | `pnpm dev:refresh`（最慢） |
-
-已注册的 Native Host 运行在
-`~/Library/Application Support/DeepSeekHarness/` 下的安装副本里，不是源码树。
-改了 `apps/native-server` 但不重新注册，对正在运行的浏览器会话毫无作用。
-"我改了怎么没反应"几乎总是因为走错了该层的生效路径。
-
-日常分层工作流（耗时为本机实测；全量 refresh 的大头是刻意的从零物化：
-全新克隆 + 补丁 + 全量重建全部 54 个上游包，共约 3-4 分钟；
-产品插件本身构建只要约 2 秒）：
-
-- 扩展 UI + Native Server（日常热循环）：开两个终端分别跑 `pnpm dev` 和
-  `pnpm dev:watch`。保存文件秒级生效；侧边栏会自动重连重启后的 Native Host。
-- 产品插件（`packages/*`）：`pnpm dev:refresh -- --fast`（约 20 秒；
-  跳过 Harness 基座的重新物化）。
-- 完整 `pnpm dev:refresh` 只用于：seam 补丁变更、上游 submodule 升级、
-  或 `.generated/harness-product` 产物树损坏/缺失。不要把它纳入日常循环。
-  如果刷新后侧边栏立刻报 "DeepSeek Harness CLI was not found"，
-  那是重建窗口期的竞态：产物树在最后几秒才完成，等刷新跑完再重开侧边栏即可。
-
-### 1b. 插件开发是主要的定制路径
+### 1. 插件开发是主要的定制路径
 
 大部分产品工作就是通过在 `packages/` 下编写外挂（out-of-tree）插件来定制
 Harness —— 这是主要开发活动，不是边缘场景。
@@ -57,10 +30,9 @@ Harness —— 这是主要开发活动，不是边缘场景。
 - 照抄一个现有兄弟插件（如 `packages/harness-ui-browser-target`）作为结构
   模板：`src/` + `tsdown.config.ts` + `lib/` 产物 + `test/` 包含包契约测试
   + `package.json` 里的 `dsh.client.inject` 声明。
-- 新插件必须注册进每一份插件清单，否则会静默不生效：
-  `scripts/register-native-host.mjs` 里的 `productPluginNames`、
-  `scripts/build-harness-client-plugins.mjs` 里的插件列表、
-  以及根 `package.json` 里的 `typecheck:plugins` 链。
+- 新插件必须加入唯一清单
+  `apps/native-server/src/product-plugin-manifest.mjs`；构建、安装、注入、
+  类型检查和测试均从该清单派生。
 - 对着物化产物树（`.generated/harness-product`）做校验，绝不直接对着
   `upstream/` 源码（见红线）。
 - 新 UI 插件通常还需要一个 seam：先查

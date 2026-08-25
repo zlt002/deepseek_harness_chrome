@@ -286,6 +286,9 @@ try {
   $skillBody = Get-Content -LiteralPath $productSkill -Raw
   if ($skillBody -notmatch 'Harness Workspace 是唯一用户界面') { throw 'Installed /pmd-prd is not the product-owned skill.' }
   if ($skillBody -match 'pmd-workspace|clarification\.md') { throw 'Installed /pmd-prd looks like the legacy Claude skill.' }
+  $prototypeSkill = Join-Path $installRoot 'runtime\skills\product-prototype\SKILL.md'
+  if (-not (Test-Path -LiteralPath $prototypeSkill -PathType Leaf)) { throw "Product prototype skill is missing: $prototypeSkill" }
+  if ((Get-Content -LiteralPath $prototypeSkill -Raw) -notmatch 'name:\s*product-prototype') { throw 'Installed /product-prototype is not the product-owned skill.' }
   foreach ($officeSkill in @('pptx', 'xlsx', 'docx', 'pdf')) {
     $officeSkillPath = Join-Path $installRoot ('runtime\skills\' + $officeSkill + '\SKILL.md')
     if (-not (Test-Path -LiteralPath $officeSkillPath -PathType Leaf)) { throw "Product office skill is missing: $officeSkillPath" }

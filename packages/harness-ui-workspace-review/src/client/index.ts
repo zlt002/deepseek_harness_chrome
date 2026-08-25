@@ -1,31 +1,30 @@
-import { createSnapshotStore, type ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import { createElement, useSyncExternalStore } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { feedbackMessage, rehydrateMessage, respondRehydrate, type MarkdownReviewFeedback, workspaceReviewBridgeConfig } from './bridge.ts'
+import { feedbackMessage, rehydrateMessage, respondFeedback, respondRehydrate, type MarkdownReviewFeedback, workspaceReviewBridgeConfig } from './bridge.ts'
 import { rehydrateWorkspaceMarkdown } from './api.ts'
-import { WorkspaceReviewAction, type WorkspaceReviewActionInjected } from './WorkspaceReviewAction.tsx'
+import { createWorkspaceReviewHeaderAction } from './WorkspaceReviewAction.tsx'
+import { WorkspaceReviewTree } from './WorkspaceReviewTree.tsx'
+import type { WorkspacePickerDirectoryProps } from './directory-slot.ts'
+import { selectReadyWorkspaceDirectorySession } from './directory-session.ts'
 
 interface ReviewFeedback {
-  /** Import a background-verified Markdown annotation into its explicitly bound Harness session. */
-  importWorkspaceMarkdown(sessionId: string, feedback: MarkdownReviewFeedback): boolean
+  /** Create one immediate AI request in the feedback item's explicitly bound Harness session. */
+  submitWorkspaceMarkdown(sessionId: string, feedback: MarkdownReviewFeedback): Promise<void>
 }
 
-export const inject = ['slots', 'reviewFeedback', 'settingsQuickActions']
+export const inject = ['slots', 'reviewFeedback', 'sessions', 'workspaces']
 
 /** File discovery is same-origin; pending composer feedback belongs to the shared reviewFeedback service. */
 export function apply(ctx: ClientContext): void {
   const bridge = workspaceReviewBridgeConfig(); const reviewFeedback = ctx.get('reviewFeedback') as ReviewFeedback
-  const open = createSnapshotStore(false)
-  ctx.effect(() => ctx.get('settingsQuickActions')!.register({
-    id: 'workspace-markdown-files', label: '工作区', order: 15,
-    run: () => { open.set(true) },
-  }), 'accrui-workspace-review: quick action')
   if (bridge !== undefined) ctx.effect(() => {
     const receive = (event: MessageEvent): void => {
       const feedback = feedbackMessage(event, window.parent, bridge)
       if (feedback !== undefined) {
-        const accepted = reviewFeedback.importWorkspaceMarkdown(feedback.harnessSessionId, feedback)
-        window.parent.postMessage({ type: 'markdown-review-feedback-accepted/v1', nonce: bridge.nonce, deliveryId: feedback.id, accepted }, bridge.parentOrigin)
+        void reviewFeedback.submitWorkspaceMarkdown(feedback.harnessSessionId, feedback)
+          .then(() => respondFeedback(window.parent, bridge, feedback.id, true))
+          .catch(error => respondFeedback(window.parent, bridge, feedback.id, false, error instanceof Error ? error.message : String(error)))
         return
       }
       const request = rehydrateMessage(event, window.parent, bridge)
@@ -36,10 +35,23 @@ export function apply(ctx: ClientContext): void {
     }
     window.addEventListener('message', receive); return () => window.removeEventListener('message', receive)
   }, 'accrui-workspace-review: feedback bridge')
-  const close = (): void => { open.set(false) }
-  const injected = (): WorkspaceReviewActionInjected => ({ bridge, hooks: { open }, close })
-  ctx.slots.inject('sidebar.compact.action', () => ctx.slots.register({ name: 'sidebar.compact.action', id: 'workspace-markdown-files', order: 15, inject: injected }, WorkspaceReviewAction))
+  const useSessionForWorkspace = (workspaceId: string | undefined): string | undefined => {
+    const workspaces = useSyncExternalStore(ctx.workspaces.list.subscribe, ctx.workspaces.list.getSnapshot, ctx.workspaces.list.getSnapshot)
+    const sessions = useSyncExternalStore(ctx.sessions.list.subscribe, ctx.sessions.list.getSnapshot, ctx.sessions.list.getSnapshot)
+    return selectReadyWorkspaceDirectorySession(workspaces.items, sessions, workspaceId)
+  }
+  ctx.slots.inject('accrui.workspace-picker.directory', () => ctx.slots.register({
+    name: 'accrui.workspace-picker.directory', id: 'accrui-workspace-review-directory', order: 0,
+  }, function WorkspacePickerDirectory({ workspaceId, onClose }: WorkspacePickerDirectoryProps) {
+    const sessionId = useSessionForWorkspace(workspaceId)
+    return createElement(WorkspaceReviewTree, { sessionId, bridge, onClose })
+  }))
+  ctx.slots.inject('sidebar.workspaces.header.action', () => ctx.slots.register({
+    name: 'sidebar.workspaces.header.action', id: 'accrui-workspace-review-directory', order: 10,
+  }, createWorkspaceReviewHeaderAction(bridge, useSessionForWorkspace)))
 }
 
-export { WorkspaceReviewAction } from './WorkspaceReviewAction.tsx'
-export { workspaceReviewBridgeConfig, requestOpenReview, rehydrateMessage, respondRehydrate } from './bridge.ts'
+export { WorkspaceReviewHeaderAction } from './WorkspaceReviewAction.tsx'
+export { WorkspaceReviewTree } from './WorkspaceReviewTree.tsx'
+export { selectReadyWorkspaceDirectorySession } from './directory-session.ts'
+export { workspaceReviewBridgeConfig, requestOpenReview, rehydrateMessage, respondFeedback, respondRehydrate } from './bridge.ts'

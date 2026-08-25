@@ -10,10 +10,11 @@ import {
   WORKSPACE_REVIEW_SELECTION_PATH,
   WORKSPACE_REVIEW_SNAPSHOT_PATH,
 } from './protocol.ts'
+import { resolveSessionProject } from './session-project.ts'
 import { WorkspaceReviewRuntime } from './workspace.mjs'
 
 export const name = 'accrui-workspace-review'
-export const inject = ['sessions', 'tools']
+export const inject = ['sessions', 'tools', 'workspaceRegistry']
 
 export * from './protocol.ts'
 export { WorkspaceReviewRuntime } from './workspace.mjs'
@@ -28,6 +29,7 @@ interface WebServerLookup {
 
 interface HostContext {
   sessions: SessionLookup
+  workspaceRegistry: { list(): readonly { readonly path: string; readonly sessionIds: readonly string[] }[] }
   tools: { register(definition: unknown): () => void }
   webServer: WebServerLookup
   inject(deps: readonly string[], callback: (ctx: HostContext) => void): void
@@ -88,19 +90,19 @@ export function apply(ctx: HostContext): void {
     register(WORKSPACE_REVIEW_LIST_PATH, async (req, res) => {
       const body = await trustedBody(req, res)
       if (body === undefined) return
-      const session = sessionFor(webCtx, body.sessionId)
+      const session = resolveSessionProject(webCtx, body.sessionId)
       json(res, 200, await reviews.list(session.cwd, optionalString(body.relativePath)))
     })
     register(WORKSPACE_REVIEW_OPEN_PATH, async (req, res) => {
       const body = await trustedBody(req, res)
       if (body === undefined) return
-      const session = sessionFor(webCtx, body.sessionId)
+      const session = resolveSessionProject(webCtx, body.sessionId)
       json(res, 200, await reviews.open(session.id, session.cwd, requiredString(body.relativePath, 'relativePath')))
     })
     register(WORKSPACE_REVIEW_REHYDRATE_PATH, async (req, res) => {
       const body = await trustedBody(req, res)
       if (body === undefined) return
-      const session = sessionFor(webCtx, body.sessionId)
+      const session = resolveSessionProject(webCtx, body.sessionId)
       json(res, 200, await reviews.rehydrate(session.id, session.cwd, requiredString(body.reviewId, 'reviewId'), requiredString(body.resourceId, 'resourceId')))
     })
     register(WORKSPACE_REVIEW_SNAPSHOT_PATH, async (req, res) => {
@@ -141,13 +143,6 @@ async function trustedBody(req: IncomingMessage, res: ServerResponse): Promise<R
   if (req.method !== 'POST') { json(res, 405, { error: 'workspace review routes accept POST only' }); return undefined }
   if (!isTrustedSessionRequest(req)) { json(res, 403, { error: 'workspace review session route is loopback same-origin only' }); return undefined }
   return parseBody(req)
-}
-
-function sessionFor(ctx: HostContext, value: unknown): { id: string; cwd: string } {
-  const id = requiredString(value, 'sessionId')
-  const cwd = ctx.sessions.get(id)?.header.cwd
-  if (cwd === undefined || cwd === '') throw new Error(`session "${id}" has no project cwd`)
-  return { id, cwd }
 }
 
 async function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {

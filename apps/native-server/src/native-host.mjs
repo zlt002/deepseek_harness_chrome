@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { stdin, stdout } from 'node:process'
-import { randomUUID } from 'node:crypto'
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { decodeNativeFrames, encodeNativeFrame } from './protocol.mjs'
@@ -71,7 +71,7 @@ process.on('unhandledRejection', (error) => {
  * to stderr so Chrome never sees an unframed byte.
  */
 export class NativeHost {
-  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string } }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object }} [options] */
+  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
   constructor(options = {}) {
     this.processFactory = options.processFactory ?? ((processOptions) => new HarnessWebProcess(processOptions))
     this.connectorFactory = options.connectorFactory ?? ((connectorOptions) => new BrowserConnector(connectorOptions))
@@ -88,6 +88,8 @@ export class NativeHost {
     this.buffer = Buffer.alloc(0)
     this.closed = false
     this.runtimeIdentity = options.runtimeIdentity ?? installedRuntimeIdentity()
+    this.prototypeRecoveryKeyPair = options.prototypeRecoveryKeyPair ?? generateKeyPairSync('ed25519')
+    this.prototypeRecoveryPublicKey = this.prototypeRecoveryKeyPair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url')
   }
 
   /** Attach stdin/stdout and start consuming frames. */
@@ -139,6 +141,10 @@ export class NativeHost {
     }
     if (type === 'transfer-browser-target') {
       this.transferBrowserTarget(message.requestId, message.runId, message.browserTarget, message.browserTargets, message.unavailableBrowserTargets)
+      return
+    }
+    if (type === 'sign-prototype-recovery') {
+      this.signPrototypeRecovery(message.requestId, message.payload)
       return
     }
     if (type === CONNECTOR_RESPONSE) {
@@ -214,6 +220,25 @@ export class NativeHost {
     return true
   }
 
+  signPrototypeRecovery(requestId, payload) {
+    const fail = (error) => { this.send({ type: 'prototype_recovery_sign_failed', requestId, error }); return false }
+    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160 || this.currentRunId === undefined || this.serverUrl === undefined) return fail('Prototype recovery signing requires the active Native Harness Run.')
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 6) return fail('Prototype recovery signing payload is invalid.')
+    const { projectId, expectedSessionId, referenceId, evidenceFingerprint, capabilityFingerprint, expectedRecoveryEpoch } = payload
+    if (typeof projectId !== 'string' || !/^prototype-[a-z0-9-]{8,72}$/.test(projectId)
+      || typeof expectedSessionId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(expectedSessionId)
+      || typeof referenceId !== 'string' || referenceId.length < 1 || referenceId.length > 160
+      || typeof evidenceFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(evidenceFingerprint)
+      || typeof capabilityFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(capabilityFingerprint)
+      || !Number.isSafeInteger(expectedRecoveryEpoch) || expectedRecoveryEpoch < 0) return fail('Prototype recovery signing payload is invalid.')
+    const issuedAt = Date.now()
+    const assertion = { v: 1, purpose: 'prototype-studio-capability-recovery', runId: this.currentRunId, projectId, expectedSessionId, referenceId, evidenceFingerprint, capabilityFingerprint, expectedRecoveryEpoch, nonce: randomUUID(), issuedAt, expiresAt: issuedAt + 60_000 }
+    const bytes = Buffer.from(JSON.stringify([assertion.v, assertion.purpose, assertion.runId, assertion.projectId, assertion.expectedSessionId, assertion.referenceId, assertion.evidenceFingerprint, assertion.capabilityFingerprint, assertion.expectedRecoveryEpoch, assertion.nonce, assertion.issuedAt, assertion.expiresAt]))
+    const signature = sign(null, bytes, this.prototypeRecoveryKeyPair.privateKey).toString('base64url')
+    this.send({ type: 'prototype_recovery_signed', requestId, assertion, signature })
+    return true
+  }
+
   async close(reason) {
     if (this.closed) return
     this.closed = true
@@ -248,6 +273,8 @@ export class NativeHost {
       if (this.harness === undefined) {
         this.harness = this.processFactory({
           mcpConnector: { url: `${connector.url}/mcp`, token: connector.token },
+          prototypeRecoveryPublicKey: this.prototypeRecoveryPublicKey,
+          prototypeRecoveryRunId: this.currentRunId,
         })
       }
       const harnessUrl = await this.harness.start()

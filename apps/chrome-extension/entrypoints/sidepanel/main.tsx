@@ -5,6 +5,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import ReactDOM from 'react-dom/client'
 import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessHandoffTabFromLocation, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from './harness-frame'
 import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
+import { MARKDOWN_AI_ACK_TIMEOUT_MS } from '../markdown-review/delivery-timeouts'
+import { validateWorkspaceMarkdownFeedback } from './markdown-feedback-validator'
 import './style.css'
 
 type HarnessStatus = 'starting' | 'ready' | 'error'
@@ -17,6 +19,8 @@ interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: s
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
 interface BrowserTargetSettingsResponse { ok: boolean; settings?: BrowserTargetSettings; tabs?: BrowserTargetTab[]; error?: string }
 interface DesignReferenceCaptureResponse { ok: boolean; referenceId?: string; error?: string }
+interface RecentPrototypeStudio { projectId: string; referenceId: string; referenceTitle?: string; referenceUrl?: string; updatedAt: number; authorizationActive: boolean }
+interface RecentPrototypeStudiosResponse { ok: boolean; projects?: RecentPrototypeStudio[]; error?: string }
 interface ActiveTab extends BrowserTargetTab {}
 interface ActiveTabResponse { ok: boolean; epoch?: string; sequence?: number; tab?: ActiveTab; error?: string }
 interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
@@ -43,23 +47,8 @@ interface OpenMarkdownReview {
   capability: string
 }
 
-interface WorkspaceMarkdownFeedback {
-  id: string
-  harnessSessionId: string
-  reviewId: string
-  resourceId: string
-  displayPath: string
-  revision: string
-  fingerprint: string
-  startUtf16: number
-  endUtf16: number
-  quote: string
-  prefix: string
-  suffix: string
-  comment: string
-}
 interface MarkdownReviewIdentity { reviewId: string; harnessSessionId: string; resourceId: string }
-interface PrototypePromptPayload { projectId: string; sessionId: string; request: string; selection?: { elementId?: unknown; type?: unknown; label?: unknown }; evidence: unknown[]; revisions: unknown[]; currentRevisionId?: unknown; designSpec?: unknown; document?: unknown }
+interface PrototypePromptPayload { projectId: string; sessionId: string; requestId: string; expectedRevisionId?: string; request: string; selection?: { elementId?: unknown; type?: unknown; label?: unknown }; evidence: unknown[]; revisions: unknown[]; currentRevisionId?: unknown; designSpec?: unknown; document?: unknown }
 
 type BrowserTargetCommand =
   | { command: 'refresh' }
@@ -113,23 +102,10 @@ function isMarkdownReviewIdentity(value: unknown): value is MarkdownReviewIdenti
   return ['reviewId', 'harnessSessionId', 'resourceId'].every(key => boundedString(review[key], 160))
 }
 
-function isWorkspaceMarkdownFeedback(value: unknown): value is WorkspaceMarkdownFeedback {
-  if (typeof value !== 'object' || value === null) return false
-  const item = value as Record<string, unknown>
-  return ['id', 'harnessSessionId', 'reviewId', 'resourceId', 'revision', 'fingerprint'].every(key => boundedString(item[key], 160))
-    && boundedString(item.displayPath, 2_048)
-    && boundedString(item.quote, 8_000)
-    && boundedString(item.prefix, 512, true)
-    && boundedString(item.suffix, 512, true)
-    && boundedString(item.comment, 8_000)
-    && Number.isSafeInteger(item.startUtf16) && (item.startUtf16 as number) >= 0
-    && Number.isSafeInteger(item.endUtf16) && (item.endUtf16 as number) > (item.startUtf16 as number)
-}
-
 function isPrototypePromptPayload(value: unknown): value is PrototypePromptPayload {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const item = value as Record<string, unknown>
-  if (typeof item.projectId !== 'string' || !/^prototype-[a-z0-9-]{8,72}$/.test(item.projectId) || !boundedString(item.sessionId, 160) || !boundedString(item.request, 4_000) || !Array.isArray(item.evidence) || item.evidence.length !== 1 || !Array.isArray(item.revisions) || item.revisions.length > 20) return false
+  if (typeof item.projectId !== 'string' || !/^prototype-[a-z0-9-]{8,72}$/.test(item.projectId) || !boundedString(item.sessionId, 160) || !boundedString(item.requestId, 160) || !/^[A-Za-z0-9._:-]{8,160}$/.test(item.requestId) || (item.expectedRevisionId !== undefined && !boundedString(item.expectedRevisionId, 160)) || !boundedString(item.request, 4_000) || !Array.isArray(item.evidence) || item.evidence.length !== 1 || !Array.isArray(item.revisions) || item.revisions.length > 20) return false
   if (item.selection !== undefined && (typeof item.selection !== 'object' || item.selection === null || Array.isArray(item.selection))) return false
   try { return JSON.stringify(item).length <= 260_000 } catch { return false }
 }
@@ -154,9 +130,43 @@ function requestTargetSettings(message: unknown): Promise<BrowserTargetSettingsR
 
 function requestDesignReferenceCapture(browserTarget: BrowserTarget, sessionId: string): Promise<DesignReferenceCaptureResponse> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'capture-design-reference/v1', browserTarget, sessionId }, (response: DesignReferenceCaptureResponse | undefined) => {
+    let settled = false
+    const timeout = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve({ ok: false, error: '提取设计规范超时，已自动结束。请确认网页加载完成后重试。' })
+    }, 45_000)
+    try {
+      chrome.runtime.sendMessage({ type: 'capture-design-reference/v1', browserTarget, sessionId }, (response: DesignReferenceCaptureResponse | undefined) => {
+        const runtimeError = chrome.runtime.lastError
+        if (settled) return
+        settled = true
+        window.clearTimeout(timeout)
+        resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return the captured reference.' } : { ok: false, error: runtimeError.message })
+      })
+    } catch (cause) {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      resolve({ ok: false, error: cause instanceof Error ? cause.message : String(cause) })
+    }
+  })
+}
+
+function requestRecentPrototypeStudios(): Promise<RecentPrototypeStudiosResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'prototype-studio-recent/v1' }, (response: RecentPrototypeStudiosResponse | undefined) => {
       const runtimeError = chrome.runtime.lastError
-      resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return the captured reference.' } : { ok: false, error: runtimeError.message })
+      resolve(runtimeError === undefined ? response ?? { ok: false, error: '无法读取最近原型。' } : { ok: false, error: runtimeError.message })
+    })
+  })
+}
+
+function openRecentPrototypeStudio(projectId: string): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'prototype-studio-open-recent/v1', projectId }, (response: { ok: boolean; error?: string } | undefined) => {
+      const runtimeError = chrome.runtime.lastError
+      resolve(runtimeError === undefined ? response ?? { ok: false, error: '无法打开最近原型。' } : { ok: false, error: runtimeError.message })
     })
   })
 }
@@ -246,6 +256,26 @@ function isHarnessSessionIdentity(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
 }
 
+/** Keep one reference capture in flight even when iframe commands arrive back-to-back. */
+export async function runDesignReferenceCaptureOnce<T>(
+  pending: { current: number | undefined },
+  tabId: number,
+  projectBusy: (tabId: number | undefined) => void,
+  capture: () => Promise<T>,
+): Promise<T | undefined> {
+  if (pending.current !== undefined) return undefined
+  pending.current = tabId
+  projectBusy(tabId)
+  try {
+    return await capture()
+  } finally {
+    if (pending.current === tabId) {
+      pending.current = undefined
+      projectBusy(undefined)
+    }
+  }
+}
+
 /** The extension shell owns Chrome permissions; the iframe owns all target UI. */
 function App(): React.JSX.Element {
   const [status, setStatus] = useState<HarnessStatus>('starting')
@@ -254,12 +284,18 @@ function App(): React.JSX.Element {
   const [targetSettings, setTargetSettings] = useState<BrowserTargetSettings>({ mode: 'follow-active-tab', pinnedTabs: [] })
   const [availableTabs, setAvailableTabs] = useState<BrowserTargetTab[]>([])
   const [targetError, setTargetError] = useState<string>()
+  const [capturingDesignReferenceTabId, setCapturingDesignReferenceTabId] = useState<number>()
+  const [recentPrototypes, setRecentPrototypes] = useState<RecentPrototypeStudio[]>([])
+  const [recentPrototypesOpen, setRecentPrototypesOpen] = useState(false)
+  const [recentPrototypeError, setRecentPrototypeError] = useState<string>()
+  const [openingRecentProjectId, setOpeningRecentProjectId] = useState<string>()
   const [activeTab, setActiveTab] = useState<{ epoch: string; sequence: number; tab: ActiveTab }>()
   const frameRef = useRef<HTMLIFrameElement>(null)
   const frameReadyRef = useRef(false)
   const bridgeSequenceRef = useRef(0)
   const targetSettingsRef = useRef(targetSettings)
   const availableTabsRef = useRef(availableTabs)
+  const designReferenceCaptureRef = useRef<number | undefined>(undefined)
   const commandSequenceRef = useRef(0)
   const knowledgeCommandSequenceRef = useRef(0)
   const knowledgeSnapshotSequenceRef = useRef(0)
@@ -319,6 +355,13 @@ function App(): React.JSX.Element {
     setTargetSettings(response.settings); setAvailableTabs(response.tabs ?? []); setTargetError(undefined)
   }, [])
 
+  const loadRecentPrototypes = useCallback(async () => {
+    const response = await requestRecentPrototypeStudios()
+    if (!response.ok) { setRecentPrototypeError(response.error ?? '无法读取最近原型。'); return }
+    setRecentPrototypes((response.projects ?? []).filter(item => typeof item.projectId === 'string' && typeof item.referenceId === 'string' && Number.isSafeInteger(item.updatedAt)))
+    setRecentPrototypeError(undefined)
+  }, [])
+
   const saveTargetSettings = useCallback(async (settings: BrowserTargetSettings) => {
     const response = await requestTargetSettings({ type: 'save-browser-target-settings', settings })
     if (!response.ok || response.settings === undefined) { setTargetError(response.error ?? 'Unable to save Browser Target settings.'); return }
@@ -327,8 +370,8 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!sidePanelHandoff.ready) return
-    void connect(); void loadTargetSettings()
-  }, [connect, loadTargetSettings, sidePanelHandoff.ready])
+    void connect(); void loadTargetSettings(); void loadRecentPrototypes()
+  }, [connect, loadRecentPrototypes, loadTargetSettings, sidePanelHandoff.ready])
 
   const replaySearchProgress = useCallback(() => {
     if (frameOrigin === undefined || !frameReadyRef.current) return
@@ -381,19 +424,24 @@ function App(): React.JSX.Element {
       }
       if (value.type === 'markdown-review-feedback-forward/v1') {
         const target = frameRef.current?.contentWindow
-        if (frameOrigin === undefined || target === null || target === undefined || !isWorkspaceMarkdownFeedback(value.feedback)) {
+        if (frameOrigin === undefined || target === null || target === undefined) {
           sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' })
           return false
         }
-        const deliveryId = value.feedback.id
+        const validation = validateWorkspaceMarkdownFeedback(value.feedback)
+        if (!validation.ok) {
+          sendResponse({ ok: false, error: validation.error })
+          return false
+        }
+        const deliveryId = validation.feedback.id
         const timeout = window.setTimeout(() => {
           const pending = reviewFeedbackRef.current.get(deliveryId)
           if (pending === undefined) return
           reviewFeedbackRef.current.delete(deliveryId)
-          pending.sendResponse({ ok: false, error: 'Timed out inserting the annotation into the Harness composer.' })
-        }, 5_000)
+          pending.sendResponse({ ok: false, error: 'Harness 未在 15 秒内确认 AI 请求；可以重试，同一批注不会重复发送。' })
+        }, MARKDOWN_AI_ACK_TIMEOUT_MS)
         reviewFeedbackRef.current.set(deliveryId, { sendResponse, timeout })
-        target.postMessage({ type: 'markdown-review-feedback/v1', nonce: frameNonce, feedback: value.feedback }, frameOrigin)
+        target.postMessage({ type: 'markdown-review-feedback/v1', nonce: frameNonce, feedback: validation.feedback }, frameOrigin)
         return true
       }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
@@ -414,16 +462,21 @@ function App(): React.JSX.Element {
     return () => chrome.runtime.onMessage.removeListener(onMessage)
   }, [connect, frameNonce, frameOrigin])
 
-  const sendBrowserTargetSnapshot = useCallback(() => {
+  const projectBrowserTargetSnapshot = useCallback((capturingTabId: number | undefined) => {
     if (frameOrigin === undefined || !frameReadyRef.current) return
     const target = frameRef.current?.contentWindow
     if (target === null || target === undefined) return
     bridgeSequenceRef.current += 1
     target.postMessage({
       type: 'browser-target-snapshot/v1', nonce: frameNonce, sequence: bridgeSequenceRef.current,
-      settings: targetSettings, tabs: availableTabs, activeTab: activeTab?.tab, error: targetError,
+      settings: targetSettings, tabs: availableTabs, activeTab: activeTab?.tab,
+      ...(capturingTabId === undefined ? {} : { capturingDesignReferenceTabId: capturingTabId }), error: targetError,
     }, frameOrigin)
   }, [activeTab, availableTabs, frameNonce, frameOrigin, targetError, targetSettings])
+
+  const sendBrowserTargetSnapshot = useCallback(() => {
+    projectBrowserTargetSnapshot(capturingDesignReferenceTabId)
+  }, [capturingDesignReferenceTabId, projectBrowserTargetSnapshot])
 
   useEffect(() => { sendBrowserTargetSnapshot() }, [sendBrowserTargetSnapshot])
 
@@ -431,14 +484,25 @@ function App(): React.JSX.Element {
     if (command.command === 'refresh') { await loadTargetSettings(); return }
     const settings = targetSettingsRef.current
     if (command.command === 'set-mode') { await saveTargetSettings({ ...settings, mode: command.mode }); return }
+    if (command.command === 'capture-design-reference' && designReferenceCaptureRef.current !== undefined) return
     const tab = availableTabsRef.current.find((item) => item.tabId === command.tabId)
       ?? (command.command === 'toggle-pinned-tab' && !command.checked ? settings.pinnedTabs.find((item) => item.tabId === command.tabId) : undefined)
     if (tab === undefined) { setTargetError('The selected Chrome tab is no longer available.'); return }
     if (command.command === 'capture-design-reference') {
-      setTargetError(undefined)
       if (command.sessionId === undefined) { setTargetError('请先打开一个 Harness 对话，再采集参考网页。'); return }
-      const response = await requestDesignReferenceCapture({ browser: 'chrome', windowId: tab.windowId, tabId: tab.tabId, url: tab.url }, command.sessionId)
+      setTargetError(undefined)
+      const response = await runDesignReferenceCaptureOnce(
+        designReferenceCaptureRef,
+        tab.tabId,
+        capturingTabId => {
+          setCapturingDesignReferenceTabId(capturingTabId)
+          projectBrowserTargetSnapshot(capturingTabId)
+        },
+        () => requestDesignReferenceCapture({ browser: 'chrome', windowId: tab.windowId, tabId: tab.tabId, url: tab.url }, command.sessionId as string),
+      )
+      if (response === undefined) return
       if (!response.ok) setTargetError(response.error ?? '无法采集这个参考网页。')
+      else void loadRecentPrototypes()
       return
     }
     if (command.command === 'toggle-pinned-tab') {
@@ -451,7 +515,7 @@ function App(): React.JSX.Element {
     }
     if (!settings.pinnedTabs.some((item) => item.tabId === tab.tabId)) { setTargetError('Choose this tab before making it the primary target.'); return }
     await saveTargetSettings({ ...settings, primaryTabId: tab.tabId })
-  }, [loadTargetSettings, saveTargetSettings])
+  }, [loadRecentPrototypes, loadTargetSettings, projectBrowserTargetSnapshot, saveTargetSettings])
 
   const handleAccountAccessCommand = useCallback(async (command: 'refresh' | 'login' | 'logout') => {
     if (command === 'login') {
@@ -571,7 +635,9 @@ function App(): React.JSX.Element {
         if (pending === undefined) return
         reviewFeedbackRef.current.delete(value.deliveryId)
         window.clearTimeout(pending.timeout)
-        pending.sendResponse(value.accepted === true ? { ok: true } : { ok: false, error: 'Harness rejected the Markdown annotation.' })
+        pending.sendResponse(value.accepted === true
+          ? { ok: true }
+          : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness rejected the Markdown annotation.' })
         return
       }
       if (value.type === 'markdown-review-rehydrate-response/v1' && boundedString(value.requestId, 160)) {
@@ -650,6 +716,14 @@ function App(): React.JSX.Element {
     {status === 'ready' && url !== undefined ? (
       <section className="harness-frame-shell">
         <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="ACCRUI Web UI" allow="clipboard-read; clipboard-write" />
+        <div className="recent-prototypes-control">
+          <button className="recent-prototypes-trigger" type="button" aria-expanded={recentPrototypesOpen} onClick={() => { setRecentPrototypesOpen(value => !value); void loadRecentPrototypes() }}>最近原型{recentPrototypes.length > 0 ? ` · ${recentPrototypes.length}` : ''}</button>
+          {recentPrototypesOpen && <section className="recent-prototypes-popover" aria-label="最近原型">
+            <header><div><b>最近原型</b><small>关闭原型页后，也能从这里继续。</small></div><button type="button" className="recent-prototypes-refresh" aria-label="刷新最近原型" onClick={() => void loadRecentPrototypes()}>↻</button></header>
+            {recentPrototypeError !== undefined ? <p className="recent-prototypes-error">{recentPrototypeError}</p> : recentPrototypes.length === 0 ? <p className="recent-prototypes-empty">还没有保存过原型。先在对话中选择网页并提取设计规范。</p> : <ul>{recentPrototypes.map(project => <li key={project.projectId}><button type="button" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); setRecentPrototypeError(undefined); void openRecentPrototypeStudio(project.projectId).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法打开最近原型。'); else setRecentPrototypesOpen(false) }).finally(() => setOpeningRecentProjectId(undefined)) }}><span><b>{project.referenceTitle ?? '参考网页原型'}</b><small>{project.referenceUrl ?? '参考网页信息已清理'} · {new Date(project.updatedAt).toLocaleString()}</small></span><em>{openingRecentProjectId === project.projectId ? '正在打开…' : project.authorizationActive ? '继续编辑' : '恢复后编辑'}</em></button></li>)}</ul>}
+            <footer>“恢复后编辑”会先打开项目；随后由你点击“恢复已有项目”，不会自动恢复。</footer>
+          </section>}
+        </div>
         {surface === 'fullscreen-tab' && <button
           className="fullscreen-collapse"
           type="button"

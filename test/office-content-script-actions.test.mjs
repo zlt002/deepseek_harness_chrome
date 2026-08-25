@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { LIGHT_DOCUMENT_OPERATIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
+import { LIGHT_DOCUMENT_OPERATIONS, SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
 
 /**
  * Cross-layer contract: every spreadsheet/document action the MCP surface
@@ -29,9 +29,25 @@ function assignedArrayOnFirstMatchingLine(source, predicate, label) {
 
 test('the content script still accepts used_range for read_work_tab spreadsheet previews', async () => {
   const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
-  const allowlist = arrayOnFirstMatchingLine(contentSource, (line) => line.includes("'special_cells', 'inspect_write', 'write', 'probe'"), 'the content-script spreadsheet allowlist')
+  const allowlist = arrayOnFirstMatchingLine(contentSource, (line) => line.includes("'context', 'active_sheet'") && line.includes("'inspect_write', 'write', 'probe'"), 'the content-script spreadsheet allowlist')
   assert.ok(allowlist.includes('used_range'), 'read_work_tab still previews spreadsheets through used_range')
   assert.ok(allowlist.includes('probe'))
+  for (const inspectAction of SPREADSHEET_INSPECT_ACTIONS) {
+    const runtimeAction = {
+      workbook: 'workbook_info', protection: 'worksheet_protection', preflight: 'write_preflight',
+      filter: 'filter_state', charts: 'list_charts', pivots: 'list_pivots',
+    }[inspectAction] ?? inspectAction
+    assert.ok(allowlist.includes(runtimeAction), `spreadsheet inspect action '${inspectAction}' must be accepted by the content script`)
+  }
+})
+
+test('the Extension background accepts every advertised spreadsheet write and never accepts model-controlled target fields', async () => {
+  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background/office-request-contract.ts', import.meta.url), 'utf8')
+  const backgroundOperations = assignedArrayOnFirstMatchingLine(backgroundSource, (line) => line.includes('const OFFICE_SPREADSHEET_OPERATIONS:'), 'the Extension background spreadsheet operations')
+  for (const operation of SPREADSHEET_WRITE_OPERATIONS) {
+    assert.ok(backgroundOperations.includes(operation), `Native spreadsheet operation '${operation}' must be accepted by the Extension background`)
+  }
+  assert.match(backgroundSource, /message\.operation === undefined && message\.payload === undefined && message\.resource === undefined && message\.precondition === undefined/)
 })
 
 test('the content script accepts every light-document action the MCP surface advertises', async () => {
@@ -63,7 +79,7 @@ test('the content script grants light-document writes a longer budget than reads
   const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
   const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
 
-  const writeBudgetMatch = /'write'\s*\?\s*(\d[\d_]*)/.exec(contentSource)
+  const writeBudgetMatch = /\['inspect_write', 'write'\]\.includes\(String\(action\)\)\s*\?\s*(\d[\d_]*)/.exec(contentSource)
   assert.ok(writeBudgetMatch, 'the light-document dispatcher must define an explicit write timeout budget')
   const writeBudgetMs = Number(writeBudgetMatch[1].replace(/_/g, ''))
   const nativeTimeoutMatch = /const REQUEST_TIMEOUT_MS = (\d[\d_]*)/.exec(connectorSource)
@@ -82,6 +98,28 @@ test('the content script grants light-document writes a longer budget than reads
   // another 8s. The short REQUEST_TIMEOUT_MS must not abort that path.
   assert.ok(officeTimeoutMs >= 16_000, `office timeout ${officeTimeoutMs}ms must cover an 8s probe plus an 8s in-frame read`)
   assert.ok(officeTimeoutMs > nativeTimeoutMs, `office timeout ${officeTimeoutMs}ms must exceed the generic ${nativeTimeoutMs}ms request timeout`)
+})
+
+test('presentation write previews use the slow mutation-inspection budget end to end', async () => {
+  const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
+  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+  const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
+
+  assert.match(contentSource, /const officeRuntimeBudgetMs = \(action: unknown\): number =>/)
+  assert.match(contentSource, /\['inspect_write', 'write'\]\.includes\(String\(action\)\) \? 20_000 : 8_000/)
+  assert.match(backgroundSource, /\['inspect_write', 'write'\]\.includes\(String\(message\?\.action\)\) \? OFFICE_FRAME_WRITE_OPERATION_MS_DEFAULT : OFFICE_FRAME_READ_OPERATION_MS_DEFAULT/)
+
+  const frameWriteMs = Number(/const OFFICE_FRAME_WRITE_OPERATION_MS_DEFAULT = (\d[\d_]*)/.exec(backgroundSource)?.[1].replace(/_/g, ''))
+  const nativeOfficeMs = Number(/const OFFICE_REQUEST_TIMEOUT_MS = (\d[\d_]*)/.exec(connectorSource)?.[1].replace(/_/g, ''))
+  assert.ok(nativeOfficeMs > 8_000 + frameWriteMs, `native Office timeout ${nativeOfficeMs}ms must leave headroom above iframe discovery plus the ${frameWriteMs}ms frame write budget`)
+})
+
+test('Office reads and write previews do not queue behind Native start and restart work', async () => {
+  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+  const responder = /function respondToOfficeRequest[\s\S]*?\n}\n\nasync function queueResourceWrite/.exec(backgroundSource)?.[0]
+  assert.ok(responder, 'the Office request responder must remain discoverable')
+  assert.doesNotMatch(responder, /queueNativeLifecycle\(execute\)/, 'a stale iframe request must not block later Office reads or previews behind the Native lifecycle queue')
+  assert.match(responder, /void respond\(execute\(\)\)/, 'non-commit Office requests should execute directly')
 })
 
 test('the light-document CustomEvent bridge uses a per-load channel and strict envelopes', async () => {

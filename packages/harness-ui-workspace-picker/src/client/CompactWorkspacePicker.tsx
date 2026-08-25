@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   Button, HoverCard, IconArchiveOutline20, IconBranchOutline16, IconChevronDownOutline14,
   IconEditOutline16, IconEllipsisOutline16, IconFolderClose16, IconFolderOpenOutline16, IconNewChatOutline16,
@@ -12,6 +12,10 @@ import css from './CompactWorkspacePicker.module.css'
 import type { ClaudeImportController } from './ClaudeImportModal.tsx'
 import { claudeImportControllerOf } from './claude-import-controller.mjs'
 import { ClaudeImportAction } from './WorkspaceSurfaceActions.tsx'
+import { selectWorkspaceDirectorySession } from './directory-selection.ts'
+import { WORKSPACE_PICKER_DIRECTORY_SLOT, type CompactWorkspacePickerSlots } from './directory-slot.ts'
+import { workspacePickerMaxHeight } from './popover-geometry.ts'
+import { workspacePickerTabForKey, type WorkspacePickerPane } from './tab-navigation.ts'
 
 /** Avoid a runtime dependency for the small conditional class lists in this bundle. */
 function classes(...values: Array<string | false | null | undefined>): string {
@@ -194,9 +198,11 @@ function SessionRow({
 export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps & {
   matched?: ClaudeImportController | { claudeImport?: ClaudeImportController }
   claudeImport?: ClaudeImportController
-}) {
+} & CompactWorkspacePickerSlots) {
   const importController = claudeImportControllerOf(owner) as ClaudeImportController | undefined
   const [open, setOpen] = useState(false)
+  const [activePane, setActivePane] = useState<WorkspacePickerPane>('sessions')
+  const [popoverMaxHeight, setPopoverMaxHeight] = useState<number>()
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(owner.workspaces[0]?.id)
   const [menuWorkspaceId, setMenuWorkspaceId] = useState<string | undefined>()
   const [menuSessionId, setMenuSessionId] = useState<string | undefined>()
@@ -214,12 +220,23 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
   const [sessionRenameError, setSessionRenameError] = useState<string | null>(null)
   const composingRef = useRef(false)
   const root = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const sessionTab = useRef<HTMLButtonElement>(null)
+  const directoryTab = useRef<HTMLButtonElement>(null)
+  const tabsId = useId()
+  const sessionsTabId = `${tabsId}-sessions-tab`
+  const directoryTabId = `${tabsId}-directory-tab`
+  const sessionsPanelId = `${tabsId}-sessions-panel`
+  const directoryPanelId = `${tabsId}-directory-panel`
   const defaultWorkspace = useMemo(
     () => owner.workspaces.find(workspace => workspace.sessions.some(session => session.id === owner.currentSessionId))
       ?? owner.workspaces[0],
     [owner.currentSessionId, owner.workspaces],
   )
   const selectedWorkspace = owner.workspaces.find(workspace => workspace.id === selectedWorkspaceId) ?? defaultWorkspace
+  const selectedDirectorySession = selectedWorkspace === undefined
+    ? undefined
+    : selectWorkspaceDirectorySession(selectedWorkspace.sessions, owner.currentSessionId)
   const renameTrimmed = renameDraft.trim()
   const renameDuplicate = renameTarget !== null && renameTrimmed !== '' && renameTrimmed !== renameTarget.title
     && owner.workspaces.some(workspace => workspace.title === renameTrimmed)
@@ -229,10 +246,31 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
   useEffect(() => {
     if (!open) {
       setSelectedWorkspaceId(defaultWorkspace?.id)
+      setActivePane('sessions')
       setMenuWorkspaceId(undefined)
       setMenuSessionId(undefined)
     }
   }, [defaultWorkspace?.id, open])
+  useLayoutEffect(() => {
+    if (!open) return
+    const updateMaxHeight = (): void => {
+      const bottom = trigger.current?.getBoundingClientRect().bottom
+      if (bottom === undefined) return
+      const viewport = window.visualViewport?.height ?? window.innerHeight
+      setPopoverMaxHeight(workspacePickerMaxHeight(bottom, viewport))
+    }
+    updateMaxHeight()
+    window.addEventListener('resize', updateMaxHeight)
+    window.addEventListener('scroll', updateMaxHeight, true)
+    window.visualViewport?.addEventListener('resize', updateMaxHeight)
+    window.visualViewport?.addEventListener('scroll', updateMaxHeight)
+    return () => {
+      window.removeEventListener('resize', updateMaxHeight)
+      window.removeEventListener('scroll', updateMaxHeight, true)
+      window.visualViewport?.removeEventListener('resize', updateMaxHeight)
+      window.visualViewport?.removeEventListener('scroll', updateMaxHeight)
+    }
+  }, [open])
   useEffect(() => {
     if (!open) return
     const closeOutside = (event: PointerEvent): void => {
@@ -319,10 +357,21 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
       setSessionRenameError(failureText(reason))
     })
   }
+  const activatePane = (pane: WorkspacePickerPane, focus = false): void => {
+    setActivePane(pane)
+    if (focus) (pane === 'sessions' ? sessionTab : directoryTab).current?.focus()
+  }
+  const moveTab = (event: ReactKeyboardEvent<HTMLButtonElement>): void => {
+    const pane = workspacePickerTabForKey(activePane, event.key)
+    if (pane === undefined) return
+    event.preventDefault()
+    activatePane(pane, true)
+  }
 
   return (
     <div ref={root} className={css.root}>
       <button
+        ref={trigger}
         type="button"
         className={css.trigger}
         aria-expanded={open}
@@ -335,7 +384,10 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
         <IconChevronDownOutline14 className={classes(css.chevron, open && css.chevronOpen)} />
       </button>
       {open && (
-        <div className={css.popover}>
+        <div
+          className={css.popover}
+          style={{ '--accrui-workspace-picker-max-height': `${String(popoverMaxHeight ?? 0)}px` } as CSSProperties}
+        >
           <section className={css.pane}>
             <div className={css.paneHeader}>
               <div className={css.paneTitle}>{owner.labels.workspaces}</div>
@@ -378,8 +430,11 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
           </section>
           <section className={classes(css.pane, css.sessionsPane)}>
             <div className={css.paneHeader}>
-              <div className={css.paneTitle}>{owner.labels.sessions}</div>
-              <div className={css.headerActions}>
+              <div className={css.paneTabs} role="tablist" aria-label="工作区内容">
+                <button ref={sessionTab} id={sessionsTabId} type="button" role="tab" tabIndex={activePane === 'sessions' ? 0 : -1} aria-selected={activePane === 'sessions'} aria-controls={sessionsPanelId} className={classes(css.paneTab, activePane === 'sessions' && css.paneTabActive)} onClick={() => { activatePane('sessions') }} onKeyDown={moveTab}>会话</button>
+                <button ref={directoryTab} id={directoryTabId} type="button" role="tab" tabIndex={activePane === 'directory' ? 0 : -1} aria-selected={activePane === 'directory'} aria-controls={directoryPanelId} className={classes(css.paneTab, activePane === 'directory' && css.paneTabActive)} onClick={() => { activatePane('directory') }} onKeyDown={moveTab}>目录</button>
+              </div>
+              {activePane === 'sessions' && <div className={css.headerActions}>
                 <Tooltip label={owner.labels.newSession} side="bottom" delayMs={500}>
                   <button
                     type="button"
@@ -389,9 +444,9 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
                   ><IconNewChatOutline16 size={16} /></button>
                 </Tooltip>
                 <ClaudeImportAction workspace={selectedWorkspace} controller={importController} />
-              </div>
+              </div>}
             </div>
-            <div className={css.list}>{selectedWorkspace?.sessions.map(session => (
+            <div id={sessionsPanelId} className={css.list} role="tabpanel" aria-labelledby={sessionsTabId} hidden={activePane !== 'sessions'}>{selectedWorkspace?.sessions.map(session => (
               <SessionRow
                 key={session.id}
                 session={session}
@@ -410,6 +465,14 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
                 onOpen={() => { owner.openSession(session.id); setOpen(false) }}
               />
             ))}{(selectedWorkspace?.sessions.length ?? 0) === 0 && <div className={css.empty}>{owner.labels.newSession}</div>}</div>
+            <div id={directoryPanelId} className={css.directoryPanel} role="tabpanel" aria-labelledby={directoryTabId} hidden={activePane !== 'directory'}>
+              {activePane === 'directory' && (selectedWorkspace === undefined ? <div className={css.empty}>请先选择工作区。</div> : owner.renderSlot(WORKSPACE_PICKER_DIRECTORY_SLOT, {
+                  workspaceId: String(selectedWorkspace.id),
+                  workspaceTitle: selectedWorkspace.title,
+                  sessionId: selectedDirectorySession === undefined ? undefined : String(selectedDirectorySession.id),
+                  onClose: () => { setOpen(false) },
+                }))}
+            </div>
           </section>
         </div>
       )}

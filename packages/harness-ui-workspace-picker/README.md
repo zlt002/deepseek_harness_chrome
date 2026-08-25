@@ -4,6 +4,14 @@ This out-of-tree product plugin fills the public `sidebar.workspaces.compact`
 seat. It preserves the normal Workspace/session actions and adds one
 **Import from Claude Code** flow.
 
+The right picker pane has accessible `会话` and `目录` tabs. The picker owns
+Workspace selection and renders the product child slot
+`accrui.workspace-picker.directory` with only the selected Workspace, its
+preferred session (current when it belongs to that Workspace, otherwise the
+first), and a close callback. Its popover measures the trigger-to-viewport
+space on resize and scroll, naturally sizes to content, and constrains only
+the two independently scrollable panes.
+
 The Host half exposes one loopback, same-origin route at
 `/api/claude-code.import`. Project discovery reads directory entries and file
 metadata only. Session previews read at most 64 KiB per selected project's

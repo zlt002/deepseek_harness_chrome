@@ -124,6 +124,9 @@ test('installs the native host into a stable macOS location', async () => {
     assert.match(installedSkillSource, /Harness Workspace 是唯一用户界面/)
     assert.match(installedSkillSource, /自动生成内部 `requirementId`/)
     assert.doesNotMatch(installedSkillSource, /pmd-workspace|clarification\.md/)
+    const prototypeSkill = join(installRoot, 'skills/product-prototype/SKILL.md')
+    await stat(prototypeSkill)
+    assert.match(await readFile(prototypeSkill, 'utf8'), /name:\s*product-prototype/)
     for (const officeSkill of ['pptx', 'xlsx', 'docx', 'pdf']) {
       const officeSkillPath = join(installRoot, `skills/${officeSkill}/SKILL.md`)
       await stat(officeSkillPath)

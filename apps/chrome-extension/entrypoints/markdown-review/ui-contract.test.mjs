@@ -4,7 +4,18 @@ import test from 'node:test'
 
 const root = new URL('.', import.meta.url)
 const main = await readFile(new URL('./main.tsx', root), 'utf8')
+const editor = await readFile(new URL('./visual-markdown-editor.tsx', root), 'utf8')
+const mermaidView = await readFile(new URL('./mermaid-view.mjs', root), 'utf8')
 const style = await readFile(new URL('./style.css', root), 'utf8')
+const wxtConfig = await readFile(new URL('../../wxt.config.ts', root), 'utf8')
+const packageJson = JSON.parse(await readFile(new URL('../../package.json', root), 'utf8'))
+
+test('development prebundles the CommonJS debug dependency used by micromark', () => {
+  assert.match(wxtConfig, /include:\s*\[[\s\S]*['"]@milkdown\/crepe['"][\s\S]*['"]@milkdown\/kit['"]/)
+  assert.match(wxtConfig, /['"]@milkdown\/kit\/core['"][\s\S]*['"]@milkdown\/kit\/plugin\/diff['"][\s\S]*['"]@milkdown\/kit\/plugin\/history['"][\s\S]*['"]@milkdown\/kit\/plugin\/streaming['"][\s\S]*['"]@milkdown\/kit\/prose\/state['"][\s\S]*['"]@milkdown\/kit\/prose\/view['"][\s\S]*['"]@milkdown\/kit\/utils['"]/)
+  assert.match(wxtConfig, /include:\s*\[[\s\S]*['"]debug['"]/)
+  assert.equal(packageJson.dependencies.debug, '4.4.3')
+})
 
 test('review workspace uses one visual Milkdown canvas rather than source and preview panes', () => {
   assert.match(main, /<VisualMarkdownEditor/)
@@ -13,18 +24,61 @@ test('review workspace uses one visual Milkdown canvas rather than source and pr
   assert.match(style, /\.visual-markdown-editor/)
 })
 
-test('visual surface states the safe HTML and Mermaid downgrade', () => {
-  assert.match(main, /HTML 和 Mermaid 保留为安全文本\/代码块，不执行。/)
+test('review chrome stays compact and replaces empty error canvases with recovery state', () => {
+  assert.match(main, /showRecoveryState/)
+  assert.match(main, /const activityNotice = saveNotice \?\? proposalNotice/)
+  assert.match(main, /activityNotice !== undefined/)
+  assert.match(main, /review-recovery/)
+  assert.doesNotMatch(main, /className="workspace-toolbar"/)
+  assert.match(style, /\.review-header\s*\{[\s\S]*height: 44px;/)
+  assert.match(style, /\.review-main\s*\{[\s\S]*padding: 0;/)
+  assert.match(style, /\.review-recovery\s*\{/)
+  assert.match(main, /title="在排版后的正文中直接编辑；标题、段落、列表、表格、代码块和跨块选区都可作为 AI 上下文。HTML 保留为安全文本；Mermaid 仅在本地安全渲染。"/)
+})
+
+test('visual surface states the safe HTML downgrade and local Mermaid preview', () => {
+  assert.match(main, /HTML 保留为安全文本；Mermaid 仅在本地安全渲染。/)
   assert.doesNotMatch(main, /data-source-start|data-source-end/)
 })
 
-test('active AI diffs have visible accept and reject controls', () => {
+test('each Mermaid block defaults to a visual view and can independently reveal its unchanged source', () => {
+  assert.match(editor, /mermaid-view-toggle/)
+  assert.match(editor, /可视化/)
+  assert.match(editor, /源码/)
+  assert.match(editor, /data-mermaid-source/)
+  assert.match(editor, /wireMermaidViewToggle/)
+  assert.match(editor, /Decoration\.node/)
+  assert.match(mermaidView, /classList\.toggle\('mermaid-source-hidden'/)
+  assert.match(mermaidView, /aria-pressed/)
+  assert.doesNotMatch(editor, /onMarkdownChangeRef\.current\(source\)/)
+  assert.match(editor, /key: `mermaid:\$\{position\}:\$\{node\.textContent\}`/)
+  assert.match(editor, /Decoration\.widget\(position, /)
+  assert.match(editor, /mermaid-viewer-controls/)
+  assert.match(editor, /wireMermaidViewer/)
+  assert.match(style, /\.mermaid-toolbar\s*\{[\s\S]*justify-content: space-between/)
+  assert.match(style, /\.mermaid-canvas\s*\{[\s\S]*transform-origin: center/)
+})
+
+test('official Crepe code and image blocks retain their component layout instead of falling back to raw pre and img styling', () => {
+  assert.match(style, /\.milkdown-code-block\s*\{[\s\S]*border: 1px solid var\(--review-border\)/)
+  assert.match(style, /\.milkdown-code-block \.tools\s*\{[\s\S]*border-bottom: 1px solid var\(--review-border-subtle\)/)
+  assert.match(style, /\.milkdown-image-block\s*\{[\s\S]*max-inline-size: min\(100%, 960px\)/)
+  assert.match(style, /\.milkdown-image-block .*img\s*\{[\s\S]*max-block-size: 640px/)
+  assert.match(style, /\.mermaid-block\s*\{[\s\S]*width: 100%/)
+  assert.match(style, /\.mermaid-preview\s*\{[\s\S]*width: 100%(?![\s\S]*max-width: 960px)/)
+})
+
+test('active AI diffs show before and after with visible accept and reject controls', () => {
   assert.match(main, /candidateReviewActive/)
+  assert.match(main, /修改前/)
+  assert.match(main, /修改后/)
   assert.match(main, /拒绝修改/)
   assert.match(main, /接受修改/)
   assert.match(main, /acceptCandidate/)
   assert.match(main, /rejectCandidate/)
-  assert.match(style, /\.candidate-actions/)
+  assert.match(style, /\.diff-review-dock/)
+  assert.match(style, /\.milkdown-diff-controls/)
+  assert.match(style, /display: none !important/)
 })
 
 test('dirty visual drafts use a captured selection and explicit verified-write confirmation', () => {
@@ -38,12 +92,79 @@ test('dirty visual drafts use a captured selection and explicit verified-write c
   assert.match(main, /不会自动重试/)
 })
 
-test('review panel is collapsible and stacks below the canvas on narrow widths', () => {
-  assert.match(main, /setReviewPanelOpen/)
-  assert.match(main, /aria-expanded=\{reviewPanelOpen\}/)
-  assert.match(main, /review-main review-panel-collapsed/)
+test('external updates preserve local review work and a write confirmation cannot double-commit', () => {
+  assert.match(main, /hasLocalReviewWork\(\)/)
+  assert.match(main, /外部文件已更新/)
+  assert.match(main, /放弃本地更改并重新读取/)
+  assert.match(main, /syncEditorMarkdown\(\)/)
+  assert.match(main, /idempotencyKey: requestId\(\)/)
+  assert.match(main, /beginCommit\(commitRef\.current/)
+  assert.match(main, /isCurrentCommit\(commitRef\.current, expected\.token\)/)
+  assert.match(main, /正在确认写入/)
+})
+
+test('selection review is contextual inside the document instead of a fixed right panel', () => {
+  assert.doesNotMatch(main, /annotation-panel|setReviewPanelOpen/)
+  assert.doesNotMatch(style, /\.annotation-panel/)
+  assert.match(editor, /pointerup/)
+  assert.match(editor, /keyup/)
+  assert.match(editor, /AI_SELECTION_QUICK_ACTIONS/)
+  assert.match(editor, /润色/)
+  assert.match(editor, /精简/)
+  assert.match(editor, /扩写/)
+  assert.match(editor, /转验收标准/)
+  assert.match(editor, /submitQuickAction[\s\S]*onSubmitAnnotation\(floatingSelection, instruction\)/)
+  assert.match(editor, /添加自定义批注/)
+  assert.match(editor, /提交给 AI/)
+  assert.match(style, /\.selection-action-menu/)
+  assert.match(style, /\.selection-action/)
+  assert.match(style, /\.annotation-composer/)
+})
+
+test('saved annotations stay highlighted in the document and expose their delivery state', () => {
+  assert.match(editor, /Decoration\.inline/)
+  assert.match(editor, /data-review-annotation-id/)
+  assert.match(style, /\.review-annotation-highlight/)
+  assert.match(editor, /批注详情/)
+  assert.match(editor, /statusAnnotation\.comment/)
+  assert.match(editor, /重新发送/)
+  assert.match(style, /\.annotation-status-popover p/)
+  assert.match(editor, /已提交给 AI|正在提交给 AI|提交给 AI 失败/)
+})
+
+test('annotation delivery survives editor startup and reports a disconnected send', () => {
+  assert.match(editor, /isReady:/)
+  assert.match(editor, /onReady/)
+  assert.match(main, /!editor\.isReady\(\)/)
+  assert.match(main, /onReady=\{applyQueuedProposal\}/)
+  assert.doesNotMatch(main, /onReady=\{[^}]*syncEditorMarkdown/)
+  assert.match(main, /getMarkdown\(\)/)
+  assert.match(main, /const failSendingAnnotations[\s\S]*deliveryStatus === 'sending'[\s\S]*deliveryStatus: 'failed'/)
+  assert.match(main, /const disconnected = \(\) => \{[\s\S]*failSendingAnnotations/)
+  assert.match(main, /deliveryTimeoutsRef/)
+  assert.match(main, /window\.setTimeout\([\s\S]*deliveryStatus: 'failed'/)
+  assert.match(main, /const submitAnnotation[\s\S]*deliverAnnotation\(annotation\)/)
+  assert.doesNotMatch(main, /const addAnnotation/)
+})
+
+test('oversized visual selections are explained and never delivered', () => {
+  assert.match(main, /selection\.limitReason !== undefined/)
+  assert.match(editor, /quote_too_long/)
+  assert.match(editor, /too_many_blocks/)
+  assert.match(editor, /8,000/)
+  assert.match(editor, /24/)
+  assert.match(style, /\.selection-limit-notice/)
+})
+
+test('visual editing exposes undo and redo while retaining the native shortcuts', () => {
+  assert.match(editor, /undoCommand/)
+  assert.match(editor, /redoCommand/)
+  assert.match(main, /撤销/)
+  assert.match(main, /重做/)
+  assert.match(main, /Ctrl\+Z/)
+  assert.match(main, /Ctrl\+Y/)
   assert.match(main, /已绑定会话/)
-  assert.match(style, /\.annotation-panel\.collapsed \{ width: 56px;/)
-  assert.match(style, /\.review-main\.review-panel-collapsed \{ grid-template-columns: minmax\(0, 1fr\) 56px;/)
-  assert.match(style, /@media \(max-width: 840px\)[\s\S]*grid-template-columns: minmax\(0, 1fr\)/)
+  assert.match(main, /key=\{editorEpoch\}/)
+  assert.match(main, /setEditorEpoch\(\(epoch\) => epoch \+ 1\)/)
+  assert.doesNotMatch(main, /key=\{`\$\{snapshot\.resource\.revision\}:\$\{snapshot\.resource\.fingerprint\}`\}/)
 })

@@ -3,8 +3,17 @@
 .header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; border-bottom: 1px solid var(--dsw-border-secondary); }
 .header button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 18px; }
 .headerActions { display: inline-flex; align-items: center; gap: 4px; }
+.headerAction { display: inline-flex; }
+.headerAction button { display: inline-flex; align-items: center; gap: 5px; min-width: 58px; height: 28px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.headerAction button:hover:not(:disabled) { background: var(--dsw-interactive-bg-hover); }
+.headerAction button:disabled { color: var(--dsw-fg-secondary); cursor: not-allowed; }
 .tree { min-height: 0; flex: 1; overflow: auto; padding: 6px; }
+.treeToolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; padding: 0 4px 4px 8px; color: var(--dsw-fg-secondary); font-size: 12px; }
+.treeToolbar button { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: inherit; cursor: pointer; }
+.treeToolbar button:hover { background: var(--dsw-interactive-bg-hover); }
 .entry { display: flex; width: 100%; align-items: center; gap: 7px; border: 0; border-radius: 7px; padding: 7px 8px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
 .entry:hover { background: var(--dsw-interactive-bg-hover); }
 .nested { margin-left: 14px; border-left: 1px solid var(--dsw-border-secondary); padding-left: 5px; }
 .status { padding: 9px; color: var(--dsw-fg-secondary); font-size: 12px; white-space: pre-wrap; }
+.chevronExpanded { transform: rotate(90deg); }
+.markdownMark { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border: 1px solid currentColor; border-radius: 3px; color: var(--dsw-fg-secondary); font-size: 8px; font-weight: 600; line-height: 1; }

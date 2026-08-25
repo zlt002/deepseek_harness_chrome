@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import ts from 'typescript'
 import { browserTargetBridgeConfig, createBrowserTargetProtocol, requestHarnessReconnect, requestOpenFullscreenTab, requestReturnToSidepanel } from '../src/client/protocol.js'
+
+async function activeBridge() {
+  const source = await readFile(new URL('../src/client/active-tab-bridge.ts', import.meta.url), 'utf8')
+  const storeModule = `export function createSnapshotStore(initial) { return { value: initial, set(value) { this.value = value }, getSnapshot() { return this.value }, subscribe() { return () => {} } } }`
+  const storeUrl = `data:text/javascript,${encodeURIComponent(storeModule)}`
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+    .replace("from '@deepseek-ai/dsh-client-runtime/client'", `from '${storeUrl}'`)
+  return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
+}
 
 function store(initial) { return { value: initial, set(value) { this.value = value } } }
 const snapshot = { settings: { mode: 'follow-active-tab', pinnedTabs: [] }, tabs: [], activeTab: { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://example.test', title: 'Example' } }
@@ -26,6 +37,18 @@ test('emits extension commands with its own increasing sequence', () => {
     { message: { type: 'browser-target-command/v1', nonce: 'nonce', sequence: 2, command: { command: 'set-mode', mode: 'none' } }, origin: 'chrome-extension://abc' },
     { message: { type: 'browser-target-command/v1', nonce: 'nonce', sequence: 3, command: { command: 'capture-design-reference', tabId: 2 } }, origin: 'chrome-extension://abc' },
   ])
+})
+
+test('accepts only a bounded integer for the in-flight design-reference tab id', async () => {
+  const { createBrowserTargetBridge } = await activeBridge()
+  const parent = {}
+  const valid = createBrowserTargetBridge('nonce', 'chrome-extension://abc')
+  assert.equal(valid.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, capturingDesignReferenceTabId: 2 } }, parent), true)
+  assert.equal(valid.source.getSnapshot().capturingDesignReferenceTabId, 2)
+  for (const invalid of [-1, 2.5, Number.MAX_SAFE_INTEGER]) {
+    const bridge = createBrowserTargetBridge('nonce', 'chrome-extension://abc')
+    assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, capturingDesignReferenceTabId: invalid } }, parent), false)
+  }
 })
 
 test('requires an exact chrome extension parent origin in the opt-in bridge URL', () => {

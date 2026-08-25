@@ -17,6 +17,8 @@ test('keeps message annotation UI and prompt enrichment in an out-of-tree produc
   assert.match(client, /conversation\.composer\.above/)
   assert.match(client, /conversation\.input\.overlay/)
   assert.match(client, /composerSubmissionTransforms/)
+  assert.match(client, /ReviewFeedbackService/)
+  assert.match(client, /\['slots', 'composerSubmissionTransforms', 'sessions'\]/)
   assert.match(client, /provide\('reviewFeedback'/)
   assert.match(client, /id: 'review-feedback'/)
   assert.match(client, /accept: \(\) => annotations\.accept/)
@@ -31,6 +33,18 @@ test('keeps message annotation UI and prompt enrichment in an out-of-tree produc
   assert.match(seam, /ComposerSubmissionTransforms/)
   assert.match(selectionSeam, /data-assistant-message-id/)
   assert.doesNotMatch(`${client}\n${view}`, /deepseek-harness\/packages\/.*\/src/)
+})
+
+test('uses the public session-scoped conversation service for one-click Markdown AI requests', async () => {
+  const [service, submitter] = await Promise.all([
+    source('../src/client/ReviewFeedbackService.ts'),
+    source('../src/client/workspace-markdown-submission.js'),
+  ])
+  assert.match(service, /submitWorkspaceMarkdown/)
+  assert.match(submitter, /sessions\.scope\(sessionId\)/)
+  assert.match(submitter, /scope\.get\('conversation'\)/)
+  assert.match(submitter, /conversation\.send\(reviewFeedbackPrompt\('', \[item\]\)\)/)
+  assert.doesNotMatch(`${service}\n${submitter}`, /deepseek-harness\/packages\/.*\/src/)
 })
 
 test('renders the selection popover through a page-level portal instead of the composer overlay stacking context', async () => {

@@ -30,6 +30,7 @@ export interface BrowserTargetSnapshot {
   settings: BrowserTargetSettings
   tabs: BrowserTargetTab[]
   activeTab?: BrowserTargetTab
+  capturingDesignReferenceTabId?: number
   error?: string
 }
 
@@ -65,6 +66,10 @@ function isBrowserTargetMode(value: unknown): value is BrowserTargetMode {
   return value === 'follow-active-tab' || value === 'pinned-tabs' || value === 'none'
 }
 
+function isBoundedTabId(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 2_147_483_647
+}
+
 function isBrowserTargetSettings(value: unknown): value is BrowserTargetSettings {
   return typeof value === 'object' && value !== null
     && isBrowserTargetMode((value as BrowserTargetSettings).mode)
@@ -82,6 +87,7 @@ function isBrowserTargetSnapshotMessage(value: unknown): value is BrowserTargetS
     && Array.isArray((value as BrowserTargetSnapshotMessage).tabs)
     && (value as BrowserTargetSnapshotMessage).tabs.every(isBrowserTargetTab)
     && ((value as BrowserTargetSnapshotMessage).activeTab === undefined || isBrowserTargetTab((value as BrowserTargetSnapshotMessage).activeTab))
+    && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId === undefined || isBoundedTabId((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId))
     && ((value as BrowserTargetSnapshotMessage).error === undefined || typeof (value as BrowserTargetSnapshotMessage).error === 'string')
 }
 
@@ -103,7 +109,7 @@ export function createBrowserTargetBridge(nonce: string, parentOrigin: string): 
       if (event.source !== parent || event.origin !== parentOrigin) return false
       if (!isBrowserTargetSnapshotMessage(event.data) || event.data.nonce !== nonce || event.data.sequence <= incomingSequence) return false
       incomingSequence = event.data.sequence
-      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
+      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.capturingDesignReferenceTabId === undefined ? {} : { capturingDesignReferenceTabId: event.data.capturingDesignReferenceTabId }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
       return true
     },
     send(command, parent): void {

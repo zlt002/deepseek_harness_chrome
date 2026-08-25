@@ -28,6 +28,10 @@ import {
   isLightDocumentResourceIdentity,
   isListWorkTabsRequest as isConnectorRequest,
   isOfficeDocumentRequest,
+  isOfficePresentationRequest,
+  isOfficeReadFailureDetails,
+  isOfficeSpreadsheetRequest,
+  isSpreadsheetResourceIdentity,
   isReadWorkTabRequest,
 } from './background/office-request-contract'
 import { MARKDOWN_REVIEW_PORT, isMarkdownReviewPortRequest } from './markdown-review/protocol'
@@ -36,7 +40,11 @@ import type {
   LightDocumentResourceIdentity,
   ListWorkTabsRequest as ConnectorRequest,
   OfficeDocumentRequest,
+  OfficePresentationRequest,
   OfficeReadFailure,
+  OfficeSpreadsheetRequest,
+  PresentationResourceIdentity,
+  SpreadsheetResourceIdentity,
   ReadWorkTabRequest,
 } from './background/office-request-contract'
 import {
@@ -46,6 +54,16 @@ import {
   validPrototypeStudioAuthorization,
 } from '../src/prototype-studio-authorization'
 import type { PrototypeStudioAuthorization } from '../src/prototype-studio-authorization'
+import {
+  PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY,
+  retainedPrototypeStudioRecoveryBindings,
+  storedPrototypeStudioRecoveries,
+  validPrototypeStudioRecoveryBinding,
+} from '../src/prototype-studio-recovery'
+import type { PrototypeStudioRecoveryBinding } from '../src/prototype-studio-recovery'
+import { retainedPrototypeReferences } from '../src/prototype-reference-storage'
+import { sha256Fingerprint, validateReferenceEvidence, verifyReferenceEvidenceFingerprint } from '../../../packages/harness-ui-prototype-studio/src/prototype-document'
+import { productBrief } from '../../../packages/harness-ui-prototype-studio/src/product-brief.mjs'
 const KNOWLEDGE_API_ORIGIN = 'https://anapi-uat.annto.com'
 const KNOWLEDGE_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-kd`
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
@@ -123,6 +141,7 @@ const WORKSPACE_REVIEW_SELECTION_PATH = '/api/workspace-review/selection'
 const WORKSPACE_REVIEW_PROPOSALS_PATH = '/api/workspace-review/proposals'
 const WORKSPACE_REVIEW_PREPARE_WRITE_PATH = '/api/workspace-review/prepare-write'
 const WORKSPACE_REVIEW_COMMIT_WRITE_PATH = '/api/workspace-review/commit-write'
+const WORKSPACE_REVIEW_REQUEST_TIMEOUT_MS = 15_000
 const MARKDOWN_REVIEW_STORAGE_KEY = 'harnessMarkdownReviewIdentitiesV1'
 
 interface OpenMarkdownReview {
@@ -628,10 +647,19 @@ function selectedSourceScopeEcho(record: { scope: KnowledgeScope; enabled: boole
 
 const NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
 const START_TIMEOUT_MS = 30_000
-const MAX_STORED_PROTOTYPE_REFERENCES = 3
 const PROTOTYPE_STUDIO_OPEN_PATH = '/api/prototype-studio/open'
+const PROTOTYPE_STUDIO_RECOVER_PATH = '/api/prototype-studio/recover'
+const PROTOTYPE_STUDIO_CONFIRM_DESIGN_PATH = '/api/prototype-studio/confirm-design'
+const PROTOTYPE_STUDIO_CONFIRM_BRIEF_PATH = '/api/prototype-studio/confirm-brief'
+const PROTOTYPE_STUDIO_REOPEN_DESIGN_PATH = '/api/prototype-studio/reopen-design'
 const PROTOTYPE_STUDIO_SNAPSHOT_PATH = '/api/prototype-studio/snapshot'
+const PROTOTYPE_STUDIO_REVISION_PREVIEW_PATH = '/api/prototype-studio/revision-preview'
 const PROTOTYPE_STUDIO_RESTORE_PATH = '/api/prototype-studio/restore'
+const PROTOTYPE_STUDIO_BEGIN_GENERATION_PATH = '/api/prototype-studio/begin-generation'
+const PROTOTYPE_STUDIO_CANCEL_GENERATION_PATH = '/api/prototype-studio/cancel-generation'
+const PROTOTYPE_HOST_TIMEOUT_MS = 12_000
+const PROTOTYPE_RECOVERY_LATE_COMMIT_MAX_MS = 15_000
+const PROTOTYPE_RECOVERY_LATE_COMMIT_POLL_MS = 100
 const TRANSFER_TIMEOUT_MS = 15_000
 const TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY = 'teamKnowledgeCreateCheckpointsV1'
 
@@ -653,6 +681,12 @@ interface NativeMessage {
   resource?: unknown
   action?: unknown
   operation?: unknown
+  precondition?: unknown
+  sheetName?: unknown
+  matchCase?: unknown
+  matchEntireCell?: unknown
+  searchBy?: unknown
+  slideIndex?: unknown
   offset?: unknown
   limit?: unknown
   query?: unknown
@@ -665,6 +699,8 @@ interface NativeMessage {
   harnessSessionId?: unknown
   harnessParentSessionId?: unknown
   question?: unknown
+  assertion?: unknown
+  signature?: unknown
 }
 
 interface NativeStartPayload {
@@ -687,7 +723,25 @@ let nativeUrl: string | undefined
 let nativeRuntimeIdentity: RuntimeIdentitySummary | undefined
 let startPromise: Promise<string> | undefined
 const boundBrowserTargets = new Map<string, BrowserTargetBinding>()
+interface PresentationFrameBinding {
+  frameId: number
+  frameUrl: string
+  resource: PresentationResourceIdentity
+}
+const presentationFrameBindings = new Map<string, PresentationFrameBinding>()
+interface SpreadsheetFrameBinding {
+  frameId: number
+  frameUrl: string
+  resource: SpreadsheetResourceIdentity
+}
+const spreadsheetFrameBindings = new Map<string, SpreadsheetFrameBinding>()
 const pendingTargetTransfers = new Map<string, { resolve: () => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
+interface PrototypeRecoverySignature {
+  assertion: Record<string, unknown>
+  signature: string
+}
+const pendingPrototypeRecoverySignatures = new Map<string, { resolve: (value: PrototypeRecoverySignature) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
+let prototypeStudioRecoveryMutation: Promise<void> = Promise.resolve()
 
 function runtimeIdentitySummary(value: unknown): RuntimeIdentitySummary | undefined {
   return validRuntimeIdentitySummary(value) ? value : undefined
@@ -1424,6 +1478,8 @@ async function restartHarnessForSettings(): Promise<string> {
     nativeUrl = undefined
     nativeRuntimeIdentity = undefined
     boundBrowserTargets.clear()
+    presentationFrameBindings.clear()
+    spreadsheetFrameBindings.clear()
     return startHarnessForSettings()
   })
 }
@@ -1449,12 +1505,107 @@ function storedPrototypeReferences(value: unknown): StoredPrototypeReferences {
     : { v: 1, references: {} }
 }
 
+class PrototypeHostTimeoutError extends Error {}
+function prototypeHostTimeoutMs(): number {
+  const override = (globalThis as { __ACCRUI_PROTOTYPE_HOST_TIMEOUT_MS?: unknown }).__ACCRUI_PROTOTYPE_HOST_TIMEOUT_MS
+  return typeof override === 'number' && Number.isFinite(override) && override > 0 && override <= 60_000 ? override : PROTOTYPE_HOST_TIMEOUT_MS
+}
+function prototypeRecoveryLateCommitWindowMs(): number {
+  return Math.max(500, Math.min(PROTOTYPE_RECOVERY_LATE_COMMIT_MAX_MS, prototypeHostTimeoutMs() * 2))
+}
+function delayPrototypeRecoveryReadback(milliseconds: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, milliseconds)) }
+async function requestPrototypeHost(base: string, authorization: PrototypeStudioAuthorization, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), prototypeHostTimeoutMs())
+  try {
+    const response = await fetch(new URL(path, base), { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${authorization.capability}` }, body: JSON.stringify({ projectId: authorization.projectId, ...body }), signal: controller.signal })
+    const text = await response.text(); let payload: Record<string, unknown> = {}
+    try { payload = text === '' ? {} : JSON.parse(text) as Record<string, unknown> } catch { /* preserve the HTTP status below */ }
+    if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `Prototype Studio request failed: HTTP ${String(response.status)}`)
+    return payload
+  } catch (error) {
+    if (controller.signal.aborted) throw new PrototypeHostTimeoutError('Prototype Studio Host request timed out.', { cause: error })
+    throw error
+  } finally { clearTimeout(timeout) }
+}
+async function requestPrototypeRecovery(base: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), prototypeHostTimeoutMs())
+  try {
+    const response = await fetch(new URL(PROTOTYPE_STUDIO_RECOVER_PATH, base), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal })
+    const text = await response.text(); let payload: Record<string, unknown> = {}
+    try { payload = text === '' ? {} : JSON.parse(text) as Record<string, unknown> } catch { /* preserve the HTTP status below */ }
+    if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `Prototype Studio recovery failed: HTTP ${String(response.status)}`)
+    return payload
+  } catch (error) {
+    if (controller.signal.aborted) throw new PrototypeHostTimeoutError('Prototype Studio recovery timed out.', { cause: error })
+    throw error
+  } finally { clearTimeout(timeout) }
+}
+
+function settlePrototypeRecoverySignature(message: NativeMessage): void {
+  if (typeof message.requestId !== 'string') return
+  const pending = pendingPrototypeRecoverySignatures.get(message.requestId)
+  if (pending === undefined) return
+  clearTimeout(pending.timeout)
+  pendingPrototypeRecoverySignatures.delete(message.requestId)
+  if (message.type === 'prototype_recovery_sign_failed') {
+    pending.reject(new Error(typeof message.error === 'string' ? message.error : 'Native Host refused Prototype Studio recovery signing.'))
+    return
+  }
+  if (message.type !== 'prototype_recovery_signed' || message.assertion === null || typeof message.assertion !== 'object' || Array.isArray(message.assertion) || typeof message.signature !== 'string') {
+    pending.reject(new Error('Native Host returned an invalid Prototype Studio recovery signature.'))
+    return
+  }
+  pending.resolve({ assertion: message.assertion as Record<string, unknown>, signature: message.signature })
+}
+
+function rejectPrototypeRecoverySignatures(error: Error): void {
+  for (const pending of pendingPrototypeRecoverySignatures.values()) {
+    clearTimeout(pending.timeout)
+    pending.reject(error)
+  }
+  pendingPrototypeRecoverySignatures.clear()
+}
+
+async function requestPrototypeRecoverySignature(payload: Pick<PrototypeStudioRecoveryBinding, 'projectId' | 'referenceId' | 'sessionId' | 'evidenceFingerprint' | 'recoveryEpoch'> & { capabilityFingerprint: string }): Promise<PrototypeRecoverySignature> {
+  await (nativeUrl === undefined ? startHarnessForSettings() : Promise.resolve(nativeUrl))
+  const port = nativePort
+  if (port === undefined) throw new Error('可信恢复通道尚未准备好，请重试；原型和历史版本仍保留。')
+  const requestId = crypto.randomUUID()
+  return new Promise<PrototypeRecoverySignature>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingPrototypeRecoverySignatures.delete(requestId)
+      reject(new Error('等待本机恢复授权签名超时，请重试。'))
+    }, prototypeHostTimeoutMs())
+    pendingPrototypeRecoverySignatures.set(requestId, { resolve, reject, timeout })
+    try {
+      port.postMessage({
+        type: 'sign-prototype-recovery', requestId,
+        payload: {
+          projectId: payload.projectId,
+          expectedSessionId: payload.sessionId,
+          referenceId: payload.referenceId,
+          evidenceFingerprint: payload.evidenceFingerprint,
+          capabilityFingerprint: payload.capabilityFingerprint,
+          expectedRecoveryEpoch: payload.recoveryEpoch,
+        },
+      })
+    } catch (error) {
+      clearTimeout(timeout)
+      pendingPrototypeRecoverySignatures.delete(requestId)
+      reject(new Error(asError(error)))
+    }
+  })
+}
 async function prototypeHostRequest(authorization: PrototypeStudioAuthorization, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   const base = nativeUrl ?? await startHarnessForSettings()
-  const response = await fetch(new URL(path, base), { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${authorization.capability}` }, body: JSON.stringify({ projectId: authorization.projectId, ...body }) })
-  const payload = await response.json() as Record<string, unknown>
-  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `Prototype Studio request failed: HTTP ${String(response.status)}`)
-  return payload
+  try { return await requestPrototypeHost(base, authorization, path, body) } catch (error) {
+    if (!(error instanceof PrototypeHostTimeoutError)) throw error
+    const restarted = await restartHarnessForSettings()
+    try { return await requestPrototypeHost(restarted, authorization, path, body) } catch (retryError) {
+      if (retryError instanceof PrototypeHostTimeoutError) throw new Error('原型服务连接超时，请稍后重试。', { cause: retryError })
+      throw retryError
+    }
+  }
 }
 
 function replaceRememberedPrototypeStudios(authorizations: Iterable<unknown>, now = Date.now()): PrototypeStudioAuthorization[] {
@@ -1483,6 +1634,106 @@ async function rememberPrototypeStudio(authorization: PrototypeStudioAuthorizati
   })
 }
 
+function queuePrototypeStudioRecoveryMutation(operation: () => Promise<void>): Promise<void> {
+  const queued = prototypeStudioRecoveryMutation.then(operation)
+  prototypeStudioRecoveryMutation = queued.then(() => undefined, () => undefined)
+  return queued
+}
+
+function recoveryBindingFromSnapshot(snapshot: Record<string, unknown>, projectId: string, referenceId: string): PrototypeStudioRecoveryBinding | undefined {
+  const evidence = Array.isArray(snapshot.evidence) ? snapshot.evidence[0] as { id?: unknown; fingerprint?: unknown; source?: { title?: unknown; url?: unknown } } | undefined : undefined
+  const referenceTitle = typeof evidence?.source?.title === 'string' ? evidence.source.title.trim().slice(0, 240) : undefined
+  const referenceUrl = typeof evidence?.source?.url === 'string' ? evidence.source.url : undefined
+  const candidate: PrototypeStudioRecoveryBinding = {
+    projectId,
+    referenceId,
+    sessionId: typeof snapshot.sessionId === 'string' ? snapshot.sessionId : '',
+    evidenceFingerprint: typeof evidence?.fingerprint === 'string' ? evidence.fingerprint : '',
+    recoveryEpoch: typeof snapshot.recoveryEpoch === 'number' ? snapshot.recoveryEpoch : -1,
+    updatedAt: Date.now(),
+    ...(referenceTitle === undefined ? {} : { referenceTitle }),
+    ...(referenceUrl === undefined ? {} : { referenceUrl }),
+  }
+  return evidence?.id === referenceId && validPrototypeStudioRecoveryBinding(candidate) ? candidate : undefined
+}
+
+async function rememberPrototypeStudioRecoveryBinding(binding: PrototypeStudioRecoveryBinding): Promise<void> {
+  await queuePrototypeStudioRecoveryMutation(async () => {
+    const storage = chrome.storage?.local
+    if (storage === undefined) return
+    const current = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
+    // Snapshots created by older Host builds may omit source metadata. Keep
+    // the previously verified non-secret title/URL in that case so the Side
+    // Panel can still identify a project after local screenshot eviction.
+    const previous = current.projects[binding.projectId]
+    const enriched: PrototypeStudioRecoveryBinding = {
+      ...binding,
+      ...(binding.referenceTitle === undefined && previous?.referenceTitle !== undefined ? { referenceTitle: previous.referenceTitle } : {}),
+      ...(binding.referenceUrl === undefined && previous?.referenceUrl !== undefined ? { referenceUrl: previous.referenceUrl } : {}),
+    }
+    const retained = retainedPrototypeStudioRecoveryBindings([...Object.values(current.projects), enriched])
+    const next = { v: 1 as const, projects: Object.fromEntries(retained.map(item => [item.projectId, item])) }
+    await storage.set({ [PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY]: next })
+    const readback = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
+    const stored = readback.projects[binding.projectId]
+    if (stored === undefined || stored.referenceId !== enriched.referenceId || stored.sessionId !== enriched.sessionId || stored.evidenceFingerprint !== enriched.evidenceFingerprint || stored.recoveryEpoch !== enriched.recoveryEpoch
+      || stored.referenceTitle !== enriched.referenceTitle || stored.referenceUrl !== enriched.referenceUrl) {
+      throw new Error('浏览器未能回读并确认项目恢复绑定，请重试。')
+    }
+  })
+}
+
+async function prototypeStudioRecoveryBinding(projectId: string, referenceId: string): Promise<PrototypeStudioRecoveryBinding | undefined> {
+  const storage = chrome.storage?.local
+  if (storage === undefined) return undefined
+  let selected: PrototypeStudioRecoveryBinding | undefined
+  await queuePrototypeStudioRecoveryMutation(async () => {
+    const current = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
+    // Sanitise persisted values while reading. Local storage intentionally has
+    // no capability, private key, or Browser Connector credential.
+    await storage.set({ [PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY]: current })
+    const candidate = current.projects[projectId]
+    selected = candidate?.referenceId === referenceId && validPrototypeStudioRecoveryBinding(candidate) ? candidate : undefined
+  })
+  return selected
+}
+
+type RecentPrototypeStudio = Pick<PrototypeStudioRecoveryBinding, 'projectId' | 'referenceId' | 'referenceTitle' | 'referenceUrl' | 'updatedAt'> & { authorizationActive: boolean }
+
+async function recentPrototypeStudios(): Promise<RecentPrototypeStudio[]> {
+  const storage = chrome.storage?.local
+  if (storage === undefined) return []
+  const stored = storedPrototypeStudioRecoveries((await storage.get(PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY))[PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY])
+  // Readback sanitises old/malformed records, but never writes capabilities,
+  // screenshots, credentials, or private keys to local storage.
+  await storage.set({ [PROTOTYPE_STUDIO_RECOVERY_STORAGE_KEY]: stored })
+  const authorizations = await Promise.all(Object.values(stored.projects).map(async binding => ({
+    binding,
+    authorizationActive: (await prototypeStudioAuthorization(binding.projectId)) !== undefined,
+  })))
+  return authorizations
+    .sort((left, right) => right.binding.updatedAt - left.binding.updatedAt || left.binding.projectId.localeCompare(right.binding.projectId))
+    .map(({ binding, authorizationActive }) => ({
+      projectId: binding.projectId,
+      referenceId: binding.referenceId,
+      ...(binding.referenceTitle === undefined ? {} : { referenceTitle: binding.referenceTitle }),
+      ...(binding.referenceUrl === undefined ? {} : { referenceUrl: binding.referenceUrl }),
+      updatedAt: binding.updatedAt,
+      authorizationActive,
+    }))
+}
+
+async function openRecentPrototypeStudio(projectId: string): Promise<void> {
+  const projects = await recentPrototypeStudios()
+  const project = projects.find(item => item.projectId === projectId)
+  if (project === undefined) throw new Error('这个最近原型已不存在或未通过安全校验。')
+  const url = new URL(chrome.runtime.getURL('prototype-studio.html'))
+  url.searchParams.set('referenceId', project.referenceId)
+  url.searchParams.set('projectId', project.projectId)
+  const window = await chrome.windows?.getLastFocused().catch(() => undefined)
+  await chrome.tabs.create({ active: true, ...(Number.isInteger(window?.id) ? { windowId: window!.id } : {}), url: url.toString() })
+}
+
 async function prototypeStudioAuthorization(projectId: string): Promise<PrototypeStudioAuthorization | undefined> {
   const remembered = prototypeStudioAuthorizations.get(projectId)
   if (remembered !== undefined && validPrototypeStudioAuthorization(remembered)) return remembered
@@ -1500,18 +1751,79 @@ async function prototypeStudioAuthorization(projectId: string): Promise<Prototyp
   return restored
 }
 
+async function sha256TextFingerprint(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function recoveredPrototypeSnapshot(value: Record<string, unknown>, projectId: string, referenceId: string, evidenceFingerprint: string): value is Record<string, unknown> & { sessionId: string } {
+  return value.projectId === projectId && validSessionIdentity(value.sessionId)
+    && Array.isArray(value.evidence) && (value.evidence[0] as { id?: unknown; fingerprint?: unknown } | undefined)?.id === referenceId
+    && (value.evidence[0] as { fingerprint?: unknown } | undefined)?.fingerprint === evidenceFingerprint
+}
+
+async function readLateRecoveredPrototypeSnapshot(base: string, authorization: PrototypeStudioAuthorization, binding: PrototypeStudioRecoveryBinding): Promise<Record<string, unknown> | undefined> {
+  const deadline = Date.now() + prototypeRecoveryLateCommitWindowMs()
+  while (true) {
+    const snapshot = await requestPrototypeHost(base, authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {}).catch(() => undefined)
+    if (snapshot !== undefined && recoveredPrototypeSnapshot(snapshot, authorization.projectId, authorization.referenceId, binding.evidenceFingerprint) && snapshot.sessionId === binding.sessionId && snapshot.recoveryEpoch === binding.recoveryEpoch + 1) return snapshot
+    if (Date.now() >= deadline) return undefined
+    await delayPrototypeRecoveryReadback(PROTOTYPE_RECOVERY_LATE_COMMIT_POLL_MS)
+  }
+}
+
+async function recoverPrototypeStudio(projectId: string, referenceId: string): Promise<Record<string, unknown>> {
+  const binding = await prototypeStudioRecoveryBinding(projectId, referenceId)
+  if (binding === undefined) throw new Error('恢复所需的项目绑定不存在或校验失败，请重新提取设计规范。')
+  const authorization: PrototypeStudioAuthorization = { projectId, referenceId, sessionId: binding.sessionId, capability: `${crypto.randomUUID()}${crypto.randomUUID()}`, openedAt: Date.now() }
+  const capabilityFingerprint = await sha256TextFingerprint(authorization.capability)
+  const base = nativeUrl ?? await startHarnessForSettings()
+  const signed = await requestPrototypeRecoverySignature({ ...binding, capabilityFingerprint })
+  const recoveryBody = { assertion: signed.assertion, signature: signed.signature, capability: authorization.capability }
+  // Persist this session-only capability before sending. If the HTTP response
+  // is lost after the Host commits, a Service Worker restart still retains the
+  // exact capability needed for the next snapshot readback.
+  await rememberPrototypeStudio(authorization)
+  let recovery: Record<string, unknown> | undefined
+  try {
+    recovery = await requestPrototypeRecovery(base, recoveryBody)
+  } catch (error) {
+    // A timed-out client can race a Host write that is still committing. Poll
+    // with the new session capability, then safely retry the exact signed
+    // request once: Host-side nonce handling makes that retry idempotent.
+    let uncertainReadback = await readLateRecoveredPrototypeSnapshot(base, authorization, binding)
+    if (uncertainReadback === undefined && error instanceof PrototypeHostTimeoutError) {
+      try { recovery = await requestPrototypeRecovery(base, recoveryBody) } catch (retryError) {
+        uncertainReadback = await readLateRecoveredPrototypeSnapshot(base, authorization, binding)
+        if (uncertainReadback === undefined) throw retryError
+      }
+    }
+    if (uncertainReadback !== undefined) recovery = { status: 'verified_write', projectId, sessionId: uncertainReadback.sessionId, referenceId, evidenceFingerprint: binding.evidenceFingerprint, capabilityFingerprint, recoveryEpoch: binding.recoveryEpoch + 1 }
+    else if (recovery === undefined) throw error
+  }
+  if (recovery === undefined || recovery.status !== 'verified_write' || recovery.projectId !== projectId || recovery.sessionId !== binding.sessionId || recovery.referenceId !== referenceId || recovery.evidenceFingerprint !== binding.evidenceFingerprint || recovery.capabilityFingerprint !== capabilityFingerprint || recovery.recoveryEpoch !== binding.recoveryEpoch + 1) throw new Error('原型恢复结果没有通过身份和指纹校验，请重试。')
+  authorization.sessionId = recovery.sessionId
+  const snapshot = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+  if (!recoveredPrototypeSnapshot(snapshot, projectId, referenceId, binding.evidenceFingerprint) || snapshot.sessionId !== authorization.sessionId || snapshot.recoveryEpoch !== binding.recoveryEpoch + 1) throw new Error('原型恢复后未能完成同项目回读，请勿继续操作并重试。')
+  await rememberPrototypeStudio(authorization)
+  const rebound = recoveryBindingFromSnapshot(snapshot, projectId, referenceId)
+  if (rebound === undefined) throw new Error('原型恢复后未能确认项目绑定，请勿继续操作并重试。')
+  await rememberPrototypeStudioRecoveryBinding(rebound)
+  return snapshot
+}
+
 async function captureDesignReference(browserTarget: BrowserTarget, sessionId: string): Promise<{ referenceId: string; projectId: string }> {
   const before = await chrome.tabs.get(browserTarget.tabId)
   const liveBefore = targetFromActionTab(before)
   if (liveBefore === undefined || !sameBrowserTarget(liveBefore, browserTarget)) {
-    throw new Error('The selected reference page changed or closed. Refresh Browser Target and try again.')
+    throw new Error('参考网页已经切换或关闭。请刷新 Browser Target 后重试。')
   }
-  if (before.status !== 'complete') throw new Error('The selected reference page is still loading. Wait for it to finish and try again.')
+  if (before.status !== 'complete') throw new Error('参考网页仍在加载，请等待页面加载完成后重试。')
   await chrome.tabs.update(browserTarget.tabId, { active: true })
   const [active] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
   const activeTarget = active === undefined ? undefined : targetFromActionTab(active)
   if (activeTarget === undefined || !sameBrowserTarget(activeTarget, browserTarget)) {
-    throw new Error('Chrome could not make the selected reference page active for visual capture.')
+    throw new Error('浏览器无法切换到要截图的参考网页，请刷新 Browser Target 后重试。')
   }
 
   const captureModule = await import('../src/design-reference-capture')
@@ -1521,37 +1833,82 @@ async function captureDesignReference(browserTarget: BrowserTarget, sessionId: s
     func: captureModule.captureDesignReferencePage,
   })
   const raw = executions[0]?.result
-  const screenshotDataUrl = await chrome.tabs.captureVisibleTab(browserTarget.windowId, { format: 'jpeg', quality: 60 })
+  const [visibleBeforeScreenshot] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
+  const visibleTargetBeforeScreenshot = visibleBeforeScreenshot === undefined ? undefined : targetFromActionTab(visibleBeforeScreenshot)
+  if (visibleTargetBeforeScreenshot === undefined || !sameBrowserTarget(visibleTargetBeforeScreenshot, browserTarget)) {
+    throw new Error('截图前参考网页被切换，本次没有保存。请保持该标签页不动后重试。')
+  }
+  let activeTabChangedDuringScreenshot = false
+  const recordScreenshotTabChange = (activeInfo: { tabId: number; windowId: number }): void => {
+    if (activeInfo.windowId === browserTarget.windowId && activeInfo.tabId !== browserTarget.tabId) activeTabChangedDuringScreenshot = true
+  }
+  chrome.tabs.onActivated.addListener(recordScreenshotTabChange)
+  let screenshotDataUrl: string
+  try {
+    screenshotDataUrl = await chrome.tabs.captureVisibleTab(browserTarget.windowId, { format: 'jpeg', quality: 60 })
+  } finally {
+    chrome.tabs.onActivated.removeListener(recordScreenshotTabChange)
+  }
+  if (activeTabChangedDuringScreenshot) {
+    throw new Error('截图期间参考网页曾被切换，本次没有保存。请保持该标签页不动后重试。')
+  }
+  const [visibleAfterScreenshot] = await chrome.tabs.query({ active: true, windowId: browserTarget.windowId })
+  const visibleTargetAfterScreenshot = visibleAfterScreenshot === undefined ? undefined : targetFromActionTab(visibleAfterScreenshot)
+  if (visibleTargetAfterScreenshot === undefined || !sameBrowserTarget(visibleTargetAfterScreenshot, browserTarget)) {
+    throw new Error('截图时参考网页被切换，本次没有保存。请保持该标签页不动后重试。')
+  }
   const after = await chrome.tabs.get(browserTarget.tabId)
   const liveAfter = targetFromActionTab(after)
   if (liveAfter === undefined || !sameBrowserTarget(liveAfter, browserTarget)) {
-    throw new Error('The reference page changed during capture. Nothing was saved; try again on the stable page.')
+    throw new Error('提取过程中参考网页发生变化，本次没有保存。请等待页面稳定后重试。')
   }
   const evidence = await captureModule.buildReferenceEvidence(raw, screenshotDataUrl)
   const storageKey = captureModule.PROTOTYPE_REFERENCE_STORAGE_KEY
   const current = storedPrototypeReferences((await chrome.storage.local.get(storageKey))[storageKey])
   const references = { ...current.references, [evidence.id]: evidence }
-  const retained = Object.entries(references)
-    .sort((left, right) => {
-      const leftTime = Date.parse(((left[1] as { source?: { capturedAt?: unknown } }).source?.capturedAt as string | undefined) ?? '') || 0
-      const rightTime = Date.parse(((right[1] as { source?: { capturedAt?: unknown } }).source?.capturedAt as string | undefined) ?? '') || 0
-      return rightTime - leftTime
-    })
-    .slice(0, MAX_STORED_PROTOTYPE_REFERENCES)
-  await chrome.storage.local.set({ [storageKey]: { v: 1, references: Object.fromEntries(retained) } })
+  const retained = retainedPrototypeReferences(references)
+  await chrome.storage.local.set({ [storageKey]: { v: 1, references: retained } })
   const readback = storedPrototypeReferences((await chrome.storage.local.get(storageKey))[storageKey]).references[evidence.id] as { fingerprint?: unknown; screenshotFingerprint?: unknown } | undefined
   if (readback?.fingerprint !== evidence.fingerprint || readback.screenshotFingerprint !== evidence.screenshotFingerprint) {
-    throw new Error('Chrome could not verify the saved design reference.')
+    throw new Error('浏览器未能回读并确认刚才保存的设计规范，请重试。')
   }
   const authorization: PrototypeStudioAuthorization = { projectId: `prototype-${crypto.randomUUID()}`, referenceId: evidence.id, sessionId, capability: `${crypto.randomUUID()}${crypto.randomUUID()}`, openedAt: Date.now() }
   const { screenshotDataUrl: _screenshot, ...hostEvidence } = evidence
-  await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId, evidence: [hostEvidence] })
+  const opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId, evidence: [hostEvidence] })
   await rememberPrototypeStudio(authorization)
+  const binding = recoveryBindingFromSnapshot(opened, authorization.projectId, authorization.referenceId)
+  if (binding === undefined) throw new Error('原型项目未能确认恢复绑定，请重试。')
+  await rememberPrototypeStudioRecoveryBinding(binding)
   const studioUrl = new URL(chrome.runtime.getURL('prototype-studio.html'))
   studioUrl.searchParams.set('referenceId', evidence.id)
   studioUrl.searchParams.set('projectId', authorization.projectId)
   await chrome.tabs.create({ windowId: browserTarget.windowId, active: true, url: studioUrl.toString() })
   return { referenceId: evidence.id, projectId: authorization.projectId }
+}
+
+async function createPrototypeVariant(source: PrototypeStudioAuthorization, windowId: number): Promise<{ referenceId: string; projectId: string }> {
+  const captureModule = await import('../src/design-reference-capture')
+  const stored = storedPrototypeReferences((await chrome.storage.local.get(captureModule.PROTOTYPE_REFERENCE_STORAGE_KEY))[captureModule.PROTOTYPE_REFERENCE_STORAGE_KEY])
+  const checked = validateReferenceEvidence(stored.references[source.referenceId])
+  if (!checked.ok || !(await verifyReferenceEvidenceFingerprint(checked.value))) throw new Error('已保存的参考网页证据不存在或校验失败，请重新提取设计规范。')
+  const authorization: PrototypeStudioAuthorization = {
+    projectId: `prototype-${crypto.randomUUID()}`,
+    referenceId: source.referenceId,
+    sessionId: source.sessionId,
+    capability: `${crypto.randomUUID()}${crypto.randomUUID()}`,
+    openedAt: Date.now(),
+  }
+  const { screenshotDataUrl: _screenshot, ...hostEvidence } = checked.value
+  const opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId: authorization.sessionId, evidence: [hostEvidence] })
+  await rememberPrototypeStudio(authorization)
+  const binding = recoveryBindingFromSnapshot(opened, authorization.projectId, authorization.referenceId)
+  if (binding === undefined) throw new Error('新设计方案未能确认恢复绑定，请重试。')
+  await rememberPrototypeStudioRecoveryBinding(binding)
+  const studioUrl = new URL(chrome.runtime.getURL('prototype-studio.html'))
+  studioUrl.searchParams.set('referenceId', authorization.referenceId)
+  studioUrl.searchParams.set('projectId', authorization.projectId)
+  await chrome.tabs.create({ windowId, active: true, url: studioUrl.toString() })
+  return { referenceId: authorization.referenceId, projectId: authorization.projectId }
 }
 
 async function readOfficeContext(request: ConnectorRequest): Promise<Record<string, unknown>> {
@@ -1681,6 +2038,16 @@ function textFromSpreadsheet(result: Record<string, unknown>): string {
   return JSON.stringify(result)
 }
 
+function textFromPresentation(result: Record<string, unknown>): string {
+  const objects = Array.isArray(result.objects) ? result.objects : []
+  const text = objects.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const value = (item as { text?: unknown }).text
+    return typeof value === 'string' && value.trim().length > 0 ? [value] : []
+  }).join('\n')
+  return text.length > 0 ? text : JSON.stringify(result)
+}
+
 const VISIBLE_PAGE_TEXT_BUDGET_MS = 4_000
 
 function asChromeError(error: unknown): string {
@@ -1733,12 +2100,14 @@ async function readWorkTabContent(request: ReadWorkTabRequest): Promise<Record<s
   const identity = await probeDocumentIdentity(live.tabId)
   const offset = request.offset ?? 0
   const limit = request.limit ?? 80
-  if (identity?.kind === 'webedit_light_document' || identity?.kind === 'webedit_spreadsheet') {
+  if (identity?.kind === 'webedit_light_document' || identity?.kind === 'webedit_spreadsheet' || identity?.kind === 'webedit_presentation') {
     const frames = webeditFramesOf(await chrome.webNavigation.getAllFrames({ tabId: live.tabId }) ?? [])
     if (frames.length === 0) throw { code: 'unsupported', message: 'That work tab has no supported WebEdit iframe.' } satisfies OfficeReadFailure
     const message = identity.kind === 'webedit_light_document'
       ? { type: 'office-document/v1', action: 'read', offset, limit }
-      : { type: 'office-spreadsheet/v1', action: 'used_range' }
+      : identity.kind === 'webedit_spreadsheet'
+        ? { type: 'office-spreadsheet/v1', action: 'used_range' }
+        : { type: 'office-presentation/v1', action: 'get_context' }
     const { reply, frame } = await sendToWebEditFrame(live.tabId, frames, message)
     if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while reading that work tab.' }
     const latest = await chrome.webNavigation.getAllFrames({ tabId: live.tabId }) ?? []
@@ -1746,7 +2115,8 @@ async function readWorkTabContent(request: ReadWorkTabRequest): Promise<Record<s
       throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while reading that work tab.' } satisfies OfficeReadFailure
     }
     const raw = reply.result as Record<string, unknown>
-    const extracted = identity.kind === 'webedit_light_document' ? textFromLightDocument(raw) : textFromSpreadsheet(raw)
+    const extracted = identity.kind === 'webedit_light_document' ? textFromLightDocument(raw)
+      : identity.kind === 'webedit_spreadsheet' ? textFromSpreadsheet(raw) : textFromPresentation(raw)
     const clipped = clipWorkTabContent(extracted)
     return { status: 'ok', tab: request.tab, page: live, pageIdentity, kind: identity.kind, ...clipped, isPrimary }
   }
@@ -1832,10 +2202,11 @@ function respondToConnector(port: chrome.runtime.Port, request: ConnectorRequest
 function officeReadFailure(error: unknown): OfficeReadFailure {
   const source = error && typeof error === 'object' ? error as Partial<OfficeReadFailure> : undefined
   const code = source?.code
-  const allowed = ['unsupported', 'preview', 'readonly', 'invalid_range', 'navigation', 'iframe_replaced', 'timeout', 'cancelled', 'fingerprint_mismatch', 'readback_mismatch', 'runtime_error']
+  const allowed = ['unsupported', 'preview', 'readonly', 'invalid_range', 'invalid_request', 'write_rejected', 'write_incomplete', 'navigation', 'iframe_replaced', 'timeout', 'cancelled', 'precondition_required', 'fingerprint_mismatch', 'selection_changed', 'context_mismatch', 'readback_mismatch', 'runtime_error']
   return {
     code: allowed.includes(code ?? '') ? code as OfficeReadFailure['code'] : 'runtime_error',
     message: typeof source?.message === 'string' ? source.message : asError(error),
+    ...(isOfficeReadFailureDetails(source?.details) ? { details: source.details } : {}),
   }
 }
 
@@ -1849,6 +2220,7 @@ function probeMessageFor(message: Record<string, unknown>): Record<string, unkno
   const type = String(message.type)
   if (type === 'office-spreadsheet/v1') return { type, action: 'probe' }
   if (type === 'office-document/v1') return { type, action: 'probe' }
+  if (type === 'office-presentation/v1') return { type, action: 'probe' }
   if (type === 'office-read-range/v1') return { type, action: 'probe' }
   return { type: 'office-read-range/v1', action: 'probe' }
 }
@@ -1871,6 +2243,7 @@ function siblingProbeType(type: string): string | null {
 function channelReadyLabel(type: string): string {
   if (type === 'office-document/v1') return 'light-document editor'
   if (type === 'office-spreadsheet/v1') return 'spreadsheet runtime'
+  if (type === 'office-presentation/v1') return 'presentation runtime'
   return 'editor runtime'
 }
 
@@ -1882,11 +2255,16 @@ function probeSucceeded(reply: { ok?: unknown; result?: unknown } | undefined): 
 
 const OFFICE_PROBE_WAIT_MS_DEFAULT = 8_000
 const OFFICE_PROBE_RETRY_MS = 250
-const OFFICE_FRAME_OPERATION_MS_DEFAULT = 8_000
+const OFFICE_FRAME_READ_OPERATION_MS_DEFAULT = 8_000
+const OFFICE_FRAME_WRITE_OPERATION_MS_DEFAULT = 22_000
 
-function officeFrameOperationBudgetMs(): number {
+function officeFrameOperationBudgetMs(message?: Record<string, unknown>): number {
   const configured = Number((globalThis as typeof globalThis & { __DSH_OFFICE_FRAME_OPERATION_MS?: unknown }).__DSH_OFFICE_FRAME_OPERATION_MS)
-  return Number.isFinite(configured) && configured >= 0 ? configured : OFFICE_FRAME_OPERATION_MS_DEFAULT
+  if (Number.isFinite(configured) && configured >= 0) return configured
+  // Content-script writes can take 20 seconds for runtime readiness, mutation,
+  // and same-frame readback. Keep the outer frame budget above that window but
+  // below the Native Connector's 30-second Office request deadline.
+  return ['inspect_write', 'write'].includes(String(message?.action)) ? OFFICE_FRAME_WRITE_OPERATION_MS_DEFAULT : OFFICE_FRAME_READ_OPERATION_MS_DEFAULT
 }
 
 /**
@@ -1919,7 +2297,7 @@ function officeFrameOperationBudgetMs(): number {
  * Returns the frame that actually answered so callers can verify that exact
  * frame afterwards.
  */
-type ProbeIdentity = { path?: unknown; workbookName?: unknown; sheetName?: unknown; hasContent?: unknown }
+type ProbeIdentity = { kind?: unknown; origin?: unknown; path?: unknown; workbookName?: unknown; sheetName?: unknown; presentationName?: unknown; documentName?: unknown; documentId?: unknown; fingerprint?: unknown; slideCount?: unknown; hasContent?: unknown }
 
 function identityPath(identity: ProbeIdentity | undefined): string {
   return typeof identity?.path === 'string' ? identity.path.toLowerCase() : ''
@@ -1933,13 +2311,21 @@ function pathLooksLikeLightDocument(path: string): boolean {
   return path.includes('/weboffice/office/o/')
 }
 
+function pathLooksLikePresentation(path: string): boolean {
+  return path.includes('/weboffice/office/p/')
+}
+
 function substantialSpreadsheet(identity: ProbeIdentity | undefined): boolean {
   return identity?.hasContent === true
     || (typeof identity?.workbookName === 'string' && identity.workbookName.length > 0)
 }
 
 function probeIdentityOf(reply: { ok?: unknown; result?: unknown } | undefined): ProbeIdentity | undefined {
-  const identity = (reply?.result as { status?: unknown; identity?: unknown } | undefined)?.identity
+  // The light-document and spreadsheet adapters expose `identity`; the
+  // presentation adapter exposes the same data as `resource`.  Treat both as
+  // the probe identity so the background stays adapter-neutral.
+  const result = reply?.result as { status?: unknown; identity?: unknown; resource?: unknown } | undefined
+  const identity = result?.identity ?? result?.resource
   return identity && typeof identity === 'object' && !Array.isArray(identity) ? identity as ProbeIdentity : undefined
 }
 
@@ -1972,7 +2358,8 @@ async function probeDocumentIdentity(tabId: number): Promise<Record<string, unkn
     if (frames.length === 0) return null
     const spreadsheetCandidates: ProbeIdentity[] = []
     const lightDocumentCandidates: ProbeIdentity[] = []
-    await Promise.all(frames.flatMap((frame) => (['office-spreadsheet/v1', 'office-document/v1'] as const).map(async (channel) => {
+    const presentationCandidates: ProbeIdentity[] = []
+    await Promise.all(frames.flatMap((frame) => (['office-spreadsheet/v1', 'office-document/v1', 'office-presentation/v1'] as const).map(async (channel) => {
       try {
         const reply = await sendMessageWithBudget(tabId, { type: channel, action: 'probe' }, frame.frameId, 250)
         if (!probeSucceeded(reply)) return
@@ -1982,16 +2369,26 @@ async function probeDocumentIdentity(tabId: number): Promise<Record<string, unkn
         // spreadsheet. A Team Knowledge light-document page also preloads a
         // blank spreadsheet iframe; never let that blank frame steal identity.
         if (channel === 'office-spreadsheet/v1') {
-          if (pathLooksLikeLightDocument(path)) return
+          if (pathLooksLikeLightDocument(path) || pathLooksLikePresentation(path)) return
           spreadsheetCandidates.push(identity)
-        } else {
-          if (pathLooksLikeSpreadsheet(path)) return
+        } else if (channel === 'office-document/v1') {
+          if (pathLooksLikeSpreadsheet(path) || pathLooksLikePresentation(path)) return
           lightDocumentCandidates.push(identity)
+        } else {
+          // A Team Knowledge PPT can expose its outer document-cloud route to
+          // the runtime while webNavigation still identifies the editor frame
+          // as /office/p/. The presentation probe itself must be ready; the
+          // frame URL merely supplies the missing route discriminator.
+          if (!pathLooksLikePresentation(path) && !pathLooksLikePresentation(frame.url)) return
+          presentationCandidates.push(identity)
         }
       } catch { /* diagnostic-only probe: an unreachable frame simply does not count */ }
     })))
     const lightDocumentReady = lightDocumentCandidates.length > 0
     const substantial = spreadsheetCandidates.filter(substantialSpreadsheet)
+    // Every presentation candidate above has already passed a ready
+    // presentation-runtime probe and an explicit presentation route check.
+    const presentations = presentationCandidates
     const spreadsheetKind = (best: ProbeIdentity) => ({
       kind: 'webedit_spreadsheet',
       workbookName: typeof best.workbookName === 'string' ? best.workbookName : null,
@@ -1999,6 +2396,16 @@ async function probeDocumentIdentity(tabId: number): Promise<Record<string, unkn
       hasContent: best.hasContent === true ? true : best.hasContent === false ? false : null,
       webeditFrames: frames.length,
     })
+    if (presentations.length > 0) {
+      const best = presentations[0]
+      return {
+        kind: 'webedit_presentation',
+        presentationName: typeof best.presentationName === 'string' ? best.presentationName : typeof best.documentName === 'string' ? best.documentName : null,
+        slideCount: Number.isInteger(best.slideCount) ? Number(best.slideCount) : null,
+        hasContent: best.hasContent === true ? true : null,
+        webeditFrames: frames.length,
+      }
+    }
     if (substantial.length > 0) {
       const best = substantial.reduce((leader, candidate) => framePreference(candidate) < framePreference(leader) ? candidate : leader)
       return spreadsheetKind(best)
@@ -2021,6 +2428,193 @@ function isProbeTimeout(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === 'probe_timeout')
 }
 
+type ReadyWebEditFrame = { frame: chrome.webNavigation.GetAllFrameResultDetails; identity: ProbeIdentity | undefined }
+
+interface PresentationFrameSelection {
+  expectedResource?: PresentationResourceIdentity
+  precondition?: Record<string, unknown>
+  binding?: PresentationFrameBinding
+}
+interface SpreadsheetFrameSelection {
+  expectedResource?: SpreadsheetResourceIdentity
+  precondition?: Record<string, unknown>
+  binding?: SpreadsheetFrameBinding
+}
+
+function presentationResourceFromProbe(value: unknown): PresentationResourceIdentity | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const resource = value as Record<string, unknown>
+  const presentationName = typeof resource.presentationName === 'string' || resource.presentationName === null ? resource.presentationName : undefined
+  const documentName = typeof resource.documentName === 'string' || resource.documentName === null ? resource.documentName : undefined
+  const documentId = typeof resource.documentId === 'string' || typeof resource.documentId === 'number' || resource.documentId === null ? resource.documentId : undefined
+  const path = typeof resource.path === 'string' ? resource.path : undefined
+  const fingerprint = typeof resource.fingerprint === 'string' && resource.fingerprint.length > 0 ? resource.fingerprint : undefined
+  const slideCount = Number.isInteger(resource.slideCount) && Number(resource.slideCount) >= 0 ? Number(resource.slideCount) : undefined
+  if (resource.kind !== 'webedit_presentation' || resource.origin !== 'https://webedit.midea.com' || fingerprint === undefined) return undefined
+  // A fingerprint alone cannot prove which of two ready presentations owns it
+  // after a runtime reset. Require at least one stable service/editor anchor.
+  if (documentId === undefined && path === undefined && presentationName === undefined && documentName === undefined) return undefined
+  return {
+    kind: 'webedit_presentation', origin: 'https://webedit.midea.com', fingerprint,
+    ...(presentationName === undefined ? {} : { presentationName }),
+    ...(documentName === undefined ? {} : { documentName }),
+    ...(documentId === undefined ? {} : { documentId }),
+    ...(path === undefined ? {} : { path }),
+    ...(slideCount === undefined ? {} : { slideCount }),
+  }
+}
+
+function presentationNameOf(resource: PresentationResourceIdentity): string | null | undefined {
+  return resource.presentationName ?? resource.documentName
+}
+
+function samePresentationAnchor(expected: PresentationResourceIdentity, actual: PresentationResourceIdentity): boolean {
+  if (expected.documentId !== undefined && expected.documentId !== null && actual.documentId !== expected.documentId) return false
+  if (expected.path !== undefined && actual.path !== expected.path) return false
+  const expectedName = presentationNameOf(expected)
+  const actualName = presentationNameOf(actual)
+  return !(expectedName !== undefined && expectedName !== null && actualName !== expectedName)
+}
+
+function presentationIdentityKey(resource: PresentationResourceIdentity): string | undefined {
+  if (resource.documentId !== undefined && resource.documentId !== null) return `id:${String(resource.documentId)}`
+  if (resource.path !== undefined) return `path:${resource.path}`
+  const name = presentationNameOf(resource)
+  return name === undefined || name === null ? undefined : `name:${name}`
+}
+
+async function completePresentationProbe(tabId: number, candidate: ReadyWebEditFrame): Promise<{ candidate: ReadyWebEditFrame; resource?: PresentationResourceIdentity }> {
+  const direct = presentationResourceFromProbe(candidate.identity)
+  if (direct !== undefined) return { candidate, resource: direct }
+  // Older/partially mounted presentation probes can report only `ready`. A
+  // private context read supplies the runtime resource without exposing a new
+  // model-facing field or sending a mutation to an unverified frame.
+  try {
+    const reply = await sendMessageWithBudget(tabId, { type: 'office-presentation/v1', action: 'get_context' }, candidate.frame.frameId, Math.min(1_000, officeFrameOperationBudgetMs()))
+    return { candidate, resource: presentationResourceFromProbe((reply?.result as { resource?: unknown } | undefined)?.resource) }
+  } catch { return { candidate } }
+}
+
+function presentationSelectionError(code: OfficeReadFailure['code'], message: string): OfficeReadFailure {
+  return { code, message }
+}
+
+async function selectPresentationFrame(tabId: number, candidates: ReadyWebEditFrame[], selection: PresentationFrameSelection): Promise<ReadyWebEditFrame> {
+  const enriched = await Promise.all(candidates.map((candidate) => completePresentationProbe(tabId, candidate)))
+  const complete = enriched.flatMap((item) => item.resource === undefined ? [] : [item as { candidate: ReadyWebEditFrame; resource: PresentationResourceIdentity }])
+  if (complete.length !== candidates.length) {
+    throw presentationSelectionError('context_mismatch', 'A ready presentation iframe did not expose a complete Resource Identity and fingerprint; routing is refused before the Office operation.')
+  }
+  if (selection.expectedResource !== undefined) {
+    const expectedFingerprint = selection.expectedResource.fingerprint
+    const preconditionFingerprint = selection.precondition?.resourceFingerprint
+    if (typeof preconditionFingerprint !== 'string' || preconditionFingerprint.length === 0) {
+      throw presentationSelectionError('precondition_required', 'Presentation write routing requires the approved resource fingerprint precondition.')
+    }
+    if (preconditionFingerprint !== expectedFingerprint) {
+      throw presentationSelectionError('fingerprint_mismatch', 'The approved presentation Resource Identity and precondition fingerprint disagree; no write was sent.')
+    }
+    const sameResource = complete.filter((item) => samePresentationAnchor(selection.expectedResource!, item.resource))
+    if (sameResource.length === 0) {
+      throw presentationSelectionError('context_mismatch', 'No ready presentation iframe matches the approved Resource Identity on this Browser Target.')
+    }
+    const exact = sameResource.filter((item) => item.resource.fingerprint === expectedFingerprint)
+    if (exact.length === 0) {
+      throw presentationSelectionError('fingerprint_mismatch', 'The matching presentation Resource Identity has a different fingerprint; no write was sent.')
+    }
+    const preconditionCount = selection.precondition?.slideCount
+    if (preconditionCount !== undefined && (!Number.isInteger(preconditionCount) || exact.some((item) => item.resource.slideCount !== Number(preconditionCount)))) {
+      throw presentationSelectionError('fingerprint_mismatch', 'The matching presentation slide count no longer satisfies the approved precondition; no write was sent.')
+    }
+    return exact.find((item) => item.candidate.frame.frameId === selection.binding?.frameId && item.candidate.frame.url === selection.binding.frameUrl)?.candidate ?? exact[0].candidate
+  }
+  if (selection.binding !== undefined) {
+    const matching = complete.filter((item) => samePresentationAnchor(selection.binding!.resource, item.resource))
+    if (matching.length === 0) {
+      throw presentationSelectionError('context_mismatch', 'The presentation previously bound to this Browser Target is no longer ready; routing is refused.')
+    }
+    return matching.find((item) => item.candidate.frame.frameId === selection.binding!.frameId && item.candidate.frame.url === selection.binding!.frameUrl)?.candidate ?? matching[0].candidate
+  }
+  const identities = new Set(complete.map((item) => presentationIdentityKey(item.resource)))
+  if (identities.size !== 1 || identities.has(undefined)) {
+    throw presentationSelectionError('context_mismatch', 'This Browser Target has multiple ready presentation resources and none is bound to the Connector Run; routing is refused.')
+  }
+  return complete[0].candidate
+}
+
+function spreadsheetResourceFromResult(value: unknown): SpreadsheetResourceIdentity | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const resource = (value as { resource?: unknown }).resource
+  return isSpreadsheetResourceIdentity(resource) ? resource : undefined
+}
+
+function sameSpreadsheetAnchor(expected: SpreadsheetResourceIdentity, actual: SpreadsheetResourceIdentity): boolean {
+  return expected.kind === actual.kind && expected.origin === actual.origin
+    && expected.workbookName === actual.workbookName && expected.sheetName === actual.sheetName
+}
+
+async function completeSpreadsheetProbe(tabId: number, candidate: ReadyWebEditFrame): Promise<{ candidate: ReadyWebEditFrame; resource?: SpreadsheetResourceIdentity }> {
+  // Spreadsheet probe identities omit the canonical resource fingerprint. A
+  // bounded context read is required before routing a multi-frame target.
+  try {
+    const reply = await sendMessageWithBudget(tabId, { type: 'office-spreadsheet/v1', action: 'context' }, candidate.frame.frameId, Math.min(1_000, officeFrameOperationBudgetMs()))
+    return { candidate, resource: spreadsheetResourceFromResult(reply?.result) }
+  } catch { return { candidate } }
+}
+
+function spreadsheetSelectionError(code: OfficeReadFailure['code'], message: string): OfficeReadFailure {
+  return { code, message }
+}
+
+async function selectSpreadsheetFrame(tabId: number, candidates: ReadyWebEditFrame[], selection: SpreadsheetFrameSelection): Promise<ReadyWebEditFrame> {
+  const enriched = await Promise.all(candidates.map((candidate) => completeSpreadsheetProbe(tabId, candidate)))
+  const complete = enriched.flatMap((item) => item.resource === undefined ? [] : [item as { candidate: ReadyWebEditFrame; resource: SpreadsheetResourceIdentity }])
+  if (complete.length !== candidates.length) {
+    throw spreadsheetSelectionError('context_mismatch', 'A ready spreadsheet iframe did not expose a complete Resource Identity and fingerprint; routing is refused before the Office operation.')
+  }
+  const chooseBound = (matches: { candidate: ReadyWebEditFrame; resource: SpreadsheetResourceIdentity }[], binding: SpreadsheetFrameBinding | undefined): ReadyWebEditFrame => {
+    const bound = matches.find((item) => item.candidate.frame.frameId === binding?.frameId && item.candidate.frame.url === binding.frameUrl)
+    if (bound !== undefined) return bound.candidate
+    if (matches.length === 1) return matches[0].candidate
+    throw spreadsheetSelectionError('context_mismatch', 'Multiple ready spreadsheet iframes match the Resource Identity but the bound iframe is unavailable; routing is refused.')
+  }
+  if (selection.expectedResource !== undefined) {
+    const expectedFingerprint = selection.expectedResource.fingerprint
+    const preconditionFingerprint = selection.precondition?.resourceFingerprint
+    if (typeof preconditionFingerprint !== 'string' || preconditionFingerprint.length === 0) {
+      throw spreadsheetSelectionError('precondition_required', 'Spreadsheet write routing requires the approved resource fingerprint precondition.')
+    }
+    if (preconditionFingerprint !== expectedFingerprint) {
+      throw spreadsheetSelectionError('fingerprint_mismatch', 'The approved spreadsheet Resource Identity and precondition fingerprint disagree; no write was sent.')
+    }
+    const sameResource = complete.filter((item) => sameSpreadsheetAnchor(selection.expectedResource!, item.resource))
+    if (sameResource.length === 0) {
+      throw spreadsheetSelectionError('context_mismatch', 'No ready spreadsheet iframe matches the approved Resource Identity on this Browser Target.')
+    }
+    const exact = sameResource.filter((item) => item.resource.fingerprint === expectedFingerprint)
+    if (exact.length === 0) {
+      throw spreadsheetSelectionError('fingerprint_mismatch', 'The matching spreadsheet Resource Identity has a different fingerprint; no write was sent.')
+    }
+    return chooseBound(exact, selection.binding)
+  }
+  if (selection.binding !== undefined) {
+    const sameResource = complete.filter((item) => sameSpreadsheetAnchor(selection.binding!.resource, item.resource))
+    if (sameResource.length === 0) {
+      throw spreadsheetSelectionError('context_mismatch', 'The spreadsheet previously bound to this Browser Target is no longer ready; routing is refused.')
+    }
+    const exact = sameResource.filter((item) => item.resource.fingerprint === selection.binding!.resource.fingerprint)
+    if (exact.length === 0) {
+      throw spreadsheetSelectionError('fingerprint_mismatch', 'The bound spreadsheet Resource Identity has changed since the prior read; no operation was sent.')
+    }
+    return chooseBound(exact, selection.binding)
+  }
+  const identities = new Set(complete.map((item) => item.resource.fingerprint))
+  if (identities.size !== 1) {
+    throw spreadsheetSelectionError('context_mismatch', 'This Browser Target has multiple ready spreadsheet resources and none is bound to the Connector Run; routing is refused.')
+  }
+  return complete[0].candidate
+}
+
 async function sendMessageWithBudget(tabId: number, message: Record<string, unknown>, frameId: number, budgetMs: number): Promise<{ ok?: unknown; result?: unknown; error?: unknown } | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
@@ -2035,7 +2629,7 @@ async function sendMessageWithBudget(tabId: number, message: Record<string, unkn
   }
 }
 
-async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.GetAllFrameResultDetails[], message: Record<string, unknown>): Promise<{ reply: { ok?: unknown; result?: unknown; error?: unknown } | undefined; frame: chrome.webNavigation.GetAllFrameResultDetails }> {
+async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.GetAllFrameResultDetails[], message: Record<string, unknown>, presentationSelection?: PresentationFrameSelection, spreadsheetSelection?: SpreadsheetFrameSelection): Promise<{ reply: { ok?: unknown; result?: unknown; error?: unknown } | undefined; frame: chrome.webNavigation.GetAllFrameResultDetails }> {
   const configuredWaitMs = Number((globalThis as typeof globalThis & { __DSH_OFFICE_PROBE_WAIT_MS?: unknown }).__DSH_OFFICE_PROBE_WAIT_MS)
   const waitBudgetMs = Number.isFinite(configuredWaitMs) && configuredWaitMs >= 0 ? configuredWaitMs : OFFICE_PROBE_WAIT_MS_DEFAULT
   const deadline = Date.now() + waitBudgetMs
@@ -2049,13 +2643,15 @@ async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.Ge
   for (;;) {
     const remainingMs = Math.max(0, deadline - Date.now())
     const perFrameMs = Math.min(1_000, remainingMs)
-    const readyByFrameId = new Map<number, { frame: chrome.webNavigation.GetAllFrameResultDetails; identity: ProbeIdentity | undefined }>()
+    const readyByFrameId = new Map<number, ReadyWebEditFrame>()
     let pending = frames.length
     let settleSweep!: () => void
     const sweepDone = new Promise<void>((resolve) => { settleSweep = resolve })
     const finishSweep = (): void => { pending = 0; settleSweep() }
     const considerReady = (): void => {
-      if ([...readyByFrameId.values()].some((candidate) => framePreference(candidate.identity) === 0) || pending <= 0) finishSweep()
+      // Presentation writes need every ready probe before resource matching;
+      // a content flag is not a presentation Resource Identity.
+      if ((String(message.type) !== 'office-presentation/v1' && [...readyByFrameId.values()].some((candidate) => framePreference(candidate.identity) === 0)) || pending <= 0) finishSweep()
     }
     const timer = setTimeout(finishSweep, perFrameMs)
     let sweepError: unknown
@@ -2095,8 +2691,13 @@ async function sendToWebEditFrame(tabId: number, frames: chrome.webNavigation.Ge
       return candidate ? [candidate] : []
     })
     if (readyCandidates.length > 0) {
-      const chosen = readyCandidates.reduce((best, candidate) => framePreference(candidate.identity) < framePreference(best.identity) ? candidate : best)
-      const operationBudgetMs = officeFrameOperationBudgetMs()
+      const needsSpreadsheetSelection = spreadsheetSelection?.expectedResource !== undefined || spreadsheetSelection?.binding !== undefined || readyCandidates.length > 1
+      const chosen = String(message.type) === 'office-presentation/v1'
+        ? await selectPresentationFrame(tabId, readyCandidates, presentationSelection ?? {})
+        : String(message.type) === 'office-spreadsheet/v1'
+          ? (needsSpreadsheetSelection ? await selectSpreadsheetFrame(tabId, readyCandidates, spreadsheetSelection ?? {}) : readyCandidates[0])
+          : readyCandidates.reduce((best, candidate) => framePreference(candidate.identity) < framePreference(best.identity) ? candidate : best)
+      const operationBudgetMs = officeFrameOperationBudgetMs(message)
       try {
         const reply = await sendMessageWithBudget(tabId, message, chosen.frame.frameId, operationBudgetMs)
         return { reply, frame: chosen.frame }
@@ -2148,51 +2749,91 @@ async function waitForTeamDocWritableFrame(tabId: number, timeoutMs = 30_000): P
   return undefined
 }
 
-async function readOfficeDocument(request: OfficeDocumentRequest): Promise<Record<string, unknown>> {
+type RoutedOfficeRequest = OfficeDocumentRequest | OfficeSpreadsheetRequest | OfficePresentationRequest
+
+function officeChannelFor(request: RoutedOfficeRequest): 'office-document/v1' | 'office-spreadsheet/v1' | 'office-presentation/v1' {
+  if (request.tool === 'spreadsheet') return 'office-spreadsheet/v1'
+  if (request.tool === 'presentation') return 'office-presentation/v1'
+  return 'office-document/v1'
+}
+
+function presentationSelectionFor(request: RoutedOfficeRequest): PresentationFrameSelection | undefined {
+  if (request.tool !== 'presentation') return undefined
+  if (request.action === 'write') {
+    return { expectedResource: request.resource, precondition: request.precondition, binding: presentationFrameBindings.get(request.runId) }
+  }
+  return { binding: presentationFrameBindings.get(request.runId) }
+}
+
+function spreadsheetSelectionFor(request: RoutedOfficeRequest): SpreadsheetFrameSelection | undefined {
+  if (request.tool !== 'spreadsheet') return undefined
+  if (request.action === 'write') {
+    return { expectedResource: request.resource, precondition: request.precondition, binding: spreadsheetFrameBindings.get(request.runId) }
+  }
+  return { binding: spreadsheetFrameBindings.get(request.runId) }
+}
+
+async function readOfficeRequest(request: RoutedOfficeRequest): Promise<Record<string, unknown>> {
   const binding = boundBrowserTargets.get(request.runId)
   if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) {
-    throw { code: 'navigation', message: 'The trusted Browser Target changed before the light document could be read.' } satisfies OfficeReadFailure
+    throw { code: 'navigation', message: 'The trusted Browser Target changed before the Office resource could be read.' } satisfies OfficeReadFailure
   }
   const tab = await chrome.tabs.get(request.browserTarget.tabId)
   if (tab.windowId !== request.browserTarget.windowId || tab.url !== request.browserTarget.url) {
-    throw { code: 'navigation', message: 'The trusted Browser Target navigated before the light document could be read.' } satisfies OfficeReadFailure
+    throw { code: 'navigation', message: 'The trusted Browser Target navigated before the Office resource could be read.' } satisfies OfficeReadFailure
   }
   const frames = (await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? [])
     .filter((candidate) => { try { return new URL(candidate.url).origin === 'https://webedit.midea.com' } catch { return false } })
   if (frames.length === 0) throw { code: 'unsupported', message: 'The bound Browser Target has no supported WebEdit iframe.' } satisfies OfficeReadFailure
   try {
-    const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, {
-      type: 'office-document/v1', action: request.action,
-      ...(request.offset === undefined ? {} : { offset: request.offset }), ...(request.limit === undefined ? {} : { limit: request.limit }),
-      ...(request.query === undefined ? {} : { query: request.query }), ...(request.operation === undefined ? {} : { operation: request.operation }),
-      ...(request.payload === undefined ? {} : { payload: request.payload }), ...(request.resource === undefined ? {} : { resource: request.resource }),
-    })
-    if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while handling the light document.' }
+    const fields = request as unknown as Record<string, unknown>
+    if (request.tool === 'presentation' && request.action === 'write' && request.resource === undefined) {
+      throw { code: 'precondition_required', message: 'Presentation write routing requires the approved Resource Identity.' } satisfies OfficeReadFailure
+    }
+    if (request.tool === 'spreadsheet' && request.action === 'write' && request.resource === undefined) {
+      throw { code: 'precondition_required', message: 'Spreadsheet write routing requires the approved Resource Identity.' } satisfies OfficeReadFailure
+    }
+    const forwarded: Record<string, unknown> = { type: officeChannelFor(request), action: request.action }
+    for (const key of ['offset', 'limit', 'query', 'range', 'sheetName', 'index', 'fieldName', 'axis', 'cellType', 'matchCase', 'matchEntireCell', 'searchBy', 'slideIndex', 'operation', 'payload', 'resource', 'precondition']) {
+      if (fields[key] !== undefined) forwarded[key] = fields[key]
+    }
+    const { reply, frame } = await sendToWebEditFrame(request.browserTarget.tabId, frames, forwarded, presentationSelectionFor(request), spreadsheetSelectionFor(request))
+    if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while handling the Office resource.' }
     const latest = await chrome.webNavigation.getAllFrames({ tabId: request.browserTarget.tabId }) ?? []
     if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) {
-      throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while handling the light document.' } satisfies OfficeReadFailure
+      throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while handling the Office resource.' } satisfies OfficeReadFailure
+    }
+    if (request.tool === 'presentation') {
+      const resource = presentationResourceFromProbe((reply.result as { resource?: unknown } | undefined)?.resource)
+      if (resource !== undefined) presentationFrameBindings.set(request.runId, { frameId: frame.frameId, frameUrl: frame.url, resource })
+    }
+    if (request.tool === 'spreadsheet') {
+      const resource = spreadsheetResourceFromResult(reply.result)
+      if (resource !== undefined) spreadsheetFrameBindings.set(request.runId, { frameId: frame.frameId, frameUrl: frame.url, resource })
     }
     return reply.result as Record<string, unknown>
   } catch (error) { throw officeReadFailure(error) }
 }
 
-function respondToOfficeDocument(port: chrome.runtime.Port, request: OfficeDocumentRequest): void {
+function respondToOfficeRequest(port: chrome.runtime.Port, request: RoutedOfficeRequest): void {
   // ADR-0006: reads may run concurrently, but writes against one Resource
-  // Identity pass through a Write Fence. A write
-  // leaves the global lifecycle chain and is serialized per resource
+  // Identity pass through a Write Fence. Office work must not enter the
+  // Native start/restart lifecycle queue: a timed-out iframe request can keep
+  // running after its caller aborts and would otherwise delay every later
+  // preview until the Native Connector times out. Stale-port checks below
+  // still fail closed across reconnects. Writes are serialized per resource
   // fingerprint, so two documents edit in parallel while the same document's
   // read-patch-readback cycles can never interleave.
   const execute = async () => {
     if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    const result = request.action === 'write' && request.resource ? await queueResourceWrite(request.resource, () => readOfficeDocument(request)) : await readOfficeDocument(request)
+    const result = request.action === 'write' && request.resource ? await queueResourceWrite(request.resource, () => readOfficeRequest(request)) : await readOfficeRequest(request)
     if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
     return result
   }
   const respond = (settled: Promise<Record<string, unknown>>) => settled
     .then((result) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
     .catch((error: unknown) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
-  if (request.action === 'write' && request.resource) void respond(execute())
-  else void respond(queueNativeLifecycle(execute))
+  void respond(execute())
 }
 
 async function queueResourceWrite<T>(resource: { origin: string; fingerprint: string }, action: () => Promise<T>): Promise<T> {
@@ -3289,6 +3930,8 @@ function settleTargetTransfer(requestId: unknown, payload: NativeTransferPayload
     browserTargets: payload.browserTargets ?? [payload.browserTarget],
     unavailableBrowserTargets: payload.unavailableBrowserTargets ?? [],
   })
+  presentationFrameBindings.delete(payload.runId)
+  spreadsheetFrameBindings.delete(payload.runId)
   pending.resolve()
 }
 
@@ -3319,7 +3962,10 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   knowledgeProxyConfig = undefined
   nativePort = undefined
   boundBrowserTargets.clear()
+  presentationFrameBindings.clear()
+  spreadsheetFrameBindings.clear()
   rejectTargetTransfers(new Error(error))
+  rejectPrototypeRecoverySignatures(new Error(error))
   void chrome.runtime.sendMessage({
     type: 'harness-disconnected',
     error,
@@ -3331,6 +3977,10 @@ function connectNativePort(): chrome.runtime.Port {
   const port = chrome.runtime.connectNative(NATIVE_HOST_NAME)
   port.onDisconnect.addListener(() => disconnectNativePort(port))
   port.onMessage.addListener((message: NativeMessage) => {
+    if (message.type === 'prototype_recovery_signed' || message.type === 'prototype_recovery_sign_failed') {
+      settlePrototypeRecoverySignature(message)
+      return
+    }
     if (isConnectorRequest(message)) {
       respondToConnector(port, message)
       return
@@ -3340,7 +3990,15 @@ function connectNativePort(): chrome.runtime.Port {
       return
     }
     if (isOfficeDocumentRequest(message)) {
-      respondToOfficeDocument(port, message)
+      respondToOfficeRequest(port, message)
+      return
+    }
+    if (isOfficeSpreadsheetRequest(message)) {
+      respondToOfficeRequest(port, message)
+      return
+    }
+    if (isOfficePresentationRequest(message)) {
+      respondToOfficeRequest(port, message)
       return
     }
     if (isTeamKnowledgeItemRequest(message)) {
@@ -3440,7 +4098,11 @@ function startHarness(binding?: BrowserTargetBinding): Promise<string> {
           nativeUrl = payload.url
           nativeRuntimeIdentity = runtimeIdentitySummary(payload.runtimeIdentity)
           if (validKnowledgeProxyConfig(payload.knowledgeProxyUrl, payload.knowledgeProxyToken)) knowledgeProxyConfig = { url: payload.knowledgeProxyUrl, token: payload.knowledgeProxyToken as string }
-          if (binding !== undefined) boundBrowserTargets.set(payload.runId, binding)
+          if (binding !== undefined) {
+            boundBrowserTargets.set(payload.runId, binding)
+            presentationFrameBindings.delete(payload.runId)
+            spreadsheetFrameBindings.delete(payload.runId)
+          }
           settled = true
           cleanup()
           resolve(payload.url)
@@ -3502,13 +4164,23 @@ function isSidePanelSender(sender: chrome.runtime.MessageSender): boolean {
   } catch { return false }
 }
 
-function isPrototypeStudioSender(sender: chrome.runtime.MessageSender, projectId?: string): boolean {
+function isPrototypeStudioSender(sender: chrome.runtime.MessageSender, projectId?: string, referenceId?: string): boolean {
   if (sender.tab?.id === undefined || typeof sender.url !== 'string') return false
   try {
     const actual = new URL(sender.url); const expected = new URL(chrome.runtime.getURL('prototype-studio.html'))
     return actual.origin === expected.origin && actual.pathname === expected.pathname
       && (projectId === undefined || actual.searchParams.get('projectId') === projectId)
+      && (referenceId === undefined || actual.searchParams.get('referenceId') === referenceId)
   } catch { return false }
+}
+
+function isPrototypeStudioSelection(value: unknown): value is { elementId: string; type: string; label: string } {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const item = value as Record<string, unknown>; const keys = Object.keys(item)
+  return keys.length === 3 && keys.every(key => ['elementId', 'type', 'label'].includes(key))
+    && typeof item.elementId === 'string' && /^[a-z][a-z0-9_-]{0,79}$/.test(item.elementId)
+    && typeof item.type === 'string' && ['text', 'button', 'input', 'card', 'group', 'metric', 'badge', 'alert', 'progress', 'chart', 'table', 'tabs', 'list', 'breadcrumb', 'empty-state', 'pagination', 'modal', 'table-row', 'list-item', 'tab', 'navigation-item', 'breadcrumb-item'].includes(item.type)
+    && typeof item.label === 'string' && item.label.length <= 2_000
 }
 
 async function persistedMarkdownReviews(): Promise<Record<string, PersistedMarkdownReview>> {
@@ -3603,16 +4275,43 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
   return record
 }
 
-async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ v: 1; type: 'markdown-review-snapshot'; reviewId: string; harnessSessionId: string; resource: { resourceId: string; displayPath: string; revision: string; fingerprint: string }; content: string; truncated: boolean; readOnly: true }> {
+class WorkspaceReviewRequestTimeoutError extends Error {
+  constructor(operation: string) {
+    super(`Markdown review ${operation} timed out after ${String(WORKSPACE_REVIEW_REQUEST_TIMEOUT_MS / 1_000)} seconds; the Host did not confirm a result.`)
+    this.name = 'WorkspaceReviewRequestTimeoutError'
+  }
+}
+
+async function workspaceReviewHostRequest(record: MarkdownReviewRecord, path: string, body: Record<string, unknown>, operation: string): Promise<Record<string, unknown>> {
   const base = nativeUrl ?? await startHarnessForSettings()
-  const endpoint = new URL(WORKSPACE_REVIEW_SNAPSHOT_PATH, base)
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${record.capability}` },
-    body: JSON.stringify({ reviewId: record.reviewId }),
+  const controller = new AbortController()
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  const request = (async () => {
+    const response = await fetch(new URL(path, base), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${record.capability}` },
+      body: JSON.stringify({ reviewId: record.reviewId, ...body }),
+      signal: controller.signal,
+    })
+    const payload = await response.json() as Record<string, unknown>
+    if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `workspace review ${operation} failed: HTTP ${String(response.status)}`)
+    return payload
+  })()
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      controller.abort()
+      reject(new WorkspaceReviewRequestTimeoutError(operation))
+    }, WORKSPACE_REVIEW_REQUEST_TIMEOUT_MS)
   })
-  const payload = await response.json() as Record<string, unknown>
-  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `workspace review snapshot failed: HTTP ${String(response.status)}`)
+  try {
+    return await Promise.race([request, timeout])
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle)
+  }
+}
+
+async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ v: 1; type: 'markdown-review-snapshot'; reviewId: string; harnessSessionId: string; resource: { resourceId: string; displayPath: string; revision: string; fingerprint: string }; content: string; truncated: boolean; readOnly: true }> {
+  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_SNAPSHOT_PATH, {}, 'snapshot')
   const resource = payload.resource as Record<string, unknown> | undefined
   if (payload.v !== 1 || payload.type !== 'markdown-review-snapshot' || payload.reviewId !== record.reviewId
     || resource === undefined || resource.resourceId !== record.resourceId || resource.displayPath !== record.displayPath
@@ -3634,20 +4333,8 @@ async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ 
   }
 }
 
-async function workspaceReviewHostRequest(record: MarkdownReviewRecord, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const base = nativeUrl ?? await startHarnessForSettings()
-  const response = await fetch(new URL(path, base), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${record.capability}` },
-    body: JSON.stringify({ reviewId: record.reviewId, ...body }),
-  })
-  const payload = await response.json() as Record<string, unknown>
-  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `workspace review request failed: HTTP ${String(response.status)}`)
-  return payload
-}
-
 async function workspaceReviewProposals(record: MarkdownReviewRecord, afterSequence: number): Promise<Record<string, unknown>> {
-  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_PROPOSALS_PATH, { afterSequence })
+  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_PROPOSALS_PATH, { afterSequence }, 'proposal read')
   if (payload.v !== 1 || payload.reviewId !== record.reviewId || !Array.isArray(payload.proposals) || payload.proposals.length > 20) throw new Error('Harness returned invalid Markdown proposals.')
   for (const raw of payload.proposals) {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Harness returned an invalid Markdown proposal.')
@@ -3667,7 +4354,7 @@ async function workspaceReviewProposals(record: MarkdownReviewRecord, afterSeque
 }
 
 async function prepareMarkdownWrite(record: MarkdownReviewRecord, request: PrepareWriteRequest): Promise<Record<string, unknown>> {
-  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_PREPARE_WRITE_PATH, { expected: request.expected, content: request.content })
+  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_PREPARE_WRITE_PATH, { expected: request.expected, content: request.content }, 'write preparation')
   const prepared = payload.status === 'prepared' && Object.keys(payload).every(key => ['status', 'approval', 'contentHash', 'expiresAt'].includes(key))
     && reviewId(payload.approval) && reviewId(payload.contentHash) && Number.isSafeInteger(payload.expiresAt) && (payload.expiresAt as number) > Date.now()
   if (!prepared && !(payload.status === 'conflict' && Object.keys(payload).every(key => ['status', 'latest'].includes(key)) && isHostMarkdownSnapshot(payload.latest, record))) {
@@ -3677,9 +4364,20 @@ async function prepareMarkdownWrite(record: MarkdownReviewRecord, request: Prepa
 }
 
 async function commitMarkdownWrite(record: MarkdownReviewRecord, request: CommitWriteRequest): Promise<Record<string, unknown>> {
-  const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_COMMIT_WRITE_PATH, {
-    approval: request.approval, idempotencyKey: request.idempotencyKey, content: request.content,
-  })
+  let payload: Record<string, unknown>
+  try {
+    payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_COMMIT_WRITE_PATH, {
+      approval: request.approval, idempotencyKey: request.idempotencyKey, content: request.content,
+    }, 'write commit')
+  } catch (error) {
+    if (error instanceof WorkspaceReviewRequestTimeoutError) {
+      return {
+        status: 'uncertain',
+        message: `${error.message} The write may or may not have reached the target; it is not a Verified Write. Re-read the document before any further write.`,
+      }
+    }
+    throw error
+  }
   const verified = payload.status === 'verified_write' && Object.keys(payload).every(key => ['status', 'resource', 'contentHash'].includes(key))
     && reviewId(payload.contentHash) && validWriteResource(payload.resource, record)
   const conflict = payload.status === 'conflict' && Object.keys(payload).every(key => ['status', 'latest'].includes(key)) && isHostMarkdownSnapshot(payload.latest, record)
@@ -3743,7 +4441,7 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Deli
       ? { startUtf16: anchor.startUtf16, endUtf16: anchor.endUtf16, prefix: anchor.prefix, suffix: anchor.suffix }
       : { editorRevision: anchor.editorRevision, from: anchor.from, to: anchor.to, blocks: anchor.blocks }),
   }
-  await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_SELECTION_PATH, { selection: { id: request.annotation.id, ...anchor } })
+  await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_SELECTION_PATH, { selection: { id: request.annotation.id, ...anchor } }, 'selection delivery')
   const response = await chrome.runtime.sendMessage({ type: 'markdown-review-feedback-forward/v1', feedback }) as { ok?: boolean; error?: string } | undefined
   if (response?.ok !== true) throw new Error(response?.error ?? 'The bound Harness Side Panel is unavailable. Reopen it and resend the annotation.')
   return request.annotation.id
@@ -3824,7 +4522,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown; projectId?: unknown; prompt?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown; projectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -4066,36 +4764,144 @@ export default defineBackground(() => {
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
+    if (request.type === 'prototype-studio-recent/v1') {
+      if (!isSidePanelSender(sender) || Object.keys(request).length !== 1) { sendResponse({ ok: false, error: '最近原型请求无效。' }); return false }
+      void recentPrototypeStudios()
+        .then(projects => sendResponse({ ok: true, projects }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-open-recent/v1') {
+      if (!isSidePanelSender(sender) || Object.keys(request).length !== 2 || typeof request.projectId !== 'string') { sendResponse({ ok: false, error: '打开最近原型的请求无效。' }); return false }
+      void openRecentPrototypeStudio(request.projectId)
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
     if (request.type === 'prototype-studio-snapshot/v1') {
-      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId)) { sendResponse({ ok: false, error: 'Invalid Prototype Studio snapshot request.' }); return false }
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId)) { sendResponse({ ok: false, error: '原型页面身份或项目参数无效，请重新打开原型工具。' }); return false }
       void prototypeStudioAuthorization(request.projectId).then(authorization => {
-        if (authorization === undefined) throw new Error('Prototype Studio authorization expired. Capture the reference page again.')
-        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
+        if (authorization === undefined) {
+          sendResponse({ ok: false, code: 'prototype_authorization_expired', recoveryAvailable: true, error: '当前浏览器授权已过期，但原型和历史版本仍安全保留。请点击“恢复已有项目”。' })
+          return undefined
+        }
+        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {}).then(async snapshot => {
+          const binding = recoveryBindingFromSnapshot(snapshot, authorization.projectId, authorization.referenceId)
+          if (binding !== undefined) await rememberPrototypeStudioRecoveryBinding(binding)
+          return snapshot
+        })
       })
+        .then(snapshot => { if (snapshot !== undefined) sendResponse({ ok: true, snapshot }) })
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-recover/v1') {
+      const keys = Object.keys(request)
+      if (keys.length !== 3 || !keys.every(key => ['type', 'projectId', 'referenceId'].includes(key)) || typeof request.projectId !== 'string' || typeof request.referenceId !== 'string' || !isPrototypeStudioSender(sender, request.projectId, request.referenceId)) { sendResponse({ ok: false, error: '恢复请求与当前原型页面不匹配，请从原型页重新操作。' }); return false }
+      void recoverPrototypeStudio(request.projectId, request.referenceId)
         .then(snapshot => sendResponse({ ok: true, snapshot }))
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
-    if (request.type === 'prototype-studio-restore/v1') {
-      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.targetRevisionId !== 'string' || typeof request.expectedCurrentRevisionId !== 'string') { sendResponse({ ok: false, error: 'Invalid Prototype Studio restore request.' }); return false }
+    if (request.type === 'prototype-studio-confirm-design/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || request.designSpec === null || typeof request.designSpec !== 'object' || Array.isArray(request.designSpec)) { sendResponse({ ok: false, error: '设计规范确认内容无效，请重新打开确认页。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(async authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        const result = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_CONFIRM_DESIGN_PATH, { designSpec: request.designSpec })
+        if (result.status !== 'verified_write' || typeof result.designSpecFingerprint !== 'string') throw new Error('设计规范没有完成安全保存和回读，请重试。')
+        return result
+      }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-revision-preview/v1') {
+      const keys = Object.keys(request)
+      if (keys.length !== 3 || !keys.every(key => ['type', 'projectId', 'targetRevisionId'].includes(key)) || typeof request.projectId !== 'string' || typeof request.targetRevisionId !== 'string' || !isPrototypeStudioSender(sender, request.projectId)) { sendResponse({ ok: false, error: '历史版本预览请求无效，请刷新原型工具后重试。' }); return false }
       void prototypeStudioAuthorization(request.projectId).then(authorization => {
-        if (authorization === undefined) throw new Error('Prototype Studio authorization expired. Capture the reference page again.')
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_REVISION_PREVIEW_PATH, { targetRevisionId: request.targetRevisionId })
+      }).then(preview => sendResponse({ ok: true, preview })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-reopen-design/v1') {
+      const keys = Object.keys(request)
+      if (keys.length !== 2 || !keys.every(key => key === 'type' || key === 'projectId') || typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId)) { sendResponse({ ok: false, error: '重新调整设计规范的请求无效，请刷新后重试。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(async authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        const result = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_REOPEN_DESIGN_PATH, {})
+        if (result.status !== 'verified_write' || result.designConfirmed !== false) throw new Error('设计规范没有安全返回调整状态，请勿继续生成并重试。')
+        return result
+      }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-create-variant/v1') {
+      const keys = Object.keys(request)
+      if (keys.length !== 2 || !keys.every(key => key === 'type' || key === 'projectId') || typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || !Number.isSafeInteger(sender.tab?.windowId)) { sendResponse({ ok: false, error: '新设计方案请求无效，请从当前原型页面重试。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        return createPrototypeVariant(authorization, sender.tab!.windowId)
+      }).then(result => sendResponse({ ok: true, ...result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-restore/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.targetRevisionId !== 'string' || typeof request.expectedCurrentRevisionId !== 'string') { sendResponse({ ok: false, error: '历史版本恢复请求无效，请先重新预览该版本。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
         return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_RESTORE_PATH, { targetRevisionId: request.targetRevisionId, expectedCurrentRevisionId: request.expectedCurrentRevisionId })
       }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
-    if (request.type === 'prototype-studio-prompt/v1') {
-      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.prompt !== 'string' || request.prompt.trim().length === 0 || request.prompt.length > 4_000) { sendResponse({ ok: false, error: 'Invalid Prototype Studio AI request.' }); return false }
-      const selection = request.selection === undefined ? undefined : request.selection
-      if (selection !== undefined && (typeof selection !== 'object' || selection === null || Array.isArray(selection))) { sendResponse({ ok: false, error: 'Invalid Prototype Studio selection.' }); return false }
+    if (request.type === 'prototype-studio-cancel-generation/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.requestId !== 'string' || (request.expectedRevisionId !== undefined && request.expectedRevisionId !== null && typeof request.expectedRevisionId !== 'string')) { sendResponse({ ok: false, error: '停止生成的请求无效，请刷新生成状态后重试。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_CANCEL_GENERATION_PATH, { requestId: request.requestId, expectedRevisionId: request.expectedRevisionId ?? null })
+      }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-confirm-brief/v1') {
+      const keys = Object.keys(request)
+      const brief = productBrief(request.brief)
+      if (keys.length !== 3 || !keys.every(key => ['type', 'projectId', 'brief'].includes(key)) || typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || brief === undefined) { sendResponse({ ok: false, error: '产品需求清单不完整，请检查使用者、核心任务、页面和流程。' }); return false }
       void prototypeStudioAuthorization(request.projectId).then(async authorization => {
-        if (authorization === undefined) throw new Error('Prototype Studio authorization expired. Capture the reference page again.')
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        const expectedFingerprint = await sha256Fingerprint(brief)
+        const result = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_CONFIRM_BRIEF_PATH, { brief })
+        if (result.status !== 'verified_write' || productBrief(result.productBrief) === undefined || result.productBriefFingerprint !== expectedFingerprint || await sha256Fingerprint(result.productBrief) !== expectedFingerprint) throw new Error('产品需求清单没有完成安全保存和同内容回读，请重试。')
+        return result
+      }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-prompt/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.requestId !== 'string' || !/^[A-Za-z0-9._:-]{8,160}$/.test(request.requestId) || typeof request.prompt !== 'string' || request.prompt.trim().length === 0 || request.prompt.length > 6_000 || (request.allowRevisionEviction !== undefined && request.allowRevisionEviction !== true)) { sendResponse({ ok: false, error: '发送给 AI 的原型请求无效或过长，请精简后重试。' }); return false }
+      const selection = request.selection === undefined ? undefined : request.selection
+      if (selection !== undefined && !isPrototypeStudioSelection(selection)) { sendResponse({ ok: false, error: '选中的原型元素已经失效，请重新选择。' }); return false }
+      const brief = request.brief === undefined ? undefined : productBrief(request.brief)
+      if (request.brief !== undefined && brief === undefined) { sendResponse({ ok: false, error: '产品需求清单格式无效，请重新确认。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(async authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
         const snapshot = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_SNAPSHOT_PATH, {})
-        const payload = { projectId: authorization.projectId, sessionId: authorization.sessionId, request: request.prompt, ...(selection === undefined ? {} : { selection }), evidence: snapshot.evidence, revisions: snapshot.revisions, currentRevisionId: snapshot.currentRevisionId, designSpec: snapshot.designSpec, document: snapshot.document }
-        if (JSON.stringify(payload).length > 260_000) throw new Error('Prototype Studio AI request is too large.')
-        const response = await chrome.runtime.sendMessage({ type: 'prototype-studio-prompt-forward/v1', payload }) as { ok?: boolean; error?: string } | undefined
-        if (response?.ok !== true) throw new Error(response?.error ?? 'The Harness Workspace did not accept the prototype request.')
-        return response
+        if (snapshot.designConfirmed !== true) throw new Error('请先查看并确认网页设计规范，再让 AI 生成原型。')
+        const confirmedDesignSpec = snapshot.confirmedDesignSpec ?? snapshot.designSpec
+        if (confirmedDesignSpec === null || typeof confirmedDesignSpec !== 'object' || Array.isArray(confirmedDesignSpec)) throw new Error('已确认的设计规范无法读取，请重新确认。')
+        const expectedRevisionId = typeof snapshot.currentRevisionId === 'string' ? snapshot.currentRevisionId : undefined
+        const confirmedBrief = productBrief(snapshot.productBrief)
+        if (expectedRevisionId === undefined && confirmedBrief === undefined) throw new Error('首次生成前请先保存并确认产品需求清单。')
+        const briefChanged = brief !== undefined && confirmedBrief !== undefined && await sha256Fingerprint(brief) !== await sha256Fingerprint(confirmedBrief)
+        if (briefChanged && expectedRevisionId === undefined) throw new Error('产品需求清单已经变化，请先重新确认后再生成。')
+        if (briefChanged && selection !== undefined) throw new Error('更新整个产品需求时不能同时修改局部元素，请先切换到“完善整个原型”。')
+        const generationBrief = brief ?? confirmedBrief
+        const began = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_BEGIN_GENERATION_PATH, { requestId: request.requestId, expectedRevisionId: expectedRevisionId ?? null, prompt: request.prompt, ...(selection === undefined ? {} : { selection }), ...(generationBrief === undefined ? {} : { brief: generationBrief }), ...(request.allowRevisionEviction === true ? { allowRevisionEviction: true } : {}) })
+        if (began.status !== 'verified_write' || began.requestId !== request.requestId) throw new Error('本次生成请求没有完成安全登记，请重试。')
+        const payload = { projectId: authorization.projectId, sessionId: authorization.sessionId, requestId: request.requestId, ...(expectedRevisionId === undefined ? {} : { expectedRevisionId }), request: request.prompt, ...(selection === undefined ? {} : { selection }), ...(generationBrief === undefined ? {} : { productBrief: generationBrief }), evidence: snapshot.evidence, revisions: snapshot.revisions, currentRevisionId: snapshot.currentRevisionId, designSpec: confirmedDesignSpec, document: snapshot.document }
+        if (JSON.stringify(payload).length > 260_000) throw new Error('参考证据和原型内容过大，暂时无法发送给 AI。')
+        try {
+          const response = await chrome.runtime.sendMessage({ type: 'prototype-studio-prompt-forward/v1', payload }) as { ok?: boolean; error?: string } | undefined
+          if (response?.ok !== true) throw new Error(response?.error ?? 'The Harness Workspace did not accept the prototype request.')
+          return response
+        } catch (error) {
+          await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_CANCEL_GENERATION_PATH, { requestId: request.requestId, expectedRevisionId: expectedRevisionId ?? null, message: '未能将本次原型生成请求交给 Harness，已取消。' }).catch(() => {})
+          throw error
+        }
       }).then(() => sendResponse({ ok: true })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }

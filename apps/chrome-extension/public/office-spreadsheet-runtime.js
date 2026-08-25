@@ -9,7 +9,11 @@
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
   const matrix = (source) => Array.isArray(source) ? source : [[source ?? null]]
   const resourceFingerprint = (workbookName, sheetName) => `webedit:${location.origin}${location.pathname}|${workbookName ?? ''}|${sheetName ?? ''}`
-  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image'])
+  const ADVANCED_OPERATIONS = new Set(['sort', 'set_auto_filter', 'clear_filters', 'set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats', 'add_comment', 'delete_comments', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image', 'clear_formats', 'apply_table_style', 'apply_filter'])
+  // Analytics writes have object, rather than cell, targets.  They deliberately
+  // do not fall through the range-write path: an object collection is the write
+  // fence and a source range (when present) is separately fingerprinted.
+  const ANALYTICS_OPERATIONS = new Set(['create_chart', 'update_chart', 'set_chart_data_source', 'resize_chart', 'delete_chart', 'create_pivot_table', 'refresh_pivot_tables', 'refresh_all_pivot_tables', 'add_pivot_field', 'remove_pivot_field', 'refresh_pivot_table', 'delete_pivot_table', 'sort_pivot_field', 'set_pivot_subtotals', 'set_pivot_value_function', 'set_pivot_show_values_as'])
   const MAX_IMAGE_ARTIFACT_BYTES = 256 * 1024
   const MAX_INLINE_IMAGE_ARTIFACT_BYTES = 8 * 1024
   const VALIDATION_TYPES = { wholeNumber: 1, decimal: 2, list: 3, date: 4, time: 5, textLength: 6, custom: 7 }
@@ -28,6 +32,7 @@
     alignment: ['general', 'General', 0, -4105], wrap: [false, 0],
   }
   const WORKBOOK_OPERATIONS = new Set(['create_defined_name', 'delete_defined_name', 'activate_worksheet', 'move_worksheet', 'set_worksheet_visibility'])
+  const SHEET_LIFECYCLE_OPERATIONS = new Set(['sheet_add', 'sheet_rename', 'sheet_delete', 'copy_worksheet'])
   const VIEW_OPERATIONS = new Set(['set_zoom', 'set_freeze_panes'])
   const PRINT_OPERATIONS = new Set(['set_print_settings'])
   const OUTLINE_OPERATIONS = new Set(['set_outline_group'])
@@ -55,7 +60,13 @@
     if (!app) return { error: fail('unsupported', 'WebEdit spreadsheet runtime is unavailable') }
     const workbook = await property(app, 'ActiveWorkbook') ?? await call(app, 'getActiveWorkbook')
     let sheet = await call(app, 'getActiveSheet') ?? await property(app, 'ActiveSheet')
-    if (requestedSheet && workbook) sheet = await call(workbook, 'getWorksheet', [requestedSheet]) ?? await call(workbook, 'getItem', [requestedSheet]) ?? sheet
+    if (requestedSheet) {
+      if (!workbook || typeof requestedSheet !== 'string' || !requestedSheet.trim()) return { error: fail('invalid_range', 'WebEdit requires a nonempty exact worksheet name') }
+      const candidate = await call(workbook, 'getWorksheet', [requestedSheet]) ?? await call(workbook, 'getItem', [requestedSheet])
+      const candidateName = await call(candidate, 'getName') ?? await property(candidate, 'Name')
+      if (!candidate || candidateName !== requestedSheet) return { error: fail('invalid_range', 'The requested worksheet was not found by exact name') }
+      sheet = candidate
+    }
     if (!sheet) return { error: fail('preview', 'WebEdit does not expose an active spreadsheet sheet') }
     const workbookName = await call(workbook, 'getName') ?? await property(workbook, 'Name') ?? null
     const sheetName = await call(sheet, 'getName') ?? await property(sheet, 'Name') ?? requestedSheet ?? null
@@ -377,6 +388,19 @@
     return !!state && typeof state === 'object' && typeof state.merged === 'boolean' && !!state.filter && typeof state.filter.operator === 'string' && typeof state.rowHeight === 'number' && Number.isFinite(state.rowHeight) && typeof state.columnWidth === 'number' && Number.isFinite(state.columnWidth)
       && !!format && typeof format === 'object' && ['bold', 'italic', 'underline', 'size', 'name', 'color', 'fill', 'numberFormat', 'alignment', 'wrap'].every((key) => Object.hasOwn(format, key) && format[key] !== null)
   }
+  async function borderSnapshot(range, sides) {
+    if (!Array.isArray(sides) || sides.length === 0 || sides.length > 8) return null
+    const borders = await property(range, 'Borders'); if (!borders) return null
+    const snapshot = {}
+    for (const side of sides) {
+      if (typeof side !== 'string' || !side || side.length > 32) return null
+      const border = await property(borders, side) ?? borders[side]
+      const color = await property(border, 'Color') ?? await property(border, 'color')
+      if (!border || color === undefined || color === null) return null
+      snapshot[side] = { color }
+    }
+    return snapshot
+  }
   async function rangeSnapshotFromRange(range, address) {
     if (!range) return null
     const values = matrix(await call(range, 'getValue2') ?? await call(range, 'getValue') ?? await property(range, 'Value2') ?? await property(range, 'Value'))
@@ -427,6 +451,79 @@
   function defaultMoveState(state) { return state?.merged === false && defaultMoveFormat(state.format) }
   function addressFor(parsed) { return `${columnName(parsed.colFrom)}${parsed.rowFrom}:${columnName(parsed.colTo)}${parsed.rowTo}` }
   function overlap(left, right) { return left.rowFrom <= right.rowTo && left.rowTo >= right.rowFrom && left.colFrom <= right.colTo && left.colTo >= right.colFrom }
+  const STRUCTURAL_OPERATIONS = new Set(['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'insert_cells', 'delete_cells'])
+  function structuralRequest(operation, payload) {
+    if (!STRUCTURAL_OPERATIONS.has(operation) || !payload || typeof payload !== 'object' || Array.isArray(payload) || !Object.keys(payload).every((key) => ['sheetName', 'range', 'count', 'shift', 'position'].includes(key))) return null
+    const count = payload.count === undefined ? 1 : payload.count
+    if (!Number.isInteger(count) || count < 1 || count > 100) return null
+    const rowMatch = typeof payload.range === 'string' && /^([1-9]\d{0,6}):([1-9]\d{0,6})$/.exec(payload.range)
+    const columnMatch = typeof payload.range === 'string' && /^([A-Z]{1,3}):([A-Z]{1,3})$/i.exec(payload.range)
+    const cell = parseAddress(payload.range)
+    const rows = operation.includes('_rows'); const columns = operation.includes('_columns'); const inserting = operation.startsWith('insert_')
+    if (rows && (!rowMatch || Number(rowMatch[1]) > Number(rowMatch[2]) || Number(rowMatch[2]) > 1048576 || payload.shift !== undefined)) return null
+    if (columns && (!columnMatch || columnNumber(columnMatch[1]) > columnNumber(columnMatch[2]) || columnNumber(columnMatch[2]) > 16384 || payload.shift !== undefined)) return null
+    if ((rows || columns) && (!inserting && payload.position !== undefined || inserting && payload.position !== undefined && payload.position !== 'before' && payload.position !== 'after')) return null
+    if (!rows && !columns && (!cell || (operation === 'insert_cells' && payload.shift !== 'down' && payload.shift !== 'right') || (operation === 'delete_cells' && payload.shift !== 'up' && payload.shift !== 'left') || payload.position !== undefined)) return null
+    const target = rows ? { rowFrom: Number(rowMatch[1]), rowTo: Number(rowMatch[2]), colFrom: 1, colTo: 1 } : columns ? { rowFrom: 1, rowTo: 1, colFrom: columnNumber(columnMatch[1]), colTo: columnNumber(columnMatch[2]) } : cell
+    const axis = rows || (!columns && payload.shift === 'down') ? 'vertical' : columns || payload.shift === 'right' ? 'horizontal' : (!columns && payload.shift === 'up') ? 'vertical' : 'horizontal'
+    const direction = operation === 'insert_cells' ? payload.shift : operation === 'delete_cells' ? payload.shift : rows ? (inserting ? 'down' : 'up') : (inserting ? 'right' : 'left')
+    const anchor = { ...target }
+    if (inserting && payload.position === 'after') {
+      if (axis === 'vertical') anchor.rowFrom = anchor.rowTo + 1
+      else anchor.colFrom = anchor.colTo + 1
+    }
+    const span = (axis === 'vertical' ? target.rowTo - target.rowFrom + 1 : target.colTo - target.colFrom + 1) * count
+    if ((axis === 'vertical' && anchor.rowFrom + span - 1 > 1048576) || (axis === 'horizontal' && anchor.colFrom + span - 1 > 16384)) return null
+    return { operation, count, target, anchor, axis, direction, inserting, rows, columns, span }
+  }
+  async function structuralFootprint(resolved, spec, fixedBounds = null) {
+    const usedRange = await call(resolved.sheet, 'getUsedRange') ?? await property(resolved.sheet, 'UsedRange') ?? await call(resolved.sheet, 'UsedRange')
+    const used = await rangeBounds(usedRange)
+    if (!used) return null
+    // The moved band plus two cells on either side is enough to prove the
+    // requested displacement, including blank inserts before existing data.
+    // Keep that evidence bounded before it crosses the extension boundary.
+    let bounds = fixedBounds
+    if (!bounds) {
+      let rowFrom; let rowTo; let colFrom; let colTo
+      if (spec.axis === 'vertical') {
+        rowFrom = Math.max(1, spec.anchor.rowFrom - 2); rowTo = spec.direction === 'up' ? used.rowTo : Math.min(1048576, spec.anchor.rowTo + spec.span + 2)
+        colFrom = spec.rows ? used.colFrom : Math.max(1, spec.target.colFrom - 2); colTo = spec.rows ? used.colTo : Math.min(16384, spec.target.colTo + 2)
+      } else {
+        rowFrom = spec.columns ? used.rowFrom : Math.max(1, spec.target.rowFrom - 2); rowTo = spec.columns ? used.rowTo : Math.min(1048576, spec.target.rowTo + 2)
+        colFrom = Math.max(1, spec.anchor.colFrom - 2); colTo = spec.direction === 'left' ? used.colTo : Math.min(16384, spec.anchor.colTo + spec.span + 2)
+      }
+      bounds = { rowFrom, rowTo, colFrom, colTo }
+    }
+    const { rowFrom, rowTo, colFrom, colTo } = bounds
+    if (![rowFrom, rowTo, colFrom, colTo].every(Number.isInteger) || rowTo < rowFrom || colTo < colFrom || (rowTo - rowFrom + 1) * (colTo - colFrom + 1) > 20_000) return null
+    const address = addressFor(bounds); const snapshot = await rangeSnapshot(resolved.sheet, address)
+    if (snapshot.error) return null
+    return { address, bounds, usedAddress: used.address, values: snapshot.snapshot.values, formulas: snapshot.snapshot.formulas }
+  }
+  function structuralExpected(footprint, spec) {
+    const values = footprint.values.map((row) => row.slice()); const formulas = footprint.formulas.map((row) => row.slice())
+    const r0 = spec.anchor.rowFrom - footprint.bounds.rowFrom; const c0 = spec.anchor.colFrom - footprint.bounds.colFrom
+    const targetRows = spec.columns ? values.length : spec.target.rowTo - spec.target.rowFrom + 1
+    const targetColumns = spec.rows ? values[0].length : spec.target.colTo - spec.target.colFrom + 1
+    const blank = spec.axis === 'vertical' ? (r, c) => { values[r][c] = null; formulas[r][c] = '' } : (r, c) => { values[r][c] = null; formulas[r][c] = '' }
+    if (spec.direction === 'down' || spec.direction === 'up') {
+      const start = Math.max(0, r0); const end = Math.min(values.length, r0 + spec.span); const columns = Array.from({ length: targetColumns }, (_, index) => spec.rows ? index : c0 + index).filter((index) => index >= 0 && index < values[0].length)
+      for (const c of columns) {
+        if (spec.direction === 'down') for (let r = values.length - 1; r >= start; r -= 1) { const source = r - spec.span; if (source >= start) { values[r][c] = footprint.values[source][c]; formulas[r][c] = footprint.formulas[source][c] } else blank(r, c) }
+        else for (let r = start; r < values.length; r += 1) { const source = r + spec.span; if (source < values.length) { values[r][c] = footprint.values[source][c]; formulas[r][c] = footprint.formulas[source][c] } else blank(r, c) }
+      }
+      if (end <= start) return null
+    } else {
+      const start = Math.max(0, c0); const end = Math.min(values[0].length, c0 + spec.span); const rows = Array.from({ length: targetRows }, (_, index) => spec.columns ? index : r0 + index).filter((index) => index >= 0 && index < values.length)
+      for (const r of rows) {
+        if (spec.direction === 'right') for (let c = values[0].length - 1; c >= start; c -= 1) { const source = c - spec.span; if (source >= start) { values[r][c] = footprint.values[r][source]; formulas[r][c] = footprint.formulas[r][source] } else blank(r, c) }
+        else for (let c = start; c < values[0].length; c += 1) { const source = c + spec.span; if (source < values[0].length) { values[r][c] = footprint.values[r][source]; formulas[r][c] = footprint.formulas[r][source] } else blank(r, c) }
+      }
+      if (end <= start) return null
+    }
+    return { values, formulas }
+  }
   function splitDelimited(value, delimiter, consecutive) {
     if (typeof value !== 'string') return [value]
     const output = []; let current = ''; let quoted = false
@@ -531,7 +628,19 @@
       const visible = await property(sheet, 'Visible') ?? await property(sheet, 'visible')
       names.push({ index, name, visible: typeof visible === 'boolean' ? visible : null, active: typeof activeName === 'string' ? name === activeName : sheet === active ? true : null })
     }
-    return { collection, count, sheets: names }
+    return { collection, count, sheets: names, names: names.map((sheet) => sheet.name) }
+  }
+  async function undoRedoSnapshot(resolved) {
+    const undo = await call(resolved.app, 'getUndoCount') ?? await property(resolved.app, 'UndoCount')
+    const redo = await call(resolved.app, 'getRedoCount') ?? await property(resolved.app, 'RedoCount')
+    const history = Number.isInteger(undo) && undo >= 0 && Number.isInteger(redo) && redo >= 0 ? { undo, redo } : null
+    const selection = await selectionSnapshot(resolved)
+    const usedRange = await call(resolved.sheet, 'getUsedRange') ?? await property(resolved.sheet, 'UsedRange')
+    const used = await summarizeLocatedRange(resolved, usedRange, 'UsedRange')
+    // Only retain bounded, fully readable observations. They make no claim
+    // about which historic edit was applied; history counters are required for
+    // a verified undo/redo result.
+    return { history, selection: selection.supported ? { address: selection.address, activeCell: selection.activeCell } : null, usedRange: used.supported && used.count <= 2000 ? { address: used.address, values: used.values ?? null, formulas: used.formulas ?? null } : null }
   }
   async function definedNamesSnapshot(workbook) {
     const collection = await property(workbook, 'Names') ?? await call(workbook, 'getNames')
@@ -580,7 +689,9 @@
     })
   }
   async function pivotCollection(sheet) { return await call(sheet, 'getPivotTables') ?? await property(sheet, 'PivotTables') }
-  async function chartCollection(sheet) { return await property(sheet, 'Shapes') ?? await property(sheet, 'Charts') }
+  // Shapes can contain pictures, text boxes, and arbitrary drawing objects.  A
+  // chart write must never use that mixed collection as its identity fence.
+  async function chartCollection(sheet) { return await call(sheet, 'getChartObjects') ?? await property(sheet, 'ChartObjects') ?? await call(sheet, 'getCharts') ?? await property(sheet, 'Charts') }
   async function objectIdentity(value) {
     const id = await call(value, 'getId') ?? await property(value, 'Id') ?? await property(value, 'id')
     const name = await call(value, 'getName') ?? await property(value, 'Name') ?? await property(value, 'name')
@@ -593,6 +704,20 @@
     const normalized = candidate.trim().replace(/^.*!/, '')
     return /^[A-Z]{1,3}\$?\d+(?::[A-Z]{1,3}\$?\d+)?$/i.test(normalized) ? normalized.replace(/\$/g, '').toUpperCase() : null
   }
+  async function commentEntries(collection) {
+    const count = await collectionCount(collection)
+    if (!collection || count === null || count > 1000) return null
+    const entries = []
+    for (let index = 1; index <= count; index += 1) {
+      const item = await collectionItem(collection, index)
+      if (!item) return null
+      const text = await call(item, 'getText') ?? await call(item, 'getContent') ?? await property(item, 'Text') ?? await property(item, 'Content') ?? await property(item, 'Comment')
+      const sourceAddress = await call(item, 'getAddress') ?? await property(item, 'Address') ?? await call(item, 'getRange') ?? await property(item, 'Range')
+      const author = await call(item, 'getAuthor') ?? await property(item, 'Author')
+      entries.push({ text: typeof text === 'string' ? text : null, address: await readableAddress(sourceAddress), author: typeof author === 'string' ? author : null })
+    }
+    return entries
+  }
   async function pivotDestination(pivot) {
     const destination = await call(pivot, 'getDestination') ?? await call(pivot, 'getDestinationRange') ?? await property(pivot, 'Destination') ?? await property(pivot, 'DestinationRange')
     return readableAddress(destination)
@@ -601,6 +726,119 @@
   function identityMatches(callbackIdentity, collectionIdentity) {
     const comparable = ['id', 'name'].filter((key) => callbackIdentity[key] !== null && collectionIdentity[key] !== null)
     return comparable.length > 0 && comparable.every((key) => callbackIdentity[key] === collectionIdentity[key])
+  }
+  const PIVOT_ORIENTATION = { row: 'etRowField', column: 'etColumnField', value: 'etDataField', filter: 'etPageField' }
+  const PIVOT_SUBTOTAL = { auto: 'SubtotalAuto', none: 'SubtotalNone', sum: 'SubtotalSum', count: 'SubtotalCount', average: 'SubtotalAverage', max: 'SubtotalMax', min: 'SubtotalMin', product: 'SubtotalProduct', countNumbers: 'SubtotalCountN', stdev: 'SubtotalStdev', stdevp: 'SubtotalStdevP', variance: 'SubtotalVar', variancep: 'SubtotalVarP' }
+  const PIVOT_FUNCTION = { sum: 'etSum', average: 'etAverage', count: 'etCount', countNumbers: 'etCountNums', max: 'etMax', min: 'etMin', product: 'etProduct', stdev: 'etStDev', stdevp: 'etStDevP', variance: 'etVar', variancep: 'etVarP', distinctCount: 'etDistinctCount' }
+  const PIVOT_CALCULATION = { none: 'xlNoAdditionalCalculation', differenceFrom: 'xlDifferenceFrom', percentDifferenceFrom: 'xlPercentDifferenceFrom', percentOf: 'xlPercentOf', percentOfColumn: 'xlPercentOfColumn', percentOfRow: 'xlPercentOfRow', percentOfTotal: 'xlPercentOfTotal', runningTotal: 'xlRunningTotal', percentRunningTotal: 'xlPercentRunningTotal', percentOfParentRow: 'xlPercentOfParentRow', percentOfParentColumn: 'xlPercentOfParentColumn', percentOfParent: 'xlPercentOfParent', rankAscending: 'xlRankAscending', rankDescending: 'xlRankDecending', index: 'xlIndex' }
+  async function analyticsCollectionSnapshot(collection, label, max = 500) {
+    const count = await collectionCount(collection)
+    if (!collection || count === null || count > max) return null
+    const items = []
+    for (let index = 1; index <= count; index += 1) {
+      const item = await collectionItem(collection, index); const identity = await objectIdentity(item)
+      if (!item || !hasReadableIdentity(identity)) return null
+      items.push({ index, ...identity })
+    }
+    return { label, count, items }
+  }
+  function analyticsTarget(payload, kind) {
+    const index = payload?.[kind === 'chart' ? 'chartIndex' : 'pivotIndex'] ?? payload?.index
+    const id = payload?.[kind === 'chart' ? 'chartId' : 'pivotTableId'] ?? payload?.id
+    const name = payload?.[kind === 'chart' ? 'chartName' : 'pivotName'] ?? payload?.name
+    const entries = [Number.isInteger(index) && index > 0, id !== undefined && id !== null && String(id).length > 0, typeof name === 'string' && name.trim().length > 0].filter(Boolean).length
+    return entries === 1 ? { index: Number.isInteger(index) && index > 0 ? index : null, id: id !== undefined && id !== null ? id : null, name: typeof name === 'string' && name.trim() ? name.trim() : null } : null
+  }
+  async function analyticsFind(collection, target) {
+    const count = await collectionCount(collection)
+    if (!target || count === null || count > 500) return null
+    if (target.index !== null) return target.index <= count ? await collectionItem(collection, target.index) : null
+    for (let index = 1; index <= count; index += 1) {
+      const item = await collectionItem(collection, index); const identity = await objectIdentity(item)
+      if ((target.id !== null && identity.id !== null && String(target.id) === String(identity.id)) || (target.name !== null && target.name === identity.name)) return item
+    }
+    return null
+  }
+  async function chartDetail(chart, required = []) {
+    const identity = await objectIdentity(chart)
+    if (!chart || !hasReadableIdentity(identity)) return null
+    const detail = { ...identity }
+    const get = async (keys) => { for (const key of keys) { const value = await call(chart, key) ?? await property(chart, key); if (value !== undefined && value !== null) return value } return undefined }
+    if (required.includes('type')) { const value = await get(['getChartType', 'Type', 'ChartType', 'type']); if (value === undefined) return null; detail.type = value }
+    if (required.includes('title')) { const value = await get(['getTitle', 'Title', 'title']); if (typeof value !== 'string') return null; detail.title = value }
+    if (required.includes('source')) { const value = await get(['getSourceData', 'getDataSource', 'SourceData', 'SourceRange', 'sourceRange']); const source = await readableAddress(value); if (!source) return null; detail.sourceRange = source }
+    for (const key of ['width', 'height', 'left', 'top']) if (required.includes(key)) { const cap = key[0].toUpperCase() + key.slice(1); const value = Number(await get([`get${cap}`, cap, key])); if (!Number.isFinite(value) || value < 0) return null; detail[key] = value }
+    return detail
+  }
+  async function pivotFieldCollection(pivot) { return await call(pivot, 'getPivotFields') ?? await call(pivot, 'PivotFields') ?? await property(pivot, 'PivotFields') ?? await call(pivot, 'getFields') ?? await property(pivot, 'Fields') }
+  async function pivotFieldDetail(field) {
+    const identity = await objectIdentity(field); const name = identity.name
+    if (!field || typeof name !== 'string' || !name) return null
+    const get = async (keys) => { for (const key of keys) { const value = await call(field, key) ?? await property(field, key); if (value !== undefined && value !== null) return value } return undefined }
+    const orientation = await get(['getOrientation', 'Orientation', 'orientation']); const position = await get(['getPosition', 'Position', 'position']); const summaryFunction = await get(['getSummaryFunction', 'SummaryFunction', 'Function', 'summaryFunction']); const calculation = await get(['getCalculation', 'Calculation', 'ShowValuesAs', 'calculation']); const baseField = await get(['getBaseField', 'BaseField', 'baseField']); const baseItem = await get(['getBaseItem', 'BaseItem', 'baseItem']); const autoSortOrder = await get(['getAutoSortOrder', 'AutoSortOrder', 'autoSortOrder']); const subtotals = await get(['getSubtotals', 'Subtotals', 'subtotals'])
+    return { ...identity, orientation: orientation ?? null, position: Number.isFinite(Number(position)) ? Number(position) : null, summaryFunction: summaryFunction ?? null, calculation: calculation ?? null, baseField: baseField ?? null, baseItem: baseItem ?? null, autoSortOrder: autoSortOrder ?? null, subtotals: Array.isArray(subtotals) ? subtotals : null }
+  }
+  async function pivotDetail(pivot, includeFields = false, refresh = false) {
+    const identity = await objectIdentity(pivot); if (!pivot || !hasReadableIdentity(identity)) return null
+    const detail = { ...identity, destination: await pivotDestination(pivot) }
+    if (!detail.destination && includeFields === false) detail.destination = null
+    if (refresh) { const updateTime = await call(pivot, 'getUpdateTime') ?? await property(pivot, 'UpdateTime') ?? await property(pivot, 'updateTime'); if (updateTime === undefined || updateTime === null) return null; detail.updateTime = updateTime }
+    if (includeFields) {
+      const fields = await pivotFieldCollection(pivot); const count = await collectionCount(fields)
+      if (!fields || count === null || count > 500) return null
+      detail.fields = []
+      for (let index = 1; index <= count; index += 1) { const field = await pivotFieldDetail(await collectionItem(fields, index)); if (!field) return null; detail.fields.push({ index, ...field }) }
+    }
+    return detail
+  }
+  async function analyticsState(resolved, includeFields = false, refresh = false) {
+    const charts = await chartCollection(resolved.sheet); const pivots = await pivotCollection(resolved.sheet)
+    const chartSnapshot = await analyticsCollectionSnapshot(charts, 'charts'); const pivotSnapshot = await analyticsCollectionSnapshot(pivots, 'pivots')
+    if (!chartSnapshot || !pivotSnapshot) return null
+    // ChartObjects/Charts must yield actual chart objects with a stable runtime
+    // id and a readable chart type.  A drawing-shape collection cannot satisfy
+    // this fence even when it happens to expose a Name.
+    chartSnapshot.items = []
+    for (let index = 1; index <= chartSnapshot.count; index += 1) { const detail = await chartDetail(await collectionItem(charts, index), ['type']); if (!detail || detail.id === null) return null; chartSnapshot.items.push({ index, ...detail }) }
+    if (includeFields || refresh) {
+      pivotSnapshot.items = []
+      for (let index = 1; index <= pivotSnapshot.count; index += 1) { const detail = await pivotDetail(await collectionItem(pivots, index), includeFields, refresh); if (!detail) return null; pivotSnapshot.items.push({ index, ...detail }) }
+    }
+    return { charts: chartSnapshot, pivots: pivotSnapshot }
+  }
+  async function pivotCommand(app, pivot) {
+    const factory = await call(app, 'getCoreFactory'); const core = await call(pivot, 'getCorePivotTable')
+    return factory && core && typeof factory.createPivotTableCmd === 'function' ? await resolve(factory.createPivotTableCmd(app, core)) : null
+  }
+  async function callbackMutation(invoke) {
+    const result = await callbackResult(invoke)
+    return result.callbackInvoked && !result.callbackError ? result : null
+  }
+  function chartRequired(operation, payload) {
+    if (operation === 'set_chart_data_source') return ['source']
+    if (operation === 'resize_chart') return ['width', 'height']
+    if (operation === 'update_chart') return [...(Object.hasOwn(payload, 'chartType') ? ['type'] : []), ...(Object.hasOwn(payload, 'title') ? ['title'] : []), ...(Object.hasOwn(payload, 'sourceRange') ? ['source'] : []), ...(Object.hasOwn(payload, 'width') ? ['width'] : []), ...(Object.hasOwn(payload, 'height') ? ['height'] : []), ...(Object.hasOwn(payload, 'left') ? ['left'] : []), ...(Object.hasOwn(payload, 'top') ? ['top'] : [])]
+    return []
+  }
+  function pivotFieldExists(detail, payload, orientation) { return Array.isArray(detail?.fields) && detail.fields.some((field) => field.name === payload.fieldName && (orientation === undefined || field.orientation === orientation || String(field.orientation) === String(orientation))) }
+  async function analyticsPrecondition(resolved, operation, payload) {
+    const chartOperation = ['create_chart', 'update_chart', 'set_chart_data_source', 'resize_chart', 'delete_chart'].includes(operation)
+    const pivotOperation = !chartOperation
+    const includeFields = ['add_pivot_field', 'remove_pivot_field', 'sort_pivot_field', 'set_pivot_subtotals', 'set_pivot_value_function', 'set_pivot_show_values_as'].includes(operation)
+    const refresh = ['refresh_pivot_table', 'refresh_pivot_tables', 'refresh_all_pivot_tables'].includes(operation)
+    const state = await analyticsState(resolved, includeFields, refresh); if (!state) return null
+    const sourceRange = operation === 'create_chart' || operation === 'create_pivot_table' ? payload.range : (operation === 'set_chart_data_source' || Object.hasOwn(payload, 'sourceRange') ? payload.sourceRange : null)
+    let source = null
+    if (sourceRange !== null) { if (typeof sourceRange !== 'string' || !parseAddress(sourceRange)) return null; const range = await rangeFor(resolved.sheet, sourceRange); const precondition = await writePrecondition(range, sourceRange); if (!precondition) return null; source = { range: sourceRange, state: precondition.state } }
+    let target = null
+    if ((chartOperation && operation !== 'create_chart') || (pivotOperation && !['create_pivot_table', 'refresh_pivot_tables', 'refresh_all_pivot_tables'].includes(operation))) {
+      target = analyticsTarget(payload, chartOperation ? 'chart' : 'pivot'); if (!target) return null
+      const collection = chartOperation ? await chartCollection(resolved.sheet) : await pivotCollection(resolved.sheet); const item = await analyticsFind(collection, target); if (!item) return null
+      const detail = chartOperation ? await chartDetail(item, chartRequired(operation, payload)) : await pivotDetail(item, includeFields, refresh)
+      if (!detail) return null
+      target = { ...target, identity: await objectIdentity(item), detail }
+    }
+    return { version: 8, analytics: { operation, state, source, target } }
   }
   async function artifactUrl(value) {
     const url = await property(value, 'url')
@@ -630,6 +868,9 @@
     const comments = await property(resolved.sheet, 'Comments')
     const charts = await chartCollection(resolved.sheet)
     const pivots = await pivotCollection(resolved.sheet)
+    const chartCount = await collectionCount(charts); const pivotCount = await collectionCount(pivots)
+    const chartReadable = !!charts && chartCount !== null && chartCount <= 500
+    const pivotReadable = !!pivots && pivotCount !== null && pivotCount <= 500
     const filterState = await property(range, 'AutoFilter') ?? await property(resolved.sheet, 'AutoFilter')
     const workbookSheets = await worksheetSnapshot(resolved.workbook); const workbookNames = await definedNamesSnapshot(resolved.workbook)
     const detected = {
@@ -638,7 +879,7 @@
       dataValidation: !!(range && validationState.supported && validation && typeof validation.Delete === 'function' && typeof validation.Add === 'function' && VALIDATION_PROPERTY_NAMES.every((name) => hasProperty(validation, name))),
       hyperlinks: !!(range && hyperlinkState.supported && hyperlinks && typeof hyperlinks.Add === 'function' && typeof hyperlinks.Delete === 'function' && typeof hyperlinks.Item === 'function'),
       comments: false,
-      charts: false, pivots: false, cellImages: false,
+      charts: chartReadable, pivots: pivotReadable, cellImages: false,
       exportPdf: false,
       exportRangeImage: false,
       exportWorksheetImage: false,
@@ -649,8 +890,8 @@
     // AccrUI exposes these tool names, but they are not evidence that the
     // current WebEdit frame can perform an auditable Harness Verified Write.
     const accruiMigrationMatrix = {
-      cellInsertDeleteHidden: { supported: false, rowColumnHidden: true, operations: ['set_rows_hidden', 'set_columns_hidden'], requiresInspectableTarget: true, reason: 'cell insertion/deletion remains unavailable; whole-row/column visibility uses per-item readback' },
-      fillReplaceTextToColumnsRemoveDuplicates: { supported: false, directionalFill: true, fillStrategy: 'atomic_set_values_formula_free', autoFill: false, batchWrite: true, replaceRangeText: typeof range?.Replace === 'function', textToColumns: !!(range && typeof range.TextToColumns === 'function' && parseAddress(address)?.colFrom === parseAddress(address)?.colTo), removeDuplicates: typeof range?.RemoveDuplicates === 'function', requiresInspectableTarget: true, reason: 'directional fill and complete-rectangle batch writes require exact formula-free state; WPS Fill/AutoFill remain unavailable because their format/formula side effects cannot be fully enumerated' },
+      cellInsertDeleteHidden: { supported: !!(range && (typeof range.Insert === 'function' || typeof range.Delete === 'function')), rowColumnHidden: true, operations: ['insert_cells', 'delete_cells', 'set_rows_hidden', 'set_columns_hidden'], requiresInspectableTarget: true, reason: 'requires bounded target/anchor snapshot and exact post-write footprint readback' },
+      fillReplaceTextToColumnsRemoveDuplicates: { supported: false, directionalFill: true, fillStrategy: 'atomic_set_values_formula_free', autoFill: !!(range && typeof range.AutoFill === 'function'), batchWrite: true, replaceRangeText: typeof range?.Replace === 'function', textToColumns: !!(range && typeof range.TextToColumns === 'function' && parseAddress(address)?.colFrom === parseAddress(address)?.colTo), removeDuplicates: typeof range?.RemoveDuplicates === 'function', requiresInspectableTarget: true, reason: 'AutoFill requires source-contained one-axis destinations with blank extension and source-preservation readback' },
       autoFit: { supported: true, operation: 'auto_fit', requiresInspectableTarget: true, reason: 'whole-row/column AutoFit requires per-item size and hidden-state readback' },
       conditionalFormatting: { supported: false, reason: unavailable },
       copyPasteMove: { supported: false, moveRange: typeof range?.Cut === 'function', requiresInspectableTarget: true, reason: 'copy and paste remain unavailable; move_range requires inspected source and destination state' },
@@ -659,8 +900,8 @@
       printSettings: { supported: !!(await printSettingsSnapshot(resolved)).supported, requiresInspectableTarget: true, reason: 'print writes require a complete PageSetup snapshot and exact whole-state readback' },
       worksheetCopyMoveHide: { supported: false, copy: !!(workbookSheets && typeof workbookSheets.collection.copy === 'function'), move: !!(workbookSheets && typeof workbookSheets.collection.move === 'function'), visibility: !!workbookSheets, requiresInspectableTarget: true, reason: 'worksheet writes require a complete bounded sheet-order snapshot and exact readback' },
       undoRedo: { supported: false, reason: unavailable },
-      chartManagement: { create: false, list: false, update: false, resize: false, delete: false, reason: unavailable },
-      pivotManagement: { create: false, list: false, refresh: false, fields: false, delete: false, reason: unavailable },
+      chartManagement: { create: !!(chartReadable && range && typeof resolved.sheet?.addChart === 'function'), list: chartReadable, update: chartReadable, resize: chartReadable, delete: chartReadable, requiresInspectableTarget: true, reason: chartReadable ? 'per-operation inspect additionally requires a chart type, stable id, callback, and exact readback' : unavailable },
+      pivotManagement: { create: !!(pivotReadable && range && typeof range.createPivotTable === 'function'), list: pivotReadable, refresh: pivotReadable && !!resolved.workbook && typeof (resolved.workbook.refreshAllPivotTables ?? resolved.workbook.RefreshAllPivotTables) === 'function', fields: pivotReadable, delete: pivotReadable, requiresInspectableTarget: true, reason: pivotReadable ? 'per-operation inspect additionally requires a stable id, callback, and operation-specific readback' : unavailable },
     }
     return { ok: true, result: { status: 'ok', resource: resolved.resource, capabilities: { ...detected, detectedButUnsupported, accruiMigrationMatrix } } }
   }
@@ -688,10 +929,84 @@
     if (request.range !== prefix.range) request = { ...request, range: prefix.range }
     if (request.action === 'context') return context()
     if (request.action === 'sheets') return listSheets()
+    // Compatibility aliases for the legacy WebEdit spreadsheet profile.  Keep
+    // these as structured reads so callers do not need to know the compact
+    // Connector action names.
+    if (request.action === 'active_sheet') {
+      const resolved = await appAndSheet(); if (resolved.error) return resolved.error
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, activeSheet: resolved.resource.sheetName } }
+    }
+    if (request.action === 'workbook_info') {
+      const resolved = await appAndSheet(); if (resolved.error) return resolved.error
+      const snapshot = await worksheetSnapshot(resolved.workbook)
+      if (!snapshot) return fail('unsupported', 'WebEdit does not expose bounded workbook information')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, workbook: { name: resolved.resource.workbookName, sheetCount: snapshot.count, sheets: snapshot.sheets, readOnly: await property(resolved.app, 'ReadOnly') === true || await property(resolved.app, 'readonly') === true } } }
+    }
+    if (request.action === 'recalculate') {
+      return fail('unsupported', 'recalculate is a write-only operation; use inspect_write followed by approved write')
+    }
     const resolved = await appAndSheet(request.sheetName); if (resolved.error) return resolved.error
     if (request.action === 'defined_names') {
       const names = await definedNamesSnapshot(resolved.workbook); if (!names) return fail('unsupported', 'WebEdit does not expose bounded defined-name enumeration')
       return { ok: true, result: { status: 'ok', resource: resolved.resource, definedNames: names.names } }
+    }
+    if (request.action === 'filter_state') {
+      const filter = await filterCondition(resolved.sheet)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, filter: filter ? { supported: true, ...filter } : { supported: false } } }
+    }
+    if (request.action === 'filter_values') {
+      if (typeof request.range !== 'string') return fail('invalid_range', 'filter_values requires a bounded range')
+      const snapshot = await rangeSnapshot(resolved.sheet, request.range, { tolerateMissingFormulas: true }); if (snapshot.error) return snapshot.error
+      const values = []; const seen = new Set(); for (const row of snapshot.snapshot.values) for (const value of row) { const key = JSON.stringify(value); if (!seen.has(key)) { seen.add(key); values.push(value) } }
+      const offset = Number.isInteger(request.offset) && request.offset >= 0 ? request.offset : 0; const limit = Number.isInteger(request.limit) ? Math.min(Math.max(request.limit, 1), 1000) : 200
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, filterValues: { values: values.slice(offset, offset + limit), offset, limit, total: values.length, hasMore: offset + limit < values.length, nextOffset: offset + limit < values.length ? offset + limit : null } } }
+    }
+    if (request.action === 'debug_runtime' || request.action === 'probe_range_api') {
+      const target = request.action === 'probe_range_api' && typeof request.range === 'string' ? await rangeFor(resolved.sheet, request.range) : resolved.sheet
+      if (!target) return fail('invalid_range', 'WebEdit could not resolve the probe target')
+      const max = Number.isInteger(request.maxMethods) ? Math.min(Math.max(request.maxMethods, 1), 1000) : 200
+      const names = Object.keys(target).filter((name) => typeof target[name] === 'function').sort()
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, probe: { target: request.action === 'probe_range_api' ? 'range' : 'worksheet', methods: names.slice(0, max), methodCount: names.length, truncated: names.length > max } } }
+    }
+    if (request.action === 'worksheet_protection' || request.action === 'write_preflight') {
+      const target = typeof request.range === 'string' ? await rangeFor(resolved.sheet, request.range) : null
+      const readBool = async (object, names) => { for (const name of names) { const value = await property(object, name); if (typeof value === 'boolean') return { value, source: name } } return { value: null, source: null } }
+      const state = { readOnly: await readBool(resolved.app, ['ReadOnly', 'readonly']), sheetProtected: await readBool(resolved.sheet, ['ProtectContents', 'ProtectionMode', 'protected']), rangeLocked: await readBool(target, ['Locked', 'locked']), saving: await readBool(resolved.app, ['IsSaving', 'isSaving']), syncing: await readBool(resolved.app, ['isSyncing', 'IsSyncing']), conflict: await readBool(resolved.app, ['hasConflict', 'IsConflict']) }
+      const verdict = Object.values(state).some((item) => item.value === true) ? 'blocked' : Object.values(state).some((item) => item.value === false) ? 'allowed' : 'unknown'
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, protection: { ...state, verdict } } }
+    }
+    if (request.action === 'list_charts' || request.action === 'list_pivots') {
+      const collection = request.action === 'list_charts' ? await chartCollection(resolved.sheet) : await pivotCollection(resolved.sheet); const count = await collectionCount(collection)
+      if (!collection || count === null || count > 10000) return fail('unsupported', `${request.action} collection count is unavailable or unsafe`)
+      const offset = Number.isInteger(request.offset) && request.offset >= 0 ? request.offset : 0; const limit = Number.isInteger(request.limit) ? Math.min(Math.max(request.limit, 1), 500) : 100; const items = []
+      for (let index = offset + 1; index <= Math.min(count, offset + limit); index += 1) items.push({ index, ...(await objectIdentity(await collectionItem(collection, index))) })
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, [request.action === 'list_charts' ? 'charts' : 'pivots']: { offset, limit, total: count, items, hasMore: offset + items.length < count, nextOffset: offset + items.length < count ? offset + items.length : null } } }
+    }
+    if (request.action === 'chart' || request.action === 'inspect_chart' || request.action === 'pivot' || request.action === 'inspect_pivot') {
+      const isChart = request.action === 'chart' || request.action === 'inspect_chart'; const collection = isChart ? await chartCollection(resolved.sheet) : await pivotCollection(resolved.sheet); const count = await collectionCount(collection)
+      if (!collection || count === null || count > 10000) return fail('unsupported', 'analytics collection count is unavailable or unsafe')
+      const item = Number.isInteger(request.index) ? await collectionItem(collection, request.index) : null; if (!item) return fail('invalid_range', 'analytics object index was not found')
+      const detail = isChart ? await chartDetail(item, ['type']) : await pivotDetail(item, true, false); if (!detail) return fail('unsupported', 'analytics object detail is unreadable')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, [isChart ? 'chart' : 'pivot']: { ...detail, index: request.index, dataReady: true } } }
+    }
+    if (request.action === 'list_pivot_fields' || request.action === 'pivot_field_items') {
+      const pivots = await pivotCollection(resolved.sheet); const pivot = await analyticsFind(pivots, analyticsTarget(request, 'pivot') ?? (Number.isInteger(request.index) ? { index: request.index, id: null, name: null } : null))
+      if (!pivot) return fail('invalid_range', 'pivot field reads require an exact pivot identity')
+      const fields = await pivotFieldCollection(pivot); const count = await collectionCount(fields)
+      if (!fields || count === null || count > 500) return fail('unsupported', 'pivot field collection count is unavailable or unsafe')
+      const offset = Number.isInteger(request.offset) && request.offset >= 0 ? request.offset : 0; const limit = Number.isInteger(request.limit) ? Math.min(Math.max(request.limit, 1), 500) : 100; const items = []
+      for (let index = offset + 1; index <= Math.min(count, offset + limit); index += 1) { const detail = await pivotFieldDetail(await collectionItem(fields, index)); if (!detail) return fail('unsupported', 'pivot field identity is unreadable'); items.push({ index, ...detail }) }
+      if (request.action === 'pivot_field_items') {
+        const fieldName = typeof request.fieldName === 'string' ? request.fieldName : null; let field = null; let raw = null
+        if (fieldName) for (let index = 1; index <= count; index += 1) { const candidate = await collectionItem(fields, index); const detail = await pivotFieldDetail(candidate); if (!detail) return fail('unsupported', 'pivot field identity is unreadable'); if (detail.name === fieldName) { field = { index, ...detail }; raw = candidate; break } }
+        if (!field || !raw) return fail('invalid_range', 'pivot_field_items requires an exact fieldName')
+        const itemCollection = await call(raw, 'getItems') ?? await property(raw, 'Items'); const itemCount = await collectionCount(itemCollection)
+        if (!itemCollection || itemCount === null || itemCount > 500) return fail('unsupported', 'pivot field-item collection is unavailable or unsafe')
+        const fieldOffset = Number.isInteger(request.itemOffset) && request.itemOffset >= 0 ? request.itemOffset : 0; const fieldLimit = Number.isInteger(request.itemLimit) ? Math.min(Math.max(request.itemLimit, 1), 500) : 100; const fieldItems = []
+        for (let index = fieldOffset + 1; index <= Math.min(itemCount, fieldOffset + fieldLimit); index += 1) { const item = await collectionItem(itemCollection, index); const name = await call(item, 'getName') ?? await property(item, 'Name') ?? await property(item, 'name'); if (typeof name !== 'string') return fail('unsupported', 'pivot field item is unreadable'); fieldItems.push({ index, name }) }
+        return { ok: true, result: { status: 'ok', resource: resolved.resource, pivotFieldItems: { pivot: await objectIdentity(pivot), fieldName, offset: fieldOffset, limit: fieldLimit, total: itemCount, items: fieldItems, hasMore: fieldOffset + fieldItems.length < itemCount, nextOffset: fieldOffset + fieldItems.length < itemCount ? fieldOffset + fieldItems.length : null } } }
+      }
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, pivotFields: { pivot: await objectIdentity(pivot), offset, limit, total: count, items, hasMore: offset + items.length < count, nextOffset: offset + items.length < count ? offset + items.length : null } } }
     }
     if (request.action === 'capabilities') return capabilities(resolved, request.range)
     if (request.action === 'view') {
@@ -741,7 +1056,11 @@
       const matches = []
       read.snapshot[field].forEach((row, rowIndex) => row.forEach((cell, columnIndex) => {
         const candidate = cell == null ? '' : String(cell); const comparable = request.matchCase ? candidate : candidate.toLowerCase()
-        if (request.matchEntireCell ? comparable === query : comparable.includes(query)) matches.push({ row: rowIndex + 1, column: columnIndex + 1, value: candidate })
+        if (request.matchEntireCell ? comparable === query : comparable.includes(query)) {
+          const bounds = parseAddress(request.range)
+          const row = bounds.rowFrom + rowIndex; const column = bounds.colFrom + columnIndex
+          matches.push({ row, column, address: `${columnName(column)}${row}`, value: candidate })
+        }
       }))
       const offset = Number.isInteger(request.offset) && request.offset >= 0 ? request.offset : 0; const limit = Number.isInteger(request.limit) ? Math.min(Math.max(request.limit, 1), 200) : 100
       return { ok: true, result: { status: 'ok', resource: resolved.resource, search: { range: request.range, query: request.query, total: matches.length, matches: matches.slice(offset, offset + limit), offset, limit, hasMore: offset + limit < matches.length } } }
@@ -755,6 +1074,55 @@
   }
   async function inspectWrite(request) {
     const payload = request.payload ?? {}; const operation = request.operation
+    if (ANALYTICS_OPERATIONS.has(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const precondition = await analyticsPrecondition(resolved, operation, payload)
+      if (!precondition) return fail('unsupported', 'WebEdit cannot create the complete bounded analytics identity, source, and operation-state precondition required for this write')
+      if (JSON.stringify(precondition).length > 96_000) return fail('unsupported', 'WebEdit analytics precondition exceeds its safe bound')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
+    }
+    if (['export_pdf', 'export_worksheet_image'].includes(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets) return fail('unsupported', 'export requires a bounded workbook snapshot')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 3, sheets: sheets.sheets } } }
+    }
+    if (operation === 'undo' || operation === 'redo') {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets) return fail('unsupported', `${operation} requires a bounded workbook snapshot`)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 10, sheets: sheets.sheets, undoRedo: await undoRedoSnapshot(resolved) } } }
+    }
+    if (operation === 'recalculate') {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const sheets = await worksheetSnapshot(resolved.workbook); const method = resolved.workbook && (typeof resolved.workbook.Recalculate === 'function' ? 'Recalculate' : typeof resolved.workbook.recalculate === 'function' ? 'recalculate' : null)
+      const before = await property(resolved.workbook, 'recalculateTime') ?? await property(resolved.workbook, 'RecalculateTime')
+      if (!sheets || !method) return fail('unsupported', 'WebEdit does not expose Workbook.Recalculate with a bounded workbook precondition')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 11, sheets: sheets.sheets, recalculateTime: before ?? null } } }
+    }
+    if (['copy_range', 'paste_special'].includes(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const sourceAddress = payload.sourceRange; const destinationAddress = payload.destinationRange
+      const source = typeof sourceAddress === 'string' && await rangeFor(resolved.sheet, sourceAddress); const destination = typeof destinationAddress === 'string' && await rangeFor(resolved.sheet, destinationAddress)
+      const sourceState = source && await writePrecondition(source, sourceAddress); const destinationState = destination && await writePrecondition(destination, destinationAddress)
+      if (!sourceState || !destinationState) return fail('unsupported', `${operation} requires readable source and destination ranges`)
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 2, targets: [{ range: sourceAddress, state: sourceState.state }, { range: destinationAddress, state: destinationState.state }] } } }
+    }
+    if (SHEET_LIFECYCLE_OPERATIONS.has(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const before = await worksheetSnapshot(resolved.workbook)
+      if (!before) return fail('unsupported', 'WebEdit cannot create a bounded worksheet precondition')
+      if (operation === 'sheet_add' && typeof before.collection.Add !== 'function' && typeof before.collection.add !== 'function') return fail('unsupported', 'WebEdit does not expose worksheet creation')
+      if (operation === 'copy_worksheet' && typeof before.collection.copy !== 'function') return fail('unsupported', 'WebEdit does not expose worksheet copy')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 3, sheets: before.sheets } } }
+    }
+    if (operation === 'auto_fill') {
+      const sourceAddress = typeof payload.range === 'string' ? payload.range : ''
+      const destinationAddress = typeof payload.destination === 'string' ? payload.destination : ''
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const source = await rangeFor(resolved.sheet, sourceAddress); const destination = await rangeFor(resolved.sheet, destinationAddress)
+      const sourceState = source && await writePrecondition(source, sourceAddress); const destinationState = destination && await writePrecondition(destination, destinationAddress)
+      if (!sourceState || !destinationState || !parseAddress(sourceAddress) || !parseAddress(destinationAddress)) return fail('unsupported', 'auto_fill requires readable source and destination ranges')
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition: { version: 2, targets: [{ range: sourceAddress, state: sourceState.state }, { range: destinationAddress, state: destinationState.state }] } } }
+    }
     if (PRINT_OPERATIONS.has(operation)) {
       const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
       const requested = requestedPrintOperation(payload); const before = await printSettingsSnapshot(resolved)
@@ -803,6 +1171,17 @@
       if (!precondition || precondition.state.formulas.some((row) => row.some((formula) => !blankCell(formula)))) return fail('unsupported', 'batch_write requires a complete formula-free target snapshot for atomic exact readback')
       return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
     }
+    if (STRUCTURAL_OPERATIONS.has(operation)) {
+      const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
+      const spec = structuralRequest(operation, payload); if (!spec) return fail('invalid_range', 'structural write requires a bounded matching range, count, position, and shift')
+      const targetAddress = spec.rows ? `${spec.target.rowFrom}:${spec.target.rowTo}` : spec.columns ? `${columnName(spec.target.colFrom)}:${columnName(spec.target.colTo)}` : payload.range
+      const targetRange = await rangeFor(resolved.sheet, targetAddress); const member = spec.rows ? await property(targetRange, 'EntireRow') : spec.columns ? await property(targetRange, 'EntireColumn') : targetRange
+      const method = spec.inserting ? (typeof member?.Insert === 'function' ? 'Insert' : typeof member?.insert === 'function' ? 'insert' : null) : (typeof member?.Delete === 'function' ? 'Delete' : typeof member?.delete === 'function' ? 'delete' : null)
+      const footprint = await structuralFootprint(resolved, spec)
+      if (!member || !method || !footprint || !structuralExpected(footprint, spec)) return fail('unsupported', 'WebEdit cannot create the bounded anchor footprint required for this structural write')
+      const precondition = { version: 9, structure: { operation, spec: { count: spec.count, axis: spec.axis, direction: spec.direction, rows: spec.rows, columns: spec.columns, span: spec.span, target: spec.target, anchor: spec.anchor }, footprint } }
+      return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
+    }
     const address = payload.range
     if (typeof address !== 'string' || !address || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
     const resolved = await appAndSheet(payload.sheetName); if (resolved.error) return resolved.error
@@ -814,12 +1193,16 @@
     if (operation === 'add_conditional_format' && !requestedConditionalFormat(payload)) return fail('invalid_range', 'add_conditional_format requires a complete bounded condition and readable style')
     if (operation === 'clear_conditional_formats' && !Object.keys(payload).every((key) => ['range', 'sheetName'].includes(key))) return fail('invalid_range', 'clear_conditional_formats accepts only a bounded range')
     if (!['replace_range_text', 'text_to_columns', 'remove_duplicates', 'move_range'].includes(operation)) {
+      const requestedBorderSides = operation === 'format' && payload.border && typeof payload.border === 'object' && !Array.isArray(payload.border) ? Object.keys(payload.border) : operation === 'apply_table_style' && payload.withBorder !== false ? ['EdgeTop', 'EdgeBottom', 'EdgeLeft', 'EdgeRight'] : []
+      const borders = requestedBorderSides.length ? await borderSnapshot(range, requestedBorderSides) : null
+      if (requestedBorderSides.length && !borders) return fail('unsupported', 'WebEdit cannot read every requested border before mutation')
       const requiresValidation = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks'].includes(operation); const requiresHyperlinks = ['add_hyperlink', 'delete_hyperlinks'].includes(operation)
       const requiresConditionalFormats = ['add_conditional_format', 'clear_conditional_formats'].includes(operation)
       const precondition = await writePrecondition(range, address, requiresValidation, requiresHyperlinks, operation === 'add_hyperlink' && payload.screenTip !== undefined, requiresConditionalFormats)
       if (!precondition) return fail('unsupported', 'WebEdit cannot create a bounded writable-range precondition')
       if (['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats'].includes(operation) && !completeDataValidationState(precondition.state)) return fail('unsupported', 'WebEdit cannot fully read all non-target range state before this feature write')
       if (operation === 'add_hyperlink' && payload.screenTip !== undefined && precondition.state.hyperlinks.length === 0) return fail('unsupported', 'WebEdit cannot prove ScreenTip readback before the first hyperlink mutation')
+      if (borders) precondition.borders = borders
       return { ok: true, result: { status: 'ok', resource: resolved.resource, precondition } }
     }
     const parsed = parseAddress(address); const snapshot = await rangeSnapshot(resolved.sheet, address)
@@ -861,10 +1244,31 @@
   }
   async function preconditionMatches(resolved, request) {
     const approved = request.precondition
+    if (approved?.version === 9 && approved.structure) {
+      const spec = structuralRequest(request.operation, request.payload ?? {})
+      const saved = approved.structure.spec
+      if (!spec || approved.structure.operation !== request.operation || !saved || !same({ count: spec.count, axis: spec.axis, direction: spec.direction, rows: spec.rows, columns: spec.columns, span: spec.span, target: spec.target, anchor: spec.anchor }, saved)) return fail('fingerprint_mismatch', 'The structural operation differs from its inspected footprint')
+      const current = await structuralFootprint(resolved, spec)
+      return current && same(current, approved.structure.footprint) ? null : fail('fingerprint_mismatch', 'The bounded structural anchor footprint or used-range identity changed since inspection')
+    }
+    if (approved?.version === 8 && approved.analytics) {
+      if (!ANALYTICS_OPERATIONS.has(request.operation) || approved.analytics.operation !== request.operation) return fail('fingerprint_mismatch', 'The analytics operation differs from its inspected precondition')
+      const current = await analyticsPrecondition(resolved, request.operation, request.payload ?? {})
+      if (!current || !same(current.analytics, approved.analytics)) return fail('fingerprint_mismatch', 'The chart, pivot collection, target identity, field state, or source range changed since inspection; reread and inspect before writing')
+      return null
+    }
     if (approved?.version === 4 && approved.view) { const current = await viewSnapshot(resolved); return current.supported && same(current.view, approved.view) ? null : fail('fingerprint_mismatch', 'The worksheet view changed since inspection; reread and inspect before writing') }
     if (approved?.version === 5 && approved.printSettings) { const current = await printSettingsSnapshot(resolved); return current.supported && same(current.settings, approved.printSettings) ? null : fail('fingerprint_mismatch', 'The print settings changed since inspection; reread and inspect before writing') }
     if (approved?.version === 6 && approved.outline) { const target = parseOutlineRange(approved.outline.range, approved.outline.axis); const current = target && await outlineSnapshot(resolved, { ...target, axis: approved.outline.axis }); return current?.supported && same(current.outline, approved.outline) ? null : fail('fingerprint_mismatch', 'The outline levels changed since inspection; reread and inspect before writing') }
     if (approved?.version === 7 && approved.dimensions) { const target = parseOutlineRange(approved.dimensions.range, approved.dimensions.axis); const current = target && await dimensionSnapshot(resolved, { ...target, axis: approved.dimensions.axis }); return current?.supported && same(current.dimensions, approved.dimensions) ? null : fail('fingerprint_mismatch', 'The row or column dimensions changed since inspection; reread and inspect before writing') }
+    if (approved?.version === 10 && Array.isArray(approved.sheets) && approved.undoRedo) {
+      const sheets = await worksheetSnapshot(resolved.workbook); const state = await undoRedoSnapshot(resolved)
+      return sheets && same(sheets.sheets, approved.sheets) && same(state, approved.undoRedo) ? null : fail('fingerprint_mismatch', 'The workbook, selection, used-range, or undo/redo history changed since inspection')
+    }
+    if (approved?.version === 11 && Array.isArray(approved.sheets)) {
+      const sheets = await worksheetSnapshot(resolved.workbook); const current = await property(resolved.workbook, 'recalculateTime') ?? await property(resolved.workbook, 'RecalculateTime') ?? null
+      return sheets && same(sheets.sheets, approved.sheets) && same(current, approved.recalculateTime) ? null : fail('fingerprint_mismatch', 'The workbook or recalculation state changed since inspection')
+    }
     if (approved?.version === 3 && Array.isArray(approved.sheets)) {
       const sheets = await worksheetSnapshot(resolved.workbook); if (!sheets || !same(sheets.sheets, approved.sheets)) return fail('fingerprint_mismatch', 'The workbook sheet order or visibility changed since inspection')
       if (approved.definedNames !== undefined) { const names = await definedNamesSnapshot(resolved.workbook); if (!names || !same(names.names, approved.definedNames)) return fail('fingerprint_mismatch', 'The workbook defined names changed since inspection') }
@@ -885,6 +1289,7 @@
     const featureWrite = ['set_data_validation', 'clear_data_validation', 'add_hyperlink', 'delete_hyperlinks', 'add_conditional_format', 'clear_conditional_formats'].includes(request.operation); const hyperlinkWrite = ['add_hyperlink', 'delete_hyperlinks'].includes(request.operation); const conditionalFormatWrite = ['add_conditional_format', 'clear_conditional_formats'].includes(request.operation)
     const current = await writePrecondition(range, address, featureWrite && !conditionalFormatWrite, hyperlinkWrite, request.operation === 'add_hyperlink' && request.payload?.screenTip !== undefined, conditionalFormatWrite)
     if (!current || !same(current.state, approved.state)) return fail('fingerprint_mismatch', 'The spreadsheet range changed since inspection; reread and inspect before writing')
+    if (approved.borders) { const borders = await borderSnapshot(range, Object.keys(approved.borders)); if (!borders || !same(borders, approved.borders)) return fail('fingerprint_mismatch', 'The requested border state changed since inspection; reread and inspect before writing') }
     if (featureWrite && !completeDataValidationState(current.state)) return fail('unsupported', 'WebEdit cannot fully reread all non-target range state before this feature write')
     return null
   }
@@ -911,12 +1316,66 @@
   }
   async function advancedWrite(resolved, request, range, address) {
     const payload = request.payload ?? {}; const operation = request.operation
-    if (['add_comment', 'delete_comments', 'create_chart', 'create_pivot_table', 'insert_cell_image', 'export_pdf', 'export_range_image', 'export_worksheet_image'].includes(operation)) return fail('unsupported', 'WebEdit operation lacks a mutation-safe preflight and deliverable-artifact contract and is unavailable')
+    if (operation === 'clear_formats') {
+      // Full range state (values/formulas/format) is re-read below; callers
+      // without readable state fail rather than mutating.
+      if (typeof range.ClearFormats !== 'function' && typeof range.clearFormats !== 'function') return fail('unsupported', 'WebEdit does not expose Range.ClearFormats')
+      const before = await writePrecondition(range, address); if (!before) return fail('unsupported', 'WebEdit cannot snapshot formats before ClearFormats')
+      try { await resolve(typeof range.ClearFormats === 'function' ? range.ClearFormats() : range.clearFormats()) } catch { return fail('runtime_error', 'WebEdit ClearFormats failed') }
+      const after = await writePrecondition(range, address); if (!after || !same(before.state.values, after.state.values) || !same(before.state.formulas, after.state.formulas)) return fail('readback_mismatch', 'ClearFormats changed values or formulas')
+      return { requested: { range: address }, observed: { state: after.state, verified: true } }
+    }
+    if (operation === 'apply_filter') {
+      if (!['values', 'custom', 'top', 'dynamic', 'color'].includes(payload.mode)) return fail('invalid_range', 'apply_filter mode is unsupported')
+      if (typeof range.setAutoFilter !== 'function' && typeof range.SetAutoFilter !== 'function' && typeof range.AutoFilter !== 'function') return fail('unsupported', 'WebEdit does not expose structured filter APIs')
+      const before = await filterCondition(range); let result
+      try { result = typeof range.setAutoFilter === 'function' ? await resolve(range.setAutoFilter(true, payload)) : typeof range.SetAutoFilter === 'function' ? await resolve(range.SetAutoFilter(true, payload)) : await resolve(range.AutoFilter(payload)) } catch { return fail('runtime_error', 'WebEdit structured filter failed') }
+      const after = await filterCondition(range)
+      if (!after || after.operator === 'none' || same(before, after)) return fail('readback_mismatch', 'Structured filter did not expose a changed filter criterion')
+      return { requested: { range: address, mode: payload.mode, criteria: payload.criteria ?? payload.values ?? null }, observed: { before, after, runtimeResult: result ?? null, verified: true } }
+    }
+    if (operation === 'apply_table_style') {
+      if (!Object.keys(payload).every((key) => ['range', 'sheetName', 'headerRange', 'headerFill', 'headerBold', 'withBorder', 'borderColor'].includes(key))) return fail('invalid_range', 'apply_table_style received fields without a complete readable contract')
+      if (payload.headerRange !== undefined && payload.headerRange !== address) return fail('unsupported', 'A separate header range requires a two-range inspected snapshot')
+      const before = await writePrecondition(range, address); const font = await property(range, 'Font'); const interior = await property(range, 'Interior'); const borders = await property(range, 'Borders')
+      if (!before || !font || !interior || (payload.withBorder !== false && !borders)) return fail('unsupported', 'WebEdit cannot fully inspect the table-style target')
+      const fill = typeof payload.headerFill === 'string' ? payload.headerFill : '#D9EAF7'; if (!await set(font, 'Bold', payload.headerBold !== false) || !await set(interior, 'Color', fill)) return fail('runtime_error', 'WebEdit table style mutation failed')
+      if (payload.withBorder !== false) for (const side of ['EdgeTop', 'EdgeBottom', 'EdgeLeft', 'EdgeRight']) if (!await set(borders[side] ?? borders, 'Color', payload.borderColor ?? '#4472C4')) return fail('unsupported', 'WebEdit cannot apply every table border')
+      const after = await writePrecondition(range, address)
+      const afterBorders = payload.withBorder !== false ? await borderSnapshot(range, ['EdgeTop', 'EdgeBottom', 'EdgeLeft', 'EdgeRight']) : null; const borderColor = payload.borderColor ?? '#4472C4'
+      if (!after || after.state.format.bold !== (payload.headerBold !== false) || after.state.format.fill !== fill || !same({ ...after.state, format: before.state.format }, before.state) || (payload.withBorder !== false && (!afterBorders || !Object.values(afterBorders).every((item) => same(item.color, borderColor))))) return fail('readback_mismatch', 'Table style readback changed non-style state or missed requested values')
+      return { requested: { range: address, headerRange: address, headerFill: fill, ...(payload.withBorder !== false ? { borderColor } : {}) }, observed: { state: after.state, ...(afterBorders ? { borders: afterBorders } : {}), verified: true } }
+    }
+    if (operation === 'add_comment' || operation === 'delete_comments') {
+      // Midea WebEdit has shipped both Range.Comments and Sheet.Comments.  The
+      // former is the only collection whose Count is target-scoped, but the
+      // latter is often the only collection which exposes item text/address.
+      const rangeComments = await property(range, 'Comments'); const sheetComments = await property(resolved.sheet, 'Comments')
+      const beforeRangeCount = rangeComments ? Number(await property(rangeComments, 'Count')) : null; const beforeSheetCount = sheetComments ? Number(await property(sheetComments, 'Count')) : null
+      const comments = rangeComments ?? sheetComments; const beforeCount = Number(await property(comments, 'Count'))
+      if (!comments || !Number.isInteger(beforeCount) || (operation === 'add_comment' ? typeof range.AddComment !== 'function' : typeof range.ClearComments !== 'function')) return fail('unsupported', 'WebEdit does not expose readable range comment APIs')
+      if (operation === 'add_comment') { if (typeof payload.text !== 'string' || payload.text.length > 20000) return fail('invalid_range', 'comment text is invalid'); await resolve(range.AddComment(payload.text)) } else await resolve(range.ClearComments())
+      const afterRangeComments = await property(range, 'Comments'); const afterSheetComments = await property(resolved.sheet, 'Comments'); const afterRangeCount = afterRangeComments ? Number(await property(afterRangeComments, 'Count')) : null; const afterSheetCount = afterSheetComments ? Number(await property(afterSheetComments, 'Count')) : null; const afterComments = afterRangeComments ?? afterSheetComments; const afterCount = Number(await property(afterComments, 'Count'))
+      if (!Number.isInteger(afterCount) || (operation === 'add_comment' ? afterCount !== beforeCount + 1 : afterCount !== 0)) return fail('readback_mismatch', 'comment count readback differs from request')
+      const readable = (await Promise.all([...new Set([afterRangeComments, afterSheetComments].filter(Boolean))].map(commentEntries))).filter(Array.isArray).flat()
+      const target = readable.find((item) => item.address === address && item.text === payload.text)
+      if (operation === 'add_comment' && target) return { requested: { range: address, text: payload.text }, observed: { range: address, beforeCount, afterCount, comment: target, contentVerified: true, verified: true } }
+      // A zero count proves only that the target-scoped collection is empty;
+      // it cannot prove the precise deleted comment when item metadata is not
+      // enumerable.  Preserve that distinction for the caller.
+      const targetRangeEmpty = Number.isInteger(beforeRangeCount) && Number.isInteger(afterRangeCount) && afterRangeCount === 0
+      const sheetDeltaMatchesTarget = Number.isInteger(beforeRangeCount) && Number.isInteger(beforeSheetCount) && Number.isInteger(afterSheetCount) && afterSheetCount === beforeSheetCount - beforeRangeCount
+      const deletedVerified = operation === 'delete_comments' && targetRangeEmpty && (rangeComments === sheetComments || sheetDeltaMatchesTarget)
+      if (deletedVerified) return { requested: { range: address, delete: true }, observed: { range: address, beforeRangeCount, afterRangeCount, beforeSheetCount, afterSheetCount, targetRangeEmpty: true, contentVerified: true, verified: true } }
+      return { verificationStatus: 'write_incomplete', requested: { range: address, ...(operation === 'add_comment' ? { text: payload.text } : { delete: true }) }, observed: { range: address, beforeCount, afterCount, targetRangeEmpty, contentVerified: false, verificationStatus: 'write_incomplete' } }
+    }
+    if (['create_chart', 'create_pivot_table'].includes(operation)) return fail('unsupported', 'WebEdit analytics creation requires a published capability contract')
     if (!ADVANCED_OPERATIONS.has(operation)) return null
     if (operation === 'sort') {
       const sorts = Array.isArray(payload.sorts) ? payload.sorts.filter((item) => item && typeof item === 'object').slice(0, 3) : []
       if (sorts.length === 0 || sorts.length > 3) return fail('invalid_range', 'sort requires one to three bounded sort descriptors')
       const before = await rangeSnapshot(resolved.sheet, address); if (before.error) return before.error
+      if (before.snapshot.formulas.some((row) => row.some((formula) => !blankCell(formula)))) return fail('unsupported', 'Sort is withheld for formulas because WebEdit does not expose a complete formula-row correspondence readback')
       const alreadySorted = sortedValues(before.snapshot.values, sorts, payload.hasHeader !== false)
       if (typeof range.sort === 'function') await resolve(range.sort(sorts.length === 1 ? sorts[0].key : { sorts, header: payload.hasHeader !== false }, sorts.length === 1 ? (sorts[0].order === 'desc' ? 'etDescending' : 'etAscending') : undefined))
       else if (typeof range.Sort === 'function' && sorts.length === 1) await resolve(range.Sort(sorts[0].key, sorts[0].order === 'desc' ? 'etDescending' : 'etAscending'))
@@ -997,10 +1456,13 @@
     }
     if (operation === 'add_comment' || operation === 'delete_comments') return fail('unsupported', 'WebEdit cell-comment APIs do not expose range-scoped content readback, so Harness will not mutate comments')
     if (operation === 'insert_cell_image') {
-      if (typeof payload.url !== 'string' || !/^https:\/\//i.test(payload.url) || payload.url.length > 2048 || typeof range.insertCellPictureUrl !== 'function') return fail('unsupported', 'WebEdit does not expose a bounded cell-image API')
-      await resolve(range.insertCellPictureUrl(payload.url)); const after = await property(range, 'Formula') ?? await call(range, 'getFormula')
-      if (!/^=DISPIMG\(/i.test(String(valueOf(after, 0, 0) ?? after))) return fail('readback_mismatch', 'WebEdit did not expose an inserted cell-image formula')
-      return { requested: { range: address, url: payload.url }, observed: { range: address, formula: valueOf(after, 0, 0) ?? after, verified: true } }
+      const parsed = parseAddress(address); const before = await rangeSnapshot(resolved.sheet, address)
+      if (!parsed || parsed.rowFrom !== parsed.rowTo || parsed.colFrom !== parsed.colTo || before.error || typeof payload.url !== 'string' || !/^https:\/\//i.test(payload.url) || payload.url.length > 2048 || typeof range.insertCellPictureUrl !== 'function') return fail('unsupported', 'WebEdit cell-image insertion requires a bounded single cell and callback API')
+      const callback = await callbackResult((done) => range.insertCellPictureUrl(payload.url, done))
+      if (!callback.callbackInvoked || callback.callbackError) return fail('readback_mismatch', 'WebEdit did not callback-confirm cell-image insertion')
+      const after = await rangeSnapshot(resolved.sheet, address); const formula = after.error ? null : after.snapshot.formulas[0][0]
+      if (typeof formula !== 'string' || !/^=DISPIMG\(/i.test(formula) || formula === before.snapshot.formulas[0][0]) return fail('readback_mismatch', 'WebEdit did not expose a changed stable DISPIMG formula')
+      return { requested: { range: address, url: payload.url }, observed: { range: address, formula, callbackInvoked: true, verified: true } }
     }
     if (operation === 'create_chart') {
       const charts = await chartCollection(resolved.sheet); const before = await collectionCount(charts)
@@ -1008,7 +1470,7 @@
       const chartType = typeof payload.chartType === 'string' || typeof payload.chartType === 'number' ? payload.chartType : 'columnClustered'
       const chartStyle = Number.isInteger(payload.chartStyle) ? payload.chartStyle : 0
       const callback = await callbackResult((done) => resolved.sheet.addChart(chartStyle, chartType, range, done, {}))
-      if (!callback.callbackInvoked || callback.callbackError) return fail('readback_mismatch', callback.callbackError ?? 'WebEdit did not confirm chart creation by callback')
+      if (!callback.callbackInvoked || callback.callbackError) return fail('unsupported', callback.callbackError ?? 'WebEdit did not confirm chart creation by callback')
       const after = await collectionCount(await chartCollection(resolved.sheet)); if (after === null || after <= before) return fail('readback_mismatch', 'WebEdit did not expose a newly-created chart')
       const created = await collectionItem(await chartCollection(resolved.sheet), after); const collectionIdentity = await objectIdentity(created)
       const callbackChart = callback.callbackInvoked ? callback.args?.[0] : null
@@ -1023,7 +1485,7 @@
       const pivots = await pivotCollection(resolved.sheet); const before = await collectionCount(pivots)
       if (!pivots || before === null || typeof range.createPivotTable !== 'function') return fail('unsupported', 'WebEdit does not expose readable Range.createPivotTable APIs')
       const callback = await callbackResult((done) => range.createPivotTable({ destRangeText: payload.destination, isNewSheet: false, autoFitColumnWidth: payload.autoFitColumnWidth !== false, styleId: Number.isInteger(payload.styleId) ? payload.styleId : -1, layout: payload.layout }, done))
-      if (!callback.callbackInvoked || callback.callbackError) return fail('readback_mismatch', callback.callbackError ?? 'WebEdit did not confirm pivot-table creation by callback')
+      if (!callback.callbackInvoked || callback.callbackError) return fail('unsupported', callback.callbackError ?? 'WebEdit did not confirm pivot-table creation by callback')
       const after = await collectionCount(await pivotCollection(resolved.sheet)); if (after === null || after <= before) return fail('readback_mismatch', 'WebEdit did not expose a newly-created pivot table')
       const pivot = await collectionItem(await pivotCollection(resolved.sheet), after); const runtime = callback.args?.[0] ?? null
       const collectionIdentity = await objectIdentity(pivot); const callbackIdentity = await objectIdentity(runtime)
@@ -1062,13 +1524,204 @@
       const bytes = new Uint8Array(await blob.arrayBuffer()); let binary = ''; for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
       return { requested: { range: address }, observed: { range: address, artifact: { kind: 'worksheet_image', mimeType, byteLength, delivery: 'inline', dataUrl: `data:${mimeType};base64,${btoa(binary)}` }, verified: true } }
     }
-    return fail('unsupported', `WebEdit ${operation} is intentionally unavailable until an operation-specific readback contract is confirmed`)
+    return fail('unsupported', `WebEdit does not expose an operation-specific API and readback contract for ${operation}`)
+  }
+  async function setAnalyticsProperty(target, key, value) {
+    const setter = `set${key[0].toUpperCase()}${key.slice(1)}`
+    if (typeof target?.[setter] === 'function') { await resolve(target[setter](value)); return true }
+    return set(target, key[0].toUpperCase() + key.slice(1), value)
+  }
+  async function chartLayer(chart) { return await call(chart, 'getChartLayer') ?? await property(chart, 'ChartLayer') }
+  async function writeAnalytics(resolved, request) {
+    const payload = request.payload ?? {}; const operation = request.operation; const preflight = request.precondition?.analytics
+    const charts = await chartCollection(resolved.sheet); const pivots = await pivotCollection(resolved.sheet)
+    if (!preflight || !charts || !pivots) return fail('fingerprint_mismatch', 'The analytics write is missing its inspected object precondition')
+    if (operation === 'create_chart') {
+      const source = await rangeFor(resolved.sheet, payload.range); const before = await collectionCount(charts)
+      if (!source || before === null || typeof resolved.sheet.addChart !== 'function') return fail('unsupported', 'WebEdit does not expose callback-driven chart creation with collection readback')
+      const chartType = payload.chartType ?? 'columnClustered'; const chartStyle = Number.isInteger(payload.chartStyle) ? payload.chartStyle : 0
+      const callback = await callbackMutation((done) => resolved.sheet.addChart(chartStyle, chartType, source, done, { dataLabelsPointUpperLimit: payload.dataLabelsPointUpperLimit }))
+      if (!callback) return fail('runtime_error', 'WebEdit did not confirm chart creation by callback')
+      const afterCollection = await chartCollection(resolved.sheet); const after = await collectionCount(afterCollection)
+      if (after === null || after !== before + 1) return fail('readback_mismatch', 'Chart collection count did not increase by one')
+      const created = await collectionItem(afterCollection, after); const callbackIdentity = await objectIdentity(callback.args?.[0]); const observed = await chartDetail(created, ['type'])
+      if (!observed || observed.id === null || callbackIdentity.id === null || !identityMatches(callbackIdentity, observed) || !same(observed.type, chartType)) return fail('readback_mismatch', 'Created chart callback identity or type does not match collection readback')
+      return { requested: { range: payload.range, chartType, chartStyle }, observed: { beforeCount: before, afterCount: after, chart: observed, callbackInvoked: true, verified: true } }
+    }
+    if (operation === 'create_pivot_table') {
+      if (payload.isNewSheet !== false || typeof payload.destination !== 'string' || !parseAddress(payload.destination)) return fail('invalid_range', 'create_pivot_table requires isNewSheet:false and an explicit same-sheet destination')
+      const source = await rangeFor(resolved.sheet, payload.range); const before = await collectionCount(pivots)
+      if (!source || before === null || typeof source.createPivotTable !== 'function') return fail('unsupported', 'WebEdit does not expose callback-driven pivot creation with collection readback')
+      const callback = await callbackMutation((done) => source.createPivotTable({ destRangeText: payload.destination, isNewSheet: false, autoFitColumnWidth: payload.autoFitColumnWidth !== false, styleId: Number.isInteger(payload.styleId) ? payload.styleId : -1, layout: payload.layout }, done))
+      if (!callback) return fail('runtime_error', 'WebEdit did not confirm pivot-table creation by callback')
+      const afterCollection = await pivotCollection(resolved.sheet); const after = await collectionCount(afterCollection)
+      if (after === null || after !== before + 1) return fail('readback_mismatch', 'Pivot collection count did not increase by one')
+      const created = await collectionItem(afterCollection, after); const observed = await pivotDetail(created, false, false); const callbackId = await property(callback.args?.[0], 'pivotTableId') ?? await property(callback.args?.[0], 'Id')
+      if (!observed || observed.id === null || callbackId === undefined || String(observed.id) !== String(callbackId) || observed.destination !== await readableAddress(payload.destination)) return fail('readback_mismatch', 'Created pivot callback identity or destination does not match collection readback')
+      return { requested: { range: payload.range, destination: payload.destination, isNewSheet: false }, observed: { beforeCount: before, afterCount: after, pivot: observed, callbackInvoked: true, verified: true } }
+    }
+    const chartOperation = ['update_chart', 'set_chart_data_source', 'resize_chart', 'delete_chart'].includes(operation)
+    if (chartOperation) {
+      const target = analyticsTarget(payload, 'chart'); const chart = await analyticsFind(charts, target); const before = preflight.target?.detail
+      if (!target || !chart || !before || !identityMatches(await objectIdentity(chart), before)) return fail('fingerprint_mismatch', 'The inspected chart identity is no longer present')
+      if (operation === 'delete_chart') {
+        const count = await collectionCount(charts); const callback = typeof resolved.sheet.deleteShape === 'function' ? await callbackMutation((done) => resolved.sheet.deleteShape(chart, done)) : typeof chart.Delete === 'function' ? await callbackMutation((done) => chart.Delete(done)) : null
+        if (!callback) return fail('unsupported', 'WebEdit does not expose callback-driven chart deletion')
+        const afterCollection = await chartCollection(resolved.sheet); const after = await collectionCount(afterCollection); const remaining = await analyticsFind(afterCollection, { index: null, id: before.id, name: before.name })
+        if (count === null || after === null || after !== count - 1 || remaining) return fail('readback_mismatch', 'Chart deletion was not proven by collection count and stable identity readback')
+        return { requested: { chart: before }, observed: { beforeCount: count, afterCount: after, deleted: true, callbackInvoked: true, verified: true } }
+      }
+      const required = chartRequired(operation, payload); if (operation === 'set_chart_data_source') required.push('source')
+      if (operation === 'resize_chart' && (!Number.isFinite(Number(payload.width)) || !Number.isFinite(Number(payload.height)) || Number(payload.width) <= 0 || Number(payload.height) <= 0)) return fail('invalid_range', 'resize_chart requires positive width and height')
+      const layer = await chartLayer(chart); let didWrite = false
+      const withCallback = async (method, args) => { if (!layer || typeof layer[method] !== 'function') return false; const result = await callbackMutation((done) => layer[method](...args, done)); if (!result) return false; didWrite = true; return true }
+      if (operation === 'set_chart_data_source' || Object.hasOwn(payload, 'sourceRange')) { const source = await rangeFor(resolved.sheet, payload.sourceRange); const descriptor = source && (await call(source, 'getRANGE') ?? source); if (!source || !await withCallback('setDataSource', [descriptor])) return fail('unsupported', 'WebEdit cannot set and callback-confirm this chart data source') }
+      if (operation === 'update_chart') {
+        if (Object.hasOwn(payload, 'chartType') && !await withCallback('setChartType', [payload.chartType])) return fail('unsupported', 'WebEdit cannot callback-confirm this chart type update')
+        if (Object.hasOwn(payload, 'title') && (typeof payload.title !== 'string' || payload.title.length > 512 || !await withCallback('setChartTitle', [payload.title]))) return fail('unsupported', 'WebEdit cannot callback-confirm this chart title update')
+        for (const key of ['width', 'height', 'left', 'top']) if (Object.hasOwn(payload, key)) { const value = Number(payload[key]); if (!Number.isFinite(value) || value < 0 || !await setAnalyticsProperty(chart, key, value)) return fail('unsupported', `WebEdit cannot update chart ${key}`); didWrite = true }
+      }
+      if (operation === 'resize_chart') { if (!await setAnalyticsProperty(chart, 'width', Number(payload.width)) || !await setAnalyticsProperty(chart, 'height', Number(payload.height))) return fail('unsupported', 'WebEdit cannot resize chart'); didWrite = true }
+      if (!didWrite) return fail('invalid_range', 'chart update requires at least one supported changed property')
+      const observed = await chartDetail(chart, required)
+      const matches = observed && identityMatches(observed, before) && (!Object.hasOwn(payload, 'chartType') || same(observed.type, payload.chartType)) && (!Object.hasOwn(payload, 'title') || observed.title === payload.title) && (!Object.hasOwn(payload, 'sourceRange') || observed.sourceRange === await readableAddress(payload.sourceRange)) && (!Object.hasOwn(payload, 'width') || observed.width === Number(payload.width)) && (!Object.hasOwn(payload, 'height') || observed.height === Number(payload.height)) && (!Object.hasOwn(payload, 'left') || observed.left === Number(payload.left)) && (!Object.hasOwn(payload, 'top') || observed.top === Number(payload.top))
+      if (!matches) return fail('readback_mismatch', 'Chart operation-specific readback differs from the requested change')
+      return { requested: { chart: before, ...(operation === 'set_chart_data_source' ? { sourceRange: payload.sourceRange } : payload) }, observed: { chart: observed, verified: true } }
+    }
+    if (operation === 'refresh_pivot_tables' || operation === 'refresh_all_pivot_tables') {
+      const before = preflight.state?.pivots; const refresh = resolved.workbook && (resolved.workbook.refreshAllPivotTables ?? resolved.workbook.RefreshAllPivotTables)
+      if (!before || typeof refresh !== 'function') return fail('unsupported', 'WebEdit does not expose callback-driven workbook pivot refresh')
+      const callback = await callbackMutation((done) => refresh.call(resolved.workbook, done)); if (!callback) return fail('runtime_error', 'WebEdit did not confirm all-pivot refresh by callback')
+      const afterState = await analyticsState(resolved, false, true); const after = afterState?.pivots
+      const changed = before.items.length === 0 || (after && before.items.every((item) => { const current = after.items.find((candidate) => identityMatches(candidate, item)); return current && current.updateTime !== item.updateTime }))
+      if (!after || !changed) return fail('readback_mismatch', 'All-pivot refresh did not expose a changed update-time readback for every inspected pivot')
+      return { requested: { pivots: before.items.map((item) => ({ id: item.id, name: item.name })) }, observed: { pivots: after.items, callbackInvoked: true, verified: true } }
+    }
+    const target = analyticsTarget(payload, 'pivot'); const pivot = await analyticsFind(pivots, target); const before = preflight.target?.detail
+    if (!target || !pivot || !before || !identityMatches(await objectIdentity(pivot), before)) return fail('fingerprint_mismatch', 'The inspected pivot identity is no longer present')
+    if (operation === 'delete_pivot_table') {
+      const command = await pivotCommand(resolved.app, pivot); const count = await collectionCount(pivots); const callback = command && typeof command.deleteTable === 'function' ? await callbackMutation((done) => command.deleteTable(done)) : null
+      if (!callback) return fail('unsupported', 'WebEdit does not expose callback-driven pivot deletion')
+      const afterCollection = await pivotCollection(resolved.sheet); const after = await collectionCount(afterCollection); const remaining = await analyticsFind(afterCollection, { index: null, id: before.id, name: before.name })
+      if (count === null || after === null || after !== count - 1 || remaining) return fail('readback_mismatch', 'Pivot deletion was not proven by collection count and stable identity readback')
+      return { requested: { pivot: before }, observed: { beforeCount: count, afterCount: after, deleted: true, callbackInvoked: true, verified: true } }
+    }
+    const command = await pivotCommand(resolved.app, pivot)
+    if (!command) return fail('unsupported', 'WebEdit does not expose the public pivot command factory')
+    if (operation === 'refresh_pivot_table') {
+      if (typeof command.refresh !== 'function') return fail('unsupported', 'WebEdit does not expose callback-driven pivot refresh')
+      const callback = await callbackMutation((done) => command.refresh(done)); const after = await pivotDetail(pivot, false, true)
+      if (!callback || !after || after.updateTime === before.updateTime) return fail('readback_mismatch', 'Pivot refresh callback or update-time readback was not verified')
+      return { requested: { pivot: before }, observed: { pivot: after, callbackInvoked: true, verified: true } }
+    }
+    const orientation = operation === 'set_pivot_value_function' || operation === 'set_pivot_show_values_as' ? 'value' : payload.orientation
+    if (!Object.hasOwn(PIVOT_ORIENTATION, orientation) || typeof payload.fieldName !== 'string' || !payload.fieldName.trim()) return fail('invalid_range', 'Pivot field operations require an exact fieldName and supported orientation')
+    const descriptor = { getName: () => payload.fieldName, getOrientation: () => PIVOT_ORIENTATION[orientation] }; let callback = null
+    if (operation === 'add_pivot_field') callback = typeof command.addFieldByName === 'function' ? await callbackMutation((done) => command.addFieldByName(payload.fieldName, PIVOT_ORIENTATION[orientation], Number.isFinite(Number(payload.position)) ? Number(payload.position) : -1, done)) : null
+    if (operation === 'remove_pivot_field') callback = typeof command.removeFieldByName === 'function' ? await callbackMutation((done) => command.removeFieldByName(payload.fieldName, PIVOT_ORIENTATION[orientation], done)) : null
+    if (operation === 'sort_pivot_field') callback = typeof command.sortField === 'function' && (payload.order === 'asc' || payload.order === 'desc') ? await callbackMutation((done) => command.sortField(descriptor, payload.order === 'desc' ? 'etDescending' : 'etAscending', payload.sortByField ?? null, null, done)) : null
+    if (operation === 'set_pivot_subtotals') { const subtotals = Array.isArray(payload.subtotals) ? payload.subtotals.map((value) => PIVOT_SUBTOTAL[value]).filter(Boolean) : []; callback = subtotals.length && typeof command.setSubtotals === 'function' ? await callbackMutation((done) => command.setSubtotals(descriptor, subtotals, done)) : null }
+    if (operation === 'set_pivot_value_function') { const fn = PIVOT_FUNCTION[payload.summaryFunction]; callback = fn && typeof command.setFunction === 'function' ? await callbackMutation((done) => command.setFunction(descriptor, fn, done)) : null }
+    if (operation === 'set_pivot_show_values_as') { const calculation = PIVOT_CALCULATION[payload.calculation]; callback = calculation && typeof command.setShowValuesAs === 'function' ? await callbackMutation((done) => command.setShowValuesAs(descriptor, { calculation, ...(payload.baseField ? { baseField: payload.baseField } : {}), ...(payload.baseItem ? { baseItem: payload.baseItem } : {}) }, done)) : null }
+    if (!callback) return fail('unsupported', 'WebEdit does not expose this callback-driven pivot field operation')
+    const after = await pivotDetail(pivot, true, false); const field = after?.fields?.find((item) => item.name === payload.fieldName); const beforeField = before.fields?.find((item) => item.name === payload.fieldName)
+    const requestedSubtotals = Array.isArray(payload.subtotals) ? payload.subtotals.map((value) => PIVOT_SUBTOTAL[value]).filter(Boolean) : []
+    const added = operation === 'add_pivot_field' && !beforeField && !!field && after.fields.length === before.fields.length + 1; const removed = operation === 'remove_pivot_field' && !!beforeField && !field && after.fields.length === before.fields.length - 1; const sorted = operation === 'sort_pivot_field' && field && beforeField && beforeField.autoSortOrder !== (payload.order === 'desc' ? 'etDescending' : 'etAscending') && field.autoSortOrder === (payload.order === 'desc' ? 'etDescending' : 'etAscending'); const subtotal = operation === 'set_pivot_subtotals' && field && beforeField && !same(beforeField.subtotals, requestedSubtotals) && same(field.subtotals, requestedSubtotals); const fn = operation === 'set_pivot_value_function' && field && beforeField && beforeField.summaryFunction !== PIVOT_FUNCTION[payload.summaryFunction] && field.summaryFunction === PIVOT_FUNCTION[payload.summaryFunction]; const valuesAs = operation === 'set_pivot_show_values_as' && field && beforeField && (beforeField.calculation !== PIVOT_CALCULATION[payload.calculation] || beforeField.baseField !== (payload.baseField ?? null) || beforeField.baseItem !== (payload.baseItem ?? null)) && field.calculation === PIVOT_CALCULATION[payload.calculation] && (!payload.baseField || field.baseField === payload.baseField) && (!payload.baseItem || field.baseItem === payload.baseItem)
+    if (!after || !(added || removed || sorted || subtotal || fn || valuesAs)) return fail('readback_mismatch', 'Pivot field operation-specific readback differs from the requested change')
+    return { requested: { pivot: before, fieldName: payload.fieldName, orientation, operation }, observed: { pivot: after, callbackInvoked: true, verified: true } }
   }
   async function writeRange(resolved, request) {
     const payload = request.payload ?? {}; const batch = request.operation === 'batch_write' ? requestedBatchWrite(payload) : null; const address = batch?.range ?? payload.range
+    if (request.operation === 'export_pdf' || request.operation === 'export_worksheet_image') {
+      const target = request.operation === 'export_worksheet_image' ? resolved.sheet : (payload.scope === 'worksheet' ? resolved.sheet : resolved.workbook)
+      if (request.operation === 'export_pdf' && payload.scope !== undefined && payload.scope !== 'worksheet' && payload.scope !== 'workbook') return fail('invalid_range', 'export_pdf scope must be workbook or worksheet')
+      if (!target) return fail('unsupported', 'export target is unavailable')
+      const result = await advancedWrite(resolved, request, await rangeFor(resolved.sheet, payload.range ?? 'A1'), payload.range ?? 'A1'); if (result) return result
+    }
+    if (request.operation === 'copy_range' || request.operation === 'paste_special') {
+      const sourceAddress = payload.sourceRange; const destinationAddress = payload.destinationRange
+      const source = typeof sourceAddress === 'string' && await rangeFor(resolved.sheet, sourceAddress); const destination = typeof destinationAddress === 'string' && await rangeFor(resolved.sheet, destinationAddress)
+      if (!source || !destination || typeof source.Copy !== 'function') return fail('unsupported', `${request.operation} requires source Copy and bounded destination APIs`)
+      const before = await rangeSnapshot(resolved.sheet, destinationAddress); const sourceSnapshot = await rangeSnapshot(resolved.sheet, sourceAddress)
+      if (before.error || sourceSnapshot.error) return fail('unsupported', `${request.operation} requires readable source and destination snapshots`)
+      if (request.operation === 'copy_range') {
+        if (typeof destinationAddress !== 'string' || typeof destination !== 'object') return fail('invalid_range', 'copy_range requires a destination range')
+        let result; try { result = await resolve(source.Copy(destination)) } catch { return fail('runtime_error', 'WebEdit Range.Copy failed') }
+        const after = await rangeSnapshot(resolved.sheet, destinationAddress); if (after.error || !same(after.snapshot.values, sourceSnapshot.snapshot.values) || !same(after.snapshot.formulas, sourceSnapshot.snapshot.formulas)) return fail('readback_mismatch', 'copy_range readback differs from source matrix')
+        return { requested: { sourceRange: sourceAddress, destinationRange: destinationAddress }, observed: { sourceRange: sourceAddress, destinationRange: destinationAddress, values: after.snapshot.values, formulas: after.snapshot.formulas, runtimeResult: result, verified: true } }
+      }
+      if (typeof destination.PasteSpecial !== 'function') return fail('unsupported', 'WebEdit does not expose Range.PasteSpecial')
+      const typeMap = { all: 1, formulas: 2, values: 3, allExceptBorders: 4, columnWidths: 5, valuesAndNumberFormats: 7, formats: 8, comments: 9, validation: 10 }; const operationMap = { none: 0, add: 1, subtract: 2, multiply: 3, divide: 4 }
+      const pasteType = typeMap[payload.pasteType ?? 'values']; const pasteOperation = operationMap[payload.operation ?? 'none']
+      if (!Number.isInteger(pasteType) || !Number.isInteger(pasteOperation)) return fail('invalid_range', 'paste_special options are not supported')
+      const pasteKind = payload.pasteType ?? 'values'
+      if (!['values', 'formulas'].includes(pasteKind) || payload.operation !== undefined && payload.operation !== 'none' || payload.skipBlanks === true || payload.transpose === true || !same(sourceSnapshot.snapshot.values.map((row) => row.length), before.snapshot.values.map((row) => row.length)) || sourceSnapshot.snapshot.values.length !== before.snapshot.values.length) return fail('unsupported', 'This PasteSpecial mode lacks a bounded exact matrix and non-target preservation contract')
+      const expectedValues = pasteKind === 'values' ? sourceSnapshot.snapshot.values : before.snapshot.values; const expectedFormulas = pasteKind === 'formulas' ? sourceSnapshot.snapshot.formulas : before.snapshot.formulas
+      try { await resolve(source.Copy()); await resolve(destination.PasteSpecial(pasteType, pasteOperation, payload.skipBlanks === true, payload.transpose === true)) } catch { return fail('runtime_error', 'WebEdit Range.PasteSpecial failed') }
+      const after = await rangeSnapshot(resolved.sheet, destinationAddress); if (after.error) return after.error
+      if (!same(after.snapshot.values, expectedValues) || !same(after.snapshot.formulas, expectedFormulas)) return fail('readback_mismatch', 'PasteSpecial readback differs from the exact requested matrix')
+      return { requested: { sourceRange: sourceAddress, destinationRange: destinationAddress, pasteType: payload.pasteType ?? 'values', operation: payload.operation ?? 'none', skipBlanks: payload.skipBlanks === true, transpose: payload.transpose === true }, observed: { destinationRange: destinationAddress, values: after.snapshot.values, formulas: after.snapshot.formulas, verified: true } }
+    }
+    if (request.operation === 'recalculate') {
+      const workbook = resolved.workbook; const method = workbook && (typeof workbook.Recalculate === 'function' ? 'Recalculate' : typeof workbook.recalculate === 'function' ? 'recalculate' : null)
+      if (!method) return fail('unsupported', 'WebEdit does not expose Workbook.Recalculate')
+      const before = request.precondition?.recalculateTime
+      let result; try { result = await resolve(workbook[method]()) } catch { return fail('runtime_error', 'WebEdit workbook recalculation failed') }
+      const callbackId = await property(result, 'callBackId') ?? await property(result, 'callbackId'); const after = await property(result, 'recalculateTime') ?? await property(workbook, 'recalculateTime') ?? await property(workbook, 'RecalculateTime')
+      if ((callbackId === undefined || callbackId === null) && (after === undefined || after === null || same(before, after))) return fail('readback_mismatch', 'WebEdit Recalculate did not expose a completion token or changed recalculation time')
+      return { requested: {}, observed: { callbackId: callbackId ?? null, before: before ?? null, after: after ?? null, commandVerified: true, formulaResultsVerified: false, verified: true } }
+    }
+    if (request.operation === 'undo' || request.operation === 'redo') {
+      const count = Number.isInteger(payload.count) ? payload.count : 1; if (count < 1 || count > 20) return fail('invalid_range', `${request.operation} count is out of bounds`)
+      const method = request.operation === 'undo' ? 'undo' : 'redo'; const fn = resolved.app && (typeof resolved.app[method] === 'function' ? resolved.app[method] : typeof resolved.app[method[0].toUpperCase() + method.slice(1)] === 'function' ? resolved.app[method[0].toUpperCase() + method.slice(1)] : null)
+      if (!fn) return fail('unsupported', `WebEdit does not expose ${method}`)
+      let result; try { result = await resolve(fn.call(resolved.app, count)) } catch { return fail('runtime_error', `WebEdit ${method} failed`) }
+      if (result && (result.errName || result.errorCode)) return fail('runtime_error', `WebEdit ${method} reported failure`)
+      const before = request.precondition?.undoRedo; const after = await undoRedoSnapshot(resolved)
+      const verified = request.operation === 'undo'
+        ? !!before?.history && !!after.history && after.history.undo === before.history.undo - count && after.history.redo === before.history.redo + count
+        : !!before?.history && !!after.history && after.history.redo === before.history.redo - count && after.history.undo === before.history.undo + count
+      if (verified) return { requested: { count }, observed: { count, runtimeResult: result ?? null, before, after, historyVerified: true, verified: true } }
+      const observableChange = !same(before?.selection, after.selection) || !same(before?.usedRange, after.usedRange) || !same(before?.history, after.history)
+      return { verificationStatus: 'write_incomplete', requested: { count }, observed: { count, runtimeResult: result ?? null, before, after, observableChange, historyVerified: false, reason: 'WebEdit did not expose matching bounded undo/redo history counters' } }
+    }
     if (typeof address !== 'string' || address.length > 128) return fail('invalid_range', 'payload.range is required and bounded')
     const range = await rangeFor(resolved.sheet, address); if (!range) return fail('invalid_range', 'WebEdit could not resolve the requested range')
     const advanced = await advancedWrite(resolved, request, range, address); if (advanced) return advanced
+    if (STRUCTURAL_OPERATIONS.has(request.operation)) {
+      const spec = structuralRequest(request.operation, payload); const approved = request.precondition?.structure
+      if (!spec || !approved?.footprint) return fail('fingerprint_mismatch', 'The structural write is missing its inspected bounded footprint')
+      const targetAddress = spec.rows ? `${spec.target.rowFrom}:${spec.target.rowTo}` : spec.columns ? `${columnName(spec.target.colFrom)}:${columnName(spec.target.colTo)}` : address
+      const base = await rangeFor(resolved.sheet, targetAddress); const target = spec.rows ? await property(base, 'EntireRow') : spec.columns ? await property(base, 'EntireColumn') : base
+      const method = spec.inserting ? (typeof target?.Insert === 'function' ? 'Insert' : typeof target?.insert === 'function' ? 'insert' : null) : (typeof target?.Delete === 'function' ? 'Delete' : typeof target?.delete === 'function' ? 'delete' : null)
+      if (!target || !method) return fail('unsupported', `WebEdit does not expose ${request.operation} API`)
+      const direction = spec.direction === 'down' ? 'etShiftDown' : spec.direction === 'up' ? 'etShiftUp' : spec.direction === 'right' ? 'etShiftRight' : 'etShiftLeft'
+      for (let index = 0; index < spec.count; index += 1) {
+        const callback = await callbackResult((done) => spec.inserting ? target[method](direction, done, payload.position !== 'after') : target[method](direction, done))
+        if (!callback.callbackInvoked || callback.callbackError) return fail('readback_mismatch', `WebEdit ${request.operation} did not callback-confirm structural completion`)
+      }
+      const after = await structuralFootprint(resolved, spec, approved.footprint.bounds); const expected = structuralExpected(approved.footprint, spec)
+      if (!after || !expected || after.address !== approved.footprint.address || !same(after.values, expected.values) || !same(after.formulas, expected.formulas)) return fail('readback_mismatch', `${request.operation} readback does not match its exact bounded value/formula displacement`)
+      return { requested: { range: payload.range, count: spec.count, ...(payload.shift ? { shift: payload.shift } : {}), ...(payload.position ? { position: payload.position } : {}) }, observed: { footprint: after.address, usedRangeBefore: approved.footprint.usedAddress, usedRangeAfter: after.usedAddress, values: after.values, formulas: after.formulas, verified: true } }
+    }
+    if (request.operation === 'auto_fill') {
+      const destinationAddress = typeof payload.destination === 'string' ? payload.destination : ''
+      const destination = await rangeFor(resolved.sheet, destinationAddress)
+      const sourceParsed = parseAddress(address); const destinationParsed = parseAddress(destinationAddress)
+      if (!destination || !sourceParsed || !destinationParsed || typeof range.AutoFill !== 'function') return fail('unsupported', 'WebEdit does not expose a bounded Range.AutoFill contract')
+      const before = await rangeSnapshot(resolved.sheet, destinationAddress); if (before.error) return before.error
+      const sourceBefore = await rangeSnapshot(resolved.sheet, address); if (sourceBefore.error) return sourceBefore.error
+      const destinationPrecondition = await writePrecondition(destination, destinationAddress)
+      if (!destinationPrecondition) return fail('unsupported', 'WebEdit cannot inspect the auto_fill destination')
+      const requestedRows = destinationParsed.rowTo - destinationParsed.rowFrom + 1; const requestedColumns = destinationParsed.colTo - destinationParsed.colFrom + 1
+      const sourceRows = sourceParsed.rowTo - sourceParsed.rowFrom + 1; const sourceColumns = sourceParsed.colTo - sourceParsed.colFrom + 1
+      if (requestedRows * requestedColumns > 20_000 || destinationParsed.rowFrom !== sourceParsed.rowFrom || destinationParsed.colFrom !== sourceParsed.colFrom || destinationParsed.rowTo < sourceParsed.rowTo || destinationParsed.colTo < sourceParsed.colTo || !((requestedRows > sourceRows && requestedColumns === sourceColumns) || (requestedColumns > sourceColumns && requestedRows === sourceRows))) return fail('invalid_range', 'auto_fill destination must contain the source at the same top-left and extend exactly one axis')
+      for (let row = 0; row < requestedRows; row += 1) for (let column = 0; column < requestedColumns; column += 1) if (row >= sourceRows || column >= sourceColumns) if (!blankCell(before.snapshot.values[row][column]) || !blankCell(before.snapshot.formulas[row][column])) return fail('invalid_range', 'auto_fill extension cells must be blank')
+      try { await resolve(range.AutoFill(destination, 0)) } catch { return fail('runtime_error', 'WebEdit AutoFill failed') }
+      const after = await rangeSnapshot(resolved.sheet, destinationAddress); if (after.error) return after.error
+      const sourceAfter = await rangeSnapshot(resolved.sheet, address); if (sourceAfter.error || blankSnapshot(after.snapshot) || !same(sourceAfter.snapshot, sourceBefore.snapshot)) return fail('readback_mismatch', 'WebEdit AutoFill did not preserve the source or produce a readable extension')
+      return { requested: { range: address, destination: destinationAddress }, observed: { range: address, destination: destinationAddress, values: after.snapshot.values, formulas: after.snapshot.formulas, verified: true } }
+    }
     if (request.operation === 'batch_write') {
       if (!batch || !await setValues(range, batch.values)) return fail('unsupported', 'WebEdit does not expose an atomic rectangular value write API')
       const after = await rangeSnapshot(resolved.sheet, batch.range)
@@ -1160,19 +1813,17 @@
       return { requested: { range: address, formulas: payload.formulas }, observed: { range: address, formulas: observed.formulas, verified: true } }
     }
     if (request.operation === 'clear') {
-      const hasClear = typeof range.clear === 'function' || typeof range.Clear === 'function' || typeof range.clearContents === 'function' || typeof range.ClearContents === 'function'
-      if (!hasClear) return fail('unsupported', 'WebEdit does not expose a bounded clear API')
-      if (typeof range.clear === 'function') await resolve(range.clear())
-      else if (typeof range.Clear === 'function') await resolve(range.Clear())
-      else if (typeof range.clearContents === 'function') await resolve(range.clearContents())
+      const hasClear = typeof range.clearContents === 'function' || typeof range.ClearContents === 'function'
+      if (!hasClear) return fail('unsupported', 'WebEdit must expose ClearContents; generic Clear may also erase format, comments, or validation')
+      if (typeof range.clearContents === 'function') await resolve(range.clearContents())
       else await resolve(range.ClearContents())
       const readback = await rangeSnapshot(resolved.sheet, address); if (readback.error) return readback.error
-      const observed = readback.snapshot
-      if (!blankSnapshot(observed)) return fail('readback_mismatch', 'WebEdit clear readback still contains values or formulas')
-      return { requested: { range: address, clear: true }, observed: { range: address, values: observed.values, formulas: observed.formulas, isBlank: true, verified: true } }
+      const observed = readback.snapshot; const state = await writePrecondition(range, address)
+      if (!blankSnapshot(observed) || !state || !same({ ...state.state, values: request.precondition?.state?.values, formulas: request.precondition?.state?.formulas }, request.precondition?.state)) return fail('readback_mismatch', 'WebEdit clear did not preserve every inspected non-content range state')
+      return { requested: { range: address, clear: true }, observed: { range: address, values: observed.values, formulas: observed.formulas, state: state.state, isBlank: true, verified: true } }
     }
     if (request.operation === 'format') {
-      const allowed = new Set(['range', 'font', 'fill', 'numberFormat', 'alignment', 'wrap'])
+      const allowed = new Set(['range', 'font', 'fill', 'numberFormat', 'alignment', 'wrap', 'border'])
       const fontKeys = new Set(['bold', 'italic', 'underline', 'size', 'name', 'color'])
       const hasUnsupportedFormatField = !Object.keys(payload).every((key) => allowed.has(key))
       const hasUnsupportedFontField = payload.font !== undefined && (!payload.font || typeof payload.font !== 'object' || Array.isArray(payload.font) || !Object.keys(payload.font).every((key) => fontKeys.has(key)))
@@ -1181,12 +1832,16 @@
       let applied = false
       if (requested.font && typeof requested.font === 'object') for (const [key, value] of Object.entries(requested.font)) { const mapped = ({ bold: 'Bold', italic: 'Italic', underline: 'Underline', size: 'Size', name: 'Name', color: 'Color' })[key] ?? key; applied = await set(font, mapped, value) || applied; await set(font, key, value) }
       if (typeof requested.fill === 'string') { applied = await set(interior, 'Color', requested.fill) || applied; await set(interior, 'color', requested.fill) }
+      const requestedBorders = requested.border && typeof requested.border === 'object' && !Array.isArray(requested.border) ? Object.fromEntries(Object.entries(requested.border).map(([side, spec]) => [side, spec && typeof spec === 'object' ? spec.color : spec])) : null
+      if (requested.border && (!requestedBorders || Object.keys(requestedBorders).length === 0 || Object.values(requestedBorders).some((color) => color === undefined || color === null))) return fail('invalid_range', 'format border requires one or more sides with exact colors')
+      if (requestedBorders) { const borders = await property(range, 'Borders'); if (!borders || !request.precondition?.borders) return fail('unsupported', 'WebEdit does not expose preflighted readable Borders'); for (const [side, color] of Object.entries(requestedBorders)) { const target = borders[side]; if (!target || !await set(target, 'Color', color)) return fail('unsupported', 'WebEdit border mutation is unavailable'); applied = true } }
       for (const [key, value] of [['NumberFormat', requested.numberFormat], ['HorizontalAlignment', requested.alignment], ['WrapText', requested.wrap]]) if (value !== undefined) { applied = await set(range, key, value) || applied; await set(range, key === 'NumberFormat' ? 'numberFormat' : key === 'WrapText' ? 'wrap' : 'alignment', value) }
       if (!applied) return fail('unsupported', 'WebEdit does not expose requested formatting APIs')
       const observed = { font: { bold: await property(font, 'bold') ?? await property(font, 'Bold'), italic: await property(font, 'italic') ?? await property(font, 'Italic'), underline: await property(font, 'underline') ?? await property(font, 'Underline'), size: await property(font, 'size') ?? await property(font, 'Size'), name: await property(font, 'name') ?? await property(font, 'Name'), color: await property(font, 'color') ?? await property(font, 'Color') }, fill: await property(interior, 'color') ?? await property(interior, 'Color'), numberFormat: await property(range, 'numberFormat') ?? await property(range, 'NumberFormat'), alignment: await property(range, 'alignment') ?? await property(range, 'HorizontalAlignment'), wrap: await property(range, 'wrap') ?? await property(range, 'WrapText') }
       const fontMatches = !requested.font || Object.entries(requested.font).every(([key, value]) => same(observed.font[key], value))
-      if (!fontMatches || (requested.fill !== undefined && !same(observed.fill, requested.fill)) || (requested.numberFormat !== undefined && !same(observed.numberFormat, requested.numberFormat)) || (requested.alignment !== undefined && !same(observed.alignment, requested.alignment)) || (requested.wrap !== undefined && !same(observed.wrap, requested.wrap))) return fail('readback_mismatch', 'WebEdit format readback differs from the requested fields')
-      return { requested: { range: address, format: payload }, observed: { range: address, format: observed, verified: true } }
+      const observedBorders = requestedBorders ? await borderSnapshot(range, Object.keys(requestedBorders)) : null
+      if (!fontMatches || (requested.fill !== undefined && !same(observed.fill, requested.fill)) || (requested.numberFormat !== undefined && !same(observed.numberFormat, requested.numberFormat)) || (requested.alignment !== undefined && !same(observed.alignment, requested.alignment)) || (requested.wrap !== undefined && !same(observed.wrap, requested.wrap)) || (requestedBorders && (!observedBorders || !Object.entries(requestedBorders).every(([side, color]) => same(observedBorders[side]?.color, color))))) return fail('readback_mismatch', 'WebEdit format readback differs from the requested fields')
+      return { requested: { range: address, format: payload }, observed: { range: address, format: { ...observed, ...(observedBorders ? { borders: observedBorders } : {}) }, verified: true } }
     }
     if (request.operation === 'merge' || request.operation === 'unmerge') {
       const merged = request.operation === 'merge'; const method = merged ? (await call(range, 'merge', []) ?? await call(range, 'Merge', [])) : (await call(range, 'unmerge', []) ?? await call(range, 'UnMerge', []))
@@ -1196,9 +1851,6 @@
       return { requested: { range: address, merged }, observed: { range: address, merged: observed, verified: true } }
     }
     const dimension = request.operation.includes('columns') || request.operation === 'column_width' ? await property(range, 'EntireColumn') : await property(range, 'EntireRow')
-    if (['insert_rows', 'insert_columns', 'delete_rows', 'delete_columns'].includes(request.operation)) {
-      return fail('unsupported', 'WebEdit structural row and column APIs have no stable non-mutating readback contract yet')
-    }
     if (request.operation === 'row_height' || request.operation === 'column_width') {
       const key = request.operation === 'row_height' ? 'RowHeight' : 'ColumnWidth'; const amount = payload.value
       const method = request.operation === 'row_height' ? 'setRowHeight' : 'setColumnWidth'
@@ -1207,7 +1859,7 @@
       const observed = await property(dimension ?? range, key); if (observed !== amount) return fail('readback_mismatch', 'WebEdit dimension readback differs from request')
       return { requested: { range: address, [key]: amount }, observed: { range: address, [key]: observed, verified: true } }
     }
-    return fail('unsupported', 'unsupported spreadsheet range operation')
+    return fail('unsupported', `WebEdit does not expose a range API/readback contract for ${request.operation}`)
   }
   async function writeSheet(resolved, request) {
     const payload = request.payload ?? {}; const before = await worksheetSnapshot(resolved.workbook)
@@ -1221,6 +1873,27 @@
       const after = await worksheetSnapshot(resolved.workbook)
       if (!after || after.count !== before.count + 1 || after.names.filter((item) => item === name).length !== 1) return fail('readback_mismatch', 'WebEdit worksheet add readback differs from request')
       return { requested: { name }, observed: { name, beforeCount: before.count, afterCount: after.count, verified: true } }
+    }
+    if (request.operation === 'copy_worksheet') {
+      const sourceName = typeof payload.sourceName === 'string' ? payload.sourceName : payload.name
+      if (typeof sourceName !== 'string' || !before.names.includes(sourceName) || typeof before.collection.copy !== 'function') return fail('unsupported', 'WebEdit does not expose worksheet copy with bounded collection readback')
+      const source = await call(before.collection, 'Item', [sourceName]); if (!source) return fail('invalid_range', 'WebEdit could not resolve the worksheet to copy')
+      const activeBefore = before.sheets.find((item) => item.active === true)?.name
+      if (activeBefore !== sourceName) {
+        if (typeof source.Activate !== 'function' || !activeBefore) return fail('unsupported', 'WebEdit cannot select the requested worksheet before copy')
+        await resolve(source.Activate())
+      }
+      const copied = await resolve(before.collection.copy(false))
+      if (!copied) return fail('unsupported', 'WebEdit worksheet copy did not return a worksheet')
+      const requestedName = typeof payload.newName === 'string' ? payload.newName.trim() : null
+      if (requestedName !== null) {
+        if (!validName(requestedName) || before.names.includes(requestedName) || typeof copied.setName !== 'function') return fail('unsupported', 'WebEdit cannot safely name the copied worksheet')
+        await resolve(copied.setName(requestedName))
+      }
+      const after = await worksheetSnapshot(resolved.workbook); const copiedName = requestedName ?? await property(copied, 'Name')
+      if (!after || after.count !== before.count + 1 || typeof copiedName !== 'string' || !after.names.includes(copiedName)) return fail('readback_mismatch', 'WebEdit worksheet copy readback differs from request')
+      if (activeBefore && activeBefore !== sourceName) { const restore = await call(before.collection, 'Item', [activeBefore]); if (restore && typeof restore.Activate === 'function') await resolve(restore.Activate()) }
+      return { requested: { sourceName, newName: requestedName }, observed: { sourceName, name: copiedName, beforeCount: before.count, afterCount: after.count, verified: true } }
     }
     const name = payload.name ?? payload.sheetName; const sheet = await call(before.collection, 'Item', [name]) ?? await call(resolved.workbook, 'getWorksheet', [name])
     if (typeof name !== 'string' || !sheet || !before.names.includes(name)) return fail('invalid_range', 'WebEdit could not resolve the requested worksheet')
@@ -1366,13 +2039,19 @@
   }
   async function write(request) {
     const resolved = await appAndSheet(request.resource?.sheetName); if (resolved.error) return resolved.error
-    if (['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sheet_add', 'sheet_rename', 'sheet_delete', 'sheet_select', 'copy_worksheet'].includes(request.operation)) return fail('unsupported', 'WebEdit structural sheet mutation lacks a mutation-safe preflight and is unavailable')
+    if (request.operation === 'sheet_select') return fail('unsupported', 'WebEdit structural mutation lacks a mutation-safe preflight and is unavailable')
     const denied = await writable(resolved, request); if (denied) return denied
+    if ((SHEET_LIFECYCLE_OPERATIONS.has(request.operation) || ['insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'insert_cells', 'delete_cells', 'copy_range', 'paste_special', 'recalculate'].includes(request.operation)) && !request.precondition) return fail('unsupported', 'this write requires an inspect-before-write precondition')
     const stale = await preconditionMatches(resolved, request); if (stale) return stale
+    if (ANALYTICS_OPERATIONS.has(request.operation)) {
+      const result = await writeAnalytics(resolved, request)
+      if (!result.ok && result.error) return result
+      return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
+    }
     if (WORKBOOK_OPERATIONS.has(request.operation)) {
       const result = await writeWorkbook(resolved, request)
       if (!result.ok && result.error) return result
-      return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
+      const current = await appAndSheet(); return { ok: true, result: { status: 'verified_write', resource: current.error ? resolved.resource : current.resource, operation: request.operation, ...result } }
     }
     if (VIEW_OPERATIONS.has(request.operation)) {
       const result = await writeView(resolved, request)
@@ -1394,10 +2073,13 @@
       if (!result.ok && result.error) return result
       return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
     }
-    const sheetOperation = String(request.operation).startsWith('sheet_')
+    const sheetOperation = String(request.operation).startsWith('sheet_') || request.operation === 'copy_worksheet'
     const result = sheetOperation ? await writeSheet(resolved, request) : await writeRange(resolved, request)
     if (!result.ok && result.error) return result
-    return { ok: true, result: { status: 'verified_write', resource: resolved.resource, operation: request.operation, ...result } }
+    const current = sheetOperation ? await appAndSheet() : null
+    const resource = current?.error ? resolved.resource : current?.resource ?? resolved.resource
+    if (result.verificationStatus === 'write_incomplete') return { ok: false, error: { code: 'write_incomplete', message: `WebEdit executed ${request.operation} but could not complete its operation-specific Verified Write readback`, details: { resource, operation: request.operation, ...result } } }
+    return { ok: true, result: { status: 'verified_write', resource, operation: request.operation, ...result } }
   }
   // Probe identity lets the background disambiguate several ready WebEdit
   // frames: a doc.midea.com page can preload a blank editor (workbookName

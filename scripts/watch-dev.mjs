@@ -8,7 +8,7 @@
  *   pnpm dev:watch
  *
  * It deliberately does NOT touch:
- *   - the WXT dev server or port 3001 (extension code keeps its own HMR)
+ *   - the WXT dev server or port 3101 (extension code keeps its own HMR)
  *   - the generated Harness product (use pnpm dev:refresh for that)
  */
 import { existsSync } from 'node:fs'

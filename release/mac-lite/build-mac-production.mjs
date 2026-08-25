@@ -21,6 +21,10 @@ const EXPLICIT_HARNESS_ROOT = process.env.DSH_ROOT?.trim()
 const HARNESS_ROOT = path.resolve(EXPLICIT_HARNESS_ROOT || GENERATED_HARNESS_ROOT)
 const PACKAGE_NAME = 'accr-ui-mac-production-poc'
 const EXTENSION_VERSION = '1.1.63'
+const OFFICE_EXTENSION_RUNTIME_FILES = Object.freeze([
+  'office-spreadsheet-runtime.js',
+  'office-presentation-runtime.js',
+])
 const EXTENSION_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtjVzlR9cE9zV44l999YtraoKbQ77NfaFgwJmpeABPL2HxUK82pD0DFRSv/7FfZ4nEZRDlgZz1zj1yIF4HLnftCZyf/xYIrwhXDojQfYULE8miIGufKEJf/IUBkpFdFKHgfKgowV0M72wNzqaYd27MdR6DczCR5PQKwi5G2JKUJxx4xc2+KD3GOUjpE8DrhzliD3gYcwEZ8lphtOuCUIx5kI97etKEiixqrwFGRoUbHFLXT14+Fqg7jmSu/HaUVWbl/Dx1VbI1hgVZdnJI//UJY+T0qMLV8hcfHPpwBum0lf1rfP+FQwnqoV2wf4k+6f70dE/Xrlckddpkl0IWDSEdwIDAQAB'
 export const STATIC_REGISTRY_PACKAGE_OVERRIDES = [
   '@deepseek-ai/dsh-client-ui-skill-settings',
@@ -670,7 +674,21 @@ async function validatePackage({ packageDir, payloadDir, zipPath }) {
   const packageJson = path.join(payloadDir, 'runtime', 'harness', 'apps', 'cli', 'package.json')
   const nodeModules = path.join(payloadDir, 'runtime', 'harness', 'node_modules')
   if (!existsSync(server) || !existsSync(nativeServer) || !existsSync(packageJson)) throw new Error('Harness single-file runtime is incomplete')
+  if (!existsSync(path.join(payloadDir, 'runtime', 'skills', 'product-prototype', 'SKILL.md'))) throw new Error('Product prototype skill is missing from the packaged runtime')
   if (existsSync(nodeModules)) throw new Error('PoC unexpectedly contains runtime/harness/node_modules')
+  const extensionDir = path.join(payloadDir, 'extension')
+  const extensionManifest = JSON.parse(await readFile(path.join(extensionDir, 'manifest.json'), 'utf8'))
+  const webAccessibleResources = new Set(
+    (extensionManifest.web_accessible_resources ?? []).flatMap((entry) => entry.resources ?? []),
+  )
+  for (const runtimeFile of OFFICE_EXTENSION_RUNTIME_FILES) {
+    if (!existsSync(path.join(extensionDir, runtimeFile))) {
+      throw new Error(`Packaged extension is missing Office runtime: ${runtimeFile}`)
+    }
+    if (!webAccessibleResources.has(runtimeFile)) {
+      throw new Error(`Packaged extension does not expose Office runtime: ${runtimeFile}`)
+    }
+  }
   const smoke = run(process.execPath, [server, '--help'], {
     env: {
       ...process.env,
@@ -683,9 +701,14 @@ async function validatePackage({ packageDir, payloadDir, zipPath }) {
   return { helpSmoke: true }
 }
 
-/** Build the no-node_modules Mac package PoC from existing built artifacts. */
+/** Build the no-node_modules Mac package PoC from freshly built extension artifacts. */
 export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT_ROOT, 'release') } = {}) {
   assertHarnessProductAvailable()
+  // The release owns the source-to-artifact boundary. Building here prevents a
+  // stale .output tree from silently omitting a newly added content runtime.
+  // Build only WXT here: the root asset sync replaces public/harness in place
+  // and would race unrelated readers when this package proof runs in parallel.
+  run('pnpm', ['--dir', 'apps/chrome-extension', 'run', 'build'], { cwd: PROJECT_ROOT })
   const cliEntry = path.join(HARNESS_ROOT, 'apps', 'cli', 'lib', 'bin.js')
   const webDist = path.join(HARNESS_ROOT, 'apps', 'web', 'dist')
   const cliConfig = path.join(HARNESS_ROOT, 'apps', 'cli', 'config')
@@ -798,7 +821,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await writeFile(path.join(runtimeDir, 'dsh-plugin'), pluginManagerLauncher(), { mode: 0o755 })
   await writeFile(path.join(runtimeDir, 'register-native-host.sh'), registerNativeHost(), { mode: 0o755 })
   await writeFile(path.join(harnessDir, 'harness-runtime.json'), `${JSON.stringify({ format: 'deepseek-harness-mac-static-web-v1', entrypoint: 'apps/cli/lib/server.mjs', bundled: true, nodeModulesIncluded: false, staticWebPluginCount: aliases.size, dynamicPluginRepository: 'managed-web-profile' }, null, 2)}\n`)
-  await writeFile(path.join(packageDir, 'README.zh-CN.md'), '# Harness UI Mac 生产候选包\n\n核心 Harness Web profile 已打包为 `server.mjs`，只携带 Mac ARM64 必需的原生文件，不含整套 `node_modules`。内置 skill 在 `runtime/skills`，启动器通过 `DSH_PRODUCT_SKILLS_ROOT` 挂载；产品 `/pmd-prd`、`/pptx`、`/xlsx`、`/docx`、`/pdf` 优先于 `~/.claude/skills` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。双击 `install.command` 安装主程序；双击 `install-plugin.command` 可以之后独立安装兼容的 Harness 插件，不需要重新发布主包。插件安装需要本机 `pnpm`。\n')
+  await writeFile(path.join(packageDir, 'README.zh-CN.md'), '# Harness UI Mac 生产候选包\n\n核心 Harness Web profile 已打包为 `server.mjs`，只携带 Mac ARM64 必需的原生文件，不含整套 `node_modules`。内置 skill 在 `runtime/skills`，启动器通过 `DSH_PRODUCT_SKILLS_ROOT` 挂载；产品 `/product-prototype`、`/pmd-prd`、`/pptx`、`/xlsx`、`/docx`、`/pdf` 优先于 `~/.claude/skills` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。双击 `install.command` 安装主程序；双击 `install-plugin.command` 可以之后独立安装兼容的 Harness 插件，不需要重新发布主包。插件安装需要本机 `pnpm`。\n')
   await writeFile(path.join(packageDir, 'install.command'), installer(), { mode: 0o755 })
   await writeFile(path.join(packageDir, 'install-plugin.command'), interactivePluginInstaller(), { mode: 0o755 })
   run('zip', ['-qr', path.join(packageDir, 'payload.zip'), '.'], { cwd: payloadDir })

@@ -53,7 +53,7 @@ await run('pnpm', ['run', 'sync-harness-assets'])
 
 console.log('4/4 Restarting WXT and Native Host...')
 // WXT's development public directory is populated during its build:done hook.
-// Releasing port 3001 guarantees that the next dev boot copies the freshly
+// Releasing port 3101 guarantees that the next dev boot copies the freshly
 // synchronized Harness assets instead of leaving an old iframe bundle served.
 await run(process.execPath, ['scripts/prepare-dev-port.mjs'])
 await run('pnpm', ['run', 'dev:restart', '--', '--skip-harness-build', '--skip-extension-prebuild'])

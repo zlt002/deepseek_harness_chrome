@@ -6,9 +6,11 @@ const root = new URL('.', import.meta.url)
 const visualEditor = await readFile(new URL('./visual-markdown-editor.tsx', root), 'utf8')
 const main = await readFile(new URL('./main.tsx', root), 'utf8')
 
-test('visual surface uses only bundled Milkdown assets and does not re-enable executable Mermaid', () => {
+test('visual surface uses bundled assets and renders Mermaid only through the local safe renderer', () => {
   assert.match(visualEditor, /from '@milkdown\/crepe'/)
   assert.match(visualEditor, /@milkdown\/crepe\/theme\/classic\.css/)
   assert.doesNotMatch(visualEditor, /https?:\/\//)
-  assert.doesNotMatch(main, /MermaidDiagram|mermaid\.render/)
+  assert.match(visualEditor, /renderMermaidSvg/)
+  assert.match(visualEditor, /mermaidPreviewPlugin/)
+  assert.doesNotMatch(visualEditor, /https?:\/\//)
 })

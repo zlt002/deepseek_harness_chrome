@@ -17,15 +17,14 @@ globalThis.window = {
   },
 }
 require('../lib/client.js')
-const { WorkspaceReviewAction } = client
+const { WorkspaceReviewTree } = client
 
-test('renders when the sidebar slot maps injected open to useOpen', () => {
+test('renders the picker child tree with no selected workspace session', () => {
   const props = {
-    useSessions: selector => selector({ current: undefined }),
+    sessionId: undefined,
     bridge: undefined,
-    close: () => {},
-    useOpen: selector => selector(false),
+    onClose: () => {},
   }
 
-  assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(WorkspaceReviewAction, props)))
+  assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(WorkspaceReviewTree, props)))
 })

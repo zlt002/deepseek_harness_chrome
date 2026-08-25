@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
-const port = 3001
+const port = 3101
 
 function positiveInteger(value, fallback) {
   if (value === undefined || value === '') return fallback

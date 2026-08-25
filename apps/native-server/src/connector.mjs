@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
-import { CONNECTOR_TOOLS, LIGHT_DOCUMENT_OPERATIONS, MODEL_LIGHT_DOCUMENT_OPERATIONS } from './connector-tool-catalog.mjs'
+import { CONNECTOR_TOOLS, LIGHT_DOCUMENT_OPERATIONS, MODEL_LIGHT_DOCUMENT_OPERATIONS, PRESENTATION_CHART_TYPES, PRESENTATION_EDIT_FIELDS, PRESENTATION_OBJECT_FIELDS, PRESENTATION_WRITE_ACTIONS, PRESENTATION_WRITE_OPERATIONS, PRESENTATION_WRITE_PAYLOAD_FIELDS, SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from './connector-tool-catalog.mjs'
 import { KNOWLEDGE_PROXY_PATH, knowledgeErrorChain, knowledgeHttpsFetch, proxyKnowledgeRequest } from './knowledge-transport.mjs'
 import {
   CONNECTOR_CANCEL,
@@ -24,7 +24,10 @@ const REQUEST_TIMEOUT_MS = 15_000
 // A cold WebEdit read first sweeps iframes for up to 8s, then the in-frame
 // runtime itself budgets another 8s. The previous 15s Native cap aborted
 // before the Extension could answer, so the model only saw a peer timeout.
-const OFFICE_REQUEST_TIMEOUT_MS = 30_000
+// A write preview can spend up to 8s locating the WebEdit frame and another
+// 22s inside the frame. Keep transport headroom so the Native Host never
+// cancels at the exact moment the Extension is returning the inspection.
+const OFFICE_REQUEST_TIMEOUT_MS = 45_000
 // A Team Knowledge write includes navigation, editor-frame readiness, write
 // readback, an optional per-document human confirmation (up to ten minutes),
 // and restoration of the parent page. Batch and PMD delivery issue one
@@ -108,10 +111,18 @@ function validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowser
 function validOfficeDocumentIdentity(value) {
   if (value === null) return true
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  return Object.keys(value).length === 5
-    && (value.kind === 'webedit_spreadsheet' || value.kind === 'webedit_light_document')
-    && (typeof value.workbookName === 'string' || value.workbookName === null)
-    && (typeof value.sheetName === 'string' || value.sheetName === null)
+  const boundedName = (candidate) => typeof candidate === 'string' && candidate.length <= 512 || candidate === null
+  if (value.kind === 'webedit_spreadsheet' || value.kind === 'webedit_light_document') {
+    return Object.keys(value).length === 5 && boundedName(value.workbookName) && boundedName(value.sheetName)
+      && (typeof value.hasContent === 'boolean' || value.hasContent === null)
+      && Number.isInteger(value.webeditFrames) && value.webeditFrames >= 1 && value.webeditFrames <= 50
+  }
+  return value.kind === 'webedit_presentation' && Object.keys(value).length === 5
+    && boundedName(value.presentationName)
+    // A ready `/weboffice/office/p/` target can be a valid blank presentation
+    // before its first slide exists. This is roster-only identity; presentation
+    // read/write validators still require a usable slide before dispatch.
+    && (Number.isInteger(value.slideCount) && value.slideCount >= 0 && value.slideCount <= 10000 || value.slideCount === null)
     && (typeof value.hasContent === 'boolean' || value.hasContent === null)
     && Number.isInteger(value.webeditFrames) && value.webeditFrames >= 1 && value.webeditFrames <= 50
 }
@@ -172,7 +183,7 @@ function validReadWorkTabResult(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.status !== 'ok') return false
   if (!Number.isInteger(value.tab) || value.tab < 1 || !validBrowserTarget(value.page)) return false
   if (!value.pageIdentity || typeof value.pageIdentity !== 'object' || typeof value.pageIdentity.title !== 'string' || value.pageIdentity.url !== value.page.url) return false
-  if (!['webedit_light_document', 'webedit_spreadsheet', 'web_page'].includes(value.kind)) return false
+  if (!['webedit_light_document', 'webedit_spreadsheet', 'webedit_presentation', 'web_page'].includes(value.kind)) return false
   if (typeof value.content !== 'string' || value.content.length > 20000) return false
   if (typeof value.truncated !== 'boolean') return false
   return value.isPrimary === undefined || typeof value.isPrimary === 'boolean'
@@ -183,6 +194,536 @@ function validLightDocumentResource(value) {
     && value.kind === 'webedit_light_document' && value.origin === 'https://webedit.midea.com'
     && (typeof value.documentName === 'string' || value.documentName === null)
     && typeof value.fingerprint === 'string' && value.fingerprint.length > 0 && value.fingerprint.length <= 128
+}
+
+function validSpreadsheetResource(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 5
+    && value.kind === 'webedit_spreadsheet' && value.origin === 'https://webedit.midea.com'
+    && (typeof value.workbookName === 'string' || value.workbookName === null)
+    && (typeof value.sheetName === 'string' || value.sheetName === null)
+    && typeof value.fingerprint === 'string' && value.fingerprint.length > 0 && value.fingerprint.length <= 512
+}
+
+function sameSpreadsheetResource(left, right) {
+  return validSpreadsheetResource(left) && validSpreadsheetResource(right)
+    && left.kind === right.kind && left.origin === right.origin
+    && left.workbookName === right.workbookName && left.sheetName === right.sheetName
+    && left.fingerprint === right.fingerprint
+}
+
+// A spreadsheet Resource Identity has two deliberately distinct parts.  The
+// workbook anchor keeps a Browser Target pinned to the same document/frame;
+// the active worksheet and fingerprint are mutable context.  A write still
+// enters the frame only with the exact inspected resource/precondition, but a
+// successful sheet-transition must be allowed to return its new context.
+function sameSpreadsheetWorkbook(left, right) {
+  return validSpreadsheetResource(left) && validSpreadsheetResource(right)
+    && left.kind === right.kind && left.origin === right.origin
+    && left.workbookName === right.workbookName
+}
+
+function spreadsheetOperationMayTransitionSheet(operation) {
+  return ['activate_worksheet', 'sheet_add', 'sheet_delete', 'copy_worksheet', 'move_worksheet'].includes(operation)
+}
+
+function validSpreadsheetReadResult(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'ok'
+    && validSpreadsheetResource(value.resource)
+}
+
+function validSpreadsheetInspectResult(value) {
+  return validSpreadsheetReadResult(value) && value.precondition && typeof value.precondition === 'object'
+    && !Array.isArray(value.precondition) && JSON.stringify(value.precondition).length <= 100000
+}
+
+function validSpreadsheetWriteResult(value, request) {
+  return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write'
+    && value.operation === request.operation
+    // Normal writes retain the full active-sheet identity.  Only operations
+    // which explicitly change workbook context may return a different active
+    // sheet/fingerprint, and even then must remain in the inspected workbook.
+    && (sameSpreadsheetResource(value.resource, request.resource)
+      || (spreadsheetOperationMayTransitionSheet(request.operation) && sameSpreadsheetWorkbook(value.resource, request.resource)))
+    && value.requested && typeof value.requested === 'object' && !Array.isArray(value.requested)
+    && value.observed && typeof value.observed === 'object' && !Array.isArray(value.observed)
+    && value.observed.verified === true
+}
+
+function validPresentationResource(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  if (!keys.every((key) => ['kind', 'origin', 'presentationName', 'documentName', 'documentId', 'path', 'fingerprint', 'slideCount'].includes(key))) return false
+  const boundedText = (candidate, max = 512) => typeof candidate === 'string' && candidate.length <= max
+  const optionalText = (candidate, max) => candidate === undefined || candidate === null || boundedText(candidate, max)
+  const optionalDocumentId = value.documentId === undefined || value.documentId === null || boundedText(value.documentId) || Number.isFinite(value.documentId)
+  const hasName = Object.hasOwn(value, 'presentationName') || Object.hasOwn(value, 'documentName')
+  return value.kind === 'webedit_presentation' && value.origin === 'https://webedit.midea.com' && hasName
+    && optionalText(value.presentationName, 512) && optionalText(value.documentName, 512)
+    && optionalDocumentId && optionalText(value.path, 2048)
+    && boundedText(value.fingerprint) && value.fingerprint.length > 0
+    && (value.slideCount === undefined || Number.isInteger(value.slideCount) && value.slideCount >= 0 && value.slideCount <= 10000)
+}
+function presentationName(value) { return value.presentationName ?? value.documentName ?? null }
+function optionalResourceField(value, field) { return value[field] ?? null }
+function samePresentationDocument(left, right) {
+  return validPresentationResource(left) && validPresentationResource(right)
+    && left.kind === right.kind && left.origin === right.origin
+    && presentationName(left) === presentationName(right)
+    && optionalResourceField(left, 'documentId') === optionalResourceField(right, 'documentId')
+    && optionalResourceField(left, 'path') === optionalResourceField(right, 'path')
+}
+function samePresentationTarget(left, right) {
+  return samePresentationDocument(left, right)
+    && left.fingerprint === right.fingerprint
+}
+function validPresentationReadResult(value) { return value && typeof value === 'object' && !Array.isArray(value) && validPresentationResource(value.resource) }
+function validPresentationContextResult(value) {
+  return validPresentationReadResult(value) && Number.isInteger(value.slideCount) && value.slideCount >= 1 && value.slideCount <= 10000
+    && (value.resource.slideCount === undefined || value.resource.slideCount === value.slideCount)
+}
+const REQUIRED_PRESENTATION_CAPABILITY_NAMES = ['slides', 'context', 'objects', 'selection', 'text', 'save', 'export', 'tables', 'charts', 'notes', 'comments', 'metadata', 'structure']
+const PRESENTATION_CAPABILITY_NAMES = [...REQUIRED_PRESENTATION_CAPABILITY_NAMES, 'render_scene', 'render_slide_visual']
+function validPresentationCapabilitiesResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 5) return false
+  if (!['ready', 'capabilities', 'methods', 'operations', 'resource'].every((key) => Object.hasOwn(value, key))) return false
+  if (value.ready !== true || !validPresentationResource(value.resource)
+    || !Number.isInteger(value.resource.slideCount) || value.resource.slideCount < 0 || value.resource.slideCount > 10000) return false
+  if (!value.capabilities || typeof value.capabilities !== 'object' || Array.isArray(value.capabilities)) return false
+  const capabilityNames = Object.keys(value.capabilities)
+  if (capabilityNames.length < REQUIRED_PRESENTATION_CAPABILITY_NAMES.length || capabilityNames.length > PRESENTATION_CAPABILITY_NAMES.length
+    || !capabilityNames.every((name) => PRESENTATION_CAPABILITY_NAMES.includes(name) && typeof value.capabilities[name] === 'boolean')
+    || !REQUIRED_PRESENTATION_CAPABILITY_NAMES.every((name) => typeof value.capabilities[name] === 'boolean')) return false
+  if (!Array.isArray(value.methods) || value.methods.length > 256
+    || !value.methods.every((method) => typeof method === 'string' && method.length > 0 && method.length <= 128)) return false
+  if (!value.operations || typeof value.operations !== 'object' || Array.isArray(value.operations)) return false
+  const operationNames = Object.keys(value.operations)
+  if (operationNames.length !== PRESENTATION_WRITE_OPERATIONS.length
+    || !PRESENTATION_WRITE_OPERATIONS.every((operation) => {
+      const capability = value.operations[operation]
+      const allowedActions = PRESENTATION_WRITE_ACTIONS[operation]
+      return capability && typeof capability === 'object' && !Array.isArray(capability)
+        && Object.keys(capability).length === 1 && Array.isArray(capability.actions) && capability.actions.length <= 16
+        && capability.actions.every((action, index) => typeof action === 'string' && action.length > 0 && action.length <= 64
+          && allowedActions.includes(action) && capability.actions.indexOf(action) === index)
+    })) return false
+  return JSON.stringify(value).length <= 50000
+}
+function validBoundedPreviewValue(value, depth = 0) {
+  if (value === null || typeof value === 'boolean' || Number.isFinite(value)) return true
+  if (typeof value === 'string') return value.length <= 2000
+  if (depth >= 4 || !value || typeof value !== 'object') return false
+  if (Array.isArray(value)) return value.length <= 64 && value.every((item) => validBoundedPreviewValue(item, depth + 1))
+  const keys = Object.keys(value)
+  return keys.length <= 32 && keys.every((key) => key.length <= 128 && key !== 'precondition' && validBoundedPreviewValue(value[key], depth + 1))
+}
+function validPresentationRuntimeSummary(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 3
+    && Array.isArray(value.payloadKeys) && value.payloadKeys.length <= 32
+    && value.payloadKeys.every((key) => typeof key === 'string' && key.length <= 128 && key !== 'precondition')
+    && validBoundedPreviewValue(value.target) && validBoundedPreviewValue(value.effect)
+}
+function payloadPreviewShape(value) {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return `array(${value.length})`
+  if (typeof value === 'string') return `text(${value.length})`
+  if (value && typeof value === 'object') return `object(${Object.keys(value).length})`
+  return typeof value
+}
+function previewTarget(payload) {
+  const source = payload.target && typeof payload.target === 'object' && !Array.isArray(payload.target) ? payload.target : payload
+  const result = {}
+  for (const key of ['sheetName', 'range', 'destination', 'sourceName', 'name', 'slideIndex', 'objectIndex', 'textBoxIndex']) {
+    const value = source[key] ?? (source === payload ? undefined : payload[key])
+    if (typeof value === 'string' && value.length <= 512 || Number.isInteger(value)) result[key] = value
+  }
+  return Object.keys(result).length > 0 ? result : null
+}
+function previewSummary(operation, payload, runtimeSummary = undefined) {
+  const keys = Object.keys(payload).filter((key) => key !== 'precondition').slice(0, 32)
+  return {
+    operation,
+    target: previewTarget(payload),
+    requested: { keys, fieldCount: Object.keys(payload).length, shapes: Object.fromEntries(keys.map((key) => [key, payloadPreviewShape(payload[key])])) },
+    ...(runtimeSummary === undefined ? {} : { runtime: runtimeSummary }),
+  }
+}
+function boundedMatrixPreview(value, maxRows = 8, maxColumns = 8) {
+  if (!Array.isArray(value)) return undefined
+  const rows = value.length
+  const columns = value.reduce((maximum, row) => Math.max(maximum, Array.isArray(row) ? row.length : 1), 0)
+  const cells = value.slice(0, maxRows).map((row) => (Array.isArray(row) ? row : [row]).slice(0, maxColumns).map((cell) => {
+    if (typeof cell === 'string') return cell.slice(0, 240)
+    if (cell === null || typeof cell === 'boolean' || Number.isFinite(cell)) return cell
+    return String(cell).slice(0, 240)
+  }))
+  return { rows, columns, cellCount: rows * columns, cells, truncated: rows > maxRows || columns > maxColumns }
+}
+function spreadsheetConfirmation(operation, payload, runtimeSummary = undefined) {
+  // This is intentionally a payload projection rather than a generic list of
+  // keys/shapes.  The value shown to a person at approval time must identify
+  // the exact worksheet object/range that the frozen grant will mutate.
+  const confirmation = { target: previewTarget(payload) }
+  if (['set_print_settings', 'refresh_pivot_tables', 'undo', 'redo', 'recalculate'].includes(operation)) {
+    confirmation.target = { scope: 'active_workbook' }
+  }
+  const copy = (keys, into = 'target') => {
+    const value = {}
+    for (const key of keys) if (payload[key] !== undefined) value[key] = boundedSpreadsheetPreview(payload[key])
+    if (Object.keys(value).length > 0) confirmation[into] = { ...(confirmation[into] ?? {}), ...value }
+  }
+  copy(['sheetName', 'range', 'sourceRange', 'destination', 'destinationRange', 'headerRange'])
+  copy(['name', 'newName', 'sourceName', 'targetName'], 'names')
+  copy(['chartId', 'chartIndex', 'chartName', 'chartType', 'type', 'title', 'source', 'sourceRange', 'left', 'top', 'width', 'height'], 'chart')
+  copy(['pivotTableId', 'pivotIndex', 'pivotName', 'fieldName', 'axis', 'orientation', 'function', 'summaryFunction', 'calculation', 'baseField', 'baseItem', 'source', 'destination'], 'pivot')
+  copy(['field', 'criteria', 'values', 'filterOn', 'operator'], 'filter')
+  copy(['zoom', 'freeze', 'target'], 'view')
+  copy(['count', 'shift', 'position', 'index', 'beforeIndex', 'afterIndex'], 'structure')
+  copy(['header', 'border', 'numberFormat', 'formatCode', 'fillColor', 'fontColor', 'fontSize', 'bold', 'italic', 'horizontalAlignment', 'verticalAlignment'], 'format')
+  copy(['scope', 'fileName'], 'export')
+  const values = boundedMatrixPreview(payload.values)
+  const formulas = boundedMatrixPreview(payload.formulas)
+  if (values !== undefined) confirmation.values = values
+  if (formulas !== undefined) confirmation.formulas = formulas
+  if (operation === 'batch_write' && Array.isArray(payload.cells)) {
+    const cells = payload.cells.slice(0, 24).map((cell) => {
+      const item = cell && typeof cell === 'object' && !Array.isArray(cell) ? cell : {}
+      const address = typeof item.range === 'string' ? item.range : typeof item.address === 'string' ? item.address : null
+      return {
+        address,
+        ...(boundedMatrixPreview(item.values) === undefined ? {} : { values: boundedMatrixPreview(item.values) }),
+        ...(boundedMatrixPreview(item.formulas) === undefined ? {} : { formulas: boundedMatrixPreview(item.formulas) }),
+        ...(typeof item.value === 'string' || Number.isFinite(item.value) || typeof item.value === 'boolean' || item.value === null ? { value: boundedSpreadsheetPreview(item.value) } : {}),
+      }
+    })
+    confirmation.batch = { cellCount: payload.cells.length, cells, truncated: payload.cells.length > cells.length }
+    confirmation.target = { batchWrite: true, cellCount: payload.cells.length }
+  }
+  const textFields = ['what', 'replacement', 'delimiter', 'text', 'url', 'refersTo', 'sourceRange', 'destination', 'newName', 'sourceName', 'targetName', 'name', 'chartType', 'fileName']
+  const text = {}
+  for (const key of textFields) {
+    if (typeof payload[key] === 'string') text[key] = payload[key].slice(0, 240)
+  }
+  if (Object.keys(text).length > 0) confirmation.details = text
+  const booleans = {}
+  for (const key of ['enabled', 'visible', 'hidden', 'freeze', 'grouped', 'hasHeader', 'isNewSheet']) if (typeof payload[key] === 'boolean') booleans[key] = payload[key]
+  if (Object.keys(booleans).length > 0) confirmation.flags = booleans
+  const numbers = {}
+  for (const key of ['index', 'position', 'value', 'width', 'height', 'left', 'top', 'count']) if (Number.isFinite(payload[key])) numbers[key] = payload[key]
+  if (Object.keys(numbers).length > 0) confirmation.quantities = numbers
+  for (const key of ['columns', 'criteria', 'fields', 'items']) {
+    if (Array.isArray(payload[key])) confirmation[key] = { count: payload[key].length, preview: payload[key].slice(0, 12) }
+  }
+  if (runtimeSummary !== undefined) confirmation.runtime = boundedSpreadsheetPreview(runtimeSummary, 2000)
+  return confirmation
+}
+function boundedSpreadsheetPreview(value, maxText = 240, depth = 0) {
+  if (value === null || typeof value === 'boolean' || Number.isFinite(value)) return value
+  if (typeof value === 'string') return value.slice(0, maxText)
+  if (depth >= 3 || !value || typeof value !== 'object') return String(value).slice(0, maxText)
+  if (Array.isArray(value)) return value.slice(0, 12).map((item) => boundedSpreadsheetPreview(item, maxText, depth + 1))
+  return Object.fromEntries(Object.entries(value).slice(0, 12).map(([key, item]) => [key.slice(0, 128), boundedSpreadsheetPreview(item, maxText, depth + 1)]))
+}
+const SPREADSHEET_TARGET_REQUIREMENTS = Object.freeze({
+  set_values: [['range'], ['values']], set_formula: [['range'], ['formulas']], batch_write: [['cells']],
+  copy_range: [['sourceRange'], ['destinationRange']], paste_special: [['sourceRange'], ['destinationRange']],
+  auto_fill: [['range'], ['destination']], move_range: [['range'], ['destination']],
+  sheet_add: [['name']], sheet_rename: [['sheetName'], ['newName']], sheet_delete: [['sheetName']],
+  copy_worksheet: [['sourceName', 'name']], move_worksheet: [['sheetName', 'sourceName'], ['index']],
+  set_worksheet_visibility: [['sheetName'], ['visible']], activate_worksheet: [['sheetName']],
+  create_defined_name: [['name'], ['refersTo']], delete_defined_name: [['name']],
+  create_chart: [['range'], ['chartType']], update_chart: [['chartId', 'chartIndex', 'chartName', 'name']],
+  set_chart_data_source: [['chartId', 'chartIndex', 'chartName', 'name'], ['sourceRange']],
+  resize_chart: [['chartId', 'chartIndex', 'chartName', 'name'], ['width'], ['height']], delete_chart: [['chartId', 'chartIndex', 'chartName', 'name']],
+  create_pivot_table: [['range'], ['destination']], refresh_pivot_table: [['pivotTableId', 'pivotIndex', 'pivotName', 'name']],
+  delete_pivot_table: [['pivotTableId', 'pivotIndex', 'pivotName', 'name']],
+  add_pivot_field: [['pivotTableId', 'pivotIndex', 'pivotName', 'name'], ['fieldName'], ['orientation', 'axis']],
+  remove_pivot_field: [['pivotTableId', 'pivotIndex', 'pivotName', 'name'], ['fieldName']],
+  sort_pivot_field: [['pivotTableId', 'pivotIndex', 'pivotName', 'name'], ['fieldName']],
+  set_pivot_subtotals: [['pivotTableId', 'pivotIndex', 'pivotName', 'name'], ['fieldName']],
+  set_pivot_value_function: [['pivotTableId', 'pivotIndex', 'pivotName', 'name'], ['fieldName'], ['summaryFunction', 'function']],
+  set_pivot_show_values_as: [['pivotTableId', 'pivotIndex', 'pivotName', 'name'], ['fieldName'], ['calculation']],
+  apply_filter: [['range'], ['field'], ['criteria', 'values']], set_auto_filter: [['range']], clear_filters: [['range']],
+  set_zoom: [['zoom']], set_freeze_panes: [['freeze']], set_outline_group: [['range'], ['axis'], ['grouped']],
+  export_pdf: [['scope']], export_range_image: [['range']], export_worksheet_image: [['sheetName']],
+  // These operations deliberately target the current workbook/view rather
+  // than a range.  An empty requirement list means the preview remains valid
+  // and the confirmation explicitly describes that workbook-wide target.
+  set_print_settings: [], refresh_pivot_tables: [], undo: [], redo: [], recalculate: [],
+})
+function spreadsheetPreviewComplete(operation, payload) {
+  const groups = SPREADSHEET_TARGET_REQUIREMENTS[operation] ?? [['range']]
+  return groups.every((group) => group.some((key) => payload[key] !== undefined && payload[key] !== null && payload[key] !== ''))
+}
+function spreadsheetPreviewSummary(operation, payload, runtimeSummary = undefined) {
+  return { ...previewSummary(operation, payload, runtimeSummary), confirmation: spreadsheetConfirmation(operation, payload, runtimeSummary) }
+}
+function previewPosition(value) {
+  const position = {}
+  for (const key of ['left', 'top', 'width', 'height']) if (Number.isFinite(value[key])) position[key] = value[key]
+  return position
+}
+function boundedTextPreview(value, maxLength = 240) {
+  if (typeof value !== 'string') return {}
+  return { text: value.slice(0, maxLength), textLength: value.length, textTruncated: value.length > maxLength }
+}
+function boundedValuePreview(value) {
+  if (value === undefined) return { omitted: true }
+  if (typeof value === 'string') return boundedTextPreview(value)
+  if (value === null || typeof value === 'boolean' || Number.isFinite(value)) return { value }
+  try {
+    const serialized = JSON.stringify(value)
+    return serialized.length <= 240 ? { value } : { json: serialized.slice(0, 240), jsonLength: serialized.length, jsonTruncated: true }
+  } catch { return { value: String(value).slice(0, 240), valueTruncated: true } }
+}
+function presentationChartTypePreview(value) {
+  if (Number.isFinite(value)) return value
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  if (/^[+-]?\d+$/.test(normalized)) {
+    const number = Number(normalized)
+    return Number.isSafeInteger(number) ? number : undefined
+  }
+  return normalized === '' ? undefined : normalized.slice(0, 128)
+}
+function presentationSlideTarget(payload, fields = []) {
+  const target = {}
+  for (const field of ['slideIndex', ...fields]) if (Number.isInteger(payload[field])) target[field] = payload[field]
+  return target
+}
+function presentationObjectPreview(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const result = previewPosition(value)
+  if (Number.isFinite(value.rotation)) result.rotation = value.rotation
+  return Object.keys(result).length === 0 ? undefined : result
+}
+function presentationObservedTarget(precondition) {
+  if (!precondition || typeof precondition !== 'object' || Array.isArray(precondition)) return undefined
+  const observed = {}
+  if (Number.isInteger(precondition.currentSlide)) observed.currentSlide = precondition.currentSlide
+  if (validBoundedPreviewValue(precondition.slide)) observed.slide = precondition.slide
+  if (validBoundedPreviewValue(precondition.target)) observed.object = precondition.target
+  if (validBoundedPreviewValue(precondition.selection?.selectedShape)) observed.selectedObject = precondition.selection.selectedShape
+  return Object.keys(observed).length === 0 ? undefined : observed
+}
+function withPresentationRuntime(confirmation, runtimeSummary, observed = undefined) {
+  return { ...confirmation, ...(runtimeSummary === undefined ? {} : { runtime: runtimeSummary }), ...(observed === undefined ? {} : { observed }) }
+}
+function presentationConfirmation(operation, payload, runtimeSummary = undefined, observed = undefined) {
+  const action = typeof payload.action === 'string' ? payload.action.slice(0, 64) : null
+  if (operation === 'manage_slides' && action === 'add') {
+    return { action, insertion: Number.isFinite(payload.index) ? { index: payload.index } : { append: true } }
+  }
+  if (operation === 'manage_slides') return withPresentationRuntime({ action, target: presentationSlideTarget(payload) }, runtimeSummary, observed)
+  if (operation === 'edit_selection') {
+    const edit = payload.edit && typeof payload.edit === 'object' && !Array.isArray(payload.edit) ? payload.edit : payload
+    const change = presentationObjectPreview(edit) ?? {}
+    if (typeof edit.replaceText === 'string') change.replaceText = boundedTextPreview(edit.replaceText)
+    return withPresentationRuntime({ action, target: presentationSlideTarget(payload), edit: change }, runtimeSummary, observed)
+  }
+  if (operation === 'manage_objects') {
+    return withPresentationRuntime({ action, target: presentationSlideTarget(payload, ['objectIndex']), ...(presentationObjectPreview(payload.object) === undefined ? {} : { object: presentationObjectPreview(payload.object) }) }, runtimeSummary, observed)
+  }
+  if (operation === 'manage_tables') {
+    return {
+      action,
+      table: {
+        slideIndex: Number.isInteger(payload.slideIndex) ? payload.slideIndex : null,
+        rows: Number.isInteger(payload.rows) ? payload.rows : null,
+        columns: Number.isInteger(payload.columns) ? payload.columns : null,
+        position: previewPosition(payload),
+      },
+    }
+  }
+  if (operation === 'manage_charts') {
+    return {
+      action,
+      chart: {
+        slideIndex: Number.isInteger(payload.slideIndex) ? payload.slideIndex : null,
+        ...(presentationChartTypePreview(payload.chartType) === undefined ? {} : { chartType: presentationChartTypePreview(payload.chartType) }),
+        position: previewPosition(payload),
+        ...(Number.isFinite(payload.chartStyle) ? { chartStyle: payload.chartStyle } : {}),
+      },
+    }
+  }
+  if (operation === 'manage_notes') return withPresentationRuntime({ action, target: presentationSlideTarget(payload), text: boundedTextPreview(payload.text) }, runtimeSummary, observed)
+  if (operation === 'manage_comments') {
+    return withPresentationRuntime({ action, target: { ...presentationSlideTarget(payload), ...(typeof payload.slideId === 'string' || Number.isFinite(payload.slideId) ? { slideId: payload.slideId } : {}) }, text: boundedTextPreview(payload.text), ...((typeof payload.replyer === 'string' || Number.isSafeInteger(payload.replyer)) ? { replyer: typeof payload.replyer === 'string' ? payload.replyer.slice(0, 240) : payload.replyer } : {}) }, runtimeSummary, observed)
+  }
+  if (operation === 'manage_metadata') return { action, metadata: { ...(typeof payload.name === 'string' ? { name: payload.name.slice(0, 240) } : {}), value: boundedValuePreview(payload.value) } }
+  if (operation === 'manage_structure') {
+    const move = action === 'move_slide'
+      ? { fromIndex: Number.isInteger(payload.slideIndex) ? payload.slideIndex : null, toIndex: Number.isInteger(payload.toIndex) ? payload.toIndex : null }
+      : { sectionIndex: Number.isInteger(payload.sectionIndex) ? payload.sectionIndex : null, toPos: Number.isInteger(payload.toPos) ? payload.toPos : null }
+    return withPresentationRuntime({ action, move }, runtimeSummary, observed)
+  }
+  if (operation === 'replace_text_box') return withPresentationRuntime({ action, target: presentationSlideTarget(payload, ['textBoxIndex']), text: boundedTextPreview(payload.text) }, runtimeSummary, observed)
+  if (operation === 'save') return { action }
+  if (operation === 'render_slide_visual') return withPresentationRuntime({ action, target: presentationSlideTarget(payload), visual: runtimeSummary?.effect?.visual ?? null }, runtimeSummary, observed)
+  if (operation === 'render_scene') {
+    const source = Array.isArray(payload.elements) ? payload.elements : []
+    return {
+      action,
+      target: presentationSlideTarget(payload),
+      elementCount: source.length,
+      elements: source.slice(0, 50).map((candidate, index) => {
+        const element = candidate && typeof candidate === 'object' && !Array.isArray(candidate) ? candidate : {}
+        const type = typeof element.type === 'string' ? element.type.slice(0, 32) : 'unknown'
+        const fileName = typeof element.fileName === 'string' ? element.fileName.split(/[\\/]/).at(-1).slice(0, 128) : undefined
+        return {
+          index, type, position: previewPosition(element),
+          ...boundedTextPreview(element.text),
+          ...(Number.isInteger(element.rows) ? { rows: element.rows } : {}),
+          ...(Number.isInteger(element.columns) ? { columns: element.columns } : {}),
+          ...(presentationChartTypePreview(element.chartType) === undefined ? {} : { chartType: presentationChartTypePreview(element.chartType) }),
+          ...(fileName === undefined ? {} : { fileName }),
+        }
+      }),
+    }
+  }
+  return { action }
+}
+function presentationPreviewSummary(operation, payload, runtimeSummary, precondition = undefined) {
+  const summary = previewSummary(operation, payload, runtimeSummary)
+  return { ...summary, confirmation: presentationConfirmation(operation, payload, runtimeSummary, presentationObservedTarget(precondition)) }
+}
+function validPresentationInspectResult(value, request) {
+  return validPresentationReadResult(value) && Number.isInteger(value.resource.slideCount) && value.resource.slideCount >= 0 && value.resource.slideCount <= 10000
+    && value.operation === request.operation && validPresentationRuntimeSummary(value.summary)
+    && value.precondition && typeof value.precondition === 'object' && !Array.isArray(value.precondition)
+    && JSON.stringify(value.precondition).length <= 100000
+}
+function validPresentationWriteResult(value, request) {
+  return value && typeof value === 'object' && !Array.isArray(value) && value.status === 'verified_write'
+    // A verified mutation may legitimately change the version fingerprint. It
+    // must still read back from the same immutable presentation identity.
+    && value.operation === request.operation && samePresentationDocument(value.resource, request.resource)
+    && value.observed && typeof value.observed === 'object' && !Array.isArray(value.observed)
+    && value.observed.verified === true && validPresentationContextResult(value.observed)
+    && samePresentationTarget(value.observed.resource, value.resource)
+}
+function nonNegativePresentationIndex(value) { return Number.isInteger(value) && value >= 0 && value <= 9999 }
+function validPresentationRect(value) { return value && typeof value === 'object' && !Array.isArray(value) && ['left', 'top', 'width', 'height'].every((key) => Number.isFinite(value[key])) }
+function validPresentationChartType(value) {
+  const values = new Set(Object.values(PRESENTATION_CHART_TYPES))
+  if (Number.isFinite(value)) return values.has(value)
+  if (typeof value !== 'string' || value.length > 128) return false
+  const normalized = value.trim()
+  if (Object.hasOwn(PRESENTATION_CHART_TYPES, normalized)) return true
+  return /^[+-]?\d+$/.test(normalized) && values.has(Number(normalized))
+}
+function validPresentationSceneElement(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !validPresentationRect(value)) return false
+  const exactKeys = (keys) => Object.keys(value).every((key) => keys.includes(key))
+  const rect = ['type', 'left', 'top', 'width', 'height']
+  if (value.type === 'text') return exactKeys([...rect, 'text']) && typeof value.text === 'string'
+  if (value.type === 'image') return exactKeys([...rect, 'fileName']) && typeof value.fileName === 'string' && value.fileName.length > 0 && value.fileName.length <= 2048
+  if (value.type === 'table') return exactKeys([...rect, 'rows', 'columns']) && Number.isInteger(value.rows) && value.rows > 0 && Number.isInteger(value.columns) && value.columns > 0
+  return value.type === 'chart' && exactKeys([...rect, 'chartType']) && validPresentationChartType(value.chartType)
+}
+function validPresentationSlideVisual(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).every((key) => ['action', 'slideIndex', 'svg', 'left', 'top', 'width', 'height'].includes(key))
+    && value.action === 'replace_visual' && nonNegativePresentationIndex(value.slideIndex)
+    && typeof value.svg === 'string' && value.svg.length > 0 && value.svg.length <= 100000
+    && validPresentationRect(value)
+}
+function validPresentationPreviewPayload(operation, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !PRESENTATION_WRITE_OPERATIONS.includes(operation)) return false
+  const action = payload.action
+  if (!PRESENTATION_WRITE_ACTIONS[operation].includes(action)) return false
+  const allowed = PRESENTATION_WRITE_PAYLOAD_FIELDS[`${operation}:${action}`]
+  if (!allowed || !Object.keys(payload).every((key) => allowed.includes(key))) return false
+  const exactNestedFields = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).every((key) => fields.includes(key)) && Object.keys(value).some((key) => value[key] !== undefined)
+  if (operation === 'manage_slides') return action === 'add'
+    ? (payload.index === undefined || Number.isFinite(payload.index))
+    : nonNegativePresentationIndex(payload.slideIndex)
+  if (operation === 'render_scene') return action === 'replace_scene' && nonNegativePresentationIndex(payload.slideIndex)
+    && Array.isArray(payload.elements) && payload.elements.length >= 1 && payload.elements.length <= 50 && payload.elements.every(validPresentationSceneElement)
+  if (operation === 'render_slide_visual') return validPresentationSlideVisual(payload)
+  if (operation === 'edit_selection') return action === 'update' && nonNegativePresentationIndex(payload.slideIndex)
+    && exactNestedFields(payload.edit, PRESENTATION_EDIT_FIELDS)
+  if (operation === 'manage_objects') return nonNegativePresentationIndex(payload.slideIndex) && nonNegativePresentationIndex(payload.objectIndex)
+    && (action === 'delete' || (action === 'update' && payload.object && typeof payload.object === 'object' && !Array.isArray(payload.object)
+      && exactNestedFields(payload.object, PRESENTATION_OBJECT_FIELDS)))
+  if (operation === 'manage_tables') return action === 'insert' && nonNegativePresentationIndex(payload.slideIndex)
+    && Number.isInteger(payload.rows) && payload.rows > 0 && Number.isInteger(payload.columns) && payload.columns > 0 && validPresentationRect(payload) && payload.useScale === undefined
+  if (operation === 'manage_charts') return action === 'insert' && nonNegativePresentationIndex(payload.slideIndex)
+    && validPresentationChartType(payload.chartType) && validPresentationRect(payload) && payload.chartStyle === undefined
+  if (operation === 'manage_notes') return action === 'replace' && nonNegativePresentationIndex(payload.slideIndex) && typeof payload.text === 'string'
+  if (operation === 'manage_comments') return action === 'add' && nonNegativePresentationIndex(payload.slideIndex) && typeof payload.text === 'string'
+    && (payload.replyer === undefined || typeof payload.replyer === 'string' && payload.replyer.length > 0 && payload.replyer.length <= 256 || Number.isSafeInteger(payload.replyer) && payload.replyer >= 0)
+  if (operation === 'manage_metadata') return action === 'set_builtin' && typeof payload.name === 'string' && payload.name.length > 0 && payload.value !== undefined
+  if (operation === 'manage_structure') return action === 'move_slide'
+    ? nonNegativePresentationIndex(payload.slideIndex) && nonNegativePresentationIndex(payload.toIndex)
+    : nonNegativePresentationIndex(payload.sectionIndex) && nonNegativePresentationIndex(payload.toPos)
+  if (operation === 'replace_text_box') return action === 'replace' && nonNegativePresentationIndex(payload.slideIndex)
+    && nonNegativePresentationIndex(payload.textBoxIndex) && typeof payload.text === 'string'
+  return operation === 'save' && action === 'save'
+}
+function validFlatPresentationArguments(name, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  if (name === 'presentation_get_capabilities' || name === 'presentation_get_context' || name === 'presentation_get_selection') return keys.length === 0
+  if (name === 'presentation_get_text_boxes') return keys.every((key) => key === 'slideIndex') && (value.slideIndex === undefined || Number.isInteger(value.slideIndex) && value.slideIndex >= 0 && value.slideIndex <= 9999)
+  if (name === 'presentation_write_preview') return keys.length === 2 && PRESENTATION_WRITE_OPERATIONS.includes(value.operation)
+    && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000
+    && validPresentationPreviewPayload(value.operation, value.payload)
+  return name === 'presentation_write_commit' && keys.length === 1 && typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256
+}
+
+function validFlatSpreadsheetArguments(name, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  const boundedSheetName = value.sheetName === undefined || typeof value.sheetName === 'string' && value.sheetName.trim().length > 0 && value.sheetName.length <= 128
+  const boundedRange = typeof value.range === 'string' && value.range.trim().length > 0 && value.range.length <= 128
+  if (name === 'spreadsheet_get_context') return keys.length === 0
+  if (name === 'spreadsheet_read_range') return keys.every((key) => ['range', 'sheetName'].includes(key)) && boundedRange && boundedSheetName
+  if (name === 'spreadsheet_search') return keys.every((key) => ['query', 'range', 'sheetName', 'matchCase', 'matchEntireCell', 'searchBy', 'offset', 'limit'].includes(key))
+    && typeof value.query === 'string' && value.query.trim().length > 0 && value.query.length <= 500 && boundedRange && boundedSheetName
+    && (value.matchCase === undefined || typeof value.matchCase === 'boolean')
+    && (value.matchEntireCell === undefined || typeof value.matchEntireCell === 'boolean')
+    && (value.searchBy === undefined || ['values', 'text', 'formula'].includes(value.searchBy))
+    && (value.offset === undefined || Number.isInteger(value.offset) && value.offset >= 0 && value.offset <= 100000)
+    && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
+  if (name === 'spreadsheet_inspect') return validSpreadsheetInspectArguments(value)
+  if (name === 'spreadsheet_write_preview') return keys.length === 2 && typeof value.operation === 'string' && SPREADSHEET_WRITE_OPERATIONS.includes(value.operation)
+    && value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload) && JSON.stringify(value.payload).length <= 100000
+    && spreadsheetPreviewComplete(value.operation, value.payload)
+  return name === 'spreadsheet_write_commit' && keys.length === 1
+    && typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256
+}
+
+const SPREADSHEET_INSPECT_RUNTIME_ACTIONS = Object.freeze({
+  active_sheet: 'active_sheet', selection: 'selection', used_range: 'used_range',
+  workbook: 'workbook_info', sheets: 'sheets', view: 'view', protection: 'worksheet_protection',
+  preflight: 'write_preflight', filter: 'filter_state', filter_values: 'filter_values',
+  range_features: 'range_features', special_cells: 'special_cells', charts: 'list_charts',
+  chart: 'chart', pivots: 'list_pivots', pivot: 'pivot', pivot_field_items: 'pivot_field_items',
+  defined_names: 'defined_names', print_settings: 'print_settings', outline: 'outline',
+  dimensions: 'dimensions', capabilities: 'capabilities', debug_runtime: 'debug_runtime', probe_range_api: 'probe_range_api',
+})
+function boundedOptionalText(value, maxLength = 128) {
+  return value === undefined || typeof value === 'string' && value.trim().length > 0 && value.length <= maxLength
+}
+function validSpreadsheetInspectArguments(value) {
+  const keys = Object.keys(value)
+  if (!SPREADSHEET_INSPECT_ACTIONS.includes(value.action)
+    || !keys.every((key) => ['action', 'range', 'sheetName', 'index', 'fieldName', 'axis', 'cellType', 'offset', 'limit'].includes(key))
+    || !boundedOptionalText(value.range) || !boundedOptionalText(value.sheetName) || !boundedOptionalText(value.fieldName)
+    || (value.index !== undefined && (!Number.isInteger(value.index) || value.index < 1 || value.index > 10000))
+    || (value.axis !== undefined && !['row', 'column'].includes(value.axis))
+    || (value.cellType !== undefined && !['blanks', 'constants', 'formulas', 'lastCell', 'visible'].includes(value.cellType))
+    || (value.offset !== undefined && (!Number.isInteger(value.offset) || value.offset < 0 || value.offset > 100000))
+    || (value.limit !== undefined && (!Number.isInteger(value.limit) || value.limit < 1 || value.limit > 200))) return false
+  const rangeRequired = new Set(['filter', 'filter_values', 'range_features', 'special_cells', 'outline', 'dimensions', 'capabilities', 'probe_range_api'])
+  const indexRequired = new Set(['chart', 'pivot', 'pivot_field_items'])
+  if (rangeRequired.has(value.action) && value.range === undefined) return false
+  if (indexRequired.has(value.action) && value.index === undefined) return false
+  if (['outline', 'dimensions'].includes(value.action) && value.axis === undefined) return false
+  if (value.action === 'special_cells' && value.cellType === undefined) return false
+  if (value.action === 'pivot_field_items' && value.fieldName === undefined) return false
+  return true
 }
 
 function lightDocumentArgumentsHint(args) {
@@ -701,10 +1242,24 @@ function teamDocInspectFailureText(result) {
   return `${result.error}; stage=${diagnostic.stage}; httpStatus=${diagnostic.httpStatus}; errorCode=${diagnostic.errorCode ?? 'null'}${attemptsText}`
 }
 
+function validOfficeFailureDetails(value, depth = 0) {
+  if (value === null || typeof value === 'boolean' || Number.isFinite(value)) return true
+  if (typeof value === 'string') return value.length <= 2_000
+  // Keep this exactly aligned with the Extension contract.  A PPT
+  // readback_mismatch contains details.observed.objects at five levels.
+  if (depth >= 5 || !value || typeof value !== 'object') return false
+  if (Array.isArray(value)) return value.length <= 30 && value.every((item) => validOfficeFailureDetails(item, depth + 1))
+  const entries = Object.entries(value)
+  return entries.length <= 30 && entries.every(([key, child]) => key.length <= 128 && validOfficeFailureDetails(child, depth + 1))
+}
+
 function validOfficeReadFailure(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 2
-    && ['unsupported', 'preview', 'readonly', 'invalid_range', 'navigation', 'iframe_replaced', 'timeout', 'cancelled', 'fingerprint_mismatch', 'readback_mismatch', 'runtime_error'].includes(value.code)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  return keys.every((key) => ['code', 'message', 'details'].includes(key)) && keys.includes('code') && keys.includes('message')
+    && ['unsupported', 'preview', 'readonly', 'invalid_range', 'invalid_request', 'write_rejected', 'write_incomplete', 'navigation', 'iframe_replaced', 'timeout', 'cancelled', 'precondition_required', 'fingerprint_mismatch', 'selection_changed', 'context_mismatch', 'readback_mismatch', 'runtime_error'].includes(value.code)
     && typeof value.message === 'string' && value.message.length > 0
+    && (value.details === undefined || value.details && typeof value.details === 'object' && !Array.isArray(value.details) && validOfficeFailureDetails(value.details))
 }
 
 function isPeerPreMutationFingerprintMismatch(error) {
@@ -755,6 +1310,10 @@ export class BrowserConnector {
     this.teamKnowledgeBatchChallenges = new Map()
     this.teamKnowledgeBatchLocks = new Map()
     this.officeDocumentChallenges = new Map()
+    this.spreadsheetChallenges = new Map()
+    this.spreadsheetWriteLocks = new Map()
+    this.presentationChallenges = new Map()
+    this.presentationWriteLocks = new Map()
     this.officeDocumentWrites = new Map()
     this.uncertainSelectionWrite = undefined
     this.officeDocumentWriteStore = options.officeDocumentWriteStore ?? new OfficeDocumentWriteRecordStore()
@@ -798,6 +1357,10 @@ export class BrowserConnector {
     }
     this.pending.clear()
     this.officeDocumentChallenges.clear()
+    this.spreadsheetChallenges.clear()
+    this.spreadsheetWriteLocks.clear()
+    this.presentationChallenges.clear()
+    this.presentationWriteLocks.clear()
     this.officeDocumentWrites.clear()
     this.uncertainSelectionWrite = undefined
     this.teamKnowledgeBatchChallenges.clear()
@@ -817,6 +1380,10 @@ export class BrowserConnector {
     if (!registered.ok) return false
     if (registered.runChanged) {
       this.officeDocumentChallenges.clear()
+      this.spreadsheetChallenges.clear()
+      this.spreadsheetWriteLocks.clear()
+      this.presentationChallenges.clear()
+      this.presentationWriteLocks.clear()
       this.officeDocumentWrites.clear()
       this.teamKnowledgeBatchChallenges.clear()
       this.uncertainSelectionWrite = undefined
@@ -839,10 +1406,12 @@ export class BrowserConnector {
     const isOfficeContextRequest = pending.request.tool === 'list_work_tabs'
     const isReadWorkTabRequest = pending.request.tool === 'read_work_tab'
     const isOfficeDocumentRequest = pending.request.tool === 'light_document'
+    const isSpreadsheetRequest = pending.request.tool === 'spreadsheet'
+    const isPresentationRequest = pending.request.tool === 'presentation'
     const isTeamKnowledgeBatchRequest = pending.request.tool === 'team_knowledge_batch'
     const isKnowledgeRequest = pending.request.tool === 'knowledge_search' || pending.request.tool === 'code_search'
     const isSelectedSourceScopeRequest = pending.request.tool === 'selected_source_scope'
-    const isBrowserBoundRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeDocumentRequest || isTeamKnowledgeBatchRequest
+    const isBrowserBoundRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest || isTeamKnowledgeBatchRequest
     const sameOpenIdentity = response.runId === pending.request.runId && response.generation === pending.request.generation
     const currentBinding = this.runTargets.get(pending.request.runId)
     const currentTarget = currentBinding.browserTarget
@@ -857,7 +1426,7 @@ export class BrowserConnector {
     clearTimeout(pending.timeout)
     this.pending.delete(response.requestId)
     if (!Object.hasOwn(response, 'result')) {
-      if ((isReadWorkTabRequest || isOfficeDocumentRequest) && validOfficeReadFailure(response.error)) {
+      if ((isReadWorkTabRequest || isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest) && validOfficeReadFailure(response.error)) {
         pending.reject(new Error(JSON.stringify(response.error)))
       } else if (typeof response.error === 'string' && response.error.length > 0) {
         pending.reject(new Error(response.error))
@@ -893,10 +1462,23 @@ export class BrowserConnector {
       pending.reject(new Error('Extension peer returned an invalid light-document result'))
       return true
     }
+    if (isSpreadsheetRequest && ((pending.request.action === 'write' && !validSpreadsheetWriteResult(response.result, pending.request))
+      || (pending.request.action === 'inspect_write' && !validSpreadsheetInspectResult(response.result))
+      || (!['write', 'inspect_write'].includes(pending.request.action) && !validSpreadsheetReadResult(response.result)))) {
+      pending.reject(new Error('Extension peer returned an invalid spreadsheet result'))
+      return true
+    }
+    if (isPresentationRequest && ((pending.request.action === 'write' && !validPresentationWriteResult(response.result, pending.request))
+      || (pending.request.action === 'inspect_write' && !validPresentationInspectResult(response.result, pending.request))
+      || (pending.request.action === 'inspect_capabilities' && !validPresentationCapabilitiesResult(response.result))
+      || (!['write', 'inspect_write', 'inspect_capabilities'].includes(pending.request.action) && !validPresentationReadResult(response.result)))) {
+      pending.reject(new Error('Extension peer returned an invalid presentation result'))
+      return true
+    }
     pending.resolve(isReadWorkTabRequest ? {
       browserTarget: response.browserTarget,
       result: response.result,
-    } : isOfficeDocumentRequest ? {
+    } : isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest ? {
       browserTarget: response.browserTarget,
       result: response.result,
     } : {
@@ -970,6 +1552,14 @@ export class BrowserConnector {
     }
     if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit'].includes(message.params?.name)) {
       await this.#flatLightDocument(message, response)
+      return
+    }
+    if (['spreadsheet_get_context', 'spreadsheet_read_range', 'spreadsheet_search', 'spreadsheet_inspect', 'spreadsheet_write_preview', 'spreadsheet_write_commit'].includes(message.params?.name)) {
+      await this.#flatSpreadsheet(message, response)
+      return
+    }
+    if (['presentation_get_capabilities', 'presentation_get_context', 'presentation_get_selection', 'presentation_get_text_boxes', 'presentation_write_preview', 'presentation_write_commit'].includes(message.params?.name)) {
+      await this.#flatPresentation(message, response)
       return
     }
     const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create' })[message.params?.name]
@@ -1173,6 +1763,230 @@ export class BrowserConnector {
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Work-tab read failed')
     }
+  }
+
+  async #flatSpreadsheet(message, response) {
+    const name = message.params?.name
+    const args = message.params?.arguments ?? {}
+    if (!validFlatSpreadsheetArguments(name, args)) {
+      this.#reply(response, errorResponse(message.id, -32602, `${name} received invalid arguments; use its flat schema exactly.`))
+      return
+    }
+    if (name === 'spreadsheet_get_context') {
+      await this.#spreadsheet({ ...message, params: { ...message.params, arguments: { action: 'context' } } }, response)
+      return
+    }
+    if (name === 'spreadsheet_read_range') {
+      await this.#spreadsheet({ ...message, params: { ...message.params, arguments: { action: 'range', ...args } } }, response)
+      return
+    }
+    if (name === 'spreadsheet_search') {
+      await this.#spreadsheet({ ...message, params: { ...message.params, arguments: { action: 'search', ...args } } }, response)
+      return
+    }
+    if (name === 'spreadsheet_inspect') {
+      const { action, ...inspect } = args
+      await this.#spreadsheet({ ...message, params: { ...message.params, arguments: { action: SPREADSHEET_INSPECT_RUNTIME_ACTIONS[action], ...inspect } } }, response)
+      return
+    }
+    if (name === 'spreadsheet_write_preview') {
+      await this.#spreadsheet({ ...message, params: { ...message.params, arguments: { action: 'inspect_write', operation: args.operation, payload: args.payload } } }, response)
+      return
+    }
+    const grant = this.spreadsheetChallenges.get(args.challenge)
+    if (!grant || typeof grant.operation !== 'string' || !grant.payload || !grant.precondition) {
+      this.#toolError(response, message.id, 'Spreadsheet write challenge is missing, stale, or not issued by spreadsheet_write_preview.')
+      return
+    }
+    // Commit deliberately reconstructs its request from the approval grant.
+    // No operation, payload, target, resource, or precondition is model-controlled.
+    const fenceKey = canonicalJson([grant.browserTarget, grant.resource.fingerprint])
+    await this.#withSpreadsheetWriteFence(fenceKey, async () => {
+      await this.#spreadsheet({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: grant.operation, payload: grant.payload, resource: grant.resource, precondition: grant.precondition } } }, response)
+    })
+  }
+
+  async #withSpreadsheetWriteFence(key, work) {
+    const previous = this.spreadsheetWriteLocks.get(key) ?? Promise.resolve()
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const queued = previous.catch(() => undefined).then(() => gate)
+    this.spreadsheetWriteLocks.set(key, queued)
+    await previous.catch(() => undefined)
+    try { return await work() } finally {
+      release()
+      if (this.spreadsheetWriteLocks.get(key) === queued) this.spreadsheetWriteLocks.delete(key)
+    }
+  }
+
+  async #spreadsheet(message, response) {
+    const args = message.params?.arguments ?? {}
+    const currentBinding = this.runTargets.current()
+    const runId = currentBinding?.runId
+    const browserTarget = currentBinding?.browserTarget
+    if (!validBrowserTarget(browserTarget)) {
+      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
+      return
+    }
+    if (args.action === 'write') {
+      const grant = this.spreadsheetChallenges.get(args.challenge)
+      this.spreadsheetChallenges.delete(args.challenge)
+      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.browserTarget, browserTarget)) {
+        this.#toolError(response, message.id, 'Spreadsheet approval challenge is missing, stale, or already used.')
+        return
+      }
+      if (grant.operation !== args.operation || grant.payloadHash !== lightDocumentWriteHash(args.operation, args.payload)
+        || !sameSpreadsheetResource(grant.resource, args.resource) || canonicalJson(grant.precondition) !== canonicalJson(args.precondition)) {
+        this.#toolError(response, message.id, 'Spreadsheet approval does not match the inspected operation, payload, resource, or precondition.')
+        return
+      }
+      let checkpoint
+      try {
+        checkpoint = await this.officeDocumentWriteStore.create({
+          idempotencyIdentity: args.idempotencyIdentity, targetFingerprint: hash(canonicalJson(browserTarget)), resourceFingerprint: grant.resource.fingerprint,
+          operation: args.operation, payloadHash: grant.payloadHash,
+        })
+      } catch (error) {
+        this.#toolError(response, message.id, error instanceof Error ? error.message : 'Could not persist the spreadsheet write fence.')
+        return
+      }
+      if (!checkpoint.createdNew) {
+        this.#toolError(response, message.id, checkpoint.record.state === 'verified'
+          ? 'This spreadsheet write was already verified; reread the spreadsheet before continuing.'
+          : 'This spreadsheet write is uncertain after an interrupted write; automatic retry is forbidden. Reread and resolve manually.')
+        return
+      }
+      const correlation = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'spreadsheet', action: 'write', operation: args.operation, payload: args.payload, resource: grant.resource, precondition: grant.precondition }
+      try {
+        const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
+        if (!validSpreadsheetWriteResult(resolved.result, correlation)) throw new Error('Browser Connector produced an invalid verified spreadsheet write')
+        await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'verified')
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      } catch (error) {
+        if (isPeerPreMutationFingerprintMismatch(error)) {
+          try { await this.officeDocumentWriteStore.discardPending(args.idempotencyIdentity) } catch {}
+          this.#toolError(response, message.id, 'fingerprint_mismatch: The spreadsheet changed before any write was sent. Reread it, prepare a new preview, and request approval again.')
+          return
+        }
+        try { await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'uncertain') } catch {}
+        this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet write failed')
+      }
+      return
+    }
+
+    const action = args.action
+    const validReadAction = ['context', 'range', 'search', ...Object.values(SPREADSHEET_INSPECT_RUNTIME_ACTIONS)].includes(action)
+    if (!(validReadAction || action === 'inspect_write')) {
+      this.#toolError(response, message.id, 'Invalid spreadsheet operation.')
+      return
+    }
+    const correlation = {
+      type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'spreadsheet', action,
+      ...(args.range === undefined ? {} : { range: args.range }), ...(args.sheetName === undefined ? {} : { sheetName: args.sheetName }),
+      ...(args.query === undefined ? {} : { query: args.query.trim() }), ...(args.matchCase === undefined ? {} : { matchCase: args.matchCase }),
+      ...(args.matchEntireCell === undefined ? {} : { matchEntireCell: args.matchEntireCell }), ...(args.searchBy === undefined ? {} : { searchBy: args.searchBy }),
+      ...(args.offset === undefined ? {} : { offset: args.offset }), ...(args.limit === undefined ? {} : { limit: args.limit }),
+      ...(args.index === undefined ? {} : { index: args.index }), ...(args.fieldName === undefined ? {} : { fieldName: args.fieldName }),
+      ...(args.axis === undefined ? {} : { axis: args.axis }), ...(args.cellType === undefined ? {} : { cellType: args.cellType }),
+      ...(args.operation === undefined ? {} : { operation: args.operation }), ...(args.payload === undefined ? {} : { payload: args.payload }),
+    }
+    try {
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
+      if (action === 'inspect_write') {
+        if (!validSpreadsheetInspectResult(resolved.result)) throw new Error('Browser Connector produced an invalid spreadsheet write inspection')
+        const challenge = randomBytes(32).toString('base64url')
+        for (const [key, candidate] of this.spreadsheetChallenges) if (candidate.expiresAt < Date.now()) this.spreadsheetChallenges.delete(key)
+        if (this.spreadsheetChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.spreadsheetChallenges.delete(this.spreadsheetChallenges.keys().next().value)
+        const payloadHash = lightDocumentWriteHash(args.operation, args.payload)
+        // The runtime's operation precondition guards range/workbook state.
+        // Add the immutable Resource Identity fingerprint here so the
+        // Extension can prove it selected that exact WebEdit iframe before
+        // any challenge-only write is dispatched.
+        const precondition = { ...resolved.result.precondition, resourceFingerprint: resolved.result.resource.fingerprint }
+        this.spreadsheetChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payload: args.payload, payloadHash, precondition, idempotencyIdentity: `spreadsheet-write:${hash(challenge).slice(0, 48)}`, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action, resource: resolved.result.resource, operation: args.operation, summary: spreadsheetPreviewSummary(args.operation, args.payload, resolved.result.summary), challenge }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+        return
+      }
+      if (!validSpreadsheetReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid spreadsheet read')
+      const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) {
+      this.#toolError(response, message.id, error instanceof Error ? error.message : 'Spreadsheet operation failed')
+    }
+  }
+
+  async #flatPresentation(message, response) {
+    const name = message.params?.name; const args = message.params?.arguments ?? {}
+    if (!validFlatPresentationArguments(name, args)) {
+      this.#reply(response, errorResponse(message.id, -32602, `${name} received invalid arguments; use its flat schema exactly.`)); return
+    }
+    if (name === 'presentation_get_capabilities') return this.#presentation({ ...message, params: { ...message.params, arguments: { action: 'inspect_capabilities' } } }, response)
+    if (name === 'presentation_get_context') return this.#presentation({ ...message, params: { ...message.params, arguments: { action: 'get_context' } } }, response)
+    if (name === 'presentation_get_selection') return this.#presentation({ ...message, params: { ...message.params, arguments: { action: 'selection' } } }, response)
+    if (name === 'presentation_get_text_boxes') return this.#presentation({ ...message, params: { ...message.params, arguments: { action: 'get_text_boxes', ...args } } }, response)
+    if (name === 'presentation_write_preview') return this.#presentation({ ...message, params: { ...message.params, arguments: { action: 'inspect_write', operation: args.operation, payload: args.payload } } }, response)
+    const grant = this.presentationChallenges.get(args.challenge)
+    if (!grant) { this.#toolError(response, message.id, 'Presentation write challenge is missing, stale, or not issued by presentation_write_preview.'); return }
+    const fenceKey = canonicalJson([grant.browserTarget, grant.resource.fingerprint])
+    await this.#withPresentationWriteFence(fenceKey, async () => this.#presentation({ ...message, params: { ...message.params, arguments: { action: 'write', challenge: args.challenge, idempotencyIdentity: grant.idempotencyIdentity, operation: grant.operation, payload: grant.payload, resource: grant.resource, precondition: grant.precondition } } }, response))
+  }
+
+  async #withPresentationWriteFence(key, work) {
+    const previous = this.presentationWriteLocks.get(key) ?? Promise.resolve(); let release
+    const gate = new Promise((resolve) => { release = resolve }); const queued = previous.catch(() => undefined).then(() => gate)
+    this.presentationWriteLocks.set(key, queued); await previous.catch(() => undefined)
+    try { return await work() } finally { release(); if (this.presentationWriteLocks.get(key) === queued) this.presentationWriteLocks.delete(key) }
+  }
+
+  async #presentation(message, response) {
+    const args = message.params?.arguments ?? {}; const currentBinding = this.runTargets.current()
+    const runId = currentBinding?.runId; const browserTarget = currentBinding?.browserTarget
+    if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    if (args.action === 'write') {
+      const grant = this.presentationChallenges.get(args.challenge); this.presentationChallenges.delete(args.challenge)
+      if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.browserTarget, browserTarget)) { this.#toolError(response, message.id, 'Presentation approval challenge is missing, stale, or already used.'); return }
+      if (grant.operation !== args.operation || grant.payloadHash !== lightDocumentWriteHash(args.operation, args.payload) || !samePresentationTarget(grant.resource, args.resource) || canonicalJson(grant.precondition) !== canonicalJson(args.precondition)) { this.#toolError(response, message.id, 'Presentation approval does not match the inspected operation, payload, resource, or precondition.'); return }
+      let checkpoint
+      try { checkpoint = await this.officeDocumentWriteStore.create({ idempotencyIdentity: args.idempotencyIdentity, targetFingerprint: hash(canonicalJson(browserTarget)), resourceFingerprint: grant.resource.fingerprint, operation: args.operation, payloadHash: grant.payloadHash }) } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Could not persist the presentation write fence.'); return }
+      if (!checkpoint.createdNew) { this.#toolError(response, message.id, checkpoint.record.state === 'verified' ? 'This presentation write was already verified; reread the presentation before continuing.' : 'This presentation write is uncertain after an interrupted write; automatic retry is forbidden. Reread and resolve manually.'); return }
+      const correlation = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'presentation', action: 'write', operation: args.operation, payload: args.payload, resource: grant.resource, precondition: grant.precondition }
+      try {
+        const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
+        if (!validPresentationWriteResult(resolved.result, correlation)) throw new Error('Browser Connector produced an invalid verified presentation write')
+        await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'verified')
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      } catch (error) {
+        if (isPeerPreMutationFingerprintMismatch(error)) { try { await this.officeDocumentWriteStore.discardPending(args.idempotencyIdentity) } catch {}; this.#toolError(response, message.id, 'fingerprint_mismatch: The presentation changed before any write was sent. Reread it, prepare a new preview, and request approval again.'); return }
+        try { await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'uncertain') } catch {}
+        this.#toolError(response, message.id, error instanceof Error ? error.message : 'Presentation write failed')
+      }
+      return
+    }
+    const action = args.action
+    if (!['inspect_capabilities', 'get_context', 'selection', 'get_text_boxes', 'inspect_write'].includes(action)) { this.#toolError(response, message.id, 'Invalid presentation operation.'); return }
+    const correlation = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'presentation', action, ...(args.slideIndex === undefined ? {} : { slideIndex: args.slideIndex }), ...(args.operation === undefined ? {} : { operation: args.operation }), ...(args.payload === undefined ? {} : { payload: args.payload }) }
+    try {
+      const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
+      if (action === 'inspect_write' && !validPresentationInspectResult(resolved.result, correlation)) throw new Error('Browser Connector produced an invalid presentation write inspection')
+      if (action === 'inspect_capabilities' && !validPresentationCapabilitiesResult(resolved.result)) throw new Error('Browser Connector produced an invalid presentation capabilities result')
+      if (!['inspect_write', 'inspect_capabilities'].includes(action) && !validPresentationReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid presentation read')
+      if (['get_context', 'get_text_boxes'].includes(action) && !validPresentationContextResult(resolved.result)) {
+        throw new Error('Browser Connector produced a presentation result without a bounded context readback')
+      }
+      if (action === 'inspect_write') {
+        const challenge = randomBytes(32).toString('base64url'); const payloadHash = lightDocumentWriteHash(args.operation, args.payload)
+        for (const [key, candidate] of this.presentationChallenges) if (candidate.expiresAt < Date.now()) this.presentationChallenges.delete(key)
+        if (this.presentationChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.presentationChallenges.delete(this.presentationChallenges.keys().next().value)
+        this.presentationChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payload: args.payload, payloadHash, precondition: resolved.result.precondition, idempotencyIdentity: `presentation-write:${hash(challenge).slice(0, 48)}`, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, summary: presentationPreviewSummary(args.operation, args.payload, resolved.result.summary, resolved.result.precondition), challenge }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } }); return
+      }
+      const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Presentation operation failed') }
   }
 
   async #flatLightDocument(message, response) {

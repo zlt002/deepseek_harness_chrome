@@ -1,5 +1,6 @@
 import { defineConfig } from 'wxt'
 import { execFile } from 'node:child_process'
+import { copyFile, mkdir } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
@@ -32,12 +33,32 @@ export default defineConfig({
     },
     'vite:devServer:extendConfig'(config) {
       const root = resolve(config.root ?? extensionRoot)
+      const startupGuardSource = resolve(extensionRoot, 'public', 'prototype-startup-guard.js')
+      const startupGuardTarget = resolve(extensionRoot, '.output', 'chrome-mv3-dev', 'prototype-startup-guard.js')
       const watched = [
         resolve(root, 'entrypoints'),
         resolve(root, 'src'),
         resolve(root, '.wxt-public'),
+        startupGuardSource,
         resolve(root, 'wxt.config.ts'),
       ]
+      const syncStartupGuard = async (): Promise<void> => {
+        await mkdir(dirname(startupGuardTarget), { recursive: true })
+        await copyFile(startupGuardSource, startupGuardTarget)
+      }
+      config.plugins = [...(config.plugins ?? []), {
+        name: 'accrui-prototype-startup-guard-sync',
+        configureServer(server) {
+          server.watcher.add(startupGuardSource)
+          const syncChangedGuard = (path: string): void => {
+            if (resolve(path) !== startupGuardSource) return
+            void syncStartupGuard().catch(error => server.config.logger.error(`Failed to sync Prototype Studio startup guard: ${String(error)}`))
+          }
+          server.watcher.on('add', syncChangedGuard)
+          server.watcher.on('change', syncChangedGuard)
+          void syncStartupGuard().catch(error => server.config.logger.error(`Failed to sync Prototype Studio startup guard: ${String(error)}`))
+        },
+      }]
       config.optimizeDeps = {
         ...config.optimizeDeps,
         noDiscovery: true,
@@ -45,10 +66,20 @@ export default defineConfig({
           'react',
           'react-dom',
           'react-dom/client',
+          '@milkdown/crepe',
+          '@milkdown/kit',
+          '@milkdown/kit/core',
+          '@milkdown/kit/plugin/diff',
+          '@milkdown/kit/plugin/history',
+          '@milkdown/kit/plugin/streaming',
+          '@milkdown/kit/prose/state',
+          '@milkdown/kit/prose/view',
+          '@milkdown/kit/utils',
           'react-markdown',
           'rehype-sanitize',
           'remark-gfm',
           'mermaid',
+          'debug',
         ],
       }
       config.server ??= {}
@@ -98,6 +129,7 @@ export default defineConfig({
         'office-read-runtime.js',
         'office-light-document-runtime.js',
         'office-spreadsheet-runtime.js',
+        'office-presentation-runtime.js',
       ],
       matches: ['https://webedit.midea.com/*'],
     }],

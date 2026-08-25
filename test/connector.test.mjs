@@ -218,6 +218,37 @@ test('surfaces the probed WebEdit document identity so the model can route tools
     await connector.stop()
   }
 })
+test('publishes the exact probed WebEdit presentation identity for the roster', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/13' }
+  const identity = { kind: 'webedit_presentation', presentationName: '路线图.pptx', slideCount: 3, hasContent: null, webeditFrames: 1 }
+  const connector = new BrowserConnector({ requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+    type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget,
+    result: { status: 'browser_target_verified', pageIdentity: { title: '路线图', url: target.url }, documentIdentity: identity, primaryBrowserTarget: target, pages: [{ browserTarget: target, pageIdentity: { title: '路线图', url: target.url }, documentIdentity: identity, isPrimary: true }], unavailableBrowserTargets: [] },
+  })) })
+  connector.bindBrowserTarget('run-presentation-identity', target); const started = await connector.start()
+  try {
+    const called = await fetch(`${started.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${started.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_work_tabs', arguments: {} } }) })
+    const body = await called.json()
+    assert.deepEqual(body.result.structuredContent.officeContext.documentIdentity, identity)
+    assert.deepEqual(body.result.structuredContent.officeContext.pages[0].documentIdentity, identity)
+  } finally { await connector.stop() }
+})
+test('publishes an empty WebEdit presentation identity for the roster', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 14, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/14' }
+  const identity = { kind: 'webedit_presentation', presentationName: '空白演示.pptx', slideCount: 0, hasContent: false, webeditFrames: 1 }
+  const connector = new BrowserConnector({ requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+    type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget,
+    result: { status: 'browser_target_verified', pageIdentity: { title: '空白演示', url: target.url }, documentIdentity: identity, primaryBrowserTarget: target, pages: [{ browserTarget: target, pageIdentity: { title: '空白演示', url: target.url }, documentIdentity: identity, isPrimary: true }], unavailableBrowserTargets: [] },
+  })) })
+  connector.bindBrowserTarget('run-empty-presentation-identity', target); const started = await connector.start()
+  try {
+    const called = await fetch(`${started.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${started.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_work_tabs', arguments: {} } }) })
+    const body = await called.json()
+    assert.equal(body.result.isError, undefined)
+    assert.deepEqual(body.result.structuredContent.officeContext.documentIdentity, identity)
+    assert.deepEqual(body.result.structuredContent.officeContext.pages[0].documentIdentity, identity)
+  } finally { await connector.stop() }
+})
 test('still rejects a malformed document identity object', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/broken' }
   const connector = new BrowserConnector({
@@ -374,7 +405,7 @@ test('accepts the official MCP client at the public tools/list and tools/call se
   try {
     await client.connect(transport)
     const tools = await client.listTools()
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ['list_work_tabs', 'read_work_tab', 'light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit', 'team_knowledge_batch_preview', 'team_knowledge_batch_create', 'knowledge_search', 'code_search', 'selected_source_scope'])
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['list_work_tabs', 'read_work_tab', 'spreadsheet_get_context', 'spreadsheet_read_range', 'spreadsheet_search', 'spreadsheet_inspect', 'spreadsheet_write_preview', 'spreadsheet_write_commit', 'presentation_get_capabilities', 'presentation_get_context', 'presentation_get_selection', 'presentation_get_text_boxes', 'presentation_write_preview', 'presentation_write_commit', 'light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit', 'team_knowledge_batch_preview', 'team_knowledge_batch_create', 'knowledge_search', 'code_search', 'selected_source_scope'])
     const teamKnowledgeBatchPreview = tools.tools.find((tool) => tool.name === 'team_knowledge_batch_preview')
     assert.deepEqual(teamKnowledgeBatchPreview.inputSchema.required, ['batchId', 'items'])
     assert.equal(teamKnowledgeBatchPreview.inputSchema.oneOf, undefined)

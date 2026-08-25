@@ -41,6 +41,9 @@ export function apply(ctx: ClientContext): void {
     id: 'accrui-workspace-picker',
     order: 0,
     select: _owner => claudeImport,
+    children: {
+      'accrui.workspace-picker.directory': { kind: 'single', scope: 'root' },
+    },
   }, CompactWorkspacePicker))
   ctx.slots.inject('sidebar.workspaces.header.action', () => ctx.slots.register({
     name: 'sidebar.workspaces.header.action',
@@ -50,3 +53,7 @@ export function apply(ctx: ClientContext): void {
 }
 
 export { CompactWorkspacePicker } from './CompactWorkspacePicker.tsx'
+export { WORKSPACE_PICKER_DIRECTORY_SLOT, type WorkspacePickerDirectoryOwner } from './directory-slot.ts'
+export { selectWorkspaceDirectorySession } from './directory-selection.ts'
+export { workspacePickerMaxHeight } from './popover-geometry.ts'
+export { workspacePickerTabForKey } from './tab-navigation.ts'

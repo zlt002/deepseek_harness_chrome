@@ -6,7 +6,7 @@
 
 1. 使用请求中的 `project_id`。
 2. 首次保存省略 `expected_revision_id`；修改已有原型时传入请求中的当前 revision id。
-3. 传入完整 `design_spec`、完整 `document` 和 `change_summary`。
+3. 传入完整 `document` 和 `change_summary`，省略 `design_spec`；可信 Host 会自动绑定用户确认并锁定的规范。
 4. 调用 `save_product_prototype`。
 5. 只把 `status: verified_write` 当作保存完成。
 

@@ -195,6 +195,7 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.ok(payloadEntries.includes('runtime/native-server/harness-runtime.mjs'))
   assert.ok(payloadEntries.includes('runtime/native-server/harness-tracking.mjs'))
   assert.ok(payloadEntries.includes('runtime/dsh-plugin.bat'))
+  assert.ok(payloadEntries.includes('runtime/skills/product-prototype/SKILL.md'))
   assert.ok(payloadEntries.includes('runtime/skills/pmd-prd/SKILL.md'))
   assert.ok(payloadEntries.includes('runtime/skills/pptx/SKILL.md'))
   assert.ok(payloadEntries.includes('runtime/skills/xlsx/SKILL.md'))
@@ -214,6 +215,7 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   const packagedSkill = execFileSync('unzip', ['-p', payloadZip, 'runtime/skills/pmd-prd/SKILL.md'], { encoding: 'utf8' })
   assert.match(packagedSkill, /Harness Workspace 是唯一用户界面/)
   assert.doesNotMatch(packagedSkill, /pmd-workspace|clarification\.md/)
+  assert.match(execFileSync('unzip', ['-p', payloadZip, 'runtime/skills/product-prototype/SKILL.md'], { encoding: 'utf8' }), /name:\s*product-prototype/)
   for (const [entry, expectedName] of [
     ['runtime/skills/pptx/SKILL.md', 'name: pptx'],
     ['runtime/skills/xlsx/SKILL.md', 'name: xlsx'],

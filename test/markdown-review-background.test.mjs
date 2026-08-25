@@ -126,6 +126,9 @@ test('opens a capability-free review URL, proxies a bounded snapshot, and delive
     })
     await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(background.responses.find(message => message.requestId === 'commit-1').result.status, 'verified_write')
+    const reviewFetches = background.fetches.filter(({ url }) => new URL(url).pathname.startsWith('/api/workspace-review/'))
+    assert.equal(reviewFetches.length, 6)
+    assert.equal(reviewFetches.every(({ init }) => init.signal instanceof AbortSignal), true)
   } finally { background.cleanup() }
 })
 
@@ -145,4 +148,74 @@ test('forwards a bounded dirty visual selection with structure rather than fake 
     assert.deepEqual([feedback.editorRevision, feedback.from, feedback.to], [4, 8, 31])
     assert.equal('startUtf16' in feedback, false)
   } finally { background.cleanup() }
+})
+
+test('bounds every Host request and reports an aborted commit as uncertain rather than a Verified Write', async () => {
+  const background = await loadBackground()
+  const originalFetch = globalThis.fetch
+  const originalSetTimeout = globalThis.setTimeout
+  const abortedPaths = []
+  let snapshotCalls = 0
+  const snapshot = {
+    v: 1, type: 'markdown-review-snapshot', reviewId: 'review-1',
+    resource: { resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1' },
+    content: '# Review me', truncated: false, readOnly: true,
+  }
+  const waitForResponse = async requestId => {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const response = background.responses.find(message => message.requestId === requestId)
+      if (response !== undefined) return response
+      await new Promise(resolve => originalSetTimeout(resolve, 0))
+    }
+    assert.fail(`timed out waiting for ${requestId}`)
+  }
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(callback, delay === 15_000 ? 0 : delay, ...args)
+    globalThis.fetch = async (url, init) => {
+      const pathname = new URL(String(url)).pathname
+      if (pathname.endsWith('/snapshot') && ++snapshotCalls === 2) {
+        return new Response(JSON.stringify(snapshot), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Promise(() => {
+        init.signal.addEventListener('abort', () => abortedPaths.push(pathname), { once: true })
+      })
+    }
+
+    background.portMessage({ v: 1, type: 'markdown-review-snapshot-request', requestId: 'timeout-snapshot', reviewId: 'review-1' })
+    const snapshotResponse = await waitForResponse('timeout-snapshot')
+    assert.equal(snapshotResponse.ok, false)
+    assert.match(snapshotResponse.error.message, /snapshot timed out after 15 seconds/)
+
+    background.portMessage({ v: 1, type: 'markdown-review-proposals-request', requestId: 'timeout-proposals', reviewId: 'review-1', afterSequence: 0 })
+    background.portMessage({
+      v: 1, type: 'markdown-review-prepare-write-request', requestId: 'timeout-prepare', reviewId: 'review-1',
+      expected: { resourceId: 'resource-1', revision: 'rev-1', fingerprint: 'fingerprint-1' }, content: '# Better',
+    })
+    background.portMessage({
+      v: 1, type: 'markdown-review-commit-write-request', requestId: 'timeout-commit', reviewId: 'review-1',
+      approval: 'approval-1', idempotencyKey: 'write-1', content: '# Better',
+    })
+    background.portMessage({
+      v: 1, type: 'markdown-review-deliver-request', requestId: 'timeout-selection', reviewId: 'review-1', harnessSessionId: 'session-1', deliveryId: 'annotation-1',
+      annotation: { id: 'annotation-1', anchor: { version: 1, startUtf16: 2, endUtf16: 8, quote: 'Review', prefix: '# ', suffix: ' me', sourceFingerprint: 'fingerprint-1' }, comment: '更明确一些' },
+    })
+
+    const [proposalsResponse, prepareResponse, commitResponse, selectionResponse] = await Promise.all([
+      waitForResponse('timeout-proposals'), waitForResponse('timeout-prepare'), waitForResponse('timeout-commit'), waitForResponse('timeout-selection'),
+    ])
+    for (const response of [proposalsResponse, prepareResponse, selectionResponse]) {
+      assert.equal(response.ok, false)
+      assert.match(response.error.message, /timed out after 15 seconds/)
+    }
+    assert.deepEqual({ ok: commitResponse.ok, status: commitResponse.result?.status }, { ok: true, status: 'uncertain' })
+    assert.match(commitResponse.result.message, /not a Verified Write/)
+    assert.deepEqual([...new Set(abortedPaths)].sort(), [
+      '/api/workspace-review/commit-write', '/api/workspace-review/prepare-write', '/api/workspace-review/proposals', '/api/workspace-review/selection', '/api/workspace-review/snapshot',
+    ])
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+    background.cleanup()
+  }
 })

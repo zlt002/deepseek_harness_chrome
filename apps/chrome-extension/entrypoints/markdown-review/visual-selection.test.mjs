@@ -13,7 +13,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText
 const module = { exports: {} }
 vm.runInNewContext(compiled, { module, exports: module.exports })
-const { canRestoreVisualSelection } = module.exports
+const { canRestoreVisualSelection, visualSelectionFor } = module.exports
 
 test('visual selection carries structured block context and never claims Markdown source offsets', () => {
   for (const kind of ['heading', 'paragraph', 'list_item', 'table_cell', 'code_block']) assert.match(source, new RegExp(`'${kind}'`))
@@ -39,4 +39,34 @@ test('selection replacement refuses a stale revision, invalid range, or changed 
   assert.equal(canRestoreVisualSelection(document, selection, 4), false)
   assert.equal(canRestoreVisualSelection(document, { ...selection, to: 12 }, 3), false)
   assert.equal(canRestoreVisualSelection(document, { ...selection, quote: 'other' }, 3), false)
+})
+
+test('visual selection deduplicates block context and caps it at 24 blocks', () => {
+  const blocks = Array.from({ length: 30 }, (_, index) => ({
+    isBlock: true,
+    type: { name: 'paragraph' },
+    content: { size: 1 },
+    nodeSize: 2,
+    textBetween: () => `block-${index}`,
+  }))
+  const document = {
+    textBetween: () => 'selected text',
+    nodesBetween: (_from, _to, visit) => {
+      visit(blocks[0], 1)
+      visit(blocks[0], 1)
+      blocks.slice(1).forEach((block, index) => visit(block, index + 3))
+    },
+  }
+  const selection = visualSelectionFor(document, { empty: false, from: 1, to: 100 }, 2)
+  assert.equal(selection.blocks.length, 24)
+  assert.equal(selection.blocks.filter(({ from, to }) => from === 1 && to === 3).length, 1)
+  assert.equal(selection.limitReason, 'too_many_blocks')
+})
+
+test('an overlong quote is visibly invalid instead of being truncated and delivered', () => {
+  const quote = 'x'.repeat(8_001)
+  const document = { textBetween: () => quote, nodesBetween: () => {} }
+  const selection = visualSelectionFor(document, { empty: false, from: 1, to: 8_002 }, 2)
+  assert.equal(selection.quote.length, 8_000)
+  assert.equal(selection.limitReason, 'quote_too_long')
 })

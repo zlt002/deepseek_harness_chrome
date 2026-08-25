@@ -73,23 +73,23 @@ async function runPrepare(overrides = {}) {
   return { ...result, calls }
 }
 
-test('continues without sending signals when port 3001 has no listener', async () => {
+test('continues without sending signals when port 3101 has no listener', async () => {
   const result = await runPrepare({ DEV_PORT_TEST_LISTENERS: '' })
 
   assert.equal(result.code, 0, result.stderr)
   assert.equal(result.calls, '')
-  assert.match(result.stdout, /3001 is available/)
+  assert.match(result.stdout, /3101 is available/)
 })
 
-test('terminates every listener and continues after TERM releases port 3001', async () => {
+test('terminates every listener and continues after TERM releases port 3101', async () => {
   const result = await runPrepare({ DEV_PORT_TEST_LISTENERS: '101\n202' })
 
   assert.equal(result.code, 0, result.stderr)
   assert.equal(result.calls, '-TERM 101\n-TERM 202\n')
-  assert.match(result.stdout, /Released port 3001/)
+  assert.match(result.stdout, /Released port 3101/)
 })
 
-test('escalates only remaining listeners to KILL when TERM does not release port 3001', async () => {
+test('escalates only remaining listeners to KILL when TERM does not release port 3101', async () => {
   const result = await runPrepare({
     DEV_PORT_TEST_LISTENERS: '101\n202',
     DEV_PORT_TEST_TERM_KEEPS_LISTENING: '1',
@@ -97,15 +97,15 @@ test('escalates only remaining listeners to KILL when TERM does not release port
 
   assert.equal(result.code, 0, result.stderr)
   assert.equal(result.calls, '-TERM 101\n-TERM 202\n-KILL 101\n-KILL 202\n')
-  assert.match(result.stdout, /Released port 3001/)
+  assert.match(result.stdout, /Released port 3101/)
 })
 
-test('fails without signalling when it cannot resolve port 3001 listeners', async () => {
+test('fails without signalling when it cannot resolve port 3101 listeners', async () => {
   const result = await runPrepare({ DEV_PORT_TEST_LSOF_EXIT: '2' })
 
   assert.notEqual(result.code, 0)
   assert.equal(result.calls, '')
-  assert.match(result.stderr, /Unable to inspect listeners on port 3001/)
+  assert.match(result.stderr, /Unable to inspect listeners on port 3101/)
 })
 
 test('fails without signalling when lsof returns an invalid listener PID', async () => {
@@ -113,10 +113,10 @@ test('fails without signalling when lsof returns an invalid listener PID', async
 
   assert.notEqual(result.code, 0)
   assert.equal(result.calls, '')
-  assert.match(result.stderr, /Unable to resolve listeners on port 3001/)
+  assert.match(result.stderr, /Unable to resolve listeners on port 3101/)
 })
 
-test('fails when port 3001 remains occupied after the bounded KILL wait', async () => {
+test('fails when port 3101 remains occupied after the bounded KILL wait', async () => {
   const result = await runPrepare({
     DEV_PORT_TEST_LISTENERS: '101',
     DEV_PORT_TEST_TERM_KEEPS_LISTENING: '1',
@@ -125,5 +125,5 @@ test('fails when port 3001 remains occupied after the bounded KILL wait', async 
 
   assert.notEqual(result.code, 0)
   assert.equal(result.calls, '-TERM 101\n-KILL 101\n')
-  assert.match(result.stderr, /Port 3001 remains occupied after TERM and KILL/)
+  assert.match(result.stderr, /Port 3101 remains occupied after TERM and KILL/)
 })

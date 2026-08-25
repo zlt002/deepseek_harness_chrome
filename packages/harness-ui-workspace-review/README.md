@@ -19,13 +19,13 @@ Capabilities exist only in this Host runtime and must stay in the Extension back
 
 ## Client contract
 
-The Client registers `工作区` in the compact header's three-dot quick-action menu. Selecting that menu item opens the lazy overlay drawer mounted through `sidebar.compact.action`. It sends the Host-created open record to a dedicated nonce/origin checked parent bridge:
+The Client registers a `目录` child beneath the compact Workspace picker. Its tabs keep normal sessions and Claude import controls in the session view, while the directory view resolves the selected Workspace to its current session when possible (otherwise its first session). At desktop column widths it also registers a `目录` header action that opens the same lazy tree in a drawer. The former three-dot `工作区` quick action is intentionally absent. It sends the Host-created open record to a dedicated nonce/origin checked parent bridge:
 
 ```ts
 { type: 'markdown-review-open/v1', nonce, review }
 ```
 
-The extension layer owns review-tab creation and the capability-bearing proxy. The visual Milkdown surface supports local WYSIWYG drafts, structured and cross-block selections, and reviewable AI proposals. A verified, bounded feedback item travels through `markdown-review-feedback/v1`; the Client passes it to the shared `reviewFeedback.importWorkspaceMarkdown(harnessSessionId, feedback)` service. That service owns the single client-local strip, composer transform, and accepted-only cleanup shared with assistant-message annotations.
+The extension layer owns review-tab creation and the capability-bearing proxy. The visual Milkdown surface supports local WYSIWYG drafts, structured and cross-block selections, and reviewable AI proposals. A verified, bounded feedback item travels through `markdown-review-feedback/v1`; the Client awaits `reviewFeedback.submitWorkspaceMarkdown(harnessSessionId, feedback)`. This imports the one annotation and directly creates an AI turn in that bound session — it never waits for a later manual composer send. Concurrent retries and late-ACK retries for the same feedback id share one turn; failures preserve the highlighted annotation and return the concrete bounded error for retry. The ordinary composer transform remains unchanged for assistant-message annotations.
 
 The `propose_workspace_markdown_edit` tool queues a candidate for Milkdown's in-document Diff. It never writes the file. The user must accept the candidate into the local draft and separately complete prepare, explicit confirmation, commit, and same-resource readback before the UI reports a Verified Write.
 

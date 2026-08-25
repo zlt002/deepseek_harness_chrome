@@ -1,8 +1,37 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { createPublicKey, verify } from 'node:crypto'
 import { NativeHost } from '../apps/native-server/src/native-host.mjs'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
+
+test('signs only an exact, short-lived Prototype Studio recovery assertion with a Host-private key', () => {
+  const host = new NativeHost({
+    processFactory: () => ({ start: async () => 'http://127.0.0.1:48127', stop: async () => {} }),
+    exit: () => {},
+  })
+  const messages = []
+  host.send = (message) => messages.push(message)
+  host.currentRunId = 'run-recovery-test'
+  host.serverUrl = 'http://127.0.0.1:48127'
+  const payload = { projectId: 'prototype-12345678', expectedSessionId: 'session-1', referenceId: 'ref-12345678', evidenceFingerprint: 'a'.repeat(64), capabilityFingerprint: 'b'.repeat(64), expectedRecoveryEpoch: 0 }
+  assert.equal(host.signPrototypeRecovery('request-recovery-1', payload), true)
+  const signed = messages.at(-1)
+  assert.equal(signed.type, 'prototype_recovery_signed')
+  assert.equal(signed.assertion.runId, 'run-recovery-test')
+  assert.equal(signed.assertion.expectedSessionId, payload.expectedSessionId)
+  assert.equal(signed.assertion.referenceId, payload.referenceId)
+  assert.equal(signed.assertion.evidenceFingerprint, payload.evidenceFingerprint)
+  assert.equal(signed.assertion.capabilityFingerprint, payload.capabilityFingerprint)
+  assert.equal(signed.assertion.expectedRecoveryEpoch, 0)
+  assert.ok(signed.assertion.expiresAt > signed.assertion.issuedAt)
+  assert.ok(signed.assertion.expiresAt <= signed.assertion.issuedAt + 60_000)
+  const bytes = Buffer.from(JSON.stringify([signed.assertion.v, signed.assertion.purpose, signed.assertion.runId, signed.assertion.projectId, signed.assertion.expectedSessionId, signed.assertion.referenceId, signed.assertion.evidenceFingerprint, signed.assertion.capabilityFingerprint, signed.assertion.expectedRecoveryEpoch, signed.assertion.nonce, signed.assertion.issuedAt, signed.assertion.expiresAt]))
+  const key = createPublicKey({ key: Buffer.from(host.prototypeRecoveryPublicKey, 'base64url'), format: 'der', type: 'spki' })
+  assert.equal(verify(null, bytes, key, Buffer.from(signed.signature, 'base64url')), true)
+  assert.equal(host.signPrototypeRecovery('request-recovery-2', { ...payload, expectedRecoveryEpoch: -1 }), false)
+  assert.equal(messages.at(-1).type, 'prototype_recovery_sign_failed')
+})
 
 test('returns the Harness Web URL for repeated start requests and exits on close', async () => {
   const upstream = createServer((_request, response) => response.end('ok'))

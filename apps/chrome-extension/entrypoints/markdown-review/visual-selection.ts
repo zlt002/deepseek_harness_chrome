@@ -24,13 +24,15 @@ export interface VisualSelection {
   from: number
   to: number
   blocks: VisualBlockContext[]
+  limitReason?: 'quote_too_long' | 'too_many_blocks'
 }
 
 type SelectionDocument = Pick<ProseNode, 'textBetween'> & { content: { size: number } }
 
 /** True only while a captured visual range still identifies the same document text. */
 export function canRestoreVisualSelection(doc: SelectionDocument, selection: VisualSelection, editorRevision: number): boolean {
-  return selection.editorRevision === editorRevision
+  return selection.limitReason === undefined
+    && selection.editorRevision === editorRevision
     && Number.isSafeInteger(selection.from)
     && Number.isSafeInteger(selection.to)
     && selection.from >= 0
@@ -47,6 +49,8 @@ const BLOCK_KINDS = new Set<VisualBlockKind>([
   'code_block',
   'blockquote',
 ])
+const MAX_SELECTION_BLOCKS = 24
+const MAX_SELECTION_QUOTE_LENGTH = 8_000
 
 function blockKind(node: ProseNode): VisualBlockKind {
   return BLOCK_KINDS.has(node.type.name as VisualBlockKind)
@@ -68,6 +72,7 @@ export function visualSelectionFor(doc: ProseNode, selection: Selection, editorR
   if (selection.empty || selection.from >= selection.to) return undefined
   const blocks: VisualBlockContext[] = []
   const seen = new Set<string>()
+  let tooManyBlocks = false
   doc.nodesBetween(selection.from, selection.to, (node, pos) => {
     if (!node.isBlock) return
     const kind = blockKind(node)
@@ -75,17 +80,26 @@ export function visualSelectionFor(doc: ProseNode, selection: Selection, editorR
     const from = pos
     const to = pos + node.nodeSize
     const key = `${kind}:${from}:${to}`
-    if (!seen.has(key)) {
-      seen.add(key)
-      blocks.push({ kind, from, to, text: nodeText(node) })
+    if (seen.has(key)) return
+    seen.add(key)
+    if (blocks.length >= MAX_SELECTION_BLOCKS) {
+      tooManyBlocks = true
+      return false
     }
+    blocks.push({ kind, from, to, text: nodeText(node) })
+    return blocks.length < MAX_SELECTION_BLOCKS
   })
-  const quote = doc.textBetween(selection.from, selection.to, '\n').slice(0, 8_000)
+  const fullQuote = doc.textBetween(selection.from, selection.to, '\n')
+  const quote = fullQuote.slice(0, MAX_SELECTION_QUOTE_LENGTH)
+  const limitReason = fullQuote.length > MAX_SELECTION_QUOTE_LENGTH
+    ? 'quote_too_long'
+    : tooManyBlocks ? 'too_many_blocks' : undefined
   return quote.trim().length === 0 ? undefined : {
     quote,
     editorRevision,
     from: selection.from,
     to: selection.to,
     blocks,
+    limitReason,
   }
 }

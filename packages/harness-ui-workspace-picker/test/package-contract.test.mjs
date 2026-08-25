@@ -5,11 +5,14 @@ import test from 'node:test'
 const read = relative => readFile(new URL(`../${relative}`, import.meta.url), 'utf8')
 
 test('keeps the e327 compact picker in an out-of-tree public workspace seat', async () => {
-  const [client, picker, css, actions] = await Promise.all([
+  const [client, picker, css, actions, directorySlot, geometry] = await Promise.all([
     read('src/client/index.ts'), read('src/client/CompactWorkspacePicker.tsx'), read('src/client/CompactWorkspacePicker.module.css'),
     read('src/client/WorkspaceSurfaceActions.tsx'),
+    read('src/client/directory-slot.ts'), read('src/client/popover-geometry.ts'),
   ])
   assert.match(client, /sidebar\.workspaces\.compact/)
+  assert.match(client, /children:\s*\{[\s\S]*accrui\.workspace-picker\.directory/)
+  assert.match(directorySlot, /'accrui\.workspace-picker\.directory': \{ kind: 'single'; scope: 'root'/)
   assert.match(
     client,
     /name:\s*'sidebar\.workspaces\.compact'[\s\S]*?select:\s*_owner\s*=>\s*claudeImport[\s\S]*?CompactWorkspacePicker/,
@@ -54,7 +57,23 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.match(css, /\.popover\s*>\s*\.pane:first-child\s*\{[^}]*flex:\s*0\s+0\s+180px;[^}]*width:\s*180px;[^}]*overflow-x:\s*hidden;/s, 'the workspace pane must stay fixed-width and never expose horizontal scrolling')
   assert.match(css, /\.popover\s*>\s*\.pane:first-child\s+\.list\s*\{[^}]*overflow-x:\s*hidden;/s, 'the workspace list itself must not turn its vertical scroller into a horizontal one')
   assert.match(css, /\.sessionsPane\s*\{[^}]*flex:\s*1;[^}]*min-width:\s*0;/s, 'the sessions pane must retain the remaining width without forcing the workspace pane wider')
-  assert.match(picker, /css\.paneHeader[\s\S]*labels\.workspaces[\s\S]*css\.paneHeader[\s\S]*labels\.sessions/, 'both pane titles must share the same header row')
+  assert.match(picker, /role="tablist"[\s\S]*会话[\s\S]*目录/, 'the right pane must expose accessible session and directory tabs')
+  assert.match(picker, /useId\(\)/, 'tabs need unique IDs for their panels')
+  assert.match(picker, /aria-controls=\{sessionsPanelId\}/)
+  assert.match(picker, /aria-controls=\{directoryPanelId\}/)
+  assert.match(picker, /aria-labelledby=\{sessionsTabId\}/)
+  assert.match(picker, /aria-labelledby=\{directoryTabId\}/)
+  assert.match(picker, /tabIndex=\{activePane === 'sessions' \? 0 : -1\}/)
+  assert.match(picker, /tabIndex=\{activePane === 'directory' \? 0 : -1\}/)
+  assert.match(picker, /workspacePickerTabForKey/)
+  assert.match(picker, /current\?\.focus\(\)/, 'keyboard tab changes must move focus with the roving tab stop')
+  assert.match(picker, /owner\.renderSlot\(WORKSPACE_PICKER_DIRECTORY_SLOT/, 'directory rendering must cross the picker-owned child slot')
+  assert.match(picker, /selectWorkspaceDirectorySession\(selectedWorkspace\.sessions, owner\.currentSessionId\)/, 'directory target must prefer the current workspace session')
+  assert.match(picker, /visualViewport\?\.addEventListener\('resize'/)
+  assert.match(picker, /window\.addEventListener\('scroll', updateMaxHeight, true\)/)
+  assert.match(geometry, /workspacePickerMaxHeight/)
+  assert.match(css, /max-height:\s*var\(--accrui-workspace-picker-max-height\)/)
+  assert.doesNotMatch(css, /max-height:\s*min\(560px/)
   assert.match(css, /\.paneHeader\s*\{[^}]*box-sizing:\s*border-box;[^}]*align-items:\s*center;[^}]*height:\s*32px;/s, 'workspace and session titles must occupy the same header height')
   assert.match(css, /\.paneTitle\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*height:\s*28px;[^}]*line-height:\s*16px;/s, 'pane titles must share the same text box as the add-workspace control')
   assert.match(css, /\.row\s*\{[^}]*box-sizing:\s*border-box;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/s, 'picker rows must keep padding inside the pane and never overflow it')
