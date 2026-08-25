@@ -96,13 +96,15 @@ test('mounts Harness-native skills before Claude skills so duplicate names resol
   assert.deepEqual([...PRODUCT_OFFICE_SKILL_NAMES], ['docx', 'pdf', 'pptx', 'xlsx'])
   assert.equal(resolveUserHome({ USERPROFILE: 'C:\\Users\\alice' }), 'C:\\Users\\alice')
   const patch = claudeSkillsPatch({ HOME: '/Users/alice' })
+  const patchEntries = yaml.load(patch)[0].insert
   assert.match(patch, /id: deepseek-harness-chrome-product-office-skills/)
-  const officeLoader = yaml.load(patch)[0].insert.find((entry) => entry.id === 'deepseek-harness-chrome-product-office-skills')
+  const officeLoader = patchEntries.find((entry) => entry.id === 'deepseek-harness-chrome-product-office-skills')
   assert.equal(officeLoader.name, loaderModuleSpecifier(officePlugin))
   assert.match(patch, /skillsRoot: '.*skills'/)
   assert.match(patch, /id: deepseek-harness-chrome-claude-skills/)
   assert.match(patch, /includeDefaultRoots: false/)
-  assert.match(patch, new RegExp(`customSkillDirs:\\n\\s+- '${harnessSkillsDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'\\n\\s+- '/Users/alice/\\.claude/skills'`))
+  const claudeLoader = patchEntries.find((entry) => entry.id === 'deepseek-harness-chrome-claude-skills')
+  assert.deepEqual(claudeLoader.config.customSkillDirs, [harnessSkillsDir, resolve('/Users/alice/.claude/skills')])
   assert.ok(patch.indexOf('deepseek-harness-chrome-product-office-skills') < patch.indexOf('deepseek-harness-chrome-claude-skills'))
   assert.match(
     claudeSkillsPatch({ USERPROFILE: 'C:\\Users\\alice', DSH_PRODUCT_SKILLS_ROOT: 'C:\\AccrUI\\runtime\\skills' }),
