@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { inflateRawSync } from 'node:zlib'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import path, { dirname } from 'node:path'
 
 export const ACCRUI_EXTENSION_ID = 'cmgjacoohdgjedoekbdbhbelpmboankg'
 const REQUIRED_OUTER = ['install.ps1', 'install.vbs', 'install-ui.ps1', 'payload.zip']
@@ -67,13 +67,25 @@ export function readZipEntry(bytes, name) {
   return result
 }
 
+export function resolveExtractionTarget(destination, name, pathApi = path) {
+  const root = pathApi.resolve(destination)
+  const target = pathApi.resolve(root, name)
+  const relativeTarget = pathApi.relative(root, target)
+  if (
+    relativeTarget === ''
+    || relativeTarget === '..'
+    || relativeTarget.startsWith(`..${pathApi.sep}`)
+    || pathApi.isAbsolute(relativeTarget)
+  ) throw new Error(`更新包解压目标不安全：${name}`)
+  return target
+}
+
 export async function extractZip(bytes, destination, { stripCommonRoot = false } = {}) {
   const names = zipEntries(bytes); const root = stripCommonRoot ? commonRoot(names, 'install.ps1') : ''
   for (const originalName of names) {
     const name = root && originalName.startsWith(root) ? originalName.slice(root.length) : originalName
     if (name.endsWith('/')) continue
-    const target = resolve(destination, name)
-    if (!target.startsWith(`${resolve(destination)}/`)) throw new Error(`更新包解压目标不安全：${name}`)
+    const target = resolveExtractionTarget(destination, name)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, readZipEntry(bytes, originalName))
   }

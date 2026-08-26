@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { win32 } from 'node:path'
 import test from 'node:test'
-import { verifyWindowsLitePackage } from '../apps/native-server/src/release-update/package-verifier.mjs'
+import { resolveExtractionTarget, verifyWindowsLitePackage } from '../apps/native-server/src/release-update/package-verifier.mjs'
 
 function zip(files) {
   const locals = []; const central = []; let offset = 0
@@ -37,4 +38,20 @@ test('accepts the published Windows Lite common-root archive only when identity 
 test('rejects path traversal before extraction', () => {
   const archive = zip({ '../install.ps1': 'bad' })
   assert.throws(() => verifyWindowsLitePackage(archive), /不安全 ZIP 路径/)
+})
+
+test('accepts safe Windows extraction targets and rejects escapes', () => {
+  const destination = 'C:\\Users\\tester\\AppData\\Local\\Temp\\accr-update\\package'
+  assert.equal(
+    resolveExtractionTarget(destination, 'install.ps1', win32),
+    `${destination}\\install.ps1`,
+  )
+  assert.equal(
+    resolveExtractionTarget(destination, 'nested/payload.zip', win32),
+    `${destination}\\nested\\payload.zip`,
+  )
+  assert.throws(
+    () => resolveExtractionTarget(destination, '../escape.ps1', win32),
+    /解压目标不安全/,
+  )
 })

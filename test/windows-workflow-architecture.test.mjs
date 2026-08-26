@@ -50,7 +50,7 @@ test('Windows CI builds from the recursive upstream submodule and materialized p
   const checksum = workflow.indexOf("$zip = 'release/accr-ui-windows-lite-x64.zip'")
   assert.ok(install < buildProduct && buildProduct < buildExtension && buildExtension < materializeRuntime && materializeRuntime < buildRelease)
   assert.ok(buildRelease < acceptRelease && acceptRelease < checksum)
-  assert.match(workflow, /-ExpectedVersion "\$\{\{ inputs\.version \|\| '1\.1\.76' \}\}"/)
+  assert.match(workflow, /-ExpectedVersion "\$\{\{ inputs\.version \|\| '1\.1\.77' \}\}"/)
   const editRelease = workflow.indexOf('gh release edit $env:RELEASE_TAG')
   const releaseTarget = workflow.indexOf("--target '${{ github.sha }}'", editRelease)
   const uploadRelease = workflow.indexOf('gh release upload $env:RELEASE_TAG')
