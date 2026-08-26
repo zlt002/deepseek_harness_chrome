@@ -108,8 +108,7 @@ interface AccountAccessSnapshot {
 interface CompanyGatewayModel { id: string; name: string; description?: string }
 interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
 type CompanyGatewayProtocol = 'anthropic-messages' | 'openai-completions'
-interface CompanyGatewayCapability { protocol: CompanyGatewayProtocol; modelId: string; tools: true }
-interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability?: CompanyGatewayCapability; checkedAt: string }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; checkedAt: string }
 
 const LEGACY_KNOWLEDGE_SCOPE_PREFIX = 'knowledge-query:scope:session:'
 function legacyKnowledgeScopeKey(sessionId: string): string { return `${LEGACY_KNOWLEDGE_SCOPE_PREFIX}${sessionId}` }
@@ -672,6 +671,7 @@ const PROTOTYPE_RECOVERY_LATE_COMMIT_MAX_MS = 15_000
 const PROTOTYPE_RECOVERY_LATE_COMMIT_POLL_MS = 100
 const TRANSFER_TIMEOUT_MS = 15_000
 const TEAM_KNOWLEDGE_CREATE_CHECKPOINTS_KEY = 'teamKnowledgeCreateCheckpointsV1'
+const TEAM_KNOWLEDGE_BATCH_LEASES_KEY = 'teamKnowledgeBatchLeasesV1'
 
 interface NativeMessage {
   type?: unknown
@@ -832,7 +832,8 @@ interface TeamDocParent {
 }
 
 type TeamKnowledgeItemKind = 'light_document'
-type TeamKnowledgeItemAction = 'inspect_parent' | 'create' | 'readback'
+type TeamKnowledgeItemAction = 'inspect_parent' | 'create' | 'readback' | 'release'
+type TeamKnowledgeBatchLeaseAction = 'acquire' | 'reuse' | 'release'
 
 interface TeamKnowledgeUserConfirmation {
   itemIndex: number
@@ -854,6 +855,15 @@ interface TeamKnowledgeItemRequest extends ConnectorCorrelation {
   idempotencyIdentity?: string
   recovery?: { catalogId: string | null; stages: string[] }
   userConfirmation?: TeamKnowledgeUserConfirmation
+  batchId?: string
+  lease?: TeamKnowledgeBatchLeaseAction
+}
+
+interface TeamKnowledgeBatchLease {
+  runId: string
+  batchId: string
+  browserTarget: BrowserTarget
+  parentFingerprint: string
 }
 
 type TeamDocStage = 'parent_inspected' | 'created' | 'rediscovered' | 'body_written' | 'readback_verified'
@@ -916,8 +926,13 @@ function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnow
   const candidate = message as NativeMessage & Partial<TeamKnowledgeItemRequest>
   if (!(message.type === CONNECTOR_REQUEST && typeof message.requestId === 'string' && typeof message.runId === 'string'
     && typeof message.generation === 'string' && message.tool === 'team_knowledge_batch' && isBrowserTarget(message.browserTarget)
-    && ['inspect_parent', 'create', 'readback'].includes(String(candidate.action)))) return false
+    && ['inspect_parent', 'create', 'readback', 'release'].includes(String(candidate.action)))) return false
+  const hasBatchLease = typeof candidate.batchId === 'string' && candidate.batchId.length > 0 && candidate.batchId.length <= 128
+    && (candidate.lease === 'acquire' || candidate.lease === 'reuse' || candidate.lease === 'release')
+  if ((candidate.batchId !== undefined || candidate.lease !== undefined) && !hasBatchLease) return false
+  if (candidate.action === 'release') return hasBatchLease && candidate.lease === 'release' && isTeamKnowledgeParent(candidate.parent)
   if (candidate.action === 'inspect_parent') return candidate.parent === undefined && candidate.kind === undefined && candidate.name === undefined && candidate.body === undefined && candidate.catalogId === undefined && candidate.userConfirmation === undefined
+    && (!hasBatchLease || candidate.lease === 'acquire' || candidate.lease === 'reuse')
   if (candidate.action === 'readback') return candidate.kind === 'light_document' && typeof candidate.catalogId === 'string' && /^\d+$/.test(candidate.catalogId) && candidate.userConfirmation === undefined
   const recovery = candidate.recovery
   return isTeamKnowledgeParent(candidate.parent) && candidate.kind === 'light_document'
@@ -928,6 +943,7 @@ function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnow
     && (candidate.userConfirmation === undefined || (typeof candidate.userConfirmation === 'object' && candidate.userConfirmation !== null
       && Number.isSafeInteger(candidate.userConfirmation.itemIndex) && candidate.userConfirmation.itemIndex >= 1
       && Number.isSafeInteger(candidate.userConfirmation.totalItems) && candidate.userConfirmation.totalItems >= candidate.userConfirmation.itemIndex))
+    && (!hasBatchLease || candidate.lease === 'reuse')
 }
 
 function isKnowledgeQueryRequest(message: NativeMessage): message is KnowledgeQueryRequest {
@@ -1120,12 +1136,9 @@ function companyGatewayModels(value: unknown): CompanyGatewayModel[] | undefined
 
 function validCompanyGatewayMetadata(value: unknown): value is CompanyGatewayMetadata {
   if (!isKnowledgeRecord(value) || !Array.isArray(value.models) || typeof value.checkedAt !== 'string') return false
-  const capability = value.capability
   return companyGatewayQuota(value.quota) !== undefined && value.models.every((model) => isKnowledgeRecord(model)
     && typeof model.id === 'string' && typeof model.name === 'string'
     && (model.description === undefined || typeof model.description === 'string'))
-    && (capability === undefined || (isKnowledgeRecord(capability) && (capability.protocol === 'anthropic-messages' || capability.protocol === 'openai-completions')
-      && typeof capability.modelId === 'string' && capability.tools === true))
 }
 
 async function companyGatewayMetadata(): Promise<CompanyGatewayMetadata | undefined> {
@@ -1155,65 +1168,7 @@ async function companyGatewayJson(path: '/models' | '/key/quota', apiKey: string
   }
 }
 
-const COMPANY_GATEWAY_CAPABILITY_TOOL = 'accrui_capability_probe'
-
-function companyGatewayCapabilityFailure(detail: string): string {
-  const normalized = detail.toLowerCase()
-  if (normalized.includes('invalid model name') || normalized.includes('model_not_found')) {
-    return `所选模型已不在当前模型目录中，请重新加载后选择。原始错误：${detail}`
-  }
-  if (normalized.includes('protocol_restricted') || normalized.includes('访问协议受限') || normalized.includes('访问客户端受限')) {
-    return `所选模型不允许使用当前 API 协议，请切换协议或选择其他模型。原始错误：${detail}`
-  }
-  return `所选模型暂不支持 Agent 工具调用，请换用当前目录中的其他模型。原始错误：${detail}`
-}
-
-async function probeCompanyGatewayToolCapability(options: { apiKey: string; protocol: CompanyGatewayProtocol; modelId: string; signal?: AbortSignal }): Promise<CompanyGatewayCapability> {
-  const endpoint = options.protocol === 'anthropic-messages'
-    ? `${COMPANY_GATEWAY_BASE_URL}/messages`
-    : `${COMPANY_GATEWAY_BASE_URL}/chat/completions`
-  const headers: Record<string, string> = options.protocol === 'anthropic-messages'
-    ? { 'content-type': 'application/json', 'x-api-key': options.apiKey, 'anthropic-version': '2023-06-01' }
-    : { 'content-type': 'application/json', authorization: `Bearer ${options.apiKey}` }
-  const tool = options.protocol === 'anthropic-messages'
-    ? { name: COMPANY_GATEWAY_CAPABILITY_TOOL, description: 'Verifies Agent tool-call support.', input_schema: { type: 'object', properties: {}, additionalProperties: false } }
-    : { type: 'function', function: { name: COMPANY_GATEWAY_CAPABILITY_TOOL, description: 'Verifies Agent tool-call support.', parameters: { type: 'object', properties: {}, additionalProperties: false } } }
-  const toolChoice = options.protocol === 'anthropic-messages'
-    ? { type: 'tool', name: COMPANY_GATEWAY_CAPABILITY_TOOL }
-    : { type: 'function', function: { name: COMPANY_GATEWAY_CAPABILITY_TOOL } }
-  const request = (forceTool: boolean) => fetch(endpoint, {
-    method: 'POST',
-    headers,
-    signal: options.signal,
-    body: JSON.stringify({ model: options.modelId, max_tokens: 32, messages: [{ role: 'user', content: 'Call the capability probe tool exactly once.' }], tools: [tool], ...(forceTool ? { tool_choice: toolChoice } : {}) }),
-  })
-  let response = await request(true)
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 1_000)
-    const normalized = detail.toLowerCase()
-    const thinkingRejectsForcedToolChoice = normalized.includes('thinking mode does not support this tool_choice')
-      || (detail.includes('Thinking mode') && detail.includes('不支持') && detail.includes('tool_choice'))
-    if (!thinkingRejectsForcedToolChoice) {
-      throw new Error(companyGatewayCapabilityFailure(detail || `HTTP ${String(response.status)}`))
-    }
-    response = await request(false)
-    if (!response.ok) {
-      const retryDetail = (await response.text()).slice(0, 1_000)
-      throw new Error(companyGatewayCapabilityFailure(retryDetail || `HTTP ${String(response.status)}`))
-    }
-  }
-  const value = await response.json() as Record<string, unknown>
-  const returned = options.protocol === 'anthropic-messages'
-    ? Array.isArray(value.content) && value.content.some(block => isKnowledgeRecord(block) && block.type === 'tool_use' && block.name === COMPANY_GATEWAY_CAPABILITY_TOOL)
-    : Array.isArray(value.choices) && value.choices.some((choice) => {
-        if (!isKnowledgeRecord(choice) || !isKnowledgeRecord(choice.message) || !Array.isArray(choice.message.tool_calls)) return false
-        return choice.message.tool_calls.some(call => isKnowledgeRecord(call) && isKnowledgeRecord(call.function) && call.function.name === COMPANY_GATEWAY_CAPABILITY_TOOL)
-      })
-  if (!returned) throw new Error('当前模型没有返回测试工具，不能作为 Agent 模型。')
-  return { protocol: options.protocol, modelId: options.modelId, tools: true }
-}
-
-async function probeCompanyGateway(apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string): Promise<CompanyGatewayMetadata> {
+async function probeCompanyGateway(apiKey: string): Promise<CompanyGatewayMetadata> {
   const [rawModels, rawQuota] = await Promise.all([
     companyGatewayJson('/models', apiKey),
     companyGatewayJson('/key/quota', apiKey),
@@ -1224,25 +1179,8 @@ async function probeCompanyGateway(apiKey: string, protocol: CompanyGatewayProto
   if (quota === undefined) throw new Error('公司网关返回了无法识别的用量信息。')
   if (quota.usagePercent !== null && quota.usagePercent >= 100) throw new Error('公司网关额度已经耗尽，请补充额度或更换 Key。')
   const metadata = { models, quota, checkedAt: new Date().toISOString() }
-  if (requestedModelId === undefined) {
-    return metadata
-  }
-  const modelId = requestedModelId
-  if (!models.some((model) => model.id === modelId)) throw new Error('所选模型不在公司网关返回的可用模型中。')
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), COMPANY_GATEWAY_TIMEOUT_MS)
-  let capability: CompanyGatewayCapability
-  try {
-    capability = await probeCompanyGatewayToolCapability({ apiKey, protocol, modelId, signal: controller.signal })
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error('公司网关工具能力检测超时，请稍后重试。')
-    throw error
-  } finally {
-    clearTimeout(timeout)
-  }
-  const verifiedMetadata = { ...metadata, capability }
-  await chrome.storage.local.set({ [COMPANY_GATEWAY_METADATA_STORAGE_KEY]: verifiedMetadata })
-  return verifiedMetadata
+  await chrome.storage.local.set({ [COMPANY_GATEWAY_METADATA_STORAGE_KEY]: metadata })
+  return metadata
 }
 
 function isCompanyAuthenticationCookie(cookie: chrome.cookies.Cookie, now: number): boolean {
@@ -3900,11 +3838,72 @@ async function assertTeamDocTarget(request: { runId: string; browserTarget: Brow
   if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) {
     throw new Error('The trusted Browser Target changed before Team Doc execution.')
   }
-  const tab = await chrome.tabs.get(request.browserTarget.tabId)
+  const tab = await chrome.tabs.get(request.browserTarget.tabId).catch(() => undefined)
+  if (tab === undefined) throw new Error('The trusted Browser Target closed before Team Doc execution.')
   const actual = targetFromActionTab(tab)
   if (actual === undefined || !sameBrowserTarget(actual, request.browserTarget)) {
     throw new Error('The trusted Browser Target navigated before Team Doc execution.')
   }
+}
+
+function teamKnowledgeBatchLeaseKey(runId: string, batchId: string): string { return `${runId}\u0000${batchId}` }
+
+function isTeamKnowledgeBatchLease(value: unknown): value is TeamKnowledgeBatchLease {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const lease = value as Partial<TeamKnowledgeBatchLease>
+  return typeof lease.runId === 'string' && lease.runId.length > 0 && typeof lease.batchId === 'string' && lease.batchId.length > 0
+    && isBrowserTarget(lease.browserTarget) && typeof lease.parentFingerprint === 'string' && lease.parentFingerprint.length > 0
+}
+
+async function teamKnowledgeBatchLeases(): Promise<Record<string, TeamKnowledgeBatchLease>> {
+  const stored = (await chrome.storage.session.get(TEAM_KNOWLEDGE_BATCH_LEASES_KEY))[TEAM_KNOWLEDGE_BATCH_LEASES_KEY]
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {}
+  return Object.fromEntries(Object.entries(stored).flatMap(([key, lease]) => isTeamKnowledgeBatchLease(lease) ? [[key, lease]] : []))
+}
+
+async function teamKnowledgeBatchLease(runId: string, batchId: string): Promise<TeamKnowledgeBatchLease | undefined> {
+  return (await teamKnowledgeBatchLeases())[teamKnowledgeBatchLeaseKey(runId, batchId)]
+}
+
+async function saveTeamKnowledgeBatchLease(lease: TeamKnowledgeBatchLease): Promise<void> {
+  const leases = await teamKnowledgeBatchLeases()
+  leases[teamKnowledgeBatchLeaseKey(lease.runId, lease.batchId)] = lease
+  await chrome.storage.session.set({ [TEAM_KNOWLEDGE_BATCH_LEASES_KEY]: leases })
+}
+
+async function releaseTeamKnowledgeBatchLease(runId: string, batchId: string, parentFingerprint: string): Promise<void> {
+  const leases = await teamKnowledgeBatchLeases()
+  const key = teamKnowledgeBatchLeaseKey(runId, batchId)
+  const lease = leases[key]
+  if (lease === undefined) return
+  if (lease.parentFingerprint !== parentFingerprint) throw new Error('team_knowledge_batch_lease_release_parent_changed')
+  delete leases[key]
+  await chrome.storage.session.set({ [TEAM_KNOWLEDGE_BATCH_LEASES_KEY]: leases })
+}
+
+async function resolveTeamKnowledgeBatchLease(request: TeamKnowledgeItemRequest): Promise<BrowserTargetBinding> {
+  if (request.batchId === undefined || request.lease !== 'reuse') throw new Error('team_knowledge_batch_lease_missing')
+  const lease = await teamKnowledgeBatchLease(request.runId, request.batchId)
+  if (lease === undefined) throw new Error('team_knowledge_batch_lease_missing')
+  const tab = await chrome.tabs.get(lease.browserTarget.tabId).catch(() => undefined)
+  if (tab === undefined) throw new Error('team_knowledge_batch_lease_target_closed')
+  const live = targetFromActionTab(tab)
+  if (live === undefined || !sameBrowserTarget(live, lease.browserTarget)) throw new Error('team_knowledge_batch_lease_target_navigated')
+  const binding = bindingForTarget(live)
+  const current = boundBrowserTargets.get(request.runId)
+  if (current === undefined) throw new Error('team_knowledge_batch_lease_run_unbound')
+  if (!sameBrowserTarget(current.browserTarget, binding.browserTarget)) await transferBrowserTarget(request.runId, binding, request.requestId)
+  return binding
+}
+
+function teamKnowledgeResultParent(result: object): TeamKnowledgeParent | undefined {
+  const parent = (result as { parent?: unknown }).parent
+  return isTeamKnowledgeParent(parent) ? parent : undefined
+}
+
+function teamKnowledgeResultItemUrl(result: object): string | undefined {
+  const item = (result as { item?: { url?: unknown } }).item
+  return typeof item?.url === 'string' && item.url.length > 0 ? item.url : undefined
 }
 
 async function waitForTrustedLightDocumentIdentity(browserTarget: BrowserTarget): Promise<boolean> {
@@ -4268,19 +4267,59 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
 function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnowledgeItemRequest): void {
   void queueNativeLifecycle(async () => {
     if (nativePort !== port) throw new Error('Team Knowledge item request belongs to a stale Native connection.')
+    if (request.action === 'release') {
+      if (request.batchId === undefined || request.lease !== 'release' || request.parent === undefined) throw new Error('team_knowledge_batch_lease_release_invalid')
+      await releaseTeamKnowledgeBatchLease(request.runId, request.batchId, request.parent.fingerprint)
+      const binding = await resolveOfficeBrowserTarget({
+        type: request.type,
+        requestId: request.requestId,
+        runId: request.runId,
+        generation: request.generation,
+        browserTarget: request.browserTarget,
+        tool: 'list_work_tabs',
+      })
+      return { browserTarget: binding.browserTarget, result: { status: 'ok', parent: request.parent } }
+    }
     // Team Knowledge batch/item calls may be the first tool after the user
     // selects another document in the same tab. Resolve and migrate the live
     // Browser Target here instead of requiring an list_work_tabs preflight.
-    const binding = await resolveOfficeBrowserTarget({
-      type: request.type,
-      requestId: request.requestId,
-      runId: request.runId,
-      generation: request.generation,
-      browserTarget: request.browserTarget,
-      tool: 'list_work_tabs',
-    })
+    // A batch lease always wins over the ambient active tab. It is session
+    // storage rather than a saved Browser Target preference, so user settings
+    // and browser focus are unchanged while the batch is in progress.
+    const binding = request.lease === 'reuse'
+      ? await resolveTeamKnowledgeBatchLease(request)
+      : request.action === 'create'
+      ? (await assertTeamDocTarget(request), bindingForTarget(request.browserTarget))
+      : await resolveOfficeBrowserTarget({
+          type: request.type,
+          requestId: request.requestId,
+          runId: request.runId,
+          generation: request.generation,
+          browserTarget: request.browserTarget,
+          tool: 'list_work_tabs',
+        })
     const resolvedRequest = { ...request, browserTarget: binding.browserTarget }
     const result = await runTeamKnowledgeItemRequest(resolvedRequest)
+    if (request.batchId !== undefined && request.lease === 'acquire' && request.action === 'inspect_parent') {
+      const parent = teamKnowledgeResultParent(result)
+      if (parent === undefined) throw new Error('team_knowledge_batch_lease_acquire_failed')
+      const existing = await teamKnowledgeBatchLease(request.runId, request.batchId)
+      if (existing !== undefined && (!sameBrowserTarget(existing.browserTarget, binding.browserTarget) || existing.parentFingerprint !== parent.fingerprint)) {
+        throw new Error('team_knowledge_batch_lease_already_bound')
+      }
+      if (existing === undefined) await saveTeamKnowledgeBatchLease({ runId: request.runId, batchId: request.batchId, browserTarget: binding.browserTarget, parentFingerprint: parent.fingerprint })
+    }
+    if (request.batchId !== undefined && request.lease === 'reuse' && request.action === 'inspect_parent') {
+      const lease = await teamKnowledgeBatchLease(request.runId, request.batchId)
+      const parent = teamKnowledgeResultParent(result)
+      if (lease === undefined || parent === undefined || parent.fingerprint !== lease.parentFingerprint) throw new Error('team_knowledge_batch_lease_parent_changed')
+    }
+    if (request.batchId !== undefined && request.lease === 'reuse' && request.action === 'create'
+      && (result as { status?: unknown }).status === 'partial_delivery') {
+      const lease = await teamKnowledgeBatchLease(request.runId, request.batchId)
+      const itemUrl = teamKnowledgeResultItemUrl(result)
+      if (lease !== undefined && itemUrl !== undefined) await saveTeamKnowledgeBatchLease({ ...lease, browserTarget: { ...lease.browserTarget, url: itemUrl } })
+    }
     if (nativePort !== port) throw new Error('Team Knowledge item request became stale before completion.')
     return { browserTarget: binding.browserTarget, result }
   }).then(({ browserTarget, result }) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget, result }))
@@ -4905,7 +4944,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -5060,16 +5099,14 @@ export default defineBackground(() => {
     }
     if (request.type === 'company-gateway-probe/v1') {
       if (!isSidePanelSender(sender) || typeof request.requestId !== 'string' || request.requestId.length === 0 || request.requestId.length > 160 || !usableCompanyGatewayKey(request.apiKey)
-        || (request.protocol !== 'anthropic-messages' && request.protocol !== 'openai-completions')
-        || (request.requestedModelId !== undefined && (typeof request.requestedModelId !== 'string' || request.requestedModelId.length === 0 || request.requestedModelId.length > 160))) {
+        || (request.protocol !== 'anthropic-messages' && request.protocol !== 'openai-completions')) {
         sendResponse({ ok: false, error: 'Invalid company gateway probe.' })
         return false
       }
       const requestId = request.requestId
       const apiKey = request.apiKey
       const protocol = request.protocol
-      const modelId = request.requestedModelId as string | undefined
-      void probeCompanyGateway(apiKey, protocol, modelId)
+      void probeCompanyGateway(apiKey)
         .then((gateway) => sendResponse({ ok: true, requestId, gateway }))
         .catch((error: unknown) => sendResponse({ ok: false, requestId, error: asError(error) }))
       return true

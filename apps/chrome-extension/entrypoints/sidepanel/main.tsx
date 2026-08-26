@@ -31,8 +31,7 @@ type AccountAccessStatus = 'guest' | 'authenticated' | 'unavailable'
 type CompanyGatewayProtocol = 'anthropic-messages' | 'openai-completions'
 interface CompanyGatewayModel { id: string; name: string; description?: string }
 interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
-interface CompanyGatewayCapability { protocol: CompanyGatewayProtocol; modelId: string; tools: true }
-interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability?: CompanyGatewayCapability; checkedAt: string }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; checkedAt: string }
 interface AccountAccessSnapshot { status: AccountAccessStatus; displayName?: string; knowledgeAccess: boolean; codeAccess: boolean; modelMode: 'manual' | 'company-pending'; gateway?: CompanyGatewayMetadata; message?: string }
 interface AccountAccessResponse { ok: boolean; snapshot?: AccountAccessSnapshot; error?: string }
 interface CompanyGatewayProbeResponse { ok: boolean; requestId?: string; gateway?: CompanyGatewayMetadata; error?: string }
@@ -256,9 +255,9 @@ function requestAccountAccess(command: 'refresh' | 'login' | 'logout'): Promise<
   })
 }
 
-function requestCompanyGatewayProbe(requestId: string, apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string): Promise<CompanyGatewayProbeResponse> {
+function requestCompanyGatewayProbe(requestId: string, apiKey: string, protocol: CompanyGatewayProtocol): Promise<CompanyGatewayProbeResponse> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'company-gateway-probe/v1', requestId, apiKey, protocol, ...(requestedModelId === undefined ? {} : { requestedModelId }) }, (response: CompanyGatewayProbeResponse | undefined) => {
+    chrome.runtime.sendMessage({ type: 'company-gateway-probe/v1', requestId, apiKey, protocol }, (response: CompanyGatewayProbeResponse | undefined) => {
       const runtimeError = chrome.runtime.lastError
       resolve(runtimeError === undefined ? response ?? { ok: false, requestId, error: 'Background did not return company gateway data.' } : { ok: false, requestId, error: runtimeError.message })
     })
@@ -649,8 +648,8 @@ function App(): React.JSX.Element {
 
   useEffect(() => { accountCommandHandlerRef.current = handleAccountAccessCommand }, [handleAccountAccessCommand])
 
-  const handleCompanyGatewayProbe = useCallback(async (requestId: string, apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string) => {
-    const response = await requestCompanyGatewayProbe(requestId, apiKey, protocol, requestedModelId)
+  const handleCompanyGatewayProbe = useCallback(async (requestId: string, apiKey: string, protocol: CompanyGatewayProtocol) => {
+    const response = await requestCompanyGatewayProbe(requestId, apiKey, protocol)
     if (frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
     gatewaySnapshotSequenceRef.current += 1
     frameRef.current.contentWindow.postMessage({
@@ -721,7 +720,7 @@ function App(): React.JSX.Element {
   useLayoutEffect(() => {
     const onFrameMessage = (event: MessageEvent<unknown>): void => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
-      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; apiKey?: unknown; protocol?: unknown; requestedModelId?: unknown }
+      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; apiKey?: unknown; protocol?: unknown }
       if (value.nonce !== frameNonce) return
       if (value.type === 'prototype-studio-prompt-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = prototypePromptRef.current.get(value.deliveryId)
@@ -805,10 +804,9 @@ function App(): React.JSX.Element {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= gatewayCommandSequenceRef.current
           || typeof value.requestId !== 'string' || value.requestId.length === 0 || value.requestId.length > 160
           || typeof value.apiKey !== 'string' || value.apiKey.length === 0 || value.apiKey.length > 512 || !/^[\x21-\x7E]+$/.test(value.apiKey)
-          || (value.protocol !== 'anthropic-messages' && value.protocol !== 'openai-completions')
-          || (value.requestedModelId !== undefined && (typeof value.requestedModelId !== 'string' || value.requestedModelId.length === 0 || value.requestedModelId.length > 160))) return
+          || (value.protocol !== 'anthropic-messages' && value.protocol !== 'openai-completions')) return
         gatewayCommandSequenceRef.current = value.sequence
-        void handleCompanyGatewayProbe(value.requestId, value.apiKey, value.protocol, value.requestedModelId as string | undefined)
+        void handleCompanyGatewayProbe(value.requestId, value.apiKey, value.protocol)
         return
       }
       if (value.type === 'knowledge-scope-command/v1') {

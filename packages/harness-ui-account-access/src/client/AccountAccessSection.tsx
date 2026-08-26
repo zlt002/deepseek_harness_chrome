@@ -20,7 +20,7 @@ export interface AccountAccessInjected {
     companyGatewayProbe?: SnapshotStore<CompanyGatewayProbeSnapshot | undefined>
   }
   command: (command: AccountAccessCommand) => void
-  probeGateway?: (apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string) => string
+  probeGateway?: (apiKey: string, protocol: CompanyGatewayProtocol) => string
   selectInitialModel?: (models: readonly CompanyGatewayModel[]) => Promise<string | undefined>
   api: Pick<IApiClient, 'settings' | 'credentials'>
 }
@@ -48,7 +48,7 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const probe = useGatewayProbe(snapshot => snapshot)
   const [keyDraft, setKeyDraft] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol; requestedModelId?: string }>()
+  const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol }>()
   const [probedGateway, setProbedGateway] = useState<CompanyGatewayMetadata>()
   const [probedKey, setProbedKey] = useState<string>()
   const [selectedModel, setSelectedModel] = useState<string>()
@@ -108,24 +108,11 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     setProbedGateway(undefined); setProbedKey(undefined); setSelectedModel(undefined)
     setRequest({ id: probeGateway(key, protocol), key, protocol })
   }
-  const verifySelectedModel = (): void => {
-    const key = keyDraft.trim()
-    const modelId = selectedModel
-    if (gateway === undefined || probedKey !== key || modelId === undefined) { setFailure('请先加载最新模型目录并选择模型。'); return }
-    if (probeGateway === undefined) { setFailure('公司网关连接正在刷新，请关闭并重新打开个人中心。'); return }
-    setFailure(undefined); setNotice(undefined)
-    setRequest({ id: probeGateway(key, protocol, modelId), key, protocol, requestedModelId: modelId })
-  }
   const save = async (): Promise<boolean> => {
     if (gateway === undefined) return false
     if (!verifiedDraft || selectedModel === undefined) { setFailure('请先用当前 Key 加载最新模型目录并选择模型。'); return false }
     const key = keyDraft.trim()
     if (key.length === 0) { setFailure('请输入 API Key 后加载最新模型目录。'); return false }
-    const capability = gateway.capability
-    if (capability === undefined || capability.tools !== true || capability.protocol !== protocol || capability.modelId !== selectedModel) {
-      setFailure('请先验证所选模型是否支持 Agent 工具调用。')
-      return false
-    }
     const models = companyGatewayModelsForSelection(gateway.models, selectedModel)
     setSaving(true); setFailure(undefined); setNotice(undefined)
     try {
@@ -200,7 +187,6 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
         <label className={css.gatewayField}><span>API Key</span><span className={css.keyRow}><input type={showKey ? 'text' : 'password'} value={keyDraft} placeholder={keyHint} disabled={!credentialWritable} onChange={event => { setKeyDraft(event.target.value); setProbedGateway(undefined); setProbedKey(undefined); setRequest(undefined); setSelectedModel(undefined); setFailure(undefined); setNotice(undefined) }} /><button type="button" onClick={() => setShowKey(value => !value)}>{showKey ? '隐藏' : '显示'}</button></span></label>
         <div className={css.gatewayUtilityActions}>
           <button type="button" className={css.gatewaySecondaryButton} disabled={probing || !credentialWritable || probeGateway === undefined} onClick={probeKey}>{probing ? '加载中…' : '验证 Key 并加载模型'}</button>
-          {gateway === undefined ? null : <button type="button" className={css.gatewaySecondaryButton} disabled={probing || keyDraft.trim().length === 0 || selectedModel === undefined || probeGateway === undefined} onClick={verifySelectedModel}>{probing ? '验证中…' : '验证所选模型的 Agent 工具能力'}</button>}
           <button type="button" className={css.gatewaySecondaryButton} onClick={() => window.open(COMPANY_GATEWAY_KEY_PORTAL_URL, '_blank', 'noreferrer')}>打开密钥门户</button>
         </div>
         {gateway !== undefined ? <>

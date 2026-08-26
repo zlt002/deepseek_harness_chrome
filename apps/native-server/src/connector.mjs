@@ -2222,6 +2222,16 @@ export class BrowserConnector {
     }
   }
 
+  async #releaseTeamKnowledgeBatchLease(runId, browserTarget, parent, batchId) {
+    const request = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'team_knowledge_batch', action: 'release', batchId, lease: 'release', parent }
+    const resolved = await this.#requestExtension(request)
+    if (!validTeamKnowledgeItemResult(resolved.teamKnowledgeItem) || resolved.teamKnowledgeItem.status !== 'ok') throw new Error('team_knowledge_batch_lease_release_failed')
+  }
+
+  async #bestEffortReleaseTeamKnowledgeBatchLease(runId, browserTarget, parent, batchId) {
+    try { await this.#releaseTeamKnowledgeBatchLease(runId, browserTarget, parent, batchId) } catch {}
+  }
+
   async #teamKnowledgeBatch(message, response) {
     const args = message.params?.arguments ?? {}
     if (!validTeamKnowledgeBatchArguments(args)) {
@@ -2230,8 +2240,10 @@ export class BrowserConnector {
     }
     const currentBinding = this.runTargets.current(); const runId = currentBinding?.runId; const target = currentBinding?.browserTarget
     if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
+    const existingBatch = await this.teamKnowledgeBatchStore.load(args.batchId)
+    const lease = existingBatch && existingBatch.status !== 'completed' ? 'reuse' : 'acquire'
     const inspectParent = async () => {
-      const request = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_batch', action: 'inspect_parent' }
+      const request = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: args.batchId, lease }
       const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
       if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge batch parent')
@@ -2251,6 +2263,7 @@ export class BrowserConnector {
           items: args.items.map((item, index) => ({ index, name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body), idempotencyIdentity: `team-batch:${hash(args.batchId).slice(0, 48)}:${String(index)}` })),
         })
         if (batch.status === 'completed') {
+          await this.#bestEffortReleaseTeamKnowledgeBatchLease(runId, inspected.target, parent, args.batchId)
           const result = { action: 'preview', status: 'already_completed', browserTarget: inspected.target, parent, batch: teamKnowledgeBatchView(batch) }
           this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result } })
           return
@@ -2296,7 +2309,7 @@ export class BrowserConnector {
           await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'creating', error: null })
           await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: recovery?.stages ?? [], catalogId: recovery?.catalogId ?? null, verified: false, ...(existing?.result ? { result: existing.result } : {}) })
           try {
-            const request = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_batch', action: 'create', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, userConfirmation: { itemIndex: item.index + 1, totalItems: batch.items.length }, ...(recovery ? { recovery } : {}) }
+            const request = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget: grant.target, tool: 'team_knowledge_batch', action: 'create', batchId: args.batchId, lease: 'reuse', parent: grant.parent, kind: 'light_document', name: document.name, body: document.body, idempotencyIdentity: item.idempotencyIdentity, userConfirmation: { itemIndex: item.index + 1, totalItems: batch.items.length }, ...(recovery ? { recovery } : {}) }
             const resolved = await this.#requestExtension(request, undefined, this.teamKnowledgeWriteRequestTimeoutMs); const itemResult = resolved.teamKnowledgeItem
             if (!sameBrowserTarget(resolved.browserTarget, grant.target)) throw new Error('Team Knowledge Browser Target changed during batch creation.')
             if (!validTeamKnowledgeItemResult(itemResult) || !['verified_write', 'partial_delivery'].includes(itemResult.status)) throw new Error('Extension peer returned an invalid Team Knowledge batch item result')
@@ -2311,6 +2324,7 @@ export class BrowserConnector {
         batch = await this.teamKnowledgeBatchStore.load(args.batchId)
         return { action: 'create', status: batch.status === 'completed' ? 'verified_write' : 'partial_delivery', browserTarget: grant.target, parent: grant.parent, batch: teamKnowledgeBatchView(batch) }
       })
+      if (result.status === 'verified_write') await this.#bestEffortReleaseTeamKnowledgeBatchLease(runId, grant.target, grant.parent, args.batchId)
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: teamKnowledgeBatchUserText(result) }], structuredContent: result, ...(result.status === 'partial_delivery' ? { isError: true } : {}) } })
     } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch operation failed') }
   }

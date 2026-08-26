@@ -22,14 +22,14 @@ export function apply(ctx: ClientContext): void {
   const injected = (): AccountAccessInjected => ({
     hooks: { accountAccess: bridge.source, companyGatewayProbe: bridge.gatewayProbe },
     command: command => bridge.request(command),
-    probeGateway: (apiKey, protocol, requestedModelId) => bridge.probeGateway(apiKey, protocol, requestedModelId),
+    probeGateway: (apiKey, protocol) => bridge.probeGateway(apiKey, protocol),
     selectInitialModel,
     api,
   })
   const onboardingInjected = (): CompanyGatewayOnboardingInjected => ({
     hooks: { companyGatewayProbe: bridge.gatewayProbe },
     api,
-    probeGateway: (apiKey, protocol, requestedModelId) => bridge.probeGateway(apiKey, protocol, requestedModelId),
+    probeGateway: (apiKey, protocol) => bridge.probeGateway(apiKey, protocol),
     selectInitialModel,
   })
   ctx.effect(() => {
@@ -47,4 +47,4 @@ export function apply(ctx: ClientContext): void {
 }
 
 export { AccountAccessSection }
-export type { AccountAccessCommand, AccountAccessSnapshot, AccountAccessStatus, CompanyGatewayCapability, CompanyGatewayMetadata, CompanyGatewayModel, CompanyGatewayProbeSnapshot, CompanyGatewayProtocol } from './types.ts'
+export type { AccountAccessCommand, AccountAccessSnapshot, AccountAccessStatus, CompanyGatewayMetadata, CompanyGatewayModel, CompanyGatewayProbeSnapshot, CompanyGatewayProtocol } from './types.ts'

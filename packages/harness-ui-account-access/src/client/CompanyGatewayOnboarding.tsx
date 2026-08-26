@@ -20,7 +20,7 @@ import css from './AccountAccessSection.module.css'
 export interface CompanyGatewayOnboardingInjected {
   hooks: { companyGatewayProbe: SnapshotStore<CompanyGatewayProbeSnapshot | undefined> }
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
-  probeGateway: (apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string) => string
+  probeGateway: (apiKey: string, protocol: CompanyGatewayProtocol) => string
   selectInitialModel: (models: readonly CompanyGatewayModel[]) => Promise<string | undefined>
 }
 
@@ -44,7 +44,7 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
   const [readiness, setReadiness] = useState<Readiness>('loading')
   const [keyDraft, setKeyDraft] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol; requestedModelId?: string }>()
+  const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol }>()
   const [gateway, setGateway] = useState<CompanyGatewayMetadata>()
   const [loadedKey, setLoadedKey] = useState<string>()
   const [protocol, setProtocol] = useState<CompanyGatewayProtocol>('openai-completions')
@@ -123,23 +123,12 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
     setGateway(undefined); setLoadedKey(undefined)
     setRequest({ id: probeGateway(key, protocol), key, protocol })
   }
-  const verifySelectedModel = (): void => {
-    const key = keyDraft.trim()
-    if (gateway === undefined || loadedKey !== key || selectedModel === undefined) { setFailure('请先加载模型目录并选择模型。'); return }
-    setFailure(undefined)
-    setRequest({ id: probeGateway(key, protocol, selectedModel), key, protocol, requestedModelId: selectedModel })
-  }
   const save = async (): Promise<void> => {
     if (gateway === undefined || loadedKey !== keyDraft.trim()) {
       setFailure('请先验证 API Key。')
       return
     }
     const models = companyGatewayModelsForSelection(gateway.models, selectedModel)
-    const capability = gateway.capability
-    if (capability === undefined || capability.tools !== true || capability.protocol !== protocol || capability.modelId !== selectedModel) {
-      setFailure('请先验证所选模型是否支持 Agent 工具调用。')
-      return
-    }
     setSaving(true); setFailure(undefined)
     try {
       const error = await saveCompanyGateway(api, models, keyDraft.trim(), protocol)
@@ -181,7 +170,6 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
             {gateway.models.map(model => <option key={model.id} value={model.id}>{typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id}</option>)}
           </select>
         </label>
-        <div className={css.gatewayUtilityActions}><button type="button" className={css.gatewaySecondaryButton} disabled={probing || saving || selectedModel === undefined} onClick={verifySelectedModel}>{probing ? '验证中…' : '验证所选模型的 Agent 工具能力'}</button></div>
         <p className={css.notice}>保存后通过 Harness 的模型选择服务设为当前会话和后续会话的初始模型。</p>
       </>}
       {failure === undefined ? null : <p className={css.error} role="alert">{failure}</p>}

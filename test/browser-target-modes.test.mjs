@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
-async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion } = {}) {
+async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
@@ -57,7 +57,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
     ports.push(port)
     return port
   }
-  const stored = { harnessBrowserTargetSettings: settings }
+  const stored = sessionStorage ?? { harnessBrowserTargetSettings: settings }
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } },
     runtime: {
@@ -101,6 +101,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
   await import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
   return {
     nativeMessages,
+    sessionStorage: stored,
     createdUrls,
     removedTabs,
     sendRuntimeMessage: (message) => new Promise((resolve, reject) => {
@@ -403,6 +404,224 @@ test('Team Knowledge inspection transfers to a same-tab selected parent without 
     assert.deepEqual(transfer.browserTarget, { browser: 'chrome', windowId: 7, tabId: 42, url: selected.url })
   } finally {
     background.cleanup()
+  }
+})
+
+test('Team Knowledge create keeps its confirmed Browser Target when the user activates another tab', async () => {
+  const confirmed = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/100', title: 'Confirmed parent' }
+  const other = { id: 43, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/200', title: 'Other parent' }
+  const confirmedTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: confirmed.url }
+  const parent = { parentId: '100', bookId: '1', parentName: 'Confirmed parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-100' }
+  const injectedTabIds = []
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: confirmed, tabsById: { 42: confirmed, 43: other },
+    executeScript: async (options) => {
+      injectedTabIds.push(options.target.tabId)
+      return [{ result: { ok: true, parent } }]
+    },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.activateTab(43)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    background.emitNative({
+      type: 'connector_request', requestId: 'team-knowledge-confirmed-create', runId: 'run-follow', generation: 'generation-1',
+      browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'create', parent, kind: 'light_document', name: 'Confirmed child', body: '# Confirmed child', idempotencyIdentity: 'team-batch:confirmed:0',
+    })
+    let response
+    for (let attempt = 0; attempt < 10 && response === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'team-knowledge-confirmed-create')
+    }
+    assert.deepEqual(response.browserTarget, confirmedTarget)
+    assert.deepEqual(injectedTabIds, [42])
+    assert.equal(background.nativeMessages.some((message) => message.type === 'transfer-browser-target' && message.requestId === 'team-knowledge-confirmed-create'), false)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('Team Knowledge create fails closed when its confirmed Browser Target closes or navigates', async (t) => {
+  const confirmed = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/100', title: 'Confirmed parent' }
+  const other = { id: 43, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/200', title: 'Other parent' }
+  const confirmedTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: confirmed.url }
+  const parent = { parentId: '100', bookId: '1', parentName: 'Confirmed parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-100' }
+  for (const [name, targetTab, expectedError] of [
+    ['closes', undefined, /closed before Team Doc execution/],
+    ['navigates', { ...confirmed, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/101', title: 'Different parent' }, /navigated before Team Doc execution/],
+  ]) {
+    await t.test(name, async () => {
+      const injectedTabIds = []
+      const background = await loadBackground({
+        settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: confirmed, tabsById: { ...(targetTab === undefined ? {} : { 42: targetTab }), 43: other },
+        executeScript: async (options) => { injectedTabIds.push(options.target.tabId); return [{ result: { ok: true, parent } }] },
+      })
+      try {
+        await background.sendRuntimeMessage({ type: 'ensure-harness' })
+        background.activateTab(43)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        const requestId = `team-knowledge-confirmed-create-${name}`
+        background.emitNative({
+          type: 'connector_request', requestId, runId: 'run-follow', generation: 'generation-1',
+          browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'create', parent, kind: 'light_document', name: 'Confirmed child', body: '# Confirmed child', idempotencyIdentity: `team-batch:${name}:0`,
+        })
+        let response
+        for (let attempt = 0; attempt < 10 && response === undefined; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === requestId)
+        }
+        assert.match(response.error, expectedError)
+        assert.deepEqual(injectedTabIds, [])
+        assert.equal(background.nativeMessages.some((message) => message.type === 'transfer-browser-target' && message.requestId === requestId), false)
+      } finally {
+        background.cleanup()
+      }
+    })
+  }
+})
+
+test('Team Knowledge retry preview keeps the original batch tab after a partial delivery and tab switch', async () => {
+  const confirmed = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/100', title: 'Confirmed parent' }
+  const other = { id: 43, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/200', title: 'Other parent' }
+  const confirmedTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: confirmed.url }
+  const parent = { parentId: '100', bookId: '1', parentName: 'Confirmed parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-100' }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: confirmed, tabsById: { 42: confirmed, 43: other },
+    executeScript: async () => [{ result: { ok: true, parent } }],
+  })
+  const responseFor = async (requestId) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === requestId)
+      if (response !== undefined) return response
+    }
+    throw new Error(`missing ${requestId} response`)
+  }
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.emitNative({ type: 'connector_request', requestId: 'batch-preview', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-partial', lease: 'acquire' })
+    assert.deepEqual((await responseFor('batch-preview')).browserTarget, confirmedTarget)
+    background.emitNative({
+      type: 'connector_request', requestId: 'batch-partial-create', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget,
+      tool: 'team_knowledge_batch', action: 'create', batchId: 'batch-partial', lease: 'reuse', parent, kind: 'light_document', name: 'Confirmed child', body: '# Confirmed child', idempotencyIdentity: 'team-batch:partial:0', userConfirmation: { itemIndex: 1, totalItems: 1 },
+    })
+    assert.equal((await responseFor('batch-partial-create')).result.status, 'partial_delivery')
+    background.activateTab(43)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    background.emitNative({ type: 'connector_request', requestId: 'batch-retry-preview', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-partial', lease: 'reuse' })
+    assert.deepEqual((await responseFor('batch-retry-preview')).browserTarget, confirmedTarget)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('Team Knowledge completed batch release restores the configured follow target', async () => {
+  const confirmed = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/100', title: 'Confirmed parent' }
+  const other = { id: 43, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/200', title: 'Other parent' }
+  const confirmedTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: confirmed.url }
+  const parent = { parentId: '100', bookId: '1', parentName: 'Confirmed parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-100' }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: confirmed, tabsById: { 42: confirmed, 43: other },
+    executeScript: async () => [{ result: { ok: true, parent } }],
+  })
+  const responseFor = async (requestId) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === requestId)
+      if (response !== undefined) return response
+    }
+    throw new Error(`missing ${requestId} response`)
+  }
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.emitNative({ type: 'connector_request', requestId: 'batch-acquire', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-release', lease: 'acquire' })
+    await responseFor('batch-acquire')
+    background.activateTab(43)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    background.emitNative({ type: 'connector_request', requestId: 'batch-release', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'release', batchId: 'batch-release', lease: 'release', parent })
+    const released = await responseFor('batch-release')
+    assert.equal(released.result.status, 'ok')
+    assert.equal(released.browserTarget.tabId, 43)
+    background.emitNative({ type: 'connector_request', requestId: 'ordinary-follow', runId: 'run-follow', generation: 'generation-1', browserTarget: released.browserTarget, tool: 'list_work_tabs' })
+    assert.equal((await responseFor('ordinary-follow')).browserTarget.tabId, 43)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('Team Knowledge batch lease survives a worker reload through session storage', async () => {
+  const confirmed = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/100', title: 'Confirmed parent' }
+  const other = { id: 43, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/200', title: 'Other parent' }
+  const confirmedTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: confirmed.url }
+  const parent = { parentId: '100', bookId: '1', parentName: 'Confirmed parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-100' }
+  const responseFor = async (background, requestId) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === requestId)
+      if (response !== undefined) return response
+    }
+    throw new Error(`missing ${requestId} response`)
+  }
+  const first = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: confirmed, tabsById: { 42: confirmed, 43: other },
+    executeScript: async () => [{ result: { ok: true, parent } }],
+  })
+  try {
+    await first.sendRuntimeMessage({ type: 'ensure-harness' })
+    first.emitNative({ type: 'connector_request', requestId: 'reload-acquire', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-reload', lease: 'acquire' })
+    await responseFor(first, 'reload-acquire')
+  } finally {
+    first.cleanup()
+  }
+  const reloaded = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: other, tabsById: { 42: confirmed, 43: other }, sessionStorage: first.sessionStorage,
+    executeScript: async () => [{ result: { ok: true, parent } }],
+  })
+  try {
+    await reloaded.sendRuntimeMessage({ type: 'ensure-harness' })
+    reloaded.emitNative({ type: 'connector_request', requestId: 'reload-retry', runId: 'run-follow', generation: 'generation-1', browserTarget: { browser: 'chrome', windowId: 7, tabId: 43, url: other.url }, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-reload', lease: 'reuse' })
+    assert.deepEqual((await responseFor(reloaded, 'reload-retry')).browserTarget, confirmedTarget)
+  } finally {
+    reloaded.cleanup()
+  }
+})
+
+test('Team Knowledge batch lease fails closed when its tab closes or navigates', async (t) => {
+  const confirmed = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/100', title: 'Confirmed parent' }
+  const other = { id: 43, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/200', title: 'Other parent' }
+  const confirmedTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: confirmed.url }
+  const parent = { parentId: '100', bookId: '1', parentName: 'Confirmed parent', parentType: 'folder', canRead: true, canCreate: true, fingerprint: 'parent-100' }
+  for (const [name, targetTab, expectedError] of [
+    ['closes', undefined, /lease_target_closed/],
+    ['navigates', { ...confirmed, url: 'https://doc.midea.com/teamKnowledge/detail/catalog/101', title: 'Different parent' }, /lease_target_navigated/],
+  ]) {
+    await t.test(name, async () => {
+      const injectedTabIds = []
+      const sessionStorage = {
+        harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] },
+        teamKnowledgeBatchLeasesV1: { [`run-follow\u0000batch-${name}`]: { runId: 'run-follow', batchId: `batch-${name}`, browserTarget: confirmedTarget, parentFingerprint: parent.fingerprint } },
+      }
+      const background = await loadBackground({
+        settings: sessionStorage.harnessBrowserTargetSettings, activeTab: confirmed, tabsById: { ...(targetTab === undefined ? {} : { 42: targetTab }), 43: other }, sessionStorage,
+        executeScript: async (options) => { injectedTabIds.push(options.target.tabId); return [{ result: { ok: true, parent } }] },
+      })
+      try {
+        await background.sendRuntimeMessage({ type: 'ensure-harness' })
+        background.activateTab(43)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        const requestId = `lease-${name}`
+        background.emitNative({ type: 'connector_request', requestId, runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: `batch-${name}`, lease: 'reuse' })
+        let response
+        for (let attempt = 0; attempt < 20 && response === undefined; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === requestId)
+        }
+        assert.match(response.error, expectedError)
+        assert.deepEqual(injectedTabIds, [])
+      } finally {
+        background.cleanup()
+      }
+    })
   }
 })
 

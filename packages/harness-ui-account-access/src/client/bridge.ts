@@ -9,7 +9,7 @@ export function createAccountAccessBridge(nonce: string, parentOrigin: string): 
   gatewayProbe: SnapshotStore<CompanyGatewayProbeSnapshot | undefined>
   accept(event: Pick<MessageEvent, 'source' | 'origin' | 'data'>, parent: WindowProxy): boolean
   request(command: AccountAccessCommand, parent?: WindowProxy): void
-  probeGateway(apiKey: string, protocol: CompanyGatewayProtocol, requestedModelId?: string, parent?: WindowProxy): string
+  probeGateway(apiKey: string, protocol: CompanyGatewayProtocol, parent?: WindowProxy): string
 } {
   const protocol = createAccountAccessProtocol({ createStore: createSnapshotStore, nonce, parentOrigin })
   return {
@@ -17,6 +17,6 @@ export function createAccountAccessBridge(nonce: string, parentOrigin: string): 
     gatewayProbe: protocol.gatewayProbe,
     accept: protocol.accept,
     request: (command, parent = window.parent) => { protocol.request(command, parent) },
-    probeGateway: (apiKey, protocolName, requestedModelId, parent = window.parent) => protocol.probeGateway(apiKey, protocolName, requestedModelId, parent),
+    probeGateway: (apiKey, protocolName, parent = window.parent) => protocol.probeGateway(apiKey, protocolName, parent),
   }
 }

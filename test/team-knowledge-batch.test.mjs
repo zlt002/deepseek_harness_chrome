@@ -48,7 +48,7 @@ function lightDocumentRead(request) {
   return { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ id: 'block-1', type: 'p', text: '旧内容' }], ...(selection ? { selection } : {}) } }
 }
 
-async function open(responder, responseTarget = (request) => request.browserTarget) {
+async function open(responder, responseTarget = (request) => request.browserTarget, { releaseError } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'team-knowledge-batch-'))
   const batchStore = new TeamKnowledgeBatchRecordStore({ recordPath: join(directory, 'batch.json') })
   const teamDocStore = new TeamDocRecordStore({ recordPath: join(directory, 'items.json') })
@@ -59,7 +59,10 @@ async function open(responder, responseTarget = (request) => request.browserTarg
     queueMicrotask(() => {
       const resolvedTarget = typeof responseTarget === 'function' ? responseTarget(request) : responseTarget
       if (request.action === 'inspect_parent') connector.bindBrowserTarget(request.runId, resolvedTarget)
-      assert.equal(connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: resolvedTarget, result: responder(request) }), true, `Connector rejected ${request.action}`)
+      const envelope = releaseError && request.action === 'release'
+        ? { error: releaseError }
+        : { result: request.action === 'release' ? { status: 'ok', parent: request.parent } : responder(request) }
+      assert.equal(connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: resolvedTarget, ...envelope }), true, `Connector rejected ${request.action}`)
     })
   } })
   connector.bindBrowserTarget('batch-run', target)
@@ -101,8 +104,34 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
     assert.doesNotMatch(result.result.content[0].text, /team_knowledge_|partial_delivery/)
     assert.deepEqual(result.result.structuredContent.batch.items.map((item) => item.status), ['created', 'created'])
     assert.equal(result.result.structuredContent.batch.status, 'completed'); assert.equal(creates, 2)
+    assert.deepEqual(harness.requests.filter((request) => request.tool === 'team_knowledge_batch').map((request) => [request.action, request.batchId, request.lease]), [
+      ['inspect_parent', 'batch-success', 'acquire'],
+      ['inspect_parent', 'batch-success', 'reuse'],
+      ['create', 'batch-success', 'reuse'],
+      ['create', 'batch-success', 'reuse'],
+      ['release', 'batch-success', 'release'],
+    ])
     const raw = await readFile(harness.batchStore.recordPath, 'utf8'); const itemRaw = await readFile(harness.teamDocStore.recordPath, 'utf8')
     assert.doesNotMatch(raw, /secret one|secret two|"body"/); assert.doesNotMatch(itemRaw, /secret one|secret two|"body"|observedBody/)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('lease cleanup failure never downgrades a verified or already-completed batch', async () => {
+  let creates = 0
+  const harness = await open(
+    (request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, String(++creates)),
+    (request) => request.browserTarget,
+    { releaseError: 'session storage temporarily unavailable' },
+  )
+  try {
+    const plan = await preview(harness, 'batch-release-failure')
+    const completed = await create(harness, 'batch-release-failure', plan.result.structuredContent.challenge)
+    assert.equal(completed.result.isError, undefined)
+    assert.equal(completed.result.structuredContent.status, 'verified_write')
+    const duplicate = await preview(harness, 'batch-release-failure', documents, 3)
+    assert.equal(duplicate.result.isError, undefined)
+    assert.equal(duplicate.result.structuredContent.status, 'already_completed')
+    assert.equal(creates, 2)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
@@ -215,6 +244,7 @@ test('resumes only failed items and accepts a completed duplicate without duplic
     const retry = await preview(harness, 'batch-recover', documents, 3); const done = await create(harness, 'batch-recover', retry.result.structuredContent.challenge, 4)
     assert.equal(done.result.structuredContent.status, 'verified_write'); assert.deepEqual(calls, ['One', 'Two', 'Two'])
     const duplicate = await preview(harness, 'batch-recover', documents, 5); assert.equal(duplicate.result.structuredContent.status, 'already_completed')
+    assert.equal(harness.requests.filter((request) => request.action === 'release' && request.batchId === 'batch-recover' && request.lease === 'release').length, 2)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 

@@ -72,12 +72,12 @@ test('a refreshed company catalog replaces retired models and only promotes the 
   )
 })
 
-test('both company gateway entry points expose the fixed address, model selection, and key portal', () => {
+test('both company gateway entry points expose the fixed address, model selection, and key portal without a tool-capability gate', () => {
   for (const view of [onboardingViewSource, accountAccessViewSource]) {
     assert.match(view, /API 地址/)
     assert.match(view, /打开密钥门户/)
     assert.match(view, /companyGatewayModelsForSelection/)
-    assert.match(view, /验证所选模型的 Agent 工具能力/)
+    assert.doesNotMatch(view, /验证所选模型的 Agent 工具能力|Agent 工具调用|verifySelectedModel/)
   }
 })
 
