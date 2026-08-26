@@ -61,6 +61,18 @@ test('surfaces the gateway custom-tool incompatibility and never reports a false
   }), /不支持 Agent 工具调用.*unknown variant custom/)
 })
 
+test('explains retired models and protocol restrictions while preserving the gateway detail', async () => {
+  for (const [detail, expected] of [
+    ['Invalid model name passed in model=minimax-m2.5', '所选模型已不在当前模型目录中'],
+    ['protocol_restricted', '所选模型不允许使用当前 API 协议'],
+  ]) {
+    await assert.rejects(probeCompanyGatewayToolCapability({
+      apiKey: 'secret', protocol: 'openai-completions', modelId: 'model-a',
+      fetchImpl: async () => ({ ok: false, status: 400, text: async () => detail }),
+    }), error => error.message.includes(expected) && error.message.includes(`原始错误：${detail}`))
+  }
+})
+
 test('rejects a successful text-only response because ordinary chat is not an Agent capability check', async () => {
   await assert.rejects(probeCompanyGatewayToolCapability({
     apiKey: 'secret', protocol: 'openai-completions', modelId: 'model-a',

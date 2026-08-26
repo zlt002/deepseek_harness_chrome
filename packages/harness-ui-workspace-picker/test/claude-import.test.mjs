@@ -118,6 +118,40 @@ test('synthetic Claude wrappers do not become titles or migrated user text', asy
   assert.throws(() => parseClaudeSession(line({ type: 'user', isMeta: true, message: { content: 'synthetic only' } })), /没有可迁移/)
 })
 
+test('language instruction wrappers do not become titles or migrated user text', async t => {
+  const { projects, importer } = await fixture(t)
+  const sessionId = 'language-wrapper-session'
+  await writeFile(path.join(projects, '-tmp-demo', `${sessionId}.jsonl`), [
+    line({ type: 'user', message: { content: '<language_instruction>请始终使用中文进行对话</language_instruction>\n帮我整理这份需求' } }),
+    line({ type: 'assistant', message: { content: '好的' } }),
+    line({ type: 'user', message: { content: '<language_instruction>请始终使用中文进行对话</language_instruction>' } }),
+    line({ type: 'user', message: { content: '第二段真实用户输入' } }),
+  ].join(''))
+  const listing = await importer.listSessions('-tmp-demo')
+  assert.equal(listing.sessions[0].title, '帮我整理这份需求')
+  const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
+  assert.doesNotMatch(prepared.prompt, /请始终使用中文进行对话/)
+  assert.match(prepared.prompt, /帮我整理这份需求|第二段真实用户输入/)
+  const ordinary = parseClaudeSession(line({ type: 'user', message: { content: '请解释 <language_instruction> 这个标签的用途' } }))
+  assert.equal(ordinary.title, '请解释 <language_instruction> 这个标签的用途')
+})
+
+test('user-request wrappers keep their contents without exposing wrapper tags', async t => {
+  const { projects, importer } = await fixture(t)
+  const sessionId = 'user-request-wrapper-session'
+  await writeFile(path.join(projects, '-tmp-demo', `${sessionId}.jsonl`), [
+    line({ type: 'user', message: { content: '<用户原始请求>检索 mobileinvitewxkfi 的问题</用户原始请求>\n后续补充说明' } }),
+    line({ type: 'assistant', message: { content: '收到' } }),
+  ].join(''))
+  const listing = await importer.listSessions('-tmp-demo')
+  assert.equal(listing.sessions[0].title, '检索 mobileinvitewxkfi 的问题')
+  const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
+  assert.match(prepared.prompt, /检索 mobileinvitewxkfi 的问题/)
+  assert.doesNotMatch(prepared.prompt, /<用户原始请求>|<\/用户原始请求>/)
+  const ordinary = parseClaudeSession(line({ type: 'user', message: { content: '请解释 <用户原始请求> 这个标签的用途' } }))
+  assert.equal(ordinary.title, '请解释 <用户原始请求> 这个标签的用途')
+})
+
 test('parser keeps only bounded user and assistant text', () => {
   const parsed = parseClaudeSession([
     line({ type: 'progress', data: 'ignored' }),

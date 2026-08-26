@@ -361,6 +361,7 @@ function App(): React.JSX.Element {
   const commandSequenceRef = useRef(0)
   const knowledgeCommandSequenceRef = useRef(0)
   const knowledgeSnapshotSequenceRef = useRef(0)
+  const knowledgeRequestSequenceBySessionRef = useRef(new Map<string, number>())
   const accountCommandSequenceRef = useRef(0)
   const accountSnapshotSequenceRef = useRef(0)
   const gatewayCommandSequenceRef = useRef(0)
@@ -374,7 +375,7 @@ function App(): React.JSX.Element {
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
   const knowledgeLoginTimerRef = useRef<number | undefined>(undefined)
-  const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => Promise<void>>(async () => {})
+  const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions, requestSequence: number) => Promise<void>>(async () => {})
   const accountCommandHandlerRef = useRef<(command: 'refresh' | 'login' | 'logout') => Promise<void>>(async () => {})
   const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
   const handoffSessionId = useMemo(() => HarnessHandoffSessionFromLocation(), [])
@@ -660,13 +661,14 @@ function App(): React.JSX.Element {
     }, frameOrigin)
   }, [frameNonce, frameOrigin])
 
-  const handleKnowledgeScopeCommand = useCallback(async (sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions) => {
+  const handleKnowledgeScopeCommand = useCallback(async (sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions, requestSequence: number) => {
     if (options.action === 'login') {
       if (knowledgeLoginTimerRef.current !== undefined) window.clearTimeout(knowledgeLoginTimerRef.current)
       knowledgeLoginSessionRef.current = sessionId
       knowledgeLoginAttemptsRef.current = 0
     }
     const response = await requestKnowledgeScope({ type: 'knowledge-scope/v1', sessionId, ...(scope === undefined ? {} : { scope }), ...options })
+    if (knowledgeRequestSequenceBySessionRef.current.get(sessionId) !== requestSequence) return
     if (frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
     const serviceState = response.serviceState ?? (response.ok ? 'ready' : 'unavailable')
     knowledgeSnapshotSequenceRef.current += 1
@@ -677,6 +679,7 @@ function App(): React.JSX.Element {
         ...(response.scope === undefined ? {} : { scope: response.scope }),
         enabled: response.enabled,
         remember: response.remember,
+        requestSequence,
         serviceState,
         catalog: response.catalog ?? { domains: [], systems: [], repositories: [] },
         ...(response.notice === undefined ? {} : { notice: response.notice }),
@@ -693,7 +696,7 @@ function App(): React.JSX.Element {
     if (serviceState !== 'ready' && knowledgeLoginSessionRef.current === sessionId && knowledgeLoginAttemptsRef.current < 15) {
       knowledgeLoginAttemptsRef.current += 1
       knowledgeLoginTimerRef.current = window.setTimeout(() => {
-        void knowledgeCommandHandlerRef.current(sessionId, undefined, {})
+        void knowledgeCommandHandlerRef.current(sessionId, undefined, {}, requestSequence)
       }, 2_000)
     }
   }, [frameNonce, frameOrigin])
@@ -812,7 +815,8 @@ function App(): React.JSX.Element {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= knowledgeCommandSequenceRef.current || typeof value.sessionId !== 'string' || value.sessionId.length === 0 || (value.scope !== undefined && !isKnowledgeScope(value.scope))) return
         knowledgeCommandSequenceRef.current = value.sequence
         if ((value.enabled !== undefined && typeof value.enabled !== 'boolean') || (value.remember !== undefined && typeof value.remember !== 'boolean') || (value.action !== undefined && value.action !== 'login' && value.action !== 'retry')) return
-        void handleKnowledgeScopeCommand(value.sessionId, value.scope, { ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}), ...(typeof value.remember === 'boolean' ? { remember: value.remember } : {}), ...((value.action === 'login' || value.action === 'retry') ? { action: value.action } : {}) })
+        knowledgeRequestSequenceBySessionRef.current.set(value.sessionId, value.sequence)
+        void handleKnowledgeScopeCommand(value.sessionId, value.scope, { ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}), ...(typeof value.remember === 'boolean' ? { remember: value.remember } : {}), ...((value.action === 'login' || value.action === 'retry') ? { action: value.action } : {}) }, value.sequence)
         return
       }
       if (value.type !== 'browser-target-command/v1' || typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= commandSequenceRef.current || !isBrowserTargetCommand(value.command)) return

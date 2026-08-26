@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { apply, createSelectedSourceDispatchGuard, partitionTools, publicToolName, sessionMeta } from '../src/index.mjs'
+import { apply, createSelectedSourceDispatchGuard, installSelectedSourceDispatchTracking, partitionTools, publicToolName, sessionMeta } from '../src/index.mjs'
 
 test('separates only configured raw MCP names into the continuable-child scope', () => {
   const tools = new Map([
@@ -48,6 +48,44 @@ test('admits one selected-source child per parent turn and rejects generic deleg
   assert.match(directSearchGuard(exec('subagent', 3)), /所选远程范围/)
 })
 
+test('releases a selected-source admission when dispatch fails before a child starts', async () => {
+  const guard = createSelectedSourceDispatchGuard()
+  const listeners = new Map()
+  const context = () => ({
+    on(name, listener) {
+      const registered = listeners.get(name) ?? new Set()
+      registered.add(listener)
+      listeners.set(name, registered)
+      return () => registered.delete(listener)
+    },
+    emit(name, ...args) {
+      for (const listener of listeners.get(name) ?? []) listener(...args)
+    },
+  })
+  const rootCtx = context()
+  const agentCtx = context()
+  const exec = (name) => ({
+    name,
+    agent: { id: 'parent-retry', ctx: agentCtx, session: { events: [{ type: 'turn/start', data: { turn: 1 } }] } },
+  })
+  const stop = installSelectedSourceDispatchTracking(rootCtx, guard)
+  const dispatch = async (call, body) => {
+    const [listener] = listeners.get('tools/execute') ?? []
+    return listener(call, body)
+  }
+
+  const search = exec('search_selected_remote_code')
+  assert.equal(guard(search), undefined)
+  await dispatch(search, async () => ({ isError: true }))
+  assert.equal(guard(search), undefined)
+  await dispatch(search, async () => {
+    agentCtx.emit('subagent/start', { runId: 'child-1' })
+    return { isError: true }
+  })
+  assert.match(guard(exec('search_selected_knowledge')), /已启动一个 selected-source 检索/)
+  stop()
+})
+
 function toolRegistry() {
   const registered = new Map()
   const guards = new Set()
@@ -76,6 +114,7 @@ test('installs scoped MCP tools only for continuable children and cleans them up
   let disposePlugin
   const ctx = {
     tools: rootTools,
+    on() { return () => {} },
     subagents: {
       registerContinuableSetup(setup) {
         installContinuableChild = setup
@@ -177,6 +216,7 @@ test('MCP tools/call keeps a quiet Connector response open and parses keep-alive
   const rootTools = toolRegistry()
   const ctx = {
     tools: rootTools,
+    on() { return () => {} },
     subagents: { registerContinuableSetup() { return () => {} } },
     effect() {},
     logger: { error(message) { throw new Error(message) } },

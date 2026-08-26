@@ -32,15 +32,15 @@ const MAX_SELECTED_SOURCE_SEARCHES_PER_TURN = 1
 
 /**
  * Admit one selected-source child per parent turn.
- * A guard is a product-owned, monotonic enforcement seam: unlike prompt text,
- * it rejects a second wrapper call that reaches dispatch. The parent must
+ * A guard is a product-owned, lifecycle-aware enforcement seam: unlike prompt
+ * text, it rejects a second wrapper call after a child is published. The parent must
  * settle the first result before a later turn decides whether an independent
  * evidence gap warrants another child. Generic subagents stay blocked after
  * scope discovery.
  */
 export function createSelectedSourceDispatchGuard() {
   const states = new Map()
-  return (exec) => {
+  const stateFor = (exec) => {
     const parentId = exec.agent === undefined ? undefined : String(exec.agent.id)
     const turn = activeParentTurn(exec.agent)
     if (parentId === undefined || turn === undefined) return undefined
@@ -48,24 +48,62 @@ export function createSelectedSourceDispatchGuard() {
     const previous = states.get(parentId)
     const state = previous?.turn === turn
       ? previous
-      : { turn, selectedSourceScopeRead: false, childStarted: false, searchCount: 0 }
+      : { turn, selectedSourceScopeRead: false, childStarted: false, searchCount: 0, searchPending: false }
     states.set(parentId, state)
+    return state
+  }
+  const guard = (exec) => {
+    const state = stateFor(exec)
+    if (state === undefined) return undefined
 
     if (exec.name === SELECTED_SOURCE_SCOPE) {
       state.selectedSourceScopeRead = true
       return undefined
     }
-    if (GENERIC_SUBAGENT_TOOLS.has(exec.name) && (state.selectedSourceScopeRead || state.childStarted)) {
+    if (GENERIC_SUBAGENT_TOOLS.has(exec.name) && (state.selectedSourceScopeRead || state.childStarted || state.searchPending)) {
       return '本次请求已读取所选远程范围；请直接调用对应的 selected-source 检索工具，不要再启动通用子代理。'
     }
     if (!SELECTED_SOURCE_WRAPPERS.has(exec.name)) return undefined
-    if (state.searchCount >= MAX_SELECTED_SOURCE_SEARCHES_PER_TURN) {
+    if (state.searchCount >= MAX_SELECTED_SOURCE_SEARCHES_PER_TURN || state.searchPending) {
       return '本次父会话轮次已启动一个 selected-source 检索；请先等待该结果结算。只有结算后仍存在独立证据缺口时，才在后续父会话轮次追加一个聚焦检索。'
     }
-    state.searchCount += 1
-    state.childStarted = true
+    state.searchPending = true
     return undefined
   }
+  guard.childStarted = (exec) => {
+    const state = stateFor(exec)
+    if (state === undefined || !state.searchPending) return
+    state.searchPending = false
+    state.searchCount += 1
+    state.childStarted = true
+  }
+  guard.dispatchFailed = (exec) => {
+    const state = stateFor(exec)
+    if (state !== undefined) state.searchPending = false
+  }
+  return guard
+}
+
+/**
+ * Reserve a wrapper call before dispatch, then commit it only when the
+ * parent-scoped lifecycle publishes a child. A tool error before publication
+ * clears the reservation so the model can retry in the same parent turn.
+ */
+export function installSelectedSourceDispatchTracking(ctx, guard) {
+  return ctx.on('tools/execute', async (exec, next) => {
+    if (!SELECTED_SOURCE_WRAPPERS.has(exec.name) || exec.agent === undefined) return next()
+    let childStarted = false
+    const stop = exec.agent.ctx.on('subagent/start', () => {
+      childStarted = true
+      guard.childStarted(exec)
+    })
+    try {
+      return await next()
+    } finally {
+      stop()
+      if (!childStarted) guard.dispatchFailed(exec)
+    }
+  })
 }
 
 /** The model-visible name is stable even if an MCP server uses punctuation. */
@@ -321,7 +359,9 @@ function normalizeConfig(input = {}) {
 export async function apply(ctx, input = {}) {
   const config = normalizeConfig(input)
   const rpc = createConnectorRpc(config, input.fetch ?? connectorHttpFetch)
-  const stopSelectedSourceDispatchGuard = ctx.tools.guard(createSelectedSourceDispatchGuard())
+  const selectedSourceDispatchGuard = createSelectedSourceDispatchGuard()
+  const stopSelectedSourceDispatchGuard = ctx.tools.guard(selectedSourceDispatchGuard)
+  const stopSelectedSourceDispatchTracking = installSelectedSourceDispatchTracking(ctx, selectedSourceDispatchGuard)
   const childDisposers = new Map()
   let globalDisposers = new Map()
   let definitions = new Map()
@@ -353,6 +393,7 @@ export async function apply(ctx, input = {}) {
   } catch (error) {
     stopContinuableSetup()
     stopSelectedSourceDispatchGuard()
+    stopSelectedSourceDispatchTracking()
     if (config.failOnStartupError) throw error
     ctx.logger.error(`MCP startup failed: ${String(error)}`)
   }
@@ -360,6 +401,7 @@ export async function apply(ctx, input = {}) {
     stopped = true
     stopContinuableSetup()
     stopSelectedSourceDispatchGuard()
+    stopSelectedSourceDispatchTracking()
     for (const disposers of childDisposers.values()) for (const dispose of disposers.values()) dispose()
     childDisposers.clear()
     for (const dispose of globalDisposers.values()) dispose()

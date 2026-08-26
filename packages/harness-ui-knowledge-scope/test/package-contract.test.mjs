@@ -42,9 +42,10 @@ test('composer takeover must leave the scope strip outside the hidden input card
 })
 
 test('scope pickers use the shared upward overlay and preserve the accepted e327 geometry', async () => {
-  const [control, styles] = await Promise.all([
+  const [control, styles, sidepanel] = await Promise.all([
     readFile(new URL('../src/client/KnowledgeScope.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/KnowledgeScope.module.css', import.meta.url), 'utf8'),
+    readFile(new URL('../../../apps/chrome-extension/entrypoints/sidepanel/main.tsx', import.meta.url), 'utf8'),
   ])
 
   assert.equal(control.match(/useSession\(s => s\.subagent\)/g)?.length, 2)
@@ -82,4 +83,9 @@ test('scope pickers use the shared upward overlay and preserve the accepted e327
   assert.equal(control.match(/className=\{css\.scopeTrigger\}/g)?.length, 2)
   assert.doesNotMatch(control, /关闭范围选择/)
   assert.match(styles, /\.remember\s*\{[^}]*position:\s*absolute[^}]*bottom:\s*calc\(100% \+ 6px\)/s)
+  assert.match(styles, /\.switchWrap::before\s*\{[^}]*bottom:\s*100%[^}]*height:\s*6px/s)
+  assert.match(control, /optimisticScopeSwitch/)
+  assert.match(control, /acknowledgeScopeSwitch/)
+  assert.match(sidepanel, /knowledgeRequestSequenceBySessionRef\.current\.get\(sessionId\) !== requestSequence\) return/)
+  assert.match(sidepanel, /knowledgeRequestSequenceBySessionRef\.current\.set\(value\.sessionId, value\.sequence\)/)
 })

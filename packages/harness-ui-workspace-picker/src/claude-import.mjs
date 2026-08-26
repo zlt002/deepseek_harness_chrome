@@ -135,7 +135,7 @@ export function parseClaudeSession(raw) {
     if (record.type !== 'user' && record.type !== 'assistant') continue
     const text = messageText(record)
     if (text === '') continue
-    if (title === undefined && record.type === 'user') title = oneLine(text).slice(0, 80)
+    if (title === undefined && record.type === 'user') title = titlePreview(text).slice(0, 80)
     messages.push({ role: record.type, text, timestamp: typeof record.timestamp === 'string' ? record.timestamp : undefined })
   }
   if (messages.length === 0) throw new Error('Claude Code 会话没有可迁移的用户或助手文本')
@@ -165,7 +165,10 @@ function messageText(record, allowPartialWrapper = false) {
 
 function stripSyntheticPrefix(value, allowPartialWrapper) {
   let text = value.trim()
-  const wrappers = ['browser_context', 'system-reminder', 'command-name', 'local-command-caveat', 'local-command-stdout', 'ide_opened_file', 'available-deferred-tools']
+  const wrappers = ['browser_context', 'system-reminder', 'language_instruction', 'command-name', 'local-command-caveat', 'local-command-stdout', 'ide_opened_file', 'available-deferred-tools']
+  // Claude Code wraps some real user messages in this marker. Unlike the
+  // synthetic wrappers above, its contents are the text the user wrote.
+  const contentWrappers = ['用户原始请求']
   let changed = true
   while (changed) {
     changed = false
@@ -173,6 +176,11 @@ function stripSyntheticPrefix(value, allowPartialWrapper) {
       const paired = new RegExp(`^<${wrapper}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${wrapper}>\\s*`, 'i')
       const selfClosing = new RegExp(`^<${wrapper}(?:\\s[^>]*)?\\s*\\/>\\s*`, 'i')
       const next = text.replace(paired, '').replace(selfClosing, '')
+      if (next !== text) { text = next.trim(); changed = true }
+    }
+    for (const wrapper of contentWrappers) {
+      const paired = new RegExp(`^<${wrapper}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${wrapper}>`, 'i')
+      const next = text.replace(paired, '$1')
       if (next !== text) { text = next.trim(); changed = true }
     }
   }
@@ -200,7 +208,7 @@ function previewTitle(raw) {
       const record = JSON.parse(line)
       if (record.type !== 'user') continue
       const text = messageText(record, true)
-      if (text !== '') return oneLine(text).slice(0, 80)
+      if (text !== '') return titlePreview(text).slice(0, 80)
     } catch { /* A partial final preview line is expected. Full parsing remains strict. */ }
   }
 }
@@ -211,6 +219,7 @@ function projectLabel(key) {
   return last === undefined ? key : last
 }
 function oneLine(text) { return text.replace(/\s+/g, ' ').trim() }
+function titlePreview(text) { return oneLine(text.split(/\r?\n/)[0] ?? '') }
 function boundedInteger(value, min, max, fallback, name) {
   if (value === undefined) return fallback
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`Claude Code 会话分页 ${name} 无效`)

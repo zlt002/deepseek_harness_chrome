@@ -6,7 +6,10 @@ import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   COMPANY_GATEWAY_CREDENTIAL_REF,
+  COMPANY_GATEWAY_KEY_PORTAL_URL,
   companyGatewayApiKeyFailure,
+  companyGatewayBaseUrl,
+  companyGatewayModelsForSelection,
   companyGatewayProtocolFromNamespaces,
   saveCompanyGateway,
 } from './company-gateway.ts'
@@ -30,12 +33,6 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function firstModel(models: readonly CompanyGatewayModel[], selected: string | undefined): CompanyGatewayModel[] {
-  if (selected === undefined) return [...models]
-  const first = models.find(model => model.id === selected)
-  return first === undefined ? [...models] : [first, ...models.filter(model => model !== first)]
-}
-
 /**
  * Product-owned first-run step. It uses the same active-provider/credential
  * facts as official onboarding and exits as soon as any provider is usable.
@@ -50,7 +47,7 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
   const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol; requestedModelId?: string }>()
   const [gateway, setGateway] = useState<CompanyGatewayMetadata>()
   const [loadedKey, setLoadedKey] = useState<string>()
-  const [protocol, setProtocol] = useState<CompanyGatewayProtocol>('anthropic-messages')
+  const [protocol, setProtocol] = useState<CompanyGatewayProtocol>('openai-completions')
   const [selectedModel, setSelectedModel] = useState<string>()
   const [saving, setSaving] = useState(false)
   const [failure, setFailure] = useState<string>()
@@ -78,7 +75,7 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
         const credentialsResponse = await api.credentials.describe({ refs: [...refs] })
         if (!credentialsResponse.result.ok) throw new Error(credentialsResponse.result.error.message)
         if (!active) return
-        setProtocol(companyGatewayProtocolFromNamespaces(namespaces) ?? 'anthropic-messages')
+        setProtocol(companyGatewayProtocolFromNamespaces(namespaces) ?? 'openai-completions')
         setReadiness(hasUsableModelProvider(providers, namespaces, credentialsResponse.result.value.credentials) ? 'ready' : 'needed')
       } catch {
         if (active) setReadiness('unavailable')
@@ -137,7 +134,7 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
       setFailure('请先验证 API Key。')
       return
     }
-    const models = firstModel(gateway.models, selectedModel)
+    const models = companyGatewayModelsForSelection(gateway.models, selectedModel)
     const capability = gateway.capability
     if (capability === undefined || capability.tools !== true || capability.protocol !== protocol || capability.modelId !== selectedModel) {
       setFailure('请先验证所选模型是否支持 Agent 工具调用。')
@@ -163,7 +160,9 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
   return <Modal open title="配置公司网关" onClose={() => undefined} headless className={css.onboardingModal as string}>
     <div className={css.onboardingContent}>
       <h2 className={css.onboardingTitle}>配置公司网关</h2>
-      <p className={css.notice}>验证 API Key 后加载公司模型目录；Key 仅写入 Harness 凭据存储。</p>
+      <p className={css.notice}>填写方式与自定义提供方一致；公司地址固定，Key 仅写入 Harness 凭据存储。</p>
+      <label className={css.gatewayField}><span>API 协议</span><select value={protocol} disabled={saving} onChange={event => { setProtocol(event.target.value as CompanyGatewayProtocol); setGateway(undefined); setLoadedKey(undefined); setRequest(undefined); setSelectedModel(undefined); setFailure(undefined) }}><option value="openai-completions">OpenAI URL</option><option value="anthropic-messages">Anthropic URL</option></select></label>
+      <label className={css.gatewayField}><span>API 地址</span><input readOnly value={companyGatewayBaseUrl(protocol)} /></label>
       <label className={css.gatewayField}>
         <span>API Key</span>
         <span className={css.keyRow}>
@@ -171,13 +170,13 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
           <button type="button" onClick={() => setShowKey(value => !value)}>{showKey ? '隐藏' : '显示'}</button>
         </span>
       </label>
-      <label className={css.gatewayField}><span>API 协议</span><select value={protocol} disabled={saving} onChange={event => { setProtocol(event.target.value as CompanyGatewayProtocol); setGateway(undefined); setLoadedKey(undefined); setRequest(undefined); setFailure(undefined) }}><option value="anthropic-messages">Anthropic URL</option><option value="openai-completions">OpenAI URL</option></select></label>
       <div className={css.gatewayUtilityActions}>
         <button type="button" className={css.gatewaySecondaryButton} disabled={probing || saving} onClick={loadCatalog}>{probing ? '验证中…' : '验证 Key 并加载模型'}</button>
+        <button type="button" className={css.gatewaySecondaryButton} disabled={saving} onClick={() => window.open(COMPANY_GATEWAY_KEY_PORTAL_URL, '_blank', 'noreferrer')}>打开密钥门户</button>
       </div>
       {gateway === undefined ? null : <>
         <label className={css.gatewayField}>
-          <span>初始模型（已探测到 {gateway.models.length} 个模型）</span>
+          <span>模型目录（已加载 {gateway.models.length} 个模型）</span>
           <select value={selectedModel} disabled={saving} onChange={event => { setSelectedModel(event.target.value); setFailure(undefined) }}>
             {gateway.models.map(model => <option key={model.id} value={model.id}>{typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id}</option>)}
           </select>

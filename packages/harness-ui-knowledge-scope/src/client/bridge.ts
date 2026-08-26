@@ -22,7 +22,7 @@ export function createKnowledgeScopeBridge(nonce: string, parentOrigin: string):
   source: SnapshotStore<ScopeSnapshot | undefined>
   progress: SnapshotStore<readonly SearchProgress[]>
   accept(event: Pick<MessageEvent, 'source' | 'origin' | 'data'>, parent: WindowProxy): boolean
-  request(sessionId: string, scope?: Scope, options?: ScopeOptions, parent?: WindowProxy): void
+  request(sessionId: string, scope?: Scope, options?: ScopeOptions, parent?: WindowProxy): number
 } {
   const protocol = createScopeProtocol({ createStore: createSnapshotStore, nonce, parentOrigin })
   return {

@@ -1156,6 +1156,18 @@ async function companyGatewayJson(path: '/models' | '/key/quota', apiKey: string
 }
 
 const COMPANY_GATEWAY_CAPABILITY_TOOL = 'accrui_capability_probe'
+
+function companyGatewayCapabilityFailure(detail: string): string {
+  const normalized = detail.toLowerCase()
+  if (normalized.includes('invalid model name') || normalized.includes('model_not_found')) {
+    return `所选模型已不在当前模型目录中，请重新加载后选择。原始错误：${detail}`
+  }
+  if (normalized.includes('protocol_restricted') || normalized.includes('访问协议受限') || normalized.includes('访问客户端受限')) {
+    return `所选模型不允许使用当前 API 协议，请切换协议或选择其他模型。原始错误：${detail}`
+  }
+  return `所选模型暂不支持 Agent 工具调用，请换用当前目录中的其他模型。原始错误：${detail}`
+}
+
 async function probeCompanyGatewayToolCapability(options: { apiKey: string; protocol: CompanyGatewayProtocol; modelId: string; signal?: AbortSignal }): Promise<CompanyGatewayCapability> {
   const endpoint = options.protocol === 'anthropic-messages'
     ? `${COMPANY_GATEWAY_BASE_URL}/messages`
@@ -1182,12 +1194,12 @@ async function probeCompanyGatewayToolCapability(options: { apiKey: string; prot
     const thinkingRejectsForcedToolChoice = normalized.includes('thinking mode does not support this tool_choice')
       || (detail.includes('Thinking mode') && detail.includes('不支持') && detail.includes('tool_choice'))
     if (!thinkingRejectsForcedToolChoice) {
-      throw new Error(`当前模型或协议不支持 Agent 工具调用：${detail || `HTTP ${String(response.status)}`}`)
+      throw new Error(companyGatewayCapabilityFailure(detail || `HTTP ${String(response.status)}`))
     }
     response = await request(false)
     if (!response.ok) {
       const retryDetail = (await response.text()).slice(0, 1_000)
-      throw new Error(`当前模型或协议不支持 Agent 工具调用：${retryDetail || `HTTP ${String(response.status)}`}`)
+      throw new Error(companyGatewayCapabilityFailure(retryDetail || `HTTP ${String(response.status)}`))
     }
   }
   const value = await response.json() as Record<string, unknown>

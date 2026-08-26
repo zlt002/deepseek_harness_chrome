@@ -7,9 +7,10 @@ import type { Catalog, Scope, ScopeOptions, ScopeSnapshot } from './bridge.ts'
 import { scopePanelCeiling, scopePanelMaxHeightPx } from './panel-geometry.js'
 import { selectKnowledgeDomain, selectKnowledgeSystem } from './selection.js'
 import { shouldShowKnowledgeScope } from './session-visibility.js'
+import { acknowledgeScopeSwitch, optimisticScopeSwitch, shownScopeSwitch } from './scope-switch-state.js'
 import css from './KnowledgeScope.module.css'
 
-export interface KnowledgeScopeInjected { hooks: { knowledgeScope: SnapshotStore<ScopeSnapshot | undefined> }; request: (sessionId: string, scope?: Scope, options?: ScopeOptions) => void }
+export interface KnowledgeScopeInjected { hooks: { knowledgeScope: SnapshotStore<ScopeSnapshot | undefined> }; request: (sessionId: string, scope?: Scope, options?: ScopeOptions) => number }
 type StripProps = PropsRuntime<'conversation.composer.above'> & InjectFace<KnowledgeScopeInjected>
 type PanelProps = PropsRuntime<'conversation.input.overlay'> & InjectFace<KnowledgeScopeInjected>
 const emptyCatalog: Catalog = { domains: [], systems: [], repositories: [] }
@@ -57,6 +58,7 @@ function typeLabel(type: string | undefined): string | undefined {
 /** Compact, always-visible scope summary in the card-external composer bar. */
 export function KnowledgeScopeStrip({ session, useSession, useKnowledgeScope, request }: StripProps) {
   const [rememberOpen, setRememberOpen] = useState(false)
+  const [pendingSwitch, setPendingSwitch] = useState<ReturnType<typeof optimisticScopeSwitch> | undefined>(undefined)
   const subagent = useSession(s => s.subagent)
   const snapshot = useKnowledgeScope(value => value)
   const knowledgeOverlay = useComposerOverlay('knowledge-scope')
@@ -67,7 +69,12 @@ export function KnowledgeScopeStrip({ session, useSession, useKnowledgeScope, re
   }, [request, sessionId, subagent])
   const catalog = snapshot?.catalog ?? emptyCatalog
   const scope = scopeFor(snapshot, sessionId)
-  const enabled = snapshot?.enabled === true
+  useEffect(() => { setPendingSwitch(current => acknowledgeScopeSwitch(current, snapshot)) }, [snapshot])
+  const { enabled, remember } = shownScopeSwitch(snapshot, pendingSwitch)
+  const updateSwitch = (options: ScopeOptions, nextScope = scope) => {
+    const sequence = request(sessionId, nextScope, options)
+    setPendingSwitch(current => optimisticScopeSwitch(sequence, sessionId, shownScopeSwitch(snapshot, current), options))
+  }
   const serviceState = snapshot?.serviceState ?? 'checking'
   const ready = serviceState === 'ready'
   const selectedRepositories = selectedSourceLabel(scope?.repositoryIds ?? [], catalog.repositories)
@@ -76,11 +83,9 @@ export function KnowledgeScopeStrip({ session, useSession, useKnowledgeScope, re
   if (!shouldShowKnowledgeScope(subagent)) return null
   return <><div className={css.strip} aria-label="知识检索范围">
     <span className={css.switchWrap} onMouseEnter={() => setRememberOpen(true)} onMouseLeave={() => setRememberOpen(false)}>
-    <button className={css.repositoryToggle} type="button" role="switch" aria-label="启用知识查询" aria-checked={enabled} onFocus={() => setRememberOpen(true)} onClick={() => {
-      request(sessionId, scope ?? { domainId: '', systemIds: [], repositoryIds: [] }, { enabled: !enabled })
-    }}>
+    <button className={css.repositoryToggle} type="button" role="switch" aria-label="启用知识查询" aria-checked={enabled} onFocus={() => setRememberOpen(true)} onClick={() => updateSwitch({ enabled: !enabled }, scope ?? { domainId: '', systemIds: [], repositoryIds: [] })}>
       <span aria-hidden className={css.switchTrack}><span /></span><span className={css.srOnly}>启用知识查询</span>
-    </button>{rememberOpen && <label className={css.remember}><input aria-label="记住知识库开关状态" type="checkbox" checked={snapshot?.remember === true} onChange={(event) => request(sessionId, scope, { remember: event.target.checked })}/>是否记住</label>}</span>
+    </button>{rememberOpen && <label className={css.remember}><input aria-label="记住知识库开关状态" type="checkbox" checked={remember} onChange={(event) => updateSwitch({ remember: event.target.checked })}/>是否记住</label>}</span>
     <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={selectedRepositories === undefined ? '选择代码库' : `选择代码库：${selectedRepositories}`} title={selectedRepositories} aria-expanded={repositoryOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={repositoryOverlay.toggle}>
       <span aria-hidden>⌘</span><span className={css.scopeLabel}>{selectedRepositories ?? '选择代码库'}</span><span aria-hidden>⌃</span>
     </button>

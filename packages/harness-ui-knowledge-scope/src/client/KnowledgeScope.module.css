@@ -9,6 +9,7 @@
 .repositoryToggle[aria-checked='true'] .switchTrack > span { transform: translateX(12px); }
 .srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .switchWrap { position: relative; display: inline-flex; }
+.switchWrap::before { position: absolute; right: 0; bottom: 100%; left: 0; height: 6px; content: ''; }
 .remember { position: absolute; bottom: calc(100% + 6px); left: 0; display: flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 7px; background: var(--dsw-specific-menu); box-shadow: var(--dsw-shadow-lv2); white-space: nowrap; }
 .notice { display: block; width: min(100%, var(--dsh-composer-card-max-width)); margin: 0 auto; padding: 0 12px; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
 .scopeTrigger:disabled { cursor: not-allowed; opacity: .55; }

@@ -25,6 +25,9 @@ const onboardingOutput = await build({
 })
 const onboardingModule = await import(`data:text/javascript;base64,${Buffer.from(onboardingOutput.outputFiles[0].text).toString('base64')}`)
 
+const onboardingViewSource = await readFile(new URL('../src/client/CompanyGatewayOnboarding.tsx', import.meta.url), 'utf8')
+const accountAccessViewSource = await readFile(new URL('../src/client/AccountAccessSection.tsx', import.meta.url), 'utf8')
+
 const gateway = {
   models: [{ id: 'model-a', name: 'Model A' }],
   quota: { usagePercent: 20, nextResetTime: null, resetCycle: 'monthly' },
@@ -54,6 +57,28 @@ test('saveCompanyGateway never writes the unexposed default-model settings names
 test('company gateway protocol maps to its corresponding fixed URL', () => {
   assert.equal(gatewayModule.companyGatewayBaseUrl('anthropic-messages'), 'https://anapi-uat.annto.com/api-sse-anthropic')
   assert.equal(gatewayModule.companyGatewayBaseUrl('openai-completions'), 'https://anapi-uat.annto.com/api-sse-anthropic/v1')
+})
+
+test('a refreshed company catalog replaces retired models and only promotes the selected current model', () => {
+  const latest = [{ id: 'claude-haiku-4-5-20251001' }, { id: 'minimax-m2.7' }, { id: 'minimax-m3' }]
+
+  assert.deepEqual(
+    gatewayModule.companyGatewayModelsForSelection(latest, 'minimax-m2.5').map(model => model.id),
+    ['claude-haiku-4-5-20251001', 'minimax-m2.7', 'minimax-m3'],
+  )
+  assert.deepEqual(
+    gatewayModule.companyGatewayModelsForSelection(latest, 'minimax-m3').map(model => model.id),
+    ['minimax-m3', 'claude-haiku-4-5-20251001', 'minimax-m2.7'],
+  )
+})
+
+test('both company gateway entry points expose the fixed address, model selection, and key portal', () => {
+  for (const view of [onboardingViewSource, accountAccessViewSource]) {
+    assert.match(view, /API 地址/)
+    assert.match(view, /打开密钥门户/)
+    assert.match(view, /companyGatewayModelsForSelection/)
+    assert.match(view, /验证所选模型的 Agent 工具能力/)
+  }
 })
 
 test('company gateway restores the saved protocol from the settings namespace', () => {

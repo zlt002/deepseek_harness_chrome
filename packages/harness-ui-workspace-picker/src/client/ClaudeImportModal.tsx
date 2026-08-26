@@ -123,8 +123,9 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
           </section>
           <section className={css.importColumn} aria-label="Claude Code 会话">
             <div className={css.importSearchBar}><input className={css.importSearch} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索会话" aria-label="搜索 Claude Code 会话" /></div>
+            <div className={css.importSessionHeader} aria-hidden="true"><span>标题</span><span>日期</span></div>
             <div className={css.importScroll}>
-              {visibleSessions.map(session => <button key={session.sessionId} type="button" className={classes(css.importRow, session.sessionId === selectedSessionId && css.importRowActive)} onClick={() => setSelectedSessionId(session.sessionId)}><span>{session.title}</span><small>{new Date(session.updatedAt).toLocaleDateString()}</small></button>)}
+              {visibleSessions.map(session => <button key={session.sessionId} type="button" className={classes(css.importRow, css.importSessionRow, session.sessionId === selectedSessionId && css.importRowActive)} onClick={() => setSelectedSessionId(session.sessionId)}><span>{session.title}</span><small>{formatSessionDate(session.updatedAt).map(part => <span key={part}>{part}</span>)}</small></button>)}
               {phase !== 'sessions' && sessions.length === 0 && projectKey !== undefined && <div className={css.empty}>此项目没有可导入会话</div>}
             </div>
           </section>
@@ -151,3 +152,12 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
 }
 
 function classes(...values: Array<string | false | null | undefined>): string { return values.filter((value): value is string => typeof value === 'string' && value.length > 0).join(' ') }
+
+function formatSessionDate(value: string): [string, string] {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return [value, '']
+  return [
+    `${String(date.getFullYear()).padStart(4, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`,
+    `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`,
+  ]
+}

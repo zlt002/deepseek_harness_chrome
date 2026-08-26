@@ -41,3 +41,9 @@ test('Thinking models retry capability detection without forced tool choice', ()
   assert.match(source, /\.\.\.\(forceTool \? \{ tool_choice: toolChoice \} : \{\}\)/)
   assert.match(source, /response = await request\(false\)/)
 })
+
+test('capability errors explain retired models and protocol restrictions without hiding the gateway response', () => {
+  assert.match(source, /所选模型已不在当前模型目录中，请重新加载后选择。/)
+  assert.match(source, /所选模型不允许使用当前 API 协议，请切换协议或选择其他模型。/)
+  assert.match(source, /原始错误：/)
+})

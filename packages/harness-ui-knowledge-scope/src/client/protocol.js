@@ -11,6 +11,7 @@ function snapshot(value) {
     && (value.scope === undefined || scope(value.scope))
     && (value.enabled === undefined || typeof value.enabled === 'boolean')
     && (value.remember === undefined || typeof value.remember === 'boolean')
+    && (value.requestSequence === undefined || (Number.isInteger(value.requestSequence) && value.requestSequence > 0))
     && (value.serviceState === undefined || ['checking', 'ready', 'unauthenticated', 'unavailable'].includes(value.serviceState))
     && (value.notice === undefined || (typeof value.notice === 'string' && value.notice.length <= 2_000))
     && catalog !== null && typeof catalog === 'object'
@@ -60,6 +61,7 @@ export function createScopeProtocol({ createStore, nonce, parentOrigin }) {
     request(sessionId, nextScope, options, parent) {
       outgoing += 1
       parent.postMessage({ type: 'knowledge-scope-command/v1', nonce, sequence: outgoing, sessionId, ...(nextScope === undefined ? {} : { scope: nextScope }), ...options }, parentOrigin)
+      return outgoing
     },
   }
 }

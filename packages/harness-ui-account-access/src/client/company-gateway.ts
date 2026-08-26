@@ -62,6 +62,19 @@ export function companyGatewayModelDraftFailure(models: readonly CompanyGatewayM
   return undefined
 }
 
+/**
+ * The fresh gateway directory is authoritative. A retired id must not survive
+ * from a previous cache or form draft; the selected current model is merely
+ * moved to the front because Harness uses the first profile model by default.
+ */
+export function companyGatewayModelsForSelection(
+  models: readonly CompanyGatewayModel[],
+  selectedModelId: string | undefined,
+): CompanyGatewayModel[] {
+  const selected = selectedModelId === undefined ? undefined : models.find(model => model.id === selectedModelId)
+  return selected === undefined ? [...models] : [selected, ...models.filter(model => model !== selected)]
+}
+
 export function companyGatewayApiKeyFailure(value: string): string | undefined {
   const trimmed = value.trim()
   if (trimmed.length === 0) return '请输入公司网关 API Key。'
