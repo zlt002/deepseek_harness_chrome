@@ -1,0 +1,13 @@
+{
+  "name": "@accrui/harness-default-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Product-owned first-run Harness Workspace bootstrap",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

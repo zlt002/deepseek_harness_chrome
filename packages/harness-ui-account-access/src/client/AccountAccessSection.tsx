@@ -69,6 +69,8 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const [keyDraft, setKeyDraft] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol; requestedModelId?: string }>()
+  const [probedGateway, setProbedGateway] = useState<CompanyGatewayMetadata>()
+  const [probedKey, setProbedKey] = useState<string>()
   const [modelDrafts, setModelDrafts] = useState<CompanyGatewayModel[]>([])
   const [expandedModels, setExpandedModels] = useState<ReadonlySet<number>>(new Set())
   const [editingGateway, setEditingGateway] = useState(false)
@@ -80,10 +82,9 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const [notice, setNotice] = useState<string>()
   const [failure, setFailure] = useState<string>()
 
-  const probedGateway = probe?.status === 'ready' && probe.requestId === request?.id && request?.protocol === protocol && request?.key === keyDraft.trim() ? probe.gateway : undefined
   const gateway = probedGateway ?? account?.gateway
-  const verifiedDraft = probedGateway !== undefined
-  const probing = request !== undefined && probe?.requestId !== request.id
+  const verifiedDraft = probedGateway !== undefined && probedKey === keyDraft.trim()
+  const probing = request !== undefined
 
   useEffect(() => {
     let active = true
@@ -109,9 +110,10 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   useEffect(() => {
     if (probe === undefined || probe.requestId !== request?.id) return
     if (probe.status === 'error') { setFailure(probe.error); setRequest(undefined); return }
+    setProbedGateway(probe.gateway); setProbedKey(request.key); setRequest(undefined)
     setFailure(undefined)
     if (editingGateway) setModelDrafts(current => mergeProbedModels(current, probe.gateway.models))
-  }, [editingGateway, probe, request?.id])
+  }, [editingGateway, probe, request])
 
   useEffect(() => {
     if (gateway === undefined || editingGateway) return
@@ -130,8 +132,16 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     if (invalid !== undefined) { setFailure(invalid); return }
     if (probeGateway === undefined) { setFailure('公司网关连接正在刷新，请关闭并重新打开个人中心。'); return }
     setFailure(undefined); setNotice(undefined)
-    const requestedModelId = modelDrafts[0]?.id.trim() || undefined
-    setRequest({ id: probeGateway(key, protocol, requestedModelId), key, protocol, requestedModelId })
+    setProbedGateway(undefined); setProbedKey(undefined)
+    setRequest({ id: probeGateway(key, protocol), key, protocol })
+  }
+  const verifySelectedModel = (): void => {
+    const key = keyDraft.trim()
+    const modelId = modelDrafts[0]?.id.trim()
+    if (gateway === undefined || probedKey !== key || modelId === undefined || modelId === '') { setFailure('请先加载模型目录并选择首个模型。'); return }
+    if (probeGateway === undefined) { setFailure('公司网关连接正在刷新，请关闭并重新打开个人中心。'); return }
+    setFailure(undefined); setNotice(undefined)
+    setRequest({ id: probeGateway(key, protocol, modelId), key, protocol, requestedModelId: modelId })
   }
   const save = async (): Promise<boolean> => {
     if (gateway === undefined) return false
@@ -143,7 +153,7 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     const capability = gateway.capability
     const currentModelId = modelDrafts[0]?.id.trim()
     if (capability === undefined || capability.tools !== true || capability.protocol !== protocol || capability.modelId !== currentModelId) {
-      setFailure('当前协议或首个模型尚未完成 Agent 工具验证，请重新验证 API Key。')
+      setFailure('请先验证首个模型是否支持 Agent 工具调用。')
       return false
     }
     setSaving(true); setFailure(undefined); setNotice(undefined)
@@ -235,16 +245,17 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
         <button type="button" className={css.gatewayEditButton} aria-label="编辑公司网关" onClick={() => editingGateway ? cancelGatewayEditor() : openGatewayEditor()}>{editingGateway ? '取消' : '编辑'}</button>
       </div>
       {editingGateway ? <div className={css.gatewayEditor}>
-        <label className={css.gatewayField}><span>API Key</span><span className={css.keyRow}><input type={showKey ? 'text' : 'password'} value={keyDraft} placeholder={keyHint} disabled={!credentialWritable} onChange={event => { setKeyDraft(event.target.value); setFailure(undefined); setNotice(undefined) }} /><button type="button" onClick={() => setShowKey(value => !value)}>{showKey ? '隐藏' : '显示'}</button></span></label>
+        <label className={css.gatewayField}><span>API Key</span><span className={css.keyRow}><input type={showKey ? 'text' : 'password'} value={keyDraft} placeholder={keyHint} disabled={!credentialWritable} onChange={event => { setKeyDraft(event.target.value); setProbedGateway(undefined); setProbedKey(undefined); setRequest(undefined); setFailure(undefined); setNotice(undefined) }} /><button type="button" onClick={() => setShowKey(value => !value)}>{showKey ? '隐藏' : '显示'}</button></span></label>
         <details className={css.customized}>
           <summary>自定义设置</summary>
           <div className={css.customizedBody}>
-            <label className={css.gatewayField}><span>API 协议</span><select value={protocol} onChange={event => setProtocol(event.target.value as CompanyGatewayProtocol)}><option value="anthropic-messages">Anthropic URL</option><option value="openai-completions">OpenAI URL</option></select></label>
+            <label className={css.gatewayField}><span>API 协议</span><select value={protocol} onChange={event => { setProtocol(event.target.value as CompanyGatewayProtocol); setProbedGateway(undefined); setProbedKey(undefined); setRequest(undefined); setFailure(undefined) }}><option value="anthropic-messages">Anthropic URL</option><option value="openai-completions">OpenAI URL</option></select></label>
             <label className={css.gatewayField}><span>API 地址</span><input readOnly value={companyGatewayBaseUrl(protocol)} /></label>
           </div>
         </details>
         <div className={css.gatewayUtilityActions}>
           <button type="button" className={css.gatewaySecondaryButton} disabled={probing || !credentialWritable || probeGateway === undefined} onClick={probeKey}>{probing ? '验证中…' : '验证 Key 并加载'}</button>
+          {gateway === undefined ? null : <button type="button" className={css.gatewaySecondaryButton} disabled={probing || keyDraft.trim().length === 0 || probeGateway === undefined} onClick={verifySelectedModel}>{probing ? '验证中…' : '验证首个模型的 Agent 工具能力'}</button>}
           <button type="button" className={css.gatewaySecondaryButton} onClick={() => window.open(COMPANY_GATEWAY_KEY_PORTAL_URL, '_blank', 'noreferrer')}>打开密钥门户</button>
         </div>
         {gateway !== undefined ? <>

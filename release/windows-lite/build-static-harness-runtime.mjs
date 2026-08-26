@@ -25,7 +25,7 @@ import {
   staticTypertPackages,
   staticWebRunner,
 } from '../mac-lite/build-mac-production.mjs'
-import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -286,6 +286,7 @@ export async function buildWindowsStaticHarnessRuntime({
     await cp(path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'product-office-skills.mjs'), path.join(staging, 'native-server', 'product-office-skills.mjs'))
     await bundleHarnessRuntimePlugin({ outfile: path.join(staging, 'native-server', 'harness-runtime.mjs'), projectRoot: PROJECT_ROOT })
     await bundleHarnessTrackingPlugin({ outfile: path.join(staging, 'native-server', 'harness-tracking.mjs'), projectRoot: PROJECT_ROOT })
+    await bundleHarnessDefaultWorkspacePlugin({ outfile: path.join(staging, 'native-server', 'harness-default-workspace.mjs'), projectRoot: PROJECT_ROOT })
     await copyWindowsNativeAssets(harnessRoot, path.join(staging, 'native'))
     const marker = {
       format: 'deepseek-harness-windows-static-web-v1', platform: 'win32', arch: 'x64', revision,

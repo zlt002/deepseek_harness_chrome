@@ -32,7 +32,7 @@ type CompanyGatewayProtocol = 'anthropic-messages' | 'openai-completions'
 interface CompanyGatewayModel { id: string; name: string; description?: string }
 interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
 interface CompanyGatewayCapability { protocol: CompanyGatewayProtocol; modelId: string; tools: true }
-interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability: CompanyGatewayCapability; checkedAt: string }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability?: CompanyGatewayCapability; checkedAt: string }
 interface AccountAccessSnapshot { status: AccountAccessStatus; displayName?: string; knowledgeAccess: boolean; codeAccess: boolean; modelMode: 'manual' | 'company-pending'; gateway?: CompanyGatewayMetadata; message?: string }
 interface AccountAccessResponse { ok: boolean; snapshot?: AccountAccessSnapshot; error?: string }
 interface CompanyGatewayProbeResponse { ok: boolean; requestId?: string; gateway?: CompanyGatewayMetadata; error?: string }

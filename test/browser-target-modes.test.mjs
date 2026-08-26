@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 
-async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions } = {}) {
+async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
@@ -62,6 +62,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, onStorageSet
     action: { onClicked: { addListener: () => {} } },
     runtime: {
       connectNative,
+      getManifest: manifestVersion ? () => ({ version: manifestVersion }) : undefined,
       getURL: (path) => `chrome-extension://test/${path}`,
       lastError: undefined,
       onMessage: { addListener: (listener) => { runtimeListener = listener } },
@@ -140,6 +141,7 @@ test('background creates the selected-session full-screen Harness Tab before clo
   background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab,
+    manifestVersion: '1.1.75',
     closeSidePanel: async (options) => { createdAtClose = background.createdUrls.length; closeCalls.push(options) },
   })
   try {
@@ -211,12 +213,14 @@ test('sidepanel ensure-harness resolves the last-focused active tab for the defa
   const background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab,
+    manifestVersion: '1.1.75',
   })
   try {
     const response = await background.sendRuntimeMessage({ type: 'ensure-harness' })
     assert.deepEqual(response, { ok: true, url: 'http://127.0.0.1:43123' })
     assert.deepEqual(background.nativeMessages, [{
       type: 'start',
+      productVersion: '1.1.75',
       browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://docs.example.test/follow' },
     }])
   } finally {

@@ -23,12 +23,14 @@ test('the probe is sidepanel-only, bounded, and never returns the key', () => {
 
 test('safe model and quota metadata is cached without persisting the credential', () => {
   assert.match(source, /COMPANY_GATEWAY_METADATA_STORAGE_KEY/)
-  assert.match(source, /chrome\.storage\.local\.set\(\{ \[COMPANY_GATEWAY_METADATA_STORAGE_KEY\]: metadata \}\)/)
+  assert.match(source, /chrome\.storage\.local\.set\(\{ \[COMPANY_GATEWAY_METADATA_STORAGE_KEY\]: verifiedMetadata \}\)/)
   assert.doesNotMatch(source, /chrome\.storage\.[\s\S]{0,80}\bapiKey\b/)
 })
 
-test('tool capability is verified for the requested catalog model within a bounded timeout', () => {
-  assert.match(source, /const modelId = requestedModelId \?\? models\[0\]\.id/)
+test('loads the catalog before capability validation, and probes only the selected model', () => {
+  assert.match(source, /if \(requestedModelId === undefined\) \{[\s\S]{0,400}return metadata/)
+  assert.match(source, /const modelId = requestedModelId/)
+  assert.doesNotMatch(source, /const modelId = requestedModelId \?\? models\[0\]\.id/)
   assert.match(source, /models\.some\(\(model\) => model\.id === modelId\)/)
   assert.match(source, /probeCompanyGatewayToolCapability\(\{ apiKey, protocol, modelId, signal: controller\.signal \}\)/)
   assert.match(source, /quota\.usagePercent !== null && quota\.usagePercent >= 100/)

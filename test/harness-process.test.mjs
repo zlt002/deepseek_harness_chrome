@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { claudeSkillsPatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
+import { claudeSkillsPatch, defaultWorkspacePatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveDefaultWorkspacePlugin, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
 import { mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -64,12 +64,17 @@ test('resolves the product-owned AccrUI tracking plugin outside the upstream che
     resolveHarnessTrackingPlugin({}),
     resolve(projectRoot, 'packages/harness-tracking/src/index.mjs'),
   )
+  assert.equal(
+    resolveDefaultWorkspacePlugin({}),
+    resolve(projectRoot, 'packages/harness-default-workspace/src/index.mjs'),
+  )
 })
 
 test('mounts AccrUI effective-session tracking on every Harness Web launch', () => {
   const patch = effectiveSessionTrackingPatch({})
   assert.match(patch, /id: deepseek-harness-effective-session-tracking/)
   assert.match(patch, /name: 'file:\/\/.+packages\/harness-tracking\/src\/index\.mjs'/)
+  assert.match(defaultWorkspacePatch({}), /name: 'file:\/\/.+packages\/harness-default-workspace\/src\/index\.mjs'/)
 })
 
 test('converts Windows absolute loader paths to valid file URLs', () => {

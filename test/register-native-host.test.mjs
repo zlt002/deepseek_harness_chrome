@@ -140,6 +140,7 @@ testMac('installs the native host into a stable macOS location', async () => {
     await stat(join(nativeServer, 'src/native-host.mjs'))
     await stat(join(nativeServer, 'harness-runtime.mjs'))
     await stat(join(nativeServer, 'harness-tracking.mjs'))
+    await stat(join(nativeServer, 'harness-default-workspace.mjs'))
     const installedSkill = join(installRoot, 'skills/pmd-prd/SKILL.md')
     await stat(installedSkill)
     const installedSkillSource = await readFile(installedSkill, 'utf8')
@@ -289,10 +290,12 @@ testMac('records the generated product Harness root when no launch override is s
       DSH_CLI_PATH: undefined,
       DSH_CWD: undefined,
       DSH_NATIVE_LOG: undefined,
+      ACCR_PRODUCT_VERSION: '1.1.75',
     })
     assert.equal(result.code, 0, result.stderr)
     const source = await readFile(launcher, 'utf8')
     assert.match(source, new RegExp(`export DSH_ROOT='${productRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
+    assert.match(source, /export ACCR_PRODUCT_VERSION='1\.1\.75'/)
     assert.doesNotMatch(source, /DSH_(?:LEGACY_UI_OVERLAY|ENABLE_KNOWLEDGE_SCOPE_UI|ENABLE_SKILL_SETTINGS_UI)/)
   } finally {
     await rm(home, { recursive: true, force: true })

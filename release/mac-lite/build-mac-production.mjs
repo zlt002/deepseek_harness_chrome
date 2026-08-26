@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -578,7 +578,7 @@ async function directorySize(root) {
   return bytes
 }
 
-function macNativeHostLauncher() {
+function macNativeHostLauncher(productVersion = EXTENSION_VERSION) {
   return `#!/bin/sh
 set -eu
 PACKAGE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -601,6 +601,7 @@ export DSH_CLI_PATH="$DSH_ROOT/apps/cli/lib/server.mjs"
 export DSH_CWD="$PACKAGE_DIR/../workspace"
 export DSH_PRODUCT_PLUGIN_ROOT="$PACKAGE_DIR/product-plugins"
 export DSH_PRODUCT_SKILLS_ROOT="$PACKAGE_DIR/skills"
+export ACCR_PRODUCT_VERSION=${JSON.stringify(productVersion)}
 export DSH_NODE_PTY_SPAWN_HELPER="$PACKAGE_DIR/native/node-pty/spawn-helper"
 export DSH_NATIVE_LOG="$PACKAGE_DIR/../logs/native-host.log"
 exec "$NODE_EXEC" "$PACKAGE_DIR/native-server/runtime.mjs"
@@ -759,6 +760,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   const nativeBundlePath = path.join(tempDir, 'native-server.mjs')
   const harnessRuntimePluginPath = path.join(tempDir, 'harness-runtime.mjs')
   const harnessTrackingPluginPath = path.join(tempDir, 'harness-tracking.mjs')
+  const defaultWorkspacePluginPath = path.join(tempDir, 'harness-default-workspace.mjs')
   const pluginManagerPath = path.join(tempDir, 'plugin-manager.mjs')
   const schemasteryPath = path.join(harnessDir, 'vendor', 'schemastery', 'lib', 'index.mjs')
   // The sibling Harness checkout owns the host-native esbuild binary. The
@@ -766,6 +768,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   run('pnpm', ['exec', 'esbuild', nativeServerEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${nativeBundlePath}`], { cwd: PROJECT_ROOT })
   await bundleHarnessRuntimePlugin({ outfile: harnessRuntimePluginPath, projectRoot: PROJECT_ROOT })
   await bundleHarnessTrackingPlugin({ outfile: harnessTrackingPluginPath, projectRoot: PROJECT_ROOT })
+  await bundleHarnessDefaultWorkspacePlugin({ outfile: defaultWorkspacePluginPath, projectRoot: PROJECT_ROOT })
   run('pnpm', ['exec', 'esbuild', cliEntry, '--bundle', '--platform=node', '--format=esm', '--target=node22', '--packages=bundle', `--outfile=${pluginManagerPath}`], { cwd: PROJECT_ROOT })
   await mkdir(path.join(cliDir, 'lib'), { recursive: true })
   // `harness-skill-settings` loads this through DSH_PRODUCT_SCHEMATERY_URL.
@@ -803,6 +806,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await cp(nativeBundlePath, path.join(runtimeDir, 'native-server', 'runtime.mjs'))
   await cp(harnessRuntimePluginPath, path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'))
   await cp(harnessTrackingPluginPath, path.join(runtimeDir, 'native-server', 'harness-tracking.mjs'))
+  await cp(defaultWorkspacePluginPath, path.join(runtimeDir, 'native-server', 'harness-default-workspace.mjs'))
   await cp(
     path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'),
     path.join(runtimeDir, 'native-server', 'selected-source-routing-prompt.mjs'),
@@ -816,7 +820,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await copyMacNativeAssets(path.join(runtimeDir, 'native'))
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })
-  await writeFile(path.join(runtimeDir, 'run-native-host.sh'), macNativeHostLauncher(), { mode: 0o755 })
+  await writeFile(path.join(runtimeDir, 'run-native-host.sh'), macNativeHostLauncher(EXTENSION_VERSION), { mode: 0o755 })
   await writeFile(path.join(runtimeDir, 'dsh-plugin'), pluginManagerLauncher(), { mode: 0o755 })
   await writeFile(path.join(runtimeDir, 'register-native-host.sh'), registerNativeHost(), { mode: 0o755 })
   await writeFile(path.join(harnessDir, 'harness-runtime.json'), `${JSON.stringify({ format: 'deepseek-harness-mac-static-web-v1', entrypoint: 'apps/cli/lib/server.mjs', bundled: true, nodeModulesIncluded: false, staticWebPluginCount: aliases.size, dynamicPluginRepository: 'managed-web-profile' }, null, 2)}\n`)

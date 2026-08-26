@@ -70,6 +70,18 @@ export function resolveHarnessTrackingPlugin(env = process.env) {
   return candidates.find(existsSync) ?? candidates.at(-1)
 }
 
+/** Resolve the product-owned first-run Workspace bootstrap plugin. */
+export function resolveDefaultWorkspacePlugin(env = process.env) {
+  const explicit = env.DSH_DEFAULT_WORKSPACE_PLUGIN?.trim()
+  if (explicit) return resolve(explicit)
+  const candidates = [
+    resolve(THIS_DIR, 'harness-default-workspace.mjs'),
+    resolve(THIS_DIR, '../harness-default-workspace.mjs'),
+    resolve(THIS_DIR, '../../../packages/harness-default-workspace/src/index.mjs'),
+  ]
+  return candidates.find(existsSync) ?? candidates.at(-1)
+}
+
 /** Resolve the official runtime dependency used by the one product Host plugin. */
 export function resolveSchemasteryUrl(cliPath) {
   const harnessRoot = resolve(dirname(cliPath), '../../..')
@@ -241,9 +253,20 @@ export function claudeSkillsPatch(env = process.env) {
 
 /** Always mount AccrUI effective-session tracking, even without a Browser Connector. */
 export function effectiveSessionTrackingPatch(env = process.env) {
+  const productVersion = env.ACCR_PRODUCT_VERSION?.trim()
   return `- insert:
     - id: deepseek-harness-effective-session-tracking
       name: ${yamlString(loaderModuleSpecifier(resolveHarnessTrackingPlugin(env)))}
+${productVersion ? `      config:
+        productVersion: ${yamlString(productVersion)}
+` : ''}`
+}
+
+/** Register the launcher-opt-in first-run Workspace before the web client connects. */
+export function defaultWorkspacePatch(env = process.env) {
+  return `- insert:
+    - id: deepseek-harness-default-workspace
+      name: ${yamlString(loaderModuleSpecifier(resolveDefaultWorkspacePlugin(env)))}
 `
 }
 
@@ -441,7 +464,7 @@ export class HarnessWebProcess {
     const directory = await mkdtemp(`${tmpdir()}/deepseek-harness-connector-`)
     const patchPath = resolve(directory, 'connector.cordis.yml')
     const connector = this.mcpConnector === undefined ? '' : connectorPatch(this.mcpConnector.url, this.mcpConnector.token, this.runtimePluginPath)
-    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${companyGatewayModelPatch()}${productUiPatch(this.env)}${effectiveSessionTrackingPatch(this.env)}${connector}`, { mode: 0o600 })
+    await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${companyGatewayModelPatch()}${productUiPatch(this.env)}${defaultWorkspacePatch(this.env)}${effectiveSessionTrackingPatch(this.env)}${connector}`, { mode: 0o600 })
     this.connectorPatchDir = directory
     this.connectorPatchPath = patchPath
     return patchPath

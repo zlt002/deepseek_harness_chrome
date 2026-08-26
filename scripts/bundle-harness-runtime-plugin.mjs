@@ -43,6 +43,18 @@ export async function bundleHarnessTrackingPlugin({
   })
 }
 
+export async function bundleHarnessDefaultWorkspacePlugin({
+  outfile,
+  projectRoot = PROJECT_ROOT,
+} = {}) {
+  return bundleProductHostPlugin({
+    outfile,
+    projectRoot,
+    entry: resolve(projectRoot, 'packages/harness-default-workspace/src/index.mjs'),
+    label: 'bundleHarnessDefaultWorkspacePlugin',
+  })
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const outfile = process.argv[2]
   await bundleHarnessRuntimePlugin({ outfile: outfile && resolve(outfile) })

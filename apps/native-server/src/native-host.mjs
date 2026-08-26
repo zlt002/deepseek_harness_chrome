@@ -13,6 +13,10 @@ import { redactSensitiveDiagnostic } from './redact.mjs'
 const nativeLogPath = process.env.DSH_NATIVE_LOG?.trim()
 const runtimeManifestPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime-manifest.json')
 
+function validProductVersion(value) {
+  return typeof value === 'string' && value.trim().length <= 128 && /^\d+(?:\.\d+){0,3}$/.test(value.trim())
+}
+
 function installedRuntimeIdentity() {
   if (!existsSync(runtimeManifestPath)) return undefined
   try {
@@ -71,7 +75,7 @@ process.on('unhandledRejection', (error) => {
  * to stderr so Chrome never sees an unframed byte.
  */
 export class NativeHost {
-  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
+  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string, env?: NodeJS.ProcessEnv }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
   constructor(options = {}) {
     this.processFactory = options.processFactory ?? ((processOptions) => new HarnessWebProcess(processOptions))
     this.connectorFactory = options.connectorFactory ?? ((connectorOptions) => new BrowserConnector(connectorOptions))
@@ -136,7 +140,7 @@ export class NativeHost {
       return
     }
     if (type === 'start') {
-      await this.startHarness(message.browserTarget, message.browserTargets, message.unavailableBrowserTargets)
+      await this.startHarness(message.browserTarget, message.browserTargets, message.unavailableBrowserTargets, message.productVersion)
       return
     }
     if (type === 'transfer-browser-target') {
@@ -160,7 +164,7 @@ export class NativeHost {
     this.send({ type: 'error', error: `Unknown native message type: ${String(type)}` })
   }
 
-  async startHarness(browserTarget, browserTargets, unavailableBrowserTargets) {
+  async startHarness(browserTarget, browserTargets, unavailableBrowserTargets, productVersion) {
     if (this.closed) return
     const boundTarget = this.currentRunId === undefined ? undefined : this.browserTargets.get(this.currentRunId)
     if (validBrowserTarget(browserTarget) && validBrowserTarget(boundTarget) && !sameBrowserTarget(browserTarget, boundTarget)) {
@@ -181,7 +185,7 @@ export class NativeHost {
       return
     }
     if (this.startPromise === undefined) {
-      this.startPromise = this.#startHarness().finally(() => {
+      this.startPromise = this.#startHarness(productVersion).finally(() => {
         this.startPromise = undefined
       })
     }
@@ -259,7 +263,7 @@ export class NativeHost {
     await this.closePromise
   }
 
-  async #startHarness() {
+  async #startHarness(productVersion) {
     try {
       if (this.connector === undefined) {
         this.connector = this.connectorFactory({
@@ -275,6 +279,9 @@ export class NativeHost {
           mcpConnector: { url: `${connector.url}/mcp`, token: connector.token },
           prototypeRecoveryPublicKey: this.prototypeRecoveryPublicKey,
           prototypeRecoveryRunId: this.currentRunId,
+          env: validProductVersion(productVersion)
+            ? { ...process.env, ACCR_PRODUCT_VERSION: productVersion.trim() }
+            : process.env,
         })
       }
       const harnessUrl = await this.harness.start()

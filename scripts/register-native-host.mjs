@@ -4,7 +4,7 @@ import { chmod, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promi
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from './bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from './bundle-harness-runtime-plugin.mjs'
 import { PRODUCT_UI_PLUGIN_DIRECTORIES, PRODUCT_UI_PLUGIN_PACKAGE_NAMES } from '../apps/native-server/src/product-plugin-manifest.mjs'
 import { createRuntimeIdentity } from './runtime-identity.mjs'
 
@@ -101,6 +101,7 @@ for (const [name, value] of [
   ['DSH_NATIVE_LOG', process.env.DSH_NATIVE_LOG?.trim()],
   ['DSH_HARNESS_RUNTIME_PLUGIN', process.env.DSH_HARNESS_RUNTIME_PLUGIN?.trim()],
   ['DSH_HARNESS_TRACKING_PLUGIN', process.env.DSH_HARNESS_TRACKING_PLUGIN?.trim()],
+  ['ACCR_PRODUCT_VERSION', process.env.ACCR_PRODUCT_VERSION?.trim()],
 ]) {
   if (value !== undefined && value !== '') launcherLines.splice(1, 0, `export ${name}=${shellQuote(value)}`)
 }
@@ -182,6 +183,7 @@ await mkdir(installRoot, { recursive: true })
 await replaceDirectory(nativeServerSource, nativeServer, async (staging) => {
   await bundleHarnessRuntimePlugin({ outfile: join(staging, 'harness-runtime.mjs'), projectRoot })
   await bundleHarnessTrackingPlugin({ outfile: join(staging, 'harness-tracking.mjs'), projectRoot })
+  await bundleHarnessDefaultWorkspacePlugin({ outfile: join(staging, 'harness-default-workspace.mjs'), projectRoot })
   await installProductPlugins(join(staging, 'product-plugins'))
   if (activeHarnessRoot !== undefined && existsSync(join(activeHarnessRoot, '.harness-product.json'))) {
     const runtimeIdentity = await createRuntimeIdentity({

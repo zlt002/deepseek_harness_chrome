@@ -34,6 +34,7 @@ const REQUIRED_HARNESS_PATHS = [
   'native-server/runtime.mjs',
   'native-server/harness-runtime.mjs',
   'native-server/harness-tracking.mjs',
+  'native-server/harness-default-workspace.mjs',
   'native/node-pty/prebuilds/win32-x64/pty.node',
   'native/sharp/sharp.node',
   'native/koffi/koffi.node',
@@ -142,8 +143,8 @@ export async function validateHarnessRuntime(harnessRuntimeDir) {
   return root
 }
 
-function nativeHostBat() {
-  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server.mjs"\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace"\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"\r\n`
+function nativeHostBat(productVersion) {
+  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server.mjs"\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace\\project"\r\nset "DSH_DEFAULT_WORKSPACE=%DSH_CWD%"\r\nif not exist "%DSH_DEFAULT_WORKSPACE%" mkdir "%DSH_DEFAULT_WORKSPACE%"\r\nif not exist "%DSH_DEFAULT_WORKSPACE%" (\r\n  echo ERROR: Failed to create default workspace: %DSH_DEFAULT_WORKSPACE% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills"\r\nset "ACCR_PRODUCT_VERSION=${productVersion}"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"\r\n`
 }
 
 function pluginManagerBat() {
@@ -550,7 +551,7 @@ export async function buildWindowsRelease({
   await copyDereferenced(path.join(runtimeSource, 'native'), path.join(runtimeDir, 'native'))
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
-  await writeFile(path.join(runtimeDir, 'run_native_host.bat'), nativeHostBat(), 'utf8')
+  await writeFile(path.join(runtimeDir, 'run_native_host.bat'), nativeHostBat(version), 'utf8')
   await writeFile(path.join(runtimeDir, 'dsh-plugin.bat'), pluginManagerBat(), 'utf8')
   await writeFile(path.join(runtimeDir, 'register-native-host.ps1'), utf8Bom(registerNativeHostPs1()))
   await writeFile(path.join(runtimeDir, 'start.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(startVbs(), 'utf16le')]))

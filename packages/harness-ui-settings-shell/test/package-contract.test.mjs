@@ -15,7 +15,7 @@ const onboardingOutput = await build({
 })
 const onboarding = await import(`data:text/javascript;base64,${Buffer.from(onboardingOutput.outputFiles[0].text).toString('base64')}`)
 
-test('company gateway onboarding replaces the official DeepSeek prompt without suppressing other steps', () => {
+test('company gateway onboarding is the first product step and suppresses stock prompts', () => {
   const steps = [
     { id: 'welcome-notice', order: -100 },
     { id: 'accrui-company-gateway', order: -10 },
@@ -23,7 +23,7 @@ test('company gateway onboarding replaces the official DeepSeek prompt without s
     { id: 'future-step', order: 10 },
   ]
   assert.deepEqual(onboarding.productOnboardingSteps(steps).map(step => step.id), [
-    'welcome-notice', 'accrui-company-gateway', 'future-step',
+    'accrui-company-gateway', 'future-step',
   ])
   const stock = [{ id: 'welcome-notice', order: -100 }, { id: 'deepseek-official', order: 0 }]
   assert.equal(onboarding.productOnboardingSteps(stock), stock)

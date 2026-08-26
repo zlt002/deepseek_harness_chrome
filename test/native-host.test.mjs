@@ -109,9 +109,10 @@ test('starts a pure Harness Run without a Browser Target and leaves browser tool
   host.send = (message) => messages.push(message)
 
   try {
-    await host.handle({ type: 'start' })
+    await host.handle({ type: 'start', productVersion: '1.1.75' })
     const started = messages.find((message) => message.type === 'server_started')
     assert.equal(typeof started?.payload.runId, 'string')
+    assert.equal(harnessOptions.env.ACCR_PRODUCT_VERSION, '1.1.75')
     const response = await fetch(harnessOptions.mcpConnector.url, {
       method: 'POST',
       headers: {

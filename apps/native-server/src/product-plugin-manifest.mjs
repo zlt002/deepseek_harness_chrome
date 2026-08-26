@@ -21,6 +21,7 @@ export const PRODUCT_PLUGINS = Object.freeze([
   { directory: 'harness-skill-settings', packageName: '@accrui/harness-skill-settings', client: true, typecheck: true, injectionOrder: 15 },
   { directory: 'harness-runtime', packageName: '@accrui/harness-runtime-mcp-scopes', client: false, typecheck: false },
   { directory: 'harness-tracking', packageName: '@accrui/harness-tracking', client: false, typecheck: false },
+  { directory: 'harness-default-workspace', packageName: '@accrui/harness-default-workspace', client: false, typecheck: false },
 ])
 
 export const PRODUCT_UI_PLUGINS = Object.freeze(PRODUCT_PLUGINS.filter((plugin) => plugin.client))

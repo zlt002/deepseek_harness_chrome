@@ -16,9 +16,33 @@ export const DEFAULT_TRACKING_ENDPOINT = 'http://10.27.15.64:8793/api/tracking/e
 export const DEFAULT_TRACKING_API_KEY = '4c688737784096b395936f4174aa7694fcaa173d3d70cc33'
 export const DEFAULT_ALLOW_HTTP_HOSTS = ['10.27.15.64']
 const DEFAULT_TIMEOUT_MS = 5_000
+export const MAX_PRODUCT_VERSION_LENGTH = 128
+export const MAX_SKILL_NAMES = 32
+export const MAX_SKILL_NAME_LENGTH = 128
+const PRODUCT_VERSION_PATTERN = /^\d+(?:\.\d+){0,3}$/
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 function trimValue(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+export function normalizeProductVersion(value) {
+  const version = trimValue(value)
+  return version !== undefined && version.length <= MAX_PRODUCT_VERSION_LENGTH && PRODUCT_VERSION_PATTERN.test(version) ? version : undefined
+}
+
+export function normalizeSkillNames(values) {
+  if (!Array.isArray(values)) return []
+  const names = []
+  const seen = new Set()
+  for (const value of values) {
+    const name = trimValue(value)
+    if (name === undefined || name.length > MAX_SKILL_NAME_LENGTH || !SKILL_NAME_PATTERN.test(name) || seen.has(name)) continue
+    seen.add(name)
+    names.push(name)
+    if (names.length === MAX_SKILL_NAMES) break
+  }
+  return names
 }
 
 function readEnvList(value) {
@@ -71,6 +95,7 @@ export function resolveTrackingConfig(input = {}, env = process.env) {
     now: input.now ?? (() => new Date()),
     deviceName: input.deviceName,
     deviceInstallationId: input.deviceInstallationId,
+    productVersion: normalizeProductVersion(input.productVersion ?? env.ACCR_PRODUCT_VERSION),
   }
 }
 
@@ -167,6 +192,8 @@ export async function reportEffectiveSession(input) {
         ...(apiKey ? { apiKey } : {}),
         ...(input.modelApiKey ? { modelApiKey: input.modelApiKey } : {}),
         ...(input.deviceName ? { deviceName: input.deviceName } : {}),
+        ...(normalizeProductVersion(input.productVersion) ? { productVersion: normalizeProductVersion(input.productVersion) } : {}),
+        ...(normalizeSkillNames(input.skillNames).length > 0 ? { skillNames: normalizeSkillNames(input.skillNames) } : {}),
       }),
     })
     if (!response?.ok) throw new Error(`Tracking request failed with ${response?.status}`)
@@ -181,26 +208,48 @@ export function apply(ctx, input = {}) {
   if (config.disabled) return
 
   const reported = new Set()
+  const pendingRunBySession = new Map()
+  const skillNamesByRun = new Map()
   const identityPromise = getTrackingIdentity(config)
   ctx.effect(() => ctx.on('session/event', (session, event) => {
+    if (!isRootProductSession(session)) return
+    const sessionId = String(session.id)
+    if (event?.type === 'user/message' && event.data?.source?.kind === 'skill-invocation') {
+      const runId = pendingRunBySession.get(sessionId)
+      if (runId !== undefined) {
+        skillNamesByRun.set(runId, normalizeSkillNames([...skillNamesByRun.get(runId), event.data.source.name]))
+      }
+      return
+    }
     if (!shouldReportEffectiveSession(session, event, reported)) return
-    const runId = effectiveRunId(String(session.id), event.data.turn)
+    const runId = effectiveRunId(sessionId, event.data.turn)
     reported.add(runId)
-    void identityPromise
-      .then((identity) => reportEffectiveSession({
-        endpoint: config.endpoint,
-        apiKey: config.apiKey,
-        modelApiKey: config.modelApiKey,
-        timeoutMs: config.timeoutMs,
-        fetchImpl: config.fetchImpl,
-        sessionId: String(session.id),
-        runId,
-        occurredAt: new Date(event.time ?? config.now().getTime()).toISOString(),
-        deviceInstallationId: identity.deviceInstallationId,
-        deviceName: identity.deviceName,
-      }))
-      .catch((error) => {
-        ctx.logger?.debug?.(`[tracking] effective session report failed: ${String(error)}`)
-      })
+    pendingRunBySession.set(sessionId, runId)
+    skillNamesByRun.set(runId, [])
+    // The agent loop appends recognised skill-invocation messages immediately
+    // after step/start. Yield one microtask without delaying the model step.
+    queueMicrotask(() => {
+      if (pendingRunBySession.get(sessionId) === runId) pendingRunBySession.delete(sessionId)
+      const skillNames = skillNamesByRun.get(runId) ?? []
+      skillNamesByRun.delete(runId)
+      void identityPromise
+        .then((identity) => reportEffectiveSession({
+          endpoint: config.endpoint,
+          apiKey: config.apiKey,
+          modelApiKey: config.modelApiKey,
+          timeoutMs: config.timeoutMs,
+          fetchImpl: config.fetchImpl,
+          sessionId,
+          runId,
+          occurredAt: new Date(event.time ?? config.now().getTime()).toISOString(),
+          deviceInstallationId: identity.deviceInstallationId,
+          deviceName: identity.deviceName,
+          productVersion: config.productVersion,
+          skillNames,
+        }))
+        .catch((error) => {
+          ctx.logger?.debug?.(`[tracking] effective session report failed: ${String(error)}`)
+        })
+    })
   }), 'accrui-effective-session-tracking.session-events')
 }

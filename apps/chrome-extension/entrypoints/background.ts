@@ -107,7 +107,7 @@ interface CompanyGatewayModel { id: string; name: string; description?: string }
 interface CompanyGatewayQuota { usagePercent: number | null; nextResetTime: string | null; resetCycle: 'daily' | 'weekly' | 'monthly' | 'unlimited' }
 type CompanyGatewayProtocol = 'anthropic-messages' | 'openai-completions'
 interface CompanyGatewayCapability { protocol: CompanyGatewayProtocol; modelId: string; tools: true }
-interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability: CompanyGatewayCapability; checkedAt: string }
+interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: CompanyGatewayQuota; capability?: CompanyGatewayCapability; checkedAt: string }
 
 const LEGACY_KNOWLEDGE_SCOPE_PREFIX = 'knowledge-query:scope:session:'
 function legacyKnowledgeScopeKey(sessionId: string): string { return `${LEGACY_KNOWLEDGE_SCOPE_PREFIX}${sessionId}` }
@@ -1120,8 +1120,8 @@ function validCompanyGatewayMetadata(value: unknown): value is CompanyGatewayMet
   return companyGatewayQuota(value.quota) !== undefined && value.models.every((model) => isKnowledgeRecord(model)
     && typeof model.id === 'string' && typeof model.name === 'string'
     && (model.description === undefined || typeof model.description === 'string'))
-    && isKnowledgeRecord(capability) && (capability.protocol === 'anthropic-messages' || capability.protocol === 'openai-completions')
-    && typeof capability.modelId === 'string' && capability.tools === true
+    && (capability === undefined || (isKnowledgeRecord(capability) && (capability.protocol === 'anthropic-messages' || capability.protocol === 'openai-completions')
+      && typeof capability.modelId === 'string' && capability.tools === true))
 }
 
 async function companyGatewayMetadata(): Promise<CompanyGatewayMetadata | undefined> {
@@ -1207,7 +1207,11 @@ async function probeCompanyGateway(apiKey: string, protocol: CompanyGatewayProto
   if (models === undefined || models.length === 0) throw new Error('公司网关没有返回可用模型。')
   if (quota === undefined) throw new Error('公司网关返回了无法识别的用量信息。')
   if (quota.usagePercent !== null && quota.usagePercent >= 100) throw new Error('公司网关额度已经耗尽，请补充额度或更换 Key。')
-  const modelId = requestedModelId ?? models[0].id
+  const metadata = { models, quota, checkedAt: new Date().toISOString() }
+  if (requestedModelId === undefined) {
+    return metadata
+  }
+  const modelId = requestedModelId
   if (!models.some((model) => model.id === modelId)) throw new Error('所选模型不在公司网关返回的可用模型中。')
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), COMPANY_GATEWAY_TIMEOUT_MS)
@@ -1220,9 +1224,9 @@ async function probeCompanyGateway(apiKey: string, protocol: CompanyGatewayProto
   } finally {
     clearTimeout(timeout)
   }
-  const metadata = { models, quota, capability, checkedAt: new Date().toISOString() }
-  await chrome.storage.local.set({ [COMPANY_GATEWAY_METADATA_STORAGE_KEY]: metadata })
-  return metadata
+  const verifiedMetadata = { ...metadata, capability }
+  await chrome.storage.local.set({ [COMPANY_GATEWAY_METADATA_STORAGE_KEY]: verifiedMetadata })
+  return verifiedMetadata
 }
 
 function isCompanyAuthenticationCookie(cookie: chrome.cookies.Cookie, now: number): boolean {
@@ -4467,7 +4471,12 @@ function startHarness(binding?: BrowserTargetBinding): Promise<string> {
     port.onDisconnect.addListener(onDisconnect)
     port.onMessage.addListener(onMessage)
     try {
-      port.postMessage({ type: 'start', ...(binding === undefined ? { browserTarget: undefined } : { browserTarget: binding.browserTarget, ...nativeBindingFields(binding) }) })
+      const productVersion = chrome.runtime.getManifest?.().version
+      port.postMessage({
+        type: 'start',
+        ...(typeof productVersion === 'string' && /^\d+(?:\.\d+){0,3}$/.test(productVersion) && productVersion.length <= 128 ? { productVersion } : {}),
+        ...(binding === undefined ? { browserTarget: undefined } : { browserTarget: binding.browserTarget, ...nativeBindingFields(binding) }),
+      })
     } catch (error) {
       settled = true
       cleanup()

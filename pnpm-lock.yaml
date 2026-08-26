@@ -82,6 +82,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(zod@4.4.3)
 
+  packages/harness-default-workspace: {}
+
   packages/harness-runtime: {}
 
   packages/harness-skill-settings: {}
