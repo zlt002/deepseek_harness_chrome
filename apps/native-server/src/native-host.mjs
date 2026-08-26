@@ -9,6 +9,7 @@ import { CONNECTOR_RESPONSE, sameBrowserTarget, validBrowserTarget, validBrowser
 import { validRuntimeIdentitySummary } from './runtime-identity-contract.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
 import { redactSensitiveDiagnostic } from './redact.mjs'
+import { checkUpdate, launchPreparedUpdate, prepareUpdate } from './release-update/index.mjs'
 
 const nativeLogPath = process.env.DSH_NATIVE_LOG?.trim()
 const runtimeManifestPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime-manifest.json')
@@ -75,7 +76,7 @@ process.on('unhandledRejection', (error) => {
  * to stderr so Chrome never sees an unframed byte.
  */
 export class NativeHost {
-  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string, env?: NodeJS.ProcessEnv }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
+  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string, env?: NodeJS.ProcessEnv }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object, updateCheck?: typeof checkUpdate, updatePrepare?: typeof prepareUpdate, updateLaunch?: typeof launchPreparedUpdate, installRoot?: string, platform?: NodeJS.Platform, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
   constructor(options = {}) {
     this.processFactory = options.processFactory ?? ((processOptions) => new HarnessWebProcess(processOptions))
     this.connectorFactory = options.connectorFactory ?? ((connectorOptions) => new BrowserConnector(connectorOptions))
@@ -92,6 +93,12 @@ export class NativeHost {
     this.buffer = Buffer.alloc(0)
     this.closed = false
     this.runtimeIdentity = options.runtimeIdentity ?? installedRuntimeIdentity()
+    this.updateCheck = options.updateCheck ?? checkUpdate
+    this.updatePrepare = options.updatePrepare ?? prepareUpdate
+    this.updateLaunch = options.updateLaunch ?? launchPreparedUpdate
+    this.installRoot = options.installRoot ?? this.runtimeIdentity?.installRoot ?? process.env.ACCR_INSTALL_ROOT ?? process.cwd()
+    this.platform = options.platform ?? process.platform
+    this.productVersion = process.env.ACCR_PRODUCT_VERSION
     this.prototypeRecoveryKeyPair = options.prototypeRecoveryKeyPair ?? generateKeyPairSync('ed25519')
     this.prototypeRecoveryPublicKey = this.prototypeRecoveryKeyPair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url')
   }
@@ -149,6 +156,14 @@ export class NativeHost {
     }
     if (type === 'sign-prototype-recovery') {
       this.signPrototypeRecovery(message.requestId, message.payload)
+      return
+    }
+    if (type === 'release-update-check') {
+      await this.checkReleaseUpdate(message.requestId)
+      return
+    }
+    if (type === 'release-update-prepare') {
+      await this.prepareReleaseUpdate(message.requestId)
       return
     }
     if (type === CONNECTOR_RESPONSE) {
@@ -241,6 +256,33 @@ export class NativeHost {
     const signature = sign(null, bytes, this.prototypeRecoveryKeyPair.privateKey).toString('base64url')
     this.send({ type: 'prototype_recovery_signed', requestId, assertion, signature })
     return true
+  }
+
+  async checkReleaseUpdate(requestId) {
+    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160) return this.send({ type: 'release_update_failed', requestId, error: '更新检查请求无效' })
+    if (this.platform !== 'win32') return this.send({ type: 'release_update_failed', requestId, error: '在线更新仅支持 Windows Lite' })
+    try {
+      const update = await this.updateCheck({ installRoot: this.installRoot, currentVersion: this.productVersion })
+      this.send({ type: 'release_update_checked', requestId, update })
+    } catch (error) { this.send({ type: 'release_update_failed', requestId, error: error instanceof Error ? error.message : String(error) }) }
+  }
+
+  async prepareReleaseUpdate(requestId) {
+    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160) return this.send({ type: 'release_update_failed', requestId, error: '更新请求无效' })
+    if (this.platform !== 'win32') return this.send({ type: 'release_update_failed', requestId, error: '在线更新仅支持 Windows Lite' })
+    try {
+      const prepared = await this.updatePrepare({ installRoot: this.installRoot, currentVersion: this.productVersion })
+      // Starting the detached waiter is part of preparation: do not tell the
+      // Browser that an update is accepted unless Windows has a process ready
+      // to run the existing installer after this Host exits.
+      this.updateLaunch(prepared, { installRoot: this.installRoot, nativePid: process.pid })
+      this.send({ type: 'release_update_prepared', requestId, update: { available: true, version: prepared.version, sha256: prepared.sha256 } })
+      // The detached updater waits for this Native Host PID. Close the Harness
+      // process normally before Windows replaces its runtime files.
+      setTimeout(() => {
+        void this.close('release update requested')
+      }, 20)
+    } catch (error) { this.send({ type: 'release_update_failed', requestId, error: error instanceof Error ? error.message : String(error) }) }
   }
 
   async close(reason) {

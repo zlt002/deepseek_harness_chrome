@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { readFile } from 'node:fs/promises'
+import { build } from 'esbuild'
+import { NativeHost } from '../apps/native-server/src/native-host.mjs'
+
+async function loadBridge() {
+  const source = await readFile(new URL('../packages/harness-ui-settings-shell/src/client/release-update-bridge.ts', import.meta.url), 'utf8')
+  const output = await build({ stdin: { contents: source, loader: 'ts', resolveDir: new URL('../packages/harness-ui-settings-shell/src/client/', import.meta.url).pathname }, bundle: true, format: 'esm', platform: 'node', write: false })
+  return import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString('base64')}`)
+}
+
+test('Side Panel update command reaches Native Host and returns the verified release identity to the iframe bridge', async () => {
+  const { createReleaseUpdateBridge } = await loadBridge()
+  const host = new NativeHost({
+    updateCheck: async () => ({ available: true, version: '1.1.76', sha256: 'a'.repeat(64), extensionId: 'cmgjacoohdgjedoekbdbhbelpmboankg' }),
+    platform: 'win32',
+    exit: () => {},
+  })
+  const nativeMessages = []
+  host.send = message => nativeMessages.push(message)
+  const parent = { postMessage: message => {
+    if (message.type !== 'release-update-command/v1') return
+    void host.handle({ type: 'release-update-check', requestId: message.requestId })
+  } }
+  const bridge = createReleaseUpdateBridge('nonce', 'chrome-extension://test')
+  const promise = bridge.request('check', parent)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const response = nativeMessages.find(message => message.type === 'release_update_checked')
+  assert.ok(response, 'Native Host should return a correlated release update response')
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://test', data: { type: 'release-update-result/v1', nonce: 'nonce', requestId: response.requestId, update: response.update } }, parent), true)
+  assert.deepEqual(await promise, { available: true, version: '1.1.76', sha256: 'a'.repeat(64), extensionId: 'cmgjacoohdgjedoekbdbhbelpmboankg' })
+})
+
+test('Native Host starts the detached updater before confirming a prepared update', async () => {
+  let launched = false
+  const host = new NativeHost({
+    platform: 'win32', exit: () => {},
+    updatePrepare: async () => ({ version: '1.1.76', sha256: 'b'.repeat(64), extractRoot: 'C:\\temp\\package' }),
+    updateLaunch: () => { launched = true; return true },
+  })
+  const messages = []; host.send = message => messages.push(message)
+  await host.prepareReleaseUpdate('request-prepare-123')
+  assert.equal(launched, true)
+  assert.equal(messages.at(-1).type, 'release_update_prepared')
+})

@@ -1,0 +1,6 @@
+.section { display:flex; flex-direction:column; gap:12px; padding:12px 4px 32px; color:var(--dsw-alias-label-primary); }
+.section h2,.section p { margin:0; } .section p { color:var(--dsw-alias-label-tertiary); font-size:13px; line-height:20px; }
+.section dl { margin:0; border:1px solid var(--dsw-alias-border-l2); border-radius:12px; padding:0 14px; }
+.section dl div { display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--dsw-alias-border-l2); font-size:14px; line-height:22px; }
+.section dl div:last-child { border:0; } .section dt { color:var(--dsw-alias-label-secondary); } .section dd { margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:right; }
+.actions { display:flex; gap:8px; } .actions button { height:32px; border:1px solid var(--dsw-alias-border-l2); border-radius:16px; padding:0 12px; background:transparent; color:var(--dsw-alias-label-primary); cursor:pointer; } .actions button:disabled { opacity:.45; cursor:default; } .actions .primary { border:0; background:var(--dsw-alias-button-primary-fill); color:var(--dsw-alias-label-primary-foreground); }

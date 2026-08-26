@@ -23,6 +23,7 @@ import {
 } from './background/browser-target-state'
 import type { BrowserTargetSettings } from './background/browser-target-state'
 import { BrowserTargetRuntime } from './background/browser-target-runtime'
+import { preserveFullscreenBrowserTarget } from './background/fullscreen-target-handoff'
 import type { BrowserTargetBinding, BrowserTargetTab } from './background/browser-target-runtime'
 import {
   isLightDocumentResourceIdentity,
@@ -68,6 +69,7 @@ import type { PrototypeStudioPendingRecovery, PrototypeStudioRecoveryBinding } f
 import { retainedPrototypeReferences } from '../src/prototype-reference-storage'
 import { sha256Fingerprint, validateReferenceEvidence, verifyReferenceEvidenceFingerprint } from '../../../packages/harness-ui-prototype-studio/src/prototype-document'
 import { productBrief } from '../../../packages/harness-ui-prototype-studio/src/product-brief.mjs'
+import { releaseUpdateNativeMessage, releaseUpdateResult } from '../src/release-update-wire'
 const KNOWLEDGE_API_ORIGIN = 'https://anapi-uat.annto.com'
 const KNOWLEDGE_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-kd`
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
@@ -675,6 +677,7 @@ interface NativeMessage {
   type?: unknown
   payload?: unknown
   error?: unknown
+  update?: unknown
   requestId?: unknown
   runId?: unknown
   generation?: unknown
@@ -727,6 +730,7 @@ interface NativeTransferPayload {
 }
 
 let nativePort: chrome.runtime.Port | undefined
+const pendingReleaseUpdates = new Map<string, { resolve: (value: { ok: boolean, update?: unknown, error?: string }) => void, timer: ReturnType<typeof setTimeout> }>()
 let nativeUrl: string | undefined
 let nativeRuntimeIdentity: RuntimeIdentitySummary | undefined
 let startPromise: Promise<string> | undefined
@@ -4319,6 +4323,8 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   spreadsheetFrameBindings.clear()
   rejectTargetTransfers(new Error(error))
   rejectPrototypeRecoverySignatures(new Error(error))
+  for (const pending of pendingReleaseUpdates.values()) { clearTimeout(pending.timer); pending.resolve({ ok: false, error }) }
+  pendingReleaseUpdates.clear()
   void chrome.runtime.sendMessage({
     type: 'harness-disconnected',
     error,
@@ -4330,6 +4336,13 @@ function connectNativePort(): chrome.runtime.Port {
   const port = chrome.runtime.connectNative(NATIVE_HOST_NAME)
   port.onDisconnect.addListener(() => disconnectNativePort(port))
   port.onMessage.addListener((message: NativeMessage) => {
+    if (message.type === 'release_update_checked' || message.type === 'release_update_prepared' || message.type === 'release_update_failed') {
+      const requestId = typeof message.requestId === 'string' ? message.requestId : undefined
+      const pending = requestId === undefined ? undefined : pendingReleaseUpdates.get(requestId)
+      const result = requestId === undefined ? undefined : releaseUpdateResult(message, requestId)
+      if (requestId !== undefined && pending !== undefined && result !== undefined) { clearTimeout(pending.timer); pendingReleaseUpdates.delete(requestId); pending.resolve(result) }
+      return
+    }
     if (message.type === 'prototype_recovery_signed' || message.type === 'prototype_recovery_sign_failed') {
       settlePrototypeRecoverySignature(message)
       return
@@ -4897,6 +4910,17 @@ export default defineBackground(() => {
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
+    if (request.type === 'release-update/v1') {
+      if (!isSidePanelSender(sender) || (request.action !== 'check' && request.action !== 'prepare')) { sendResponse({ ok: false, error: '在线更新请求无效。' }); return false }
+      const requestId = crypto.randomUUID()
+      try {
+        const port = connectNativePort()
+        const timer = setTimeout(() => { const pending = pendingReleaseUpdates.get(requestId); if (pending !== undefined) { pendingReleaseUpdates.delete(requestId); pending.resolve({ ok: false, error: '在线更新请求超时；请确认 Native Host 仍在线。' }) } }, request.action === 'prepare' ? 180_000 : 45_000)
+        pendingReleaseUpdates.set(requestId, { resolve: sendResponse, timer })
+        port.postMessage(releaseUpdateNativeMessage(request.action, requestId))
+        return true
+      } catch (error) { sendResponse({ ok: false, error: asError(error) }); return false }
+    }
     if (request.type === 'switch-harness-surface/v1') {
       if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || (request.sessionId !== undefined && !validSessionIdentity(request.sessionId))) {
         sendResponse({ ok: false, error: 'Chrome could not switch the Harness Workspace to a Tab.' })
@@ -4909,6 +4933,10 @@ export default defineBackground(() => {
           return false
         }
         void (async () => {
+          // Capture the real Browser Target before creating the extension Tab;
+          // Chrome activates that Tab immediately, so resolving afterwards
+          // would otherwise report the unusable fullscreen document.
+          await preserveFullscreenBrowserTarget(windowId, activeBrowserTarget, updateBrowserTargetSettings)
           const url = new URL(chrome.runtime.getURL('sidepanel.html'))
           url.searchParams.set('dshHarnessSurface', 'fullscreen-tab')
           if (typeof request.sessionId === 'string') url.searchParams.set('dshHarnessSessionId', request.sessionId)

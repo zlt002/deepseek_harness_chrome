@@ -36,6 +36,7 @@ interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: Company
 interface AccountAccessSnapshot { status: AccountAccessStatus; displayName?: string; knowledgeAccess: boolean; codeAccess: boolean; modelMode: 'manual' | 'company-pending'; gateway?: CompanyGatewayMetadata; message?: string }
 interface AccountAccessResponse { ok: boolean; snapshot?: AccountAccessSnapshot; error?: string }
 interface CompanyGatewayProbeResponse { ok: boolean; requestId?: string; gateway?: CompanyGatewayMetadata; error?: string }
+interface ReleaseUpdateResponse { ok: boolean; update?: { available: boolean; version?: string; sha256?: string; error?: string }; error?: string }
 interface OpenMarkdownReview {
   v: 1
   reviewId: string
@@ -127,6 +128,13 @@ function requestHarness(message: unknown = { type: 'ensure-harness' }): Promise<
       resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return a response.' } : { ok: false, error: runtimeError.message })
     })
   })
+}
+
+function requestReleaseUpdate(action: 'check' | 'prepare'): Promise<ReleaseUpdateResponse> {
+  return new Promise(resolve => chrome.runtime.sendMessage({ type: 'release-update/v1', action }, (response: ReleaseUpdateResponse | undefined) => {
+    const runtimeError = chrome.runtime.lastError
+    resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Native Host 未返回更新结果。' } : { ok: false, error: runtimeError.message })
+  }))
 }
 
 function requestTargetSettings(message: unknown): Promise<BrowserTargetSettingsResponse> {
@@ -778,6 +786,12 @@ function App(): React.JSX.Element {
         return
       }
       if (value.type === 'account-access-ready/v1') { accountCommandSequenceRef.current = 0; void handleAccountAccessCommand('refresh'); return }
+      if (value.type === 'release-update-command/v1') {
+        if (typeof value.requestId !== 'string' || !boundedString(value.requestId, 160) || (value.action !== 'check' && value.action !== 'prepare') || frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
+        void requestReleaseUpdate(value.action).then(response => frameRef.current?.contentWindow?.postMessage(
+          response.ok ? { type: 'release-update-result/v1', nonce: frameNonce, requestId: value.requestId, update: response.update } : { type: 'release-update-failed/v1', nonce: frameNonce, requestId: value.requestId, error: response.error ?? '在线更新失败。' }, frameOrigin))
+        return
+      }
       if (value.type === 'account-access-command/v1') {
         if (typeof value.sequence !== 'number' || !Number.isInteger(value.sequence) || value.sequence <= accountCommandSequenceRef.current || (value.command !== 'refresh' && value.command !== 'login' && value.command !== 'logout')) return
         accountCommandSequenceRef.current = value.sequence
