@@ -1,0 +1,3 @@
+.action { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; padding:0; border:0; border-radius:10px; background:transparent; color:var(--dsw-alias-state-success-primary); cursor:pointer; }
+.action:hover,.action:focus-visible { background:var(--dsw-alias-state-success-tertiary); outline:none; }
+.error { max-width:96px; overflow:hidden; color:var(--dsw-alias-state-error-primary); font-size:11px; line-height:14px; text-overflow:ellipsis; white-space:nowrap; }
