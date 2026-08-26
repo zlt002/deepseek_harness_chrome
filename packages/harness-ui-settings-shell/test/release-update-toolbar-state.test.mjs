@@ -7,6 +7,11 @@ import { fileURLToPath } from 'node:url'
 const source = await readFile(new URL('../src/client/release-update-toolbar-state.ts', import.meta.url), 'utf8')
 const output = await build({ stdin: { contents: source, loader: 'ts', resolveDir: fileURLToPath(new URL('../src/client/', import.meta.url)) }, bundle: true, format: 'esm', platform: 'node', write: false })
 const state = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString('base64')}`)
+const [toolbarSource, toolbarCss, indexSource] = await Promise.all([
+  readFile(new URL('../src/client/ReleaseUpdateToolbar.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/client/ReleaseUpdateToolbar.module.css', import.meta.url), 'utf8'),
+  readFile(new URL('../src/client/index.ts', import.meta.url), 'utf8'),
+])
 
 test('compact upgrade action occupies no toolbar seat without a verified update', () => {
   assert.equal(state.supportsReleaseUpdateToolbar('Mozilla/5.0 (Windows NT 10.0; Win64; x64)'), true)
@@ -21,4 +26,10 @@ test('a verified update enables exactly the existing prepare action', () => {
   const ready = state.checkedReleaseToolbarState({ available: true, version: '1.1.76' })
   assert.deepEqual(ready, { phase: 'ready', version: '1.1.76' })
   assert.equal(state.releaseToolbarAction(ready), 'prepare')
+  assert.match(indexSource, /sidebar\.compact\.action/)
+  assert.match(toolbarSource, /request\('prepare'\)/)
+  assert.match(toolbarSource, /升级失败：/)
+  assert.match(toolbarSource, /IconDownloadOutline16/)
+  assert.match(toolbarSource, /aria-label=\{label\}/)
+  assert.match(toolbarCss, /color:var\(--dsw-alias-state-success-primary\)/)
 })
