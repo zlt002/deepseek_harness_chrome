@@ -101,6 +101,72 @@ function Invoke-InstallerUiSmoke {
   }
 }
 
+function Wait-ReleaseUpdateTerminalStatus([string]$StatusPath) {
+  $deadline = [DateTime]::UtcNow.AddSeconds(90)
+  do {
+    if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+      try { $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } catch { $status = $null }
+      if ($null -ne $status -and ($status.state -eq 'succeeded' -or $status.state -eq 'failed')) { return $status }
+    }
+    Start-Sleep -Milliseconds 200
+  } while ([DateTime]::UtcNow -lt $deadline)
+  throw 'Timed out waiting for the detached online updater status.'
+}
+
+function Invoke-ReleaseUpdateHandoff {
+  $statusPath = Join-Path $installRoot '.accrui-update-status.json'
+  Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+  & node (Join-Path $PSScriptRoot 'release-update-handoff-smoke.mjs') --package-dir $packageRoot --install-root $installRoot --expected-version $ExpectedVersion
+  if ($LASTEXITCODE -ne 0) { throw "Online update handoff helper failed with exit code $LASTEXITCODE." }
+  $status = Wait-ReleaseUpdateTerminalStatus $statusPath
+  if ($status.state -eq 'succeeded') {
+    Write-Host 'Detached online updater completed successfully.'
+    return
+  }
+  $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+  if (Test-Path -LiteralPath $installLog -PathType Leaf) {
+    Write-Host 'Online updater installer error log:'
+    Get-Content -LiteralPath $installLog | Write-Host
+  }
+  throw "Detached online updater failed: $($status.error)"
+}
+
+function Assert-FailedReleaseUpdateHandoffStatus {
+  $fakePackageRoot = Join-Path $acceptanceRoot 'failed-update-package'
+  $fakeInstallRoot = Join-Path $acceptanceRoot 'failed-update-install'
+  $fakeInstaller = Join-Path $fakePackageRoot 'install.ps1'
+  $statusPath = Join-Path $fakeInstallRoot '.accrui-update-status.json'
+  $pendingMarker = Join-Path $fakeInstallRoot 'pending-observed.marker'
+  New-Item -ItemType Directory -Path $fakePackageRoot, $fakeInstallRoot -Force | Out-Null
+  $fakeInstallerSource = @'
+param([string]$InstallRoot)
+$pendingMarker = Join-Path $InstallRoot 'pending-observed.marker'
+$deadline = [DateTime]::UtcNow.AddSeconds(10)
+while (-not (Test-Path -LiteralPath $pendingMarker) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+if (-not (Test-Path -LiteralPath $pendingMarker)) { exit 24 }
+exit 23
+'@
+  [System.IO.File]::WriteAllText($fakeInstaller, $fakeInstallerSource, [System.Text.UTF8Encoding]::new($false))
+  & node (Join-Path $PSScriptRoot 'release-update-handoff-smoke.mjs') --package-dir $fakePackageRoot --install-root $fakeInstallRoot --expected-version '0.0.1'
+  if ($LASTEXITCODE -ne 0) { throw "Failed-update handoff helper failed with exit code $LASTEXITCODE." }
+
+  $pendingDeadline = [DateTime]::UtcNow.AddSeconds(10)
+  do {
+    if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+      try { $pending = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } catch { $pending = $null }
+      if ($null -ne $pending -and $pending.state -eq 'pending') { break }
+    }
+    Start-Sleep -Milliseconds 50
+  } while ([DateTime]::UtcNow -lt $pendingDeadline)
+  if ($null -eq $pending -or $pending.state -ne 'pending') { throw 'Detached failed-update handoff never persisted pending status.' }
+  [System.IO.File]::WriteAllText($pendingMarker, 'observed', [System.Text.UTF8Encoding]::new($false))
+
+  $status = Wait-ReleaseUpdateTerminalStatus $statusPath
+  if ($status.state -ne 'failed') { throw "Detached failed-update handoff ended in unexpected state: $($status.state)" }
+  if ([string]$status.error -notmatch '安装程序退出码：23') { throw "Detached failed-update handoff lost installer exit code: $($status.error)" }
+  Write-Host 'Detached failed-update handoff persisted installer exit code 23.'
+}
+
 function Start-ExtensionLockHolder {
   $readyPath = Join-Path $env:RUNNER_TEMP 'accrui-harness-extension-lock-ready.txt'
   $lockScriptPath = Join-Path $acceptanceRoot 'extension-lock-holder.ps1'
@@ -267,23 +333,10 @@ try {
 
   Invoke-InstallerUiSmoke
   Assert-LockedExtensionUpgradeFailsSafely
+  Assert-FailedReleaseUpdateHandoffStatus
   $respawnSupervisor = Start-NativeHostRespawnSupervisor
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
-  $vbsOutput = & cscript.exe //NoLogo $installLauncher 2>&1
-  $vbsExitCode = $LASTEXITCODE
-  $vbsOutput | ForEach-Object { Write-Host $_ }
-  if ($vbsExitCode -ne 0) {
-    $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
-    if (Test-Path -LiteralPath $installLog -PathType Leaf) {
-      Write-Host 'VBS installer error log:'
-      Get-Content -LiteralPath $installLog | Write-Host
-    } else {
-      Write-Host 'VBS installer created no error log; probing install.ps1 with Windows PowerShell directly.'
-      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
-      Write-Host "Direct Windows PowerShell installer exit code: $LASTEXITCODE"
-    }
-    throw "VBS installer failed with exit code $vbsExitCode."
-  }
+  Invoke-ReleaseUpdateHandoff
   $respawnSupervisor.Process.Refresh()
   if (-not $respawnSupervisor.Process.HasExited) { throw 'Native Host respawn supervisor did not stop after registration was suspended.' }
   if (-not (Test-Path -LiteralPath $respawnSupervisor.SuspendedPath -PathType Leaf)) { throw 'Installer never suspended Native Messaging registration during upgrade.' }

@@ -282,7 +282,7 @@ export class NativeHost {
       // Starting the detached waiter is part of preparation: do not tell the
       // Browser that an update is accepted unless Windows has a process ready
       // to run the existing installer after this Host exits.
-      this.updateLaunch(prepared, { installRoot: this.installRoot, nativePid: process.pid })
+      await this.updateLaunch(prepared, { installRoot: this.installRoot, nativePid: process.pid })
       this.send({ type: 'release_update_prepared', requestId, update: { available: true, version: prepared.version, sha256: prepared.sha256 } })
       // The detached updater waits for this Native Host PID. Close the Harness
       // process normally before Windows replaces its runtime files.

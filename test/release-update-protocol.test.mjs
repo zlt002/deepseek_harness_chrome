@@ -38,12 +38,26 @@ test('Native Host starts the detached updater before confirming a prepared updat
   const host = new NativeHost({
     platform: 'win32', exit: () => {},
     updatePrepare: async () => ({ version: '1.1.76', sha256: 'b'.repeat(64), extractRoot: 'C:\\temp\\package' }),
-    updateLaunch: () => { launched = true; return true },
+    updateLaunch: async () => { launched = true; return true },
   })
   const messages = []; host.send = message => messages.push(message)
   await host.prepareReleaseUpdate('request-prepare-123')
   assert.equal(launched, true)
   assert.equal(messages.at(-1).type, 'release_update_prepared')
+})
+
+test('Native Host does not confirm or close when the detached updater cannot start', async () => {
+  const exited = []
+  const host = new NativeHost({
+    platform: 'win32', exit: code => exited.push(code),
+    updatePrepare: async () => ({ version: '1.1.76', sha256: 'b'.repeat(64), extractRoot: 'C:\\temp\\package' }),
+    updateLaunch: async () => { throw new Error('powershell.exe is unavailable') },
+  })
+  const messages = []; host.send = message => messages.push(message)
+  await host.prepareReleaseUpdate('request-prepare-failed')
+  assert.deepEqual(messages, [{ type: 'release_update_failed', requestId: 'request-prepare-failed', error: 'powershell.exe is unavailable' }])
+  await new Promise(resolvePromise => setTimeout(resolvePromise, 30))
+  assert.deepEqual(exited, [])
 })
 
 test('Native Host returns the persisted updater outcome when checking again', async () => {

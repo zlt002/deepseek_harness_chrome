@@ -30,7 +30,7 @@ export async function prepareUpdate(options = {}) {
   return { ...verified, packagePath, extractRoot, packageUrl: source.packageUrl, ...(etag === undefined ? {} : { etag }) }
 }
 
-export function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform } = {}) {
+export async function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform } = {}) {
   if (platform !== 'win32') throw new Error('在线更新仅支持 Windows Lite')
   if (!prepared?.extractRoot || !prepared?.version || !installRoot || !Number.isInteger(nativePid)) throw new Error('更新启动参数无效')
   const escapedRoot = String(installRoot).replaceAll("'", "''")
@@ -55,29 +55,36 @@ function Write-UpdateStatus([string]$State, [string]$ErrorText = '') {
   [System.IO.File]::WriteAllText($temporary, ($status | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
   Move-Item -LiteralPath $temporary -Destination $statusPath -Force
 }
-function Get-OldProductProcesses {
-  $runtimeRoot = (Join-Path ([System.IO.Path]::GetFullPath($installRoot)) 'runtime').TrimEnd('\\') + '\\'
-  $allowedNames = @('node.exe', 'cmd.exe', 'powershell.exe', 'wscript.exe', 'cscript.exe')
-  try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch { $processes = @(Get-WmiObject Win32_Process -ErrorAction SilentlyContinue) }
-  return @($processes | Where-Object {
-    $_.ProcessId -ne $PID -and $allowedNames -contains $_.Name.ToLowerInvariant() -and
-    -not [string]::IsNullOrWhiteSpace($_.CommandLine) -and $_.CommandLine.IndexOf($runtimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
-  })
-}
 try {
   Write-UpdateStatus 'pending'
-  while (Get-Process -Id ${nativePid} -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
-  $deadline = [DateTime]::UtcNow.AddSeconds(45)
-  do { $remaining = @(Get-OldProductProcesses); if ($remaining.Count -gt 0) { Start-Sleep -Milliseconds 200 } } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
-  if ($remaining.Count -gt 0) { throw '旧 Harness UI 进程仍在退出；请关闭侧边栏后重新检查更新。' }
-  & '${escapedScript}' -InstallRoot $installRoot
+  $nativeDeadline = [DateTime]::UtcNow.AddSeconds(10)
+  while ((Get-Process -Id ${nativePid} -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $nativeDeadline) { Start-Sleep -Milliseconds 200 }
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File '${escapedScript}' -InstallRoot $installRoot
   if ($LASTEXITCODE -ne 0) { throw "安装程序退出码：$LASTEXITCODE" }
   Write-UpdateStatus 'succeeded'
 } catch {
   Write-UpdateStatus 'failed' (Get-SafeUpdateError $_)
   exit 1
 }`
-  const child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', command], { detached: true, stdio: 'ignore' })
-  child?.unref?.()
-  return true
+  return await new Promise((resolvePromise, rejectPromise) => {
+    let child
+    const settle = (callback, value) => {
+      child?.removeListener?.('spawn', onSpawn)
+      child?.removeListener?.('error', onError)
+      callback(value)
+    }
+    const onError = error => settle(rejectPromise, error)
+    const onSpawn = () => {
+      try {
+        child.unref()
+        settle(resolvePromise, true)
+      } catch (error) { settle(rejectPromise, error) }
+    }
+    try {
+      child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', command], { detached: true, stdio: 'ignore' })
+      if (!child?.once) throw new Error('更新启动器未返回子进程')
+      child.once('spawn', onSpawn)
+      child.once('error', onError)
+    } catch (error) { settle(rejectPromise, error) }
+  })
 }
