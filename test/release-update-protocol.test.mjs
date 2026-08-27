@@ -44,3 +44,20 @@ test('Native Host starts the detached updater before confirming a prepared updat
   assert.equal(launched, true)
   assert.equal(messages.at(-1).type, 'release_update_prepared')
 })
+
+test('Native Host returns the persisted updater outcome when checking again', async () => {
+  const host = new NativeHost({
+    platform: 'win32', exit: () => {},
+    updateCheck: async () => ({ available: false, version: '1.1.80', sha256: 'c'.repeat(64) }),
+    updateStatusRead: async () => ({ state: 'failed', version: '1.1.81', updatedAt: '2026-08-27T00:00:00.000Z', error: '安装内容不完整', logPath: '%TEMP%\\accr-ui-harness-install.log' }),
+  })
+  const messages = []; host.send = message => messages.push(message)
+  await host.checkReleaseUpdate('request-status-123')
+  assert.deepEqual(messages.at(-1), {
+    type: 'release_update_checked', requestId: 'request-status-123',
+    update: {
+      available: false, version: '1.1.80', sha256: 'c'.repeat(64),
+      lastUpdate: { state: 'failed', version: '1.1.81', updatedAt: '2026-08-27T00:00:00.000Z', error: '安装内容不完整', logPath: '%TEMP%\\accr-ui-harness-install.log' },
+    },
+  })
+})

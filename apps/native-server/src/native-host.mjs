@@ -10,6 +10,7 @@ import { validRuntimeIdentitySummary } from './runtime-identity-contract.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
 import { redactSensitiveDiagnostic } from './redact.mjs'
 import { checkUpdate, launchPreparedUpdate, prepareUpdate } from './release-update/index.mjs'
+import { readUpdateStatus } from './release-update/update-status.mjs'
 
 const nativeLogPath = process.env.DSH_NATIVE_LOG?.trim()
 const runtimeManifestPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime-manifest.json')
@@ -76,7 +77,7 @@ process.on('unhandledRejection', (error) => {
  * to stderr so Chrome never sees an unframed byte.
  */
 export class NativeHost {
-  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string, env?: NodeJS.ProcessEnv }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object, updateCheck?: typeof checkUpdate, updatePrepare?: typeof prepareUpdate, updateLaunch?: typeof launchPreparedUpdate, installRoot?: string, platform?: NodeJS.Platform, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
+  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string, env?: NodeJS.ProcessEnv }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void }) => BrowserConnector, exit?: (code: number) => void, runtimeIdentity?: object, updateCheck?: typeof checkUpdate, updatePrepare?: typeof prepareUpdate, updateLaunch?: typeof launchPreparedUpdate, updateStatusRead?: typeof readUpdateStatus, installRoot?: string, platform?: NodeJS.Platform, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
   constructor(options = {}) {
     this.processFactory = options.processFactory ?? ((processOptions) => new HarnessWebProcess(processOptions))
     this.connectorFactory = options.connectorFactory ?? ((connectorOptions) => new BrowserConnector(connectorOptions))
@@ -96,6 +97,7 @@ export class NativeHost {
     this.updateCheck = options.updateCheck ?? checkUpdate
     this.updatePrepare = options.updatePrepare ?? prepareUpdate
     this.updateLaunch = options.updateLaunch ?? launchPreparedUpdate
+    this.updateStatusRead = options.updateStatusRead ?? readUpdateStatus
     this.installRoot = options.installRoot ?? this.runtimeIdentity?.installRoot ?? process.env.ACCR_INSTALL_ROOT ?? process.cwd()
     this.platform = options.platform ?? process.platform
     this.productVersion = process.env.ACCR_PRODUCT_VERSION
@@ -261,10 +263,15 @@ export class NativeHost {
   async checkReleaseUpdate(requestId) {
     if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160) return this.send({ type: 'release_update_failed', requestId, error: '更新检查请求无效' })
     if (this.platform !== 'win32') return this.send({ type: 'release_update_failed', requestId, error: '在线更新仅支持 Windows Lite' })
+    const lastUpdate = await this.updateStatusRead(this.installRoot)
     try {
       const update = await this.updateCheck({ installRoot: this.installRoot, currentVersion: this.productVersion })
-      this.send({ type: 'release_update_checked', requestId, update })
-    } catch (error) { this.send({ type: 'release_update_failed', requestId, error: error instanceof Error ? error.message : String(error) }) }
+      this.send({ type: 'release_update_checked', requestId, update: { ...update, ...(lastUpdate === undefined ? {} : { lastUpdate }) } })
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error)
+      if (lastUpdate === undefined) this.send({ type: 'release_update_failed', requestId, error: errorText })
+      else this.send({ type: 'release_update_checked', requestId, update: { available: false, error: errorText, lastUpdate } })
+    }
   }
 
   async prepareReleaseUpdate(requestId) {

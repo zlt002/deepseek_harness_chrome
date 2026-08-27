@@ -38,5 +38,7 @@ test('a verified update enables exactly the existing prepare action', () => {
 test('online update tells users to reopen only the side panel', () => {
   assert.match(sectionSource, /只需关闭当前侧边栏/)
   assert.match(sectionSource, /无需退出 Chrome 或 Edge/)
+  assert.match(sectionSource, /最近一次更新失败/)
+  assert.match(sectionSource, /最近一次更新成功/)
   assert.doesNotMatch(sectionSource, /扩展管理页重新加载扩展/)
 })

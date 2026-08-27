@@ -30,12 +30,53 @@ export async function prepareUpdate(options = {}) {
   return { ...verified, packagePath, extractRoot, packageUrl: source.packageUrl, ...(etag === undefined ? {} : { etag }) }
 }
 
-export function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl } = {}) {
-  if (process.platform !== 'win32') throw new Error('在线更新仅支持 Windows Lite')
-  if (!prepared?.extractRoot || !installRoot || !Number.isInteger(nativePid)) throw new Error('更新启动参数无效')
+export function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform } = {}) {
+  if (platform !== 'win32') throw new Error('在线更新仅支持 Windows Lite')
+  if (!prepared?.extractRoot || !prepared?.version || !installRoot || !Number.isInteger(nativePid)) throw new Error('更新启动参数无效')
   const escapedRoot = String(installRoot).replaceAll("'", "''")
   const escapedScript = join(prepared.extractRoot, 'install.ps1').replaceAll("'", "''")
-  const command = `$ErrorActionPreference = 'Stop'; while (Get-Process -Id ${nativePid} -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }; & '${escapedScript}' -InstallRoot '${escapedRoot}'`
+  const escapedVersion = String(prepared.version).replaceAll("'", "''")
+  const command = `$ErrorActionPreference = 'Stop'
+$installRoot = '${escapedRoot}'
+$targetVersion = '${escapedVersion}'
+$statusPath = Join-Path $installRoot '.accrui-update-status.json'
+$installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+function Get-SafeUpdateError([object]$Cause) {
+  $text = if ($null -eq $Cause) { '安装程序未返回错误详情。' } elseif ($Cause.Exception) { $Cause.Exception.Message } else { [string]$Cause }
+  $safe = ([string]$text).Replace("\`r", ' ').Replace("\`n", ' ').Trim()
+  if ($safe.Length -gt 2048) { return $safe.Substring(0, 2048) }
+  return $safe
+}
+function Write-UpdateStatus([string]$State, [string]$ErrorText = '') {
+  New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+  $status = [ordered]@{ state = $State; version = $targetVersion; updatedAt = [DateTime]::UtcNow.ToString('o') }
+  if (-not [string]::IsNullOrWhiteSpace($ErrorText)) { $status.error = (Get-SafeUpdateError $ErrorText); $status.logPath = $installLog }
+  $temporary = $statusPath + '.' + $PID + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+  [System.IO.File]::WriteAllText($temporary, ($status | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $temporary -Destination $statusPath -Force
+}
+function Get-OldProductProcesses {
+  $runtimeRoot = (Join-Path ([System.IO.Path]::GetFullPath($installRoot)) 'runtime').TrimEnd('\\') + '\\'
+  $allowedNames = @('node.exe', 'cmd.exe', 'powershell.exe', 'wscript.exe', 'cscript.exe')
+  try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch { $processes = @(Get-WmiObject Win32_Process -ErrorAction SilentlyContinue) }
+  return @($processes | Where-Object {
+    $_.ProcessId -ne $PID -and $allowedNames -contains $_.Name.ToLowerInvariant() -and
+    -not [string]::IsNullOrWhiteSpace($_.CommandLine) -and $_.CommandLine.IndexOf($runtimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+  })
+}
+try {
+  Write-UpdateStatus 'pending'
+  while (Get-Process -Id ${nativePid} -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
+  $deadline = [DateTime]::UtcNow.AddSeconds(45)
+  do { $remaining = @(Get-OldProductProcesses); if ($remaining.Count -gt 0) { Start-Sleep -Milliseconds 200 } } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+  if ($remaining.Count -gt 0) { throw '旧 Harness UI 进程仍在退出；请关闭侧边栏后重新检查更新。' }
+  & '${escapedScript}' -InstallRoot $installRoot
+  if ($LASTEXITCODE -ne 0) { throw "安装程序退出码：$LASTEXITCODE" }
+  Write-UpdateStatus 'succeeded'
+} catch {
+  Write-UpdateStatus 'failed' (Get-SafeUpdateError $_)
+  exit 1
+}`
   const child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', command], { detached: true, stdio: 'ignore' })
   child?.unref?.()
   return true

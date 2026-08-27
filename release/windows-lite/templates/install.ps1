@@ -24,6 +24,7 @@ $installRootDrive = [System.IO.Path]::GetPathRoot($installRoot)
 if ($installRoot.TrimEnd('\') -eq $installRootDrive.TrimEnd('\')) { throw '安装位置不能是磁盘根目录。' }
 $rollbackRoot = Join-Path $installRoot 'rollback'
 $managedNames = @('extension', 'runtime', 'release.json')
+$swappableManagedNames = @('runtime', 'release.json')
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
 $nativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
 $nativeHostRegistryRoots = @(
@@ -180,15 +181,68 @@ function Move-ManagedPathWithRetry([string]$SourcePath, [string]$DestinationPath
   throw $lastError
 }
 
-function Move-ManagedTree([string]$Source, [string]$Destination, [switch]$ExplainLockedExtension) {
+function Move-ManagedTree([string]$Source, [string]$Destination, [switch]$ExplainLockedExtension, [string[]]$Names = $managedNames, [System.Collections.Generic.List[string]]$MovedNames = $null) {
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-  # Extension is deliberately first: a browser-held unpacked-extension lock fails before any old runtime is moved.
-  foreach ($name in $managedNames) {
+  foreach ($name in $Names) {
     $sourcePath = Join-Path $Source $name
     if (-not (Test-Path -LiteralPath $sourcePath)) { continue }
     $destinationPath = Join-Path $Destination $name
     $extensionLockMessage = if ($ExplainLockedExtension -and $name -eq 'extension') { 'extension lock' } else { '' }
     Move-ManagedPathWithRetry $sourcePath $destinationPath $extensionLockMessage
+    if ($null -ne $MovedNames) { [void]$MovedNames.Add($name) }
+  }
+}
+
+function Copy-ExtensionTree([string]$SourceRoot, [string]$DestinationRoot) {
+  $source = Join-Path $SourceRoot 'extension'
+  if (-not (Test-Path -LiteralPath $source -PathType Container)) { return }
+  $destination = Join-Path $DestinationRoot 'extension'
+  if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction Stop }
+  New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
+  Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force -ErrorAction Stop
+}
+
+function Copy-ExtensionFileAtomically([System.IO.FileInfo]$Source, [string]$Destination) {
+  $destinationDirectory = Split-Path -Parent $Destination
+  New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+  $temporary = Join-Path $destinationDirectory ('.accrui-extension-' + [guid]::NewGuid().ToString('N') + '.tmp')
+  try {
+    Copy-Item -LiteralPath $Source.FullName -Destination $temporary -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+      [System.IO.File]::Replace($temporary, $Destination, $null)
+    } else {
+      [System.IO.File]::Move($temporary, $Destination)
+    }
+  } finally {
+    if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function Install-ExtensionTree([string]$Source, [string]$Destination) {
+  $manifestPath = Join-Path $Source 'manifest.json'
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "安装内容不完整：缺少 $manifestPath" }
+  New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  $sourcePrefix = ([System.IO.Path]::GetFullPath($Source)).TrimEnd('\\') + '\\'
+  $sourceFiles = @(Get-ChildItem -LiteralPath $Source -Recurse -File | Sort-Object FullName)
+  $manifestFile = @($sourceFiles | Where-Object { $_.FullName -eq $manifestPath })
+  if ($manifestFile.Count -ne 1) { throw "安装内容不完整：缺少 $manifestPath" }
+  $manifestFile = $manifestFile[0]
+  $expected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($file in $sourceFiles) {
+    $relativePath = $file.FullName.Substring($sourcePrefix.Length)
+    [void]$expected.Add($relativePath)
+    if ($file.FullName -eq $manifestPath) { continue }
+    Copy-ExtensionFileAtomically $file (Join-Path $Destination $relativePath)
+  }
+  # Once all resources are in place, make the candidate manifest visible. Stale
+  # files may survive an interruption, but they cannot break either manifest.
+  Copy-ExtensionFileAtomically $manifestFile (Join-Path $Destination 'manifest.json')
+  foreach ($file in @(Get-ChildItem -LiteralPath $Destination -Recurse -File)) {
+    $relativePath = $file.FullName.Substring((([System.IO.Path]::GetFullPath($Destination)).TrimEnd('\\') + '\\').Length)
+    if (-not $expected.Contains($relativePath)) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
+  }
+  foreach ($directory in @(Get-ChildItem -LiteralPath $Destination -Recurse -Directory | Sort-Object FullName -Descending)) {
+    if ((Get-ChildItem -LiteralPath $directory.FullName -Force | Measure-Object).Count -eq 0) { Remove-Item -LiteralPath $directory.FullName -Force -ErrorAction Stop }
   }
 }
 
@@ -208,26 +262,42 @@ function Write-ProductState([string]$Root) {
 function Restore-Rollback {
   Assert-ReleaseTree $rollbackRoot | Out-Null
   $swapRoot = Join-Path $env:TEMP ('accr-ui-harness-rollback-' + [guid]::NewGuid().ToString('N'))
+  $installedToSwap = [System.Collections.Generic.List[string]]::new()
+  $preserveSwapRoot = $false
   New-Item -ItemType Directory -Path $swapRoot -Force | Out-Null
   try {
-    Move-ManagedTree $installRoot $swapRoot
-    Move-ManagedTree $rollbackRoot $installRoot
+    Copy-ExtensionTree $installRoot $swapRoot
+    Move-ManagedTree $installRoot $swapRoot -Names $swappableManagedNames -MovedNames $installedToSwap
+    Move-ManagedTree $rollbackRoot $installRoot -Names $swappableManagedNames
+    Install-ExtensionTree (Join-Path $rollbackRoot 'extension') (Join-Path $installRoot 'extension')
+    Register-ReleaseTree $installRoot
+    Write-ProductState $installRoot
+    Copy-ExtensionTree $swapRoot $rollbackRoot
+    Move-ManagedTree $swapRoot $rollbackRoot -Names $swappableManagedNames
+    Complete-NativeHostRegistrationTransition
+    Write-Host 'Harness UI 已回滚；再次运行 -Rollback 可切换回刚才的版本。'
+  } catch {
+    $rollbackError = $_
     try {
+      foreach ($name in $installedToSwap) {
+        $swapPath = Join-Path $swapRoot $name
+        $rollbackPath = Join-Path $rollbackRoot $name
+        $restoreSource = if (Test-Path -LiteralPath $swapPath) { $swapPath } elseif (Test-Path -LiteralPath $rollbackPath) { $rollbackPath } else { throw "无法找到原版本 $name 的安全备份" }
+        Move-ManagedPathWithRetry $restoreSource (Join-Path $installRoot $name)
+      }
+      if (Test-Path -LiteralPath (Join-Path $swapRoot 'extension\manifest.json') -PathType Leaf) {
+        Install-ExtensionTree (Join-Path $swapRoot 'extension') (Join-Path $installRoot 'extension')
+      }
       Register-ReleaseTree $installRoot
       Write-ProductState $installRoot
       Complete-NativeHostRegistrationTransition
     } catch {
-      Move-ManagedTree $installRoot $rollbackRoot
-      Move-ManagedTree $swapRoot $installRoot
-      Register-ReleaseTree $installRoot
-      Write-ProductState $installRoot
-      Complete-NativeHostRegistrationTransition
-      throw
+      $preserveSwapRoot = $true
+      throw "回滚失败且无法恢复原版本；安全备份保留在 $swapRoot。原始错误：$($rollbackError.Exception.Message)。恢复错误：$($_.Exception.Message)"
     }
-    Move-ManagedTree $swapRoot $rollbackRoot
-    Write-Host 'Harness UI 已回滚；再次运行 -Rollback 可切换回刚才的版本。'
+    throw $rollbackError
   } finally {
-    if (Test-Path -LiteralPath $swapRoot) { Remove-Item -LiteralPath $swapRoot -Recurse -Force }
+    if (-not $preserveSwapRoot -and (Test-Path -LiteralPath $swapRoot)) { Remove-Item -LiteralPath $swapRoot -Recurse -Force }
   }
 }
 
@@ -262,9 +332,11 @@ try {
   Suspend-NativeHostRegistration
   Stop-InstalledProductProcesses $installRoot
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
-  Move-ManagedTree $installRoot $previousRoot -ExplainLockedExtension
+  Copy-ExtensionTree $installRoot $previousRoot
   try {
-    Move-ManagedTree $stagingRoot $installRoot
+    Move-ManagedTree $installRoot $previousRoot -Names $swappableManagedNames
+    Move-ManagedTree $stagingRoot $installRoot -Names $swappableManagedNames
+    Install-ExtensionTree (Join-Path $stagingRoot 'extension') (Join-Path $installRoot 'extension')
     foreach ($name in @('workspace', 'logs', '.webmcp', 'guide-state.json')) {
       $sourcePath = Join-Path $stagingRoot $name
       $destinationPath = Join-Path $installRoot $name
@@ -277,11 +349,14 @@ try {
     Write-ProductState $installRoot
     Complete-NativeHostRegistrationTransition
   } catch {
-    foreach ($name in $managedNames) {
+    foreach ($name in $swappableManagedNames) {
       $failedPath = Join-Path $installRoot $name
       if (Test-Path -LiteralPath $failedPath) { Remove-Item -LiteralPath $failedPath -Recurse -Force }
     }
-    Move-ManagedTree $previousRoot $installRoot
+    Move-ManagedTree $previousRoot $installRoot -Names $swappableManagedNames
+    if (Test-Path -LiteralPath (Join-Path $previousRoot 'extension\manifest.json') -PathType Leaf) {
+      Install-ExtensionTree (Join-Path $previousRoot 'extension') (Join-Path $installRoot 'extension')
+    }
     if (Test-Path -LiteralPath (Join-Path $installRoot 'runtime\register-native-host.ps1')) {
       Register-ReleaseTree $installRoot
       Write-ProductState $installRoot
