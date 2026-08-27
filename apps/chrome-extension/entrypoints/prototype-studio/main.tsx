@@ -126,8 +126,9 @@ function StartupFailureView({ message }: { message: string }): React.JSX.Element
 interface StoredPrototypeReferences { v: 1; references: Record<string, unknown> }
 interface StudioRevisionSummary { id: string; parentRevisionId?: string; createdAt: string; changeSummary: string; current: boolean }
 interface BriefSuggestionAttempt { status: 'pending' | 'saved'; requestId: string; expiresAt: number }
-interface StudioBundle { projectId: string; evidence: ReferenceEvidenceV1[]; designSpec: DesignSpecV1; document: PrototypeDocumentV1; revisions: StudioRevisionSummary[]; designConfirmed: boolean; screenshotUnavailable: boolean; productBrief?: ProductBriefV1; requirementCoverage?: ProductRequirementCoverageV1; currentRevisionId?: string; generationAttempt?: StudioGenerationAttempt; briefSuggestionAttempt?: BriefSuggestionAttempt; suggestedProductBrief?: ProductBriefV1; lastAttempt?: StudioAttempt }
-interface SnapshotResponse { ok: boolean; snapshot?: { projectId?: unknown; sessionId?: unknown; evidence?: unknown; confirmedDesignSpec?: unknown; designConfirmed?: unknown; productBrief?: unknown; suggestedProductBrief?: unknown; briefSuggestionAttempt?: unknown; requirementCoverage?: unknown; designSpec?: unknown; document?: unknown; revisions?: unknown; currentRevisionId?: unknown; generationAttempt?: unknown; lastAttempt?: unknown }; code?: string; recoveryAvailable?: boolean; error?: string }
+interface PendingPrototypeCandidate { candidateId: string; requestId: string; expectedRevisionId?: string; documentFingerprint: string; changeSummary: string; createdAt: string; document: PrototypeDocumentV1; designSpec: DesignSpecV1; productBrief?: ProductBriefV1; requirementCoverage?: ProductRequirementCoverageV1; comparison: { screenCountBefore: number; screenCountAfter: number; componentCountBefore: number; componentCountAfter: number; details: string[] } }
+interface StudioBundle { projectId: string; evidence: ReferenceEvidenceV1[]; designSpec: DesignSpecV1; document: PrototypeDocumentV1; revisions: StudioRevisionSummary[]; designConfirmed: boolean; screenshotUnavailable: boolean; productBrief?: ProductBriefV1; requirementCoverage?: ProductRequirementCoverageV1; currentRevisionId?: string; pendingCandidate?: PendingPrototypeCandidate; generationAttempt?: StudioGenerationAttempt; briefSuggestionAttempt?: BriefSuggestionAttempt; suggestedProductBrief?: ProductBriefV1; lastAttempt?: StudioAttempt }
+interface SnapshotResponse { ok: boolean; snapshot?: { projectId?: unknown; sessionId?: unknown; evidence?: unknown; confirmedDesignSpec?: unknown; designConfirmed?: unknown; productBrief?: unknown; suggestedProductBrief?: unknown; briefSuggestionAttempt?: unknown; requirementCoverage?: unknown; designSpec?: unknown; document?: unknown; revisions?: unknown; currentRevisionId?: unknown; pendingCandidate?: unknown; generationAttempt?: unknown; lastAttempt?: unknown }; code?: string; recoveryAvailable?: boolean; error?: string }
 type LoadStage = 'reading-reference' | 'verifying-reference' | 'connecting-service' | 'preparing-studio'
 
 class RecoverablePrototypeAuthorizationError extends Error {}
@@ -192,6 +193,24 @@ function studioRevisions(value: unknown, currentRevisionId: unknown): StudioRevi
   const current = revisions.find(item => item.current)
   if ((current?.id ?? undefined) !== (currentRevisionId ?? undefined)) return undefined
   return revisions
+}
+
+async function pendingPrototypeCandidate(value: unknown, evidence: ReferenceEvidenceV1[]): Promise<PendingPrototypeCandidate | undefined> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  const allowed = ['v', 'candidateId', 'requestId', 'expectedRevisionId', 'documentFingerprint', 'changeSummary', 'createdAt', 'document', 'designSpec', 'productBrief', 'requirementCoverage', 'comparison']
+  if (!Object.keys(item).every(key => allowed.includes(key)) || item.v !== 1 || typeof item.candidateId !== 'string' || !/^[A-Za-z0-9._:-]{8,160}$/.test(item.candidateId) || typeof item.requestId !== 'string' || !/^[A-Za-z0-9._:-]{8,160}$/.test(item.requestId) || (item.expectedRevisionId !== undefined && (typeof item.expectedRevisionId !== 'string' || !/^rev-[a-z0-9-]{1,156}$/i.test(item.expectedRevisionId))) || typeof item.documentFingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(item.documentFingerprint) || typeof item.changeSummary !== 'string' || item.changeSummary.length === 0 || item.changeSummary.length > 600 || typeof item.createdAt !== 'string' || !Number.isFinite(Date.parse(item.createdAt)) || item.comparison === null || typeof item.comparison !== 'object' || Array.isArray(item.comparison)) return undefined
+  const comparison = item.comparison as Record<string, unknown>
+  if (!Object.keys(comparison).every(key => ['screenCountBefore', 'screenCountAfter', 'componentCountBefore', 'componentCountAfter', 'details'].includes(key)) || !Number.isSafeInteger(comparison.screenCountBefore) || !Number.isSafeInteger(comparison.screenCountAfter) || !Number.isSafeInteger(comparison.componentCountBefore) || !Number.isSafeInteger(comparison.componentCountAfter) || [comparison.screenCountBefore, comparison.screenCountAfter, comparison.componentCountBefore, comparison.componentCountAfter].some(value => Number(value) < 0 || Number(value) > 10_000) || !Array.isArray(comparison.details) || comparison.details.length > 8 || comparison.details.some(detail => typeof detail !== 'string' || detail.length > 600)) return undefined
+  const bundle = validatePrototypeBundle({ evidence, document: item.document, designSpec: item.designSpec })
+  if (!bundle.ok) return undefined
+  if (await sha256Fingerprint(bundle.value.document) !== item.documentFingerprint) return undefined
+  const candidateBrief = item.productBrief === undefined ? undefined : productBrief(item.productBrief)
+  if (item.productBrief !== undefined && candidateBrief === undefined) return undefined
+  const expectedCoverage = candidateBrief === undefined ? undefined : productRequirementCoverage(bundle.value.document, candidateBrief)
+  const candidateCoverage = item.requirementCoverage === undefined ? expectedCoverage : productRequirementCoverageValue(item.requirementCoverage)
+  if ((expectedCoverage === undefined) !== (candidateCoverage === undefined) || (candidateCoverage !== undefined && JSON.stringify(candidateCoverage) !== JSON.stringify(expectedCoverage))) return undefined
+  return { candidateId: item.candidateId, requestId: item.requestId, ...(typeof item.expectedRevisionId === 'string' ? { expectedRevisionId: item.expectedRevisionId } : {}), documentFingerprint: item.documentFingerprint, changeSummary: item.changeSummary, createdAt: item.createdAt, document: bundle.value.document, designSpec: bundle.value.designSpec, ...(candidateBrief === undefined ? {} : { productBrief: candidateBrief }), ...(candidateCoverage === undefined ? {} : { requirementCoverage: candidateCoverage }), comparison: comparison as PendingPrototypeCandidate['comparison'] }
 }
 
 function selectionTypeLabel(type: PrototypeSelection['type']): string {
@@ -438,6 +457,7 @@ async function loadCapturedReference(onStage: (stage: LoadStage) => void = () =>
   }
   onStage('preparing-studio')
   const revisions = studioRevisions(snapshot.revisions, snapshot.currentRevisionId)
+  const candidate = snapshot.pendingCandidate === undefined ? undefined : await pendingPrototypeCandidate(snapshot.pendingCandidate, evidence)
   if (snapshot.projectId !== projectId || revisions === undefined) throw new Error('原型项目与当前参考网页或版本历史不匹配。')
   const lastAttempt = studioAttempt(snapshot.lastAttempt)
   const generationAttempt = studioGenerationAttempt(snapshot.generationAttempt)
@@ -449,13 +469,14 @@ async function loadCapturedReference(onStage: (stage: LoadStage) => void = () =>
   if (snapshot.suggestedProductBrief !== undefined && suggestedProductBrief === undefined) throw new Error('AI 整理的产品需求草稿格式无效。')
   if ((suggestionAttempt?.status === 'saved') !== (suggestedProductBrief !== undefined) || (suggestionAttempt?.status === 'pending' && suggestedProductBrief !== undefined)) throw new Error('AI 产品需求草稿与请求状态不一致，请重新整理。')
   if (snapshot.productBrief !== undefined && savedBrief === undefined) throw new Error('产品需求验收清单格式无效。')
+  if (snapshot.pendingCandidate !== undefined && candidate === undefined) throw new Error('待应用原型未通过安全校验，请放弃后重新生成。')
   if (snapshot.designSpec !== undefined || snapshot.document !== undefined) {
     const bundle = validatePrototypeBundle({ evidence, designSpec: snapshot.designSpec, document: snapshot.document })
     if (!bundle.ok || typeof snapshot.currentRevisionId !== 'string') throw new Error('AI 保存的原型版本未通过安全校验。')
     const expectedCoverage = savedBrief === undefined ? undefined : productRequirementCoverage(bundle.value.document, savedBrief)
     const savedCoverage = snapshot.requirementCoverage === undefined ? expectedCoverage : productRequirementCoverageValue(snapshot.requirementCoverage)
     if ((expectedCoverage === undefined) !== (savedCoverage === undefined) || (savedCoverage !== undefined && JSON.stringify(savedCoverage) !== JSON.stringify(expectedCoverage))) throw new Error('当前版本的需求验收结果未通过确定性校验。')
-    return { projectId, ...bundle.value, revisions, designConfirmed: snapshot.designConfirmed === true, screenshotUnavailable: evidence.some(item => item.screenshotDataUrl === undefined), productBrief: savedBrief, ...(savedCoverage === undefined ? {} : { requirementCoverage: savedCoverage }), currentRevisionId: snapshot.currentRevisionId, ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(suggestionAttempt === undefined ? {} : { briefSuggestionAttempt: suggestionAttempt }), ...(suggestedProductBrief === undefined ? {} : { suggestedProductBrief }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
+    return { projectId, ...bundle.value, revisions, designConfirmed: snapshot.designConfirmed === true, screenshotUnavailable: evidence.some(item => item.screenshotDataUrl === undefined), productBrief: savedBrief, ...(savedCoverage === undefined ? {} : { requirementCoverage: savedCoverage }), currentRevisionId: snapshot.currentRevisionId, ...(candidate === undefined ? {} : { pendingCandidate: candidate }), ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(suggestionAttempt === undefined ? {} : { briefSuggestionAttempt: suggestionAttempt }), ...(suggestedProductBrief === undefined ? {} : { suggestedProductBrief }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
   }
   let designSpec = createDesignSpecFromEvidence(evidence)
   let designConfirmed = false
@@ -465,7 +486,7 @@ async function loadCapturedReference(onStage: (stage: LoadStage) => void = () =>
     designSpec = confirmed.value
     designConfirmed = true
   }
-  return { projectId, evidence, designSpec, document: starterDocument(designSpec.id, evidence[0]!.source.title), revisions, designConfirmed, screenshotUnavailable: evidence.some(item => item.screenshotDataUrl === undefined), productBrief: savedBrief, ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(suggestionAttempt === undefined ? {} : { briefSuggestionAttempt: suggestionAttempt }), ...(suggestedProductBrief === undefined ? {} : { suggestedProductBrief }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
+  return { projectId, evidence, designSpec, document: starterDocument(designSpec.id, evidence[0]!.source.title), revisions, designConfirmed, screenshotUnavailable: evidence.some(item => item.screenshotDataUrl === undefined), productBrief: savedBrief, ...(candidate === undefined ? {} : { pendingCandidate: candidate }), ...(generationAttempt === undefined ? {} : { generationAttempt }), ...(suggestionAttempt === undefined ? {} : { briefSuggestionAttempt: suggestionAttempt }), ...(suggestedProductBrief === undefined ? {} : { suggestedProductBrief }), ...(lastAttempt === undefined ? {} : { lastAttempt }) }
 }
 
 function App(): React.JSX.Element {
@@ -515,6 +536,8 @@ function App(): React.JSX.Element {
   const [cancellingGeneration, setCancellingGeneration] = useState(false)
   const [confirmingRevisionId, setConfirmingRevisionId] = useState<string>()
   const [restoringRevisionId, setRestoringRevisionId] = useState<string>()
+  const [applyingCandidateId, setApplyingCandidateId] = useState<string>()
+  const [discardingCandidateId, setDiscardingCandidateId] = useState<string>()
   const [historyPreview, setHistoryPreview] = useState<RevisionPreview>()
   const [loadingHistoryRevisionId, setLoadingHistoryRevisionId] = useState<string>()
   const [historyPreviewError, setHistoryPreviewError] = useState<string>()
@@ -671,6 +694,9 @@ function App(): React.JSX.Element {
           if (disposed) return
           setBundle(next)
           if (generationRequestId.current === undefined && !waitingForRevision) return
+          if (next.pendingCandidate !== undefined && next.pendingCandidate.requestId === generationRequestId.current) {
+            generationRequestId.current = undefined; pendingRevisionBaseline.current = undefined; setWaitingForRevision(false); setGenerationTimedOut(false); setConfirmingGenerationCancel(false); setConfirmingRevisionEviction(false); setEditingRequirements(false); clearProductBriefDraft(window.sessionStorage, bundle.projectId); setSelection(undefined); setPreviewMode('interact'); setRequest(''); setRequestTone('success'); setRequestStatus('AI 已生成待应用原型。请在中间预览后选择应用或放弃；当前版本尚未改变。'); return
+          }
           const outcome = generationOutcome(generationRequestId.current, pendingRevisionBaseline.current, next.currentRevisionId, next.generationAttempt, next.lastAttempt)
           if (outcome.status === 'repairing') {
             setRequestTone('info'); setRequestStatus(`AI 第一次保存没有通过，正在等待它根据具体错误修正：${outcome.message}`); return
@@ -703,9 +729,9 @@ function App(): React.JSX.Element {
     const timer = window.setTimeout(() => { setGenerationTimedOut(true); setRequestTone('info'); setRequestStatus('尚未收到保存结果。原请求仍在等待处理，为避免晚到结果和新请求冲突，暂时不能再次发送。') }, 180_000)
     return () => window.clearTimeout(timer)
   }, [waitingForRevision])
-  const displayedDocument = bundle?.document
-  const displayedDesignSpec = bundle?.designSpec
-  const knownElementIds = useMemo(() => bundle === undefined || historyPreview !== undefined ? new Set<string>() : collectPrototypeElementIds(bundle.document), [bundle, historyPreview])
+  const displayedDocument = bundle?.pendingCandidate?.document ?? bundle?.document
+  const displayedDesignSpec = bundle?.pendingCandidate?.designSpec ?? bundle?.designSpec
+  const knownElementIds = useMemo(() => bundle === undefined || historyPreview !== undefined || bundle.pendingCandidate !== undefined ? new Set<string>() : collectPrototypeElementIds(bundle.document), [bundle, historyPreview])
   const srcDoc = useMemo(() => bundle === undefined || displayedDocument === undefined || displayedDesignSpec === undefined ? '' : sandboxPreviewSrcDoc(displayedDocument, displayedDesignSpec, bundle.evidence, nonce, historyPreview === undefined ? 'interact' : 'select'), [bundle, displayedDesignSpec, displayedDocument, historyPreview, nonce])
   const historySrcDoc = useMemo(() => bundle === undefined || historyPreview === undefined ? '' : sandboxPreviewSrcDoc(historyPreview.document, historyPreview.designSpec, bundle.evidence, historyNonce, 'select'), [bundle, historyNonce, historyPreview])
   useEffect(() => {
@@ -750,7 +776,7 @@ function App(): React.JSX.Element {
         return
       }
       if (!isSandboxSelectionMessage(event.data, nonce)) return
-      if (historyPreview !== undefined) return
+      if (historyPreview !== undefined || bundle?.pendingCandidate !== undefined) return
       const item = event.data.selection
       if (!knownElementIds.has(item.elementId)) return
       setSelection({ elementId: item.elementId, type: item.type as PrototypeSelection['type'], label: item.label })
@@ -758,21 +784,21 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', receive)
     return () => window.removeEventListener('message', receive)
-  }, [historyPreview, knownElementIds, nonce])
+  }, [bundle?.pendingCandidate, historyPreview, knownElementIds, nonce])
   useEffect(() => {
     frameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-selection-sync/v1', schema: 'prototype-document/v1', nonce, elementId: selection?.elementId ?? null }, '*')
   }, [nonce, selection])
   useEffect(() => {
-    const mode = historyPreview === undefined ? previewMode : 'select'
+    const mode = historyPreview === undefined ? bundle?.pendingCandidate === undefined ? previewMode : 'interact' : 'select'
     frameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode }, '*')
     if (historyPreview !== undefined) historyFrameRef.current?.contentWindow?.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce: historyNonce, mode: 'select' }, '*')
-  }, [historyNonce, historyPreview, nonce, previewMode])
+  }, [bundle?.pendingCandidate, historyNonce, historyPreview, nonce, previewMode])
 
   const syncPreviewState = (): void => {
     const target = frameRef.current?.contentWindow
     if (target === undefined || target === null) return
     target.postMessage({ v: 1, type: 'prototype-selection-sync/v1', schema: 'prototype-document/v1', nonce, elementId: selection?.elementId ?? null }, '*')
-    target.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: historyPreview === undefined ? previewMode : 'select' }, '*')
+    target.postMessage({ v: 1, type: 'prototype-preview-mode/v1', schema: 'prototype-document/v1', nonce, mode: historyPreview === undefined ? bundle?.pendingCandidate === undefined ? previewMode : 'interact' : 'select' }, '*')
   }
 
   const syncHistoryPreviewState = (): void => {
@@ -781,7 +807,7 @@ function App(): React.JSX.Element {
   }
 
   const choosePreviewMode = (mode: SandboxPreviewMode): void => {
-    if (historyPreview !== undefined && mode === 'select') return
+    if ((historyPreview !== undefined || bundle?.pendingCandidate !== undefined) && mode === 'select') return
     setPreviewMode(mode)
     if (mode === 'interact') setSelection(undefined)
   }
@@ -826,6 +852,9 @@ function App(): React.JSX.Element {
     try {
       const next = await loadCapturedReference()
       setBundle(next)
+      if (next.pendingCandidate !== undefined && next.pendingCandidate.requestId === generationRequestId.current) {
+        generationRequestId.current = undefined; pendingRevisionBaseline.current = undefined; setWaitingForRevision(false); setGenerationTimedOut(false); setConfirmingGenerationCancel(false); setConfirmingRevisionEviction(false); setEditingRequirements(false); clearProductBriefDraft(window.sessionStorage, bundle.projectId); setSelection(undefined); setPreviewMode('interact'); setRequest(''); setRequestTone('success'); setRequestStatus('AI 已生成待应用原型。请在中间预览后选择应用或放弃；当前版本尚未改变。'); return
+      }
       const outcome = generationOutcome(generationRequestId.current, pendingRevisionBaseline.current, next.currentRevisionId, next.generationAttempt, next.lastAttempt)
       if (outcome.status === 'saved') {
         generationRequestId.current = undefined; pendingRevisionBaseline.current = undefined; requirementsUpdateProject.current = undefined; setWaitingForRevision(false); setGenerationTimedOut(false); setConfirmingGenerationCancel(false); setConfirmingRevisionEviction(false); setEditingRequirements(false); clearProductBriefDraft(window.sessionStorage, bundle.projectId); setSelection(undefined); setPreviewMode('interact'); setRequest(''); setRequestTone('success'); setRequestStatus('新原型已经生成、校验并保存，可以直接在中间操作。')
@@ -846,6 +875,7 @@ function App(): React.JSX.Element {
   const askAi = async (): Promise<void> => {
     if (bundle === undefined) return
     if (historyPreview !== undefined) { setRequestTone('info'); setRequestStatus('当前是只读历史预览，请先返回当前版本，或恢复该版本后再修改。'); return }
+    if (bundle.pendingCandidate !== undefined) { setRequestTone('info'); setRequestStatus('请先应用或放弃正在预览的候选原型。当前版本尚未改变。'); return }
     const firstGeneration = bundle.currentRevisionId === undefined
     const updatingRequirements = !firstGeneration && (editingRequirements || requirementsUpdateProject.current === bundle.projectId)
     const brief = firstGeneration || updatingRequirements ? productBriefFromFields({ audience: briefAudience, coreTask: briefTask, pages: briefPages, modules: briefModules, flows: briefFlows, notes: briefNotes }) : undefined
@@ -868,6 +898,7 @@ function App(): React.JSX.Element {
       const response = await extensionRequest<{ ok: boolean; error?: string }>({ type: 'prototype-studio-prompt/v1', projectId: bundle.projectId, requestId, prompt: outgoingPrompt, ...(localEdit === undefined ? {} : { selection: localEdit }), ...(brief === undefined ? {} : { brief }), ...(requiresRevisionEviction ? { allowRevisionEviction: true } : {}) })
       responseReceived = true
       if (!response.ok) throw new Error(response.error ?? 'Harness 没有接受这次原型请求。')
+      if (localEdit !== undefined) { setSelection(undefined); setPreviewMode('interact') }
       setWaitingForRevision(true); setRequestTone('info'); setRequestStatus('AI 正在生成并校验原型，保存完成后会自动刷新。你的要求会保留，失败后可直接重试。')
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
@@ -966,6 +997,40 @@ function App(): React.JSX.Element {
         }
       } catch { setRequestTone('error'); setRequestStatus(message) }
     } finally { setCancellingGeneration(false) }
+  }
+
+  const applyPendingCandidate = async (): Promise<void> => {
+    const candidate = bundle?.pendingCandidate
+    if (bundle === undefined || candidate === undefined || applyingCandidateId !== undefined || discardingCandidateId !== undefined) return
+    setApplyingCandidateId(candidate.candidateId)
+    setRequestStatus(undefined)
+    try {
+      const response = await extensionRequest<{ ok: boolean; result?: { status?: unknown; revisionId?: unknown; documentFingerprint?: unknown }; error?: string }>({ type: 'prototype-studio-confirm-candidate/v1', projectId: bundle.projectId, candidateId: candidate.candidateId, ...(bundle.currentRevisionId === undefined ? {} : { expectedCurrentRevisionId: bundle.currentRevisionId }) })
+      if (!response.ok) throw new Error(response.error ?? '候选原型没有应用成功。')
+      if (response.result?.status !== 'verified_write' || typeof response.result.revisionId !== 'string' || response.result.documentFingerprint !== candidate.documentFingerprint) throw new Error('候选原型应用回包不完整，正在通过回读确认。')
+      const refreshed = await loadCapturedReference()
+      if (refreshed.pendingCandidate !== undefined || refreshed.currentRevisionId !== response.result.revisionId || await sha256Fingerprint(refreshed.document) !== candidate.documentFingerprint) throw new Error('候选原型应用后未能完成同内容回读；当前版本没有被当作已确认。')
+      setBundle(refreshed); setRequestTone('success'); setRequestStatus('已应用修改，并完成版本回读确认。')
+    } catch (cause) {
+      setRequestTone('error'); setRequestStatus(cause instanceof Error ? cause.message : String(cause))
+    } finally { setApplyingCandidateId(undefined) }
+  }
+
+  const discardPendingCandidate = async (): Promise<void> => {
+    const candidate = bundle?.pendingCandidate
+    if (bundle === undefined || candidate === undefined || applyingCandidateId !== undefined || discardingCandidateId !== undefined) return
+    setDiscardingCandidateId(candidate.candidateId)
+    setRequestStatus(undefined)
+    try {
+      const response = await extensionRequest<{ ok: boolean; result?: { status?: unknown; candidateId?: unknown }; error?: string }>({ type: 'prototype-studio-cancel-candidate/v1', projectId: bundle.projectId, candidateId: candidate.candidateId })
+      if (!response.ok) throw new Error(response.error ?? '候选原型没有放弃成功。')
+      if (response.result?.status !== 'candidate_cancelled' || response.result.candidateId !== candidate.candidateId) throw new Error('候选原型放弃回包不完整，正在通过回读确认。')
+      const refreshed = await loadCapturedReference()
+      if (refreshed.pendingCandidate?.candidateId === candidate.candidateId) throw new Error('候选原型放弃后仍存在，请重试。')
+      setBundle(refreshed); setSelection(undefined); setPreviewMode('interact'); setRequestTone('info'); setRequestStatus('已放弃候选原型，当前版本保持不变。')
+    } catch (cause) {
+      setRequestTone('error'); setRequestStatus(cause instanceof Error ? cause.message : String(cause))
+    } finally { setDiscardingCandidateId(undefined) }
   }
 
   const confirmDesign = async (designSpec: DesignSpecV1): Promise<void> => {
@@ -1076,13 +1141,15 @@ function App(): React.JSX.Element {
   const stageLayout = previewStageLayout(previewStageSize.width, previewStageSize.height, previewViewport)
   const compareStageLayout = previewStageLayout(previewStageSize.width >= 900 ? Math.max(240, (previewStageSize.width - 12) / 2) : previewStageSize.width, previewStageSize.height, previewViewport)
   const requirementsUpdateActive = currentRevisionId !== undefined && (editingRequirements || requirementsUpdateProject.current === bundle.projectId)
-  const isBriefEditor = currentRevisionId === undefined || requirementsUpdateActive
+  const hasPendingCandidate = bundle.pendingCandidate !== undefined
+  const isBriefEditor = (currentRevisionId === undefined && !hasPendingCandidate) || requirementsUpdateActive
   const draftBrief = isBriefEditor ? productBriefFromFields({ audience: briefAudience, coreTask: briefTask, pages: briefPages, modules: briefModules, flows: briefFlows, notes: briefNotes }) : undefined
   const briefConfirmed = currentRevisionId === undefined && draftBrief !== undefined && canonicalJson(draftBrief) === canonicalJson(bundle.productBrief)
   const requirementsChanged = draftBrief !== undefined && bundle.productBrief !== undefined && canonicalJson(draftBrief) !== canonicalJson(bundle.productBrief)
-  const requestReady = currentRevisionId === undefined ? draftBrief !== undefined : editingRequirements ? draftBrief !== undefined && requirementsChanged : request.trim() !== ''
+  const requestReady = hasPendingCandidate ? false : currentRevisionId === undefined ? draftBrief !== undefined : editingRequirements ? draftBrief !== undefined && requirementsChanged : request.trim() !== ''
   const historyPreviewReadOnly = historyPreview !== undefined
-  const displayedCoverage = bundle.requirementCoverage
+  const annotationEditing = selection !== undefined && !requirementsUpdateActive && !hasPendingCandidate && !historyPreviewReadOnly
+  const displayedCoverage = bundle.pendingCandidate?.requirementCoverage ?? bundle.requirementCoverage
   const visualHistoryDiff = historyPreview === undefined ? undefined : visualRevisionDiff(document, historyPreview.document, bundle.requirementCoverage, historyPreview.requirementCoverage)
   const applyBriefExample = (kind: 'supplier' | 'project'): void => {
     if (kind === 'supplier') { setBriefAudience('采购经理、供应商管理员'); setBriefTask('筛选供应商并完成准入审批'); setBriefPages('工作台\n供应商列表\n审批详情'); setBriefModules('关键指标\n组合筛选\n供应商表格\n资质与风险\n审批记录'); setBriefFlows('组合条件筛选供应商\n打开供应商详情\n通过或驳回准入申请'); setBriefNotes('详情中展示负责人、风险、资质和审批记录。') }
@@ -1118,16 +1185,18 @@ function App(): React.JSX.Element {
     setPreviewMode('interact')
     setRequest(`请修复${viewportLabel[previewViewport]}尺寸的布局问题：${auditSummary.detail} 保持已确认的设计规范和现有业务流程不变，并重新检查所有操作区和弹窗。`)
   }
-  const previewSurface = currentRevisionId === undefined ? <div className="prototype-empty"><span>{briefConfirmed ? '设计规范和产品需求均已确认' : '设计规范已确认'}</span><h2>{briefConfirmed ? '需求已准备好，可以开始生成' : '你想做一个什么产品原型？'}</h2><p>{briefConfirmed ? '左侧已经显示确认后的需求清单。点击右侧“开始生成原型”，AI 才会收到这些内容。' : '说明使用者、核心任务和必须演示的流程。AI 会沿用刚才确认的完整设计规范。'}</p><div>{!briefConfirmed && <><button type="button" className="secondary" onClick={() => applyBriefExample('supplier')}>填入供应商管理示例</button><button type="button" className="secondary" onClick={() => applyBriefExample('project')}>填入项目看板示例</button></>}</div></div> : historyPreview === undefined ? <div ref={previewStageRef} className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: stageLayout.displayWidth, height: stageLayout.displayHeight }}><iframe ref={frameRef} title="安全交互原型" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} onLoad={syncPreviewState} style={{ width: stageLayout.viewportWidth, height: stageLayout.viewportHeight, transform: `scale(${stageLayout.scale})` }} /></div></div> : <div ref={previewStageRef} className="history-compare" aria-label="当前版本与历史版本对比"><section className="history-compare-column"><header><b>当前版本</b><small>只读对比，不会改变当前版本</small></header><div className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: compareStageLayout.displayWidth, height: compareStageLayout.displayHeight }}><iframe ref={frameRef} title="当前版本安全预览" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} onLoad={syncPreviewState} style={{ width: compareStageLayout.viewportWidth, height: compareStageLayout.viewportHeight, transform: `scale(${compareStageLayout.scale})` }} /></div></div></section><section className="history-compare-column"><header><b>历史版本</b><small>只读对比，不会改变历史版本</small></header><div className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: compareStageLayout.displayWidth, height: compareStageLayout.displayHeight }}><iframe ref={historyFrameRef} title="历史版本安全预览" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={historySrcDoc} onLoad={syncHistoryPreviewState} style={{ width: compareStageLayout.viewportWidth, height: compareStageLayout.viewportHeight, transform: `scale(${compareStageLayout.scale})` }} /></div></div></section></div>
+  const previewSurface = currentRevisionId === undefined && !hasPendingCandidate ? <div className="prototype-empty"><span>{briefConfirmed ? '设计规范和产品需求均已确认' : '设计规范已确认'}</span><h2>{briefConfirmed ? '需求已准备好，可以开始生成' : '你想做一个什么产品原型？'}</h2><p>{briefConfirmed ? '左侧已经显示确认后的需求清单。点击右侧“开始生成原型”，AI 才会收到这些内容。' : '说明使用者、核心任务和必须演示的流程。AI 会沿用刚才确认的完整设计规范。'}</p><div>{!briefConfirmed && <><button type="button" className="secondary" onClick={() => applyBriefExample('supplier')}>填入供应商管理示例</button><button type="button" className="secondary" onClick={() => applyBriefExample('project')}>填入项目看板示例</button></>}</div></div> : historyPreview === undefined ? <div ref={previewStageRef} className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: stageLayout.displayWidth, height: stageLayout.displayHeight }}><iframe ref={frameRef} title={hasPendingCandidate ? '待应用原型预览' : '安全交互原型'} className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} onLoad={syncPreviewState} style={{ width: stageLayout.viewportWidth, height: stageLayout.viewportHeight, transform: `scale(${stageLayout.scale})` }} /></div></div> : <div ref={previewStageRef} className="history-compare" aria-label="当前版本与历史版本对比"><section className="history-compare-column"><header><b>当前版本</b><small>只读对比，不会改变当前版本</small></header><div className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: compareStageLayout.displayWidth, height: compareStageLayout.displayHeight }}><iframe ref={frameRef} title="当前版本安全预览" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} onLoad={syncPreviewState} style={{ width: compareStageLayout.viewportWidth, height: compareStageLayout.viewportHeight, transform: `scale(${compareStageLayout.scale})` }} /></div></div></section><section className="history-compare-column"><header><b>历史版本</b><small>只读对比，不会改变历史版本</small></header><div className={`prototype-viewport ${previewViewport}`}><div className="prototype-scale-stage" style={{ width: compareStageLayout.displayWidth, height: compareStageLayout.displayHeight }}><iframe ref={historyFrameRef} title="历史版本安全预览" className="prototype-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={historySrcDoc} onLoad={syncHistoryPreviewState} style={{ width: compareStageLayout.viewportWidth, height: compareStageLayout.viewportHeight, transform: `scale(${compareStageLayout.scale})` }} /></div></div></section></div>
   return <main className={`studio-shell ${currentRevisionId === undefined ? 'before-first-generation' : 'has-revision'}`}>
     <header className="studio-header"><div><strong>AI 原型工具 · 生成与调整</strong><span><b className="confirmed-dot" />设计规范已确认　→　描述产品或选中元素　→　AI 生成安全交互原型</span></div><div className="studio-header-actions">{currentRevisionId !== undefined && <><button className="secondary" type="button" disabled={exporting !== undefined} onClick={() => { void exportCurrentPrototype('html') }}>{exporting === 'html' ? '正在导出…' : '导出离线原型'}</button><button className="secondary" type="button" disabled={exporting !== undefined} onClick={() => { void exportCurrentPrototype('json') }}>{exporting === 'json' ? '正在导出…' : '导出规范数据'}</button></>}<button className="secondary" type="button" onClick={() => setDesignConfirmed(false)}>查看完整规范</button></div></header>
     <section className="studio-grid">
       <aside className="studio-panel evidence-panel"><h2>设计依据</h2>{bundle.screenshotUnavailable && <p className="evidence-retention-inline" role="status">截图已清理；设计规范和历史仍保留。</p>}<article>{evidence[0]!.screenshotDataUrl !== undefined && <img className="reference-shot" src={evidence[0]!.screenshotDataUrl} alt="参考网页截图" />}<b>{evidence[0]!.source.title}</b><small>{evidence[0]!.source.url}</small><div className="evidence-summary"><span>{evidence[0]!.pageSize?.sampledBands ?? 1} 个页面区域</span><span>{designSpec.colors.length} 个规范颜色</span><span>{designSpec.spacing.scale?.length ?? 1} 个间距档位</span></div></article><article><h3>{designSpec.name}</h3><p>当前原型必须沿用已确认的颜色、排版、间距、圆角、边框、效果和动效。</p><div className="swatches">{designSpec.colors.slice(0, 7).map(item => <span key={`${item.name}-${item.value}`}><i style={{ background: item.value }} /><b>{item.name}</b><small>{item.value}</small></span>)}</div></article>{bundle.productBrief !== undefined && <article className="accepted-brief"><div className="accepted-brief-heading"><h3>已确认的产品需求</h3>{currentRevisionId !== undefined && historyPreview === undefined && !requirementsUpdateActive && <button type="button" className="secondary" disabled={sending || waitingForRevision} onClick={startRequirementsUpdate}>更新产品需求</button>}</div><dl><div><dt>谁来使用</dt><dd>{bundle.productBrief.audience}</dd></div><div><dt>核心任务</dt><dd>{bundle.productBrief.coreTask}</dd></div><div><dt>必须页面</dt><dd>{bundle.productBrief.requiredPages.join('、')}</dd></div>{bundle.productBrief.requiredModules !== undefined && <div><dt>页面内关键模块</dt><dd>{bundle.productBrief.requiredModules.join('、')}</dd></div>}<div><dt>必须演示流程</dt><dd>{bundle.productBrief.requiredFlows.join('；')}</dd></div>{bundle.productBrief.notes !== undefined && <div><dt>补充说明</dt><dd>{bundle.productBrief.notes}</dd></div>}</dl>{requirementsUpdateActive && <p className="requirements-update-note" role="status">正在准备新需求。当前版本仍使用旧需求；新版本通过校验并保存后才会更新。</p>}</article>}{displayedCoverage !== undefined && <RequirementCoveragePanel coverage={displayedCoverage} historical={historyPreview !== undefined} onFocus={historyPreview === undefined ? focusCoverageMatch : undefined} />}</aside>
       <section className="preview-panel"><div className="preview-heading"><div><h2>{currentRevisionId === undefined ? '准备生成产品原型' : displayedDocument?.title ?? document.title}</h2><p>{historyPreview !== undefined ? `只读预览 · ${revisionTime(historyPreview.createdAt)} · 不会改变当前版本` : currentRevisionId === undefined ? '在右侧描述产品、页面和关键流程。' : previewMode === 'interact' ? '操作原型：点击按钮、填写表单、切换页面。' : '选择修改：点击页面元素，再向 AI 说明要改什么。'}</p></div>{currentRevisionId === undefined ? <span>{briefConfirmed ? '需求已确认' : '等待需求'}</span> : <div className="preview-tools">{historyPreview === undefined && <div className="preview-mode-switch" aria-label="预览模式"><button type="button" className={previewMode === 'interact' ? 'active' : ''} aria-pressed={previewMode === 'interact'} onClick={() => choosePreviewMode('interact')}>操作原型</button><button type="button" className={previewMode === 'select' ? 'active' : ''} aria-pressed={previewMode === 'select'} onClick={() => choosePreviewMode('select')}>选择修改</button></div>}<div className="viewport-switch" aria-label="预览尺寸">{(['desktop', 'tablet', 'mobile'] as const).map(value => <button type="button" className={previewViewport === value ? 'active' : ''} aria-pressed={previewViewport === value} key={value} onClick={() => choosePreviewViewport(value)}>{viewportLabel[value]}</button>)}</div><span>{stageLayout.viewportWidth}px · {Math.round(stageLayout.scale * 100)}%</span></div>}</div>{historyPreview !== undefined && <div className="history-preview-banner"><div><b>正在对比：当前版本与“{historyPreview.changeSummary}”</b><span>两边都是隔离的只读预览；点击不会改变任何版本。</span><small className="history-brief-note">{historyPreview.productBriefKnown ? '恢复后产品需求也会回到该版本。' : '旧版未记录当时需求，恢复时会做兼容校验，可能被拒绝。'}</small>{visualHistoryDiff !== undefined && <div className="history-diff-summary"><section><strong>页面与组件差异</strong><ul>{visualHistoryDiff.structure.length === 0 ? <li>页面和组件标识未变化</li> : visualHistoryDiff.structure.map(detail => <li key={detail}>{detail}</li>)}</ul></section><section><strong>需求覆盖差异</strong><ul>{visualHistoryDiff.coverage.length === 0 ? <li>两个版本都没有已确认需求清单</li> : visualHistoryDiff.coverage.map(detail => <li key={detail}>{detail}</li>)}</ul></section></div>}</div><button type="button" className="secondary" onClick={() => setHistoryPreview(undefined)}>返回当前版本</button></div>}{currentRevisionId !== undefined && historyPreview === undefined && <div className={`preview-audit ${checkingAllViewports ? 'checking' : allAuditSummary.tone}`} role="status"><div className="audit-copy"><b>基础布局检查：{(['desktop', 'tablet', 'mobile'] as const).map(value => <span key={value} className={previewAudits[value] === undefined ? 'checking' : summarizePreviewAudit(previewAudits[value]).tone}>{viewportLabel[value]} {previewAudits[value] === undefined ? '待检查' : summarizePreviewAudit(previewAudits[value]).tone === 'pass' ? '✓' : '⚠'}</span>)}</b><small>{checkingAllViewports || Object.keys(previewAudits).length === 3 ? `${allAuditSummary.label} · ${allAuditSummary.detail}` : `${auditSummary.label} · ${auditSummary.detail}`}</small></div><div className="audit-actions"><button type="button" className="secondary" disabled={checkingAllViewports} onClick={checkAllViewports}>{checkingAllViewports ? '正在逐个检查…' : '检查全部尺寸'}</button>{auditSummary.tone === 'warning' && <button type="button" className="secondary" onClick={askForResponsiveRepair}>让 AI 修复当前尺寸</button>}</div></div>}{previewSurface}</section>
       <aside className="studio-panel ai-panel">
+        {hasPendingCandidate && <section className="candidate-review-bar" role="status" aria-label="待应用原型"><div><b>待应用修改</b><span>{bundle.pendingCandidate!.changeSummary}</span><small>正在预览候选结果；当前版本和历史尚未改变。</small></div><div><button type="button" disabled={applyingCandidateId !== undefined || discardingCandidateId !== undefined} onClick={() => { void discardPendingCandidate() }}>{discardingCandidateId !== undefined ? '正在放弃…' : '放弃'}</button><button type="button" disabled={applyingCandidateId !== undefined || discardingCandidateId !== undefined} onClick={() => { void applyPendingCandidate() }}>{applyingCandidateId !== undefined ? '正在应用…' : '应用修改'}</button></div></section>}
+        {annotationEditing && <section className="annotation-composer" aria-label="批注修改"><header><span>已选中 · {selectionTypeLabel(selection!.type)}</span><button type="button" className="secondary" onClick={() => { setSelection(undefined); setPreviewMode('interact'); setRequest('') }}>取消</button></header><b>{selection!.label}</b><textarea aria-label="想怎么改" autoFocus maxLength={4_000} disabled={sending || waitingForRevision} value={request} onChange={event => setRequest(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && request.trim() !== '' && !sending && !waitingForRevision) { event.preventDefault(); void askAi() } }} placeholder="想怎么改？例如：把这里改成更醒目的风险提示" /><footer><small>只修改这个选中位置 · ⌘/Ctrl + Enter 发送</small><button type="button" disabled={sending || waitingForRevision || request.trim() === ''} onClick={() => { void askAi() }}>{sending ? '正在发送…' : waitingForRevision ? 'AI 处理中…' : '发送'}</button></footer></section>}
         <h2>AI 原型助手</h2>
         <p className="conversation-context-note"><b>会结合当前 AI 对话</b><span>下面确认的需求清单优先；对话里的业务背景、规则和已确认决定会一起提供给 AI，不需要重复粘贴。</span></p>
-        <article className="request-card">
+        <article className="request-card" hidden={annotationEditing || hasPendingCandidate}>
           {selection === undefined || requirementsUpdateActive ? <div className="request-heading"><b>{currentRevisionId === undefined ? '先确认产品需求清单' : requirementsUpdateActive ? '更新产品需求并生成新版本' : '继续完善整个原型'}</b><p>{currentRevisionId === undefined ? '四项写清楚后，AI 才开始生成，避免只做几张空卡片。' : requirementsUpdateActive ? '新需求只会在新版本通过校验并保存后正式生效；当前版本不会被改写。' : '也可以先点击中间的元素，再做局部修改。'}</p></div> : <div className="selected-target"><span>正在修改</span><b>{selection.label}</b><small>{selectionTypeLabel(selection.type)} · {selection.elementId}</small><button type="button" className="secondary" onClick={() => choosePreviewMode('interact')}>改为调整整个原型</button></div>}
           {isBriefEditor && <div className="brief-builder"><label>谁来使用<input maxLength={120} disabled={sending || waitingForRevision || confirmingBrief} value={briefAudience} onChange={event => setBriefAudience(event.target.value)} placeholder="例如：采购经理、供应商管理员" /></label><label>核心任务<input maxLength={300} disabled={sending || waitingForRevision || confirmingBrief} value={briefTask} onChange={event => setBriefTask(event.target.value)} placeholder="例如：筛选供应商并完成准入审批" /></label><label>必须包含的页面<textarea maxLength={700} disabled={sending || waitingForRevision || confirmingBrief} value={briefPages} onChange={event => setBriefPages(event.target.value)} placeholder={'每行一个真实页面，例如：\n工作台\n供应商列表\n审批详情'} /></label><label>页面内关键模块（可选）<textarea maxLength={1_000} disabled={sending || waitingForRevision || confirmingBrief} value={briefModules} onChange={event => setBriefModules(event.target.value)} placeholder={'每行一个，例如：\n关键指标\n组合筛选\n供应商表格\n风险记录'} /></label><label>必须演示的真实流程<textarea maxLength={1_300} disabled={sending || waitingForRevision || confirmingBrief} value={briefFlows} onChange={event => setBriefFlows(event.target.value)} placeholder={'每行一个，例如：\n筛选供应商\n打开详情\n通过或驳回申请'} /></label><div className="brief-status"><span className={briefAudience.trim().length >= 2 ? 'done' : ''}>使用者</span><span className={briefTask.trim().length >= 6 ? 'done' : ''}>核心任务</span><span className={productBriefFromFields({ audience: briefAudience || '临时', coreTask: briefTask || '临时核心任务', pages: briefPages, flows: '临时流程' }) !== undefined ? 'done' : ''}>页面</span><span className={productBriefFromFields({ audience: briefAudience || '临时', coreTask: briefTask || '临时核心任务', pages: '临时页面', flows: briefFlows }) !== undefined ? 'done' : ''}>流程</span></div></div>}
           {historyPreviewReadOnly && <p className="history-preview-readonly" role="status">当前是只读历史预览，请先返回当前版本，或恢复该版本后再修改。</p>}

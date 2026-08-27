@@ -51,6 +51,10 @@ function pendingCandidate(record) {
     || !exactObject(item.revision) || typeof item.revision.id !== 'string' || item.revision.id !== item.candidateId || typeof item.createdAt !== 'string') return undefined
   if (item.productBrief !== undefined && productBrief(item.productBrief) === undefined) return undefined
   if (item.requirementCoverage !== undefined && productRequirementCoverageValue(item.requirementCoverage) === undefined) return undefined
+  if (item.localEditScope !== undefined) {
+    const scope = item.localEditScope
+    if (!exactObject(scope) || Object.keys(scope).length !== 2 || !HASH.test(String(scope.baselineDocumentFingerprint)) || localEditSelection(scope.selection) === undefined) return undefined
+  }
   return item
 }
 function briefSuggestionAttempt(record) {
@@ -171,6 +175,7 @@ export function firstPrototypeQualityIssues(document, briefValue, { checkFirstVe
 export class PrototypeProjectStore {
   constructor(root, contracts) { this.root = root; this.contracts = contracts; this.queues = new Map() }
   file(projectId) { if (!PROJECT_ID.test(projectId)) throw new Error('Invalid prototype project id.'); return join(this.root, `${projectId}.json`) }
+  screenshotFile(projectId, referenceId) { this.file(projectId); if (typeof referenceId !== 'string' || !/^ref-[a-z0-9-]{8,72}$/.test(referenceId)) throw new Error('Invalid prototype reference screenshot id.'); return join(this.root, 'reference-screenshots', `${projectId}-${referenceId}.json`) }
   projectLockDatabaseFile() { return join(this.root, '.prototype-project-coordinator.sqlite') }
   async read(projectId) {
     const parsed = JSON.parse(await readFile(this.file(projectId), 'utf8'))
@@ -278,10 +283,37 @@ export class PrototypeProjectStore {
         if (error?.code !== 'ENOENT') throw error
       }
       const now = new Date().toISOString()
-      const storedEvidence = checked.map(item => ({ ...item.value, screenshotDataUrl: undefined }))
+      const storedEvidence = checked.map(item => { const { screenshotDataUrl: _screenshot, ...stored } = item.value; return stored })
+      for (const item of checked.map(item => item.value)) await this.persistReferenceScreenshot(projectId, item)
       const record = { v: 1, id: projectId, sessionId, capabilityHash: hash(capability), evidence: storedEvidence, revisions: [], recoveryEpoch: 0, consumedRecoveryNonces: [], createdAt: now, updatedAt: now }
       return this.snapshot(await this.write(record, projectFence))
     })
+  }
+  async persistReferenceScreenshot(projectId, evidence) {
+    if (evidence.screenshotDataUrl === undefined) return
+    const match = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/.exec(evidence.screenshotDataUrl)
+    if (match === null || evidence.screenshotFingerprint === undefined || hash(evidence.screenshotDataUrl) !== evidence.screenshotFingerprint) throw new Error('Captured reference screenshot failed integrity verification.')
+    const data = Buffer.from(match[2], 'base64')
+    if (data.byteLength === 0 || data.byteLength > 1_500_000) throw new Error('Captured reference screenshot exceeds the bounded image limit.')
+    const target = this.screenshotFile(projectId, evidence.id); const temporary = `${target}.${randomUUID()}.tmp`
+    await mkdir(join(this.root, 'reference-screenshots'), { recursive: true })
+    await writeFile(temporary, JSON.stringify({ v: 1, mediaType: match[1], screenshotFingerprint: evidence.screenshotFingerprint, data: data.toString('base64') }), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    await rename(temporary, target)
+    const readback = JSON.parse(await readFile(target, 'utf8'))
+    if (!exactObject(readback) || readback.mediaType !== match[1] || readback.screenshotFingerprint !== evidence.screenshotFingerprint || typeof readback.data !== 'string' || hash(`data:${readback.mediaType};base64,${readback.data}`) !== evidence.screenshotFingerprint) throw new Error('Captured reference screenshot write-back verification failed.')
+  }
+  async referenceScreenshot({ projectId, sessionId, requestId, referenceId }) {
+    const record = await this.read(projectId)
+    if (record.sessionId !== sessionId || !REQUEST_ID.test(requestId)) throw new Error('Prototype reference screenshot authority is invalid.')
+    const active = generationAttempt(record)
+    if (active === undefined || active.status !== 'pending' || active.requestId !== requestId) throw new Error('Prototype reference screenshot is only available for the active generation request.')
+    const evidence = record.evidence.find(item => item.id === referenceId)
+    if (evidence === undefined || typeof evidence.screenshotFingerprint !== 'string') throw new Error('No captured screenshot is available for this reference.')
+    const item = JSON.parse(await readFile(this.screenshotFile(projectId, referenceId), 'utf8'))
+    if (!exactObject(item) || (item.mediaType !== 'image/png' && item.mediaType !== 'image/jpeg') || item.screenshotFingerprint !== evidence.screenshotFingerprint || typeof item.data !== 'string') throw new Error('Stored prototype reference screenshot is invalid.')
+    const data = Buffer.from(item.data, 'base64')
+    if (data.byteLength === 0 || data.byteLength > 1_500_000 || hash(`data:${item.mediaType};base64,${item.data}`) !== evidence.screenshotFingerprint) throw new Error('Stored prototype reference screenshot failed integrity verification.')
+    return { mediaType: item.mediaType, data, name: `${referenceId}.${item.mediaType === 'image/png' ? 'png' : 'jpg'}` }
   }
   authorize(record, capability) {
     if (typeof capability !== 'string' || !safeEqual(record.capabilityHash, hash(capability))) throw new Error('Prototype project capability is invalid.')
@@ -336,6 +368,10 @@ export class PrototypeProjectStore {
     return this.mutate(projectId, async projectFence => {
       const record = await this.read(projectId); this.authorize(record, capability)
       if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined || briefSuggestionAttempt(record) !== undefined) throw new Error('Finish, apply, or discard the active AI request before deleting this project.')
+      for (const evidence of record.evidence) {
+        if (typeof evidence.screenshotFingerprint !== 'string') continue
+        try { await unlink(this.screenshotFile(projectId, evidence.id)) } catch (error) { if (error?.code !== 'ENOENT') throw error }
+      }
       await projectFence.assertOwnership(); await unlink(this.file(projectId)); await projectFence.assertOwnership()
       try { await this.read(projectId); throw new Error('Prototype project deletion read-back verification failed.') } catch (error) { if (error?.code !== 'ENOENT') throw error }
       return { status: 'verified_delete', projectId }
@@ -427,7 +463,7 @@ export class PrototypeProjectStore {
     return this.mutate(projectId, async (projectFence) => {
       const record = await this.read(projectId)
       this.authorize(record, capability)
-      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request or candidate is still active. Stop it before adjusting the design specification.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request is still active, or a candidate awaits action. Stop it before adjusting the design specification.')
       if (record.currentRevisionId !== undefined || record.revisions.length !== 0) throw new Error('This prototype already has saved history. Create a new prototype project before changing its design specification.')
       if (record.confirmedDesignSpec === undefined || typeof record.confirmedDesignSpecFingerprint !== 'string') throw new Error('The design specification is not currently confirmed.')
       const { confirmedDesignSpec: _designSpec, confirmedDesignSpecFingerprint: _fingerprint, ...unconfirmed } = record
@@ -546,7 +582,7 @@ export class PrototypeProjectStore {
       const record = await this.read(projectId)
       this.authorize(record, capability)
       if (typeof targetRevisionId !== 'string' || targetRevisionId.length === 0 || targetRevisionId.length > 160 || typeof expectedCurrentRevisionId !== 'string' || expectedCurrentRevisionId.length === 0 || expectedCurrentRevisionId.length > 160) throw new Error('Prototype Studio restore arguments are invalid.')
-      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request or candidate is still active. Cancel or discard it before restoring a version.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request is still active, or a candidate awaits action. Cancel or discard it before restoring a version.')
       if (record.currentRevisionId !== expectedCurrentRevisionId) throw new Error(`Prototype revision conflict: current revision is ${record.currentRevisionId ?? 'empty'}. Read it before restoring again.`)
       const target = record.revisions.find(item => item.revision.id === targetRevisionId)
       if (target === undefined) throw new Error('The requested prototype revision does not exist.')
@@ -564,6 +600,50 @@ export class PrototypeProjectStore {
       if (readback === undefined || !(await this.contracts.verifyTrustedRevision(readback.revision, readback.designSpec, updated.evidence))) throw new Error('Prototype revision restore read-back verification failed.')
       if (restoredBrief !== undefined && (productBrief(updated.productBrief) === undefined || await this.contracts.sha256Fingerprint(updated.productBrief) !== await this.contracts.sha256Fingerprint(restoredBrief))) throw new Error('Prototype requirement restore read-back verification failed.')
       return { status: 'verified_write', projectId, revisionId: readback.revision.id, documentFingerprint: readback.revision.documentFingerprint, changeSummary: readback.revision.changeSummary }
+    })
+  }
+  async confirmCandidate({ projectId, capability, candidateId, expectedCurrentRevisionId }) {
+    return this.mutate(projectId, async (projectFence) => {
+      const record = await this.read(projectId); this.authorize(record, capability)
+      if (typeof candidateId !== 'string' || !/^candidate-[0-9a-f-]{36}$/i.test(candidateId) || !optionalRevisionId(expectedCurrentRevisionId)) throw new Error('Prototype candidate confirmation is invalid.')
+      const candidate = pendingCandidate(record)
+      if (candidate === undefined || candidate.candidateId !== candidateId) throw new Error('Prototype candidate is no longer available.')
+      if (!sameRevisionId(candidate.expectedRevisionId, expectedCurrentRevisionId) || !sameRevisionId(record.currentRevisionId, expectedCurrentRevisionId)) throw new Error(`Prototype revision conflict: current revision is ${record.currentRevisionId ?? 'empty'}. Refresh the candidate before applying it.`)
+      if (candidate.designSpecFingerprint !== record.confirmedDesignSpecFingerprint || JSON.stringify(candidate.evidenceFingerprints) !== JSON.stringify(record.evidence.map(item => item.fingerprint))) throw new Error('Prototype candidate authority changed. Generate it again.')
+      if (!(await this.contracts.verifyTrustedRevision(candidate.revision, candidate.designSpec, record.evidence))) throw new Error('Prototype candidate failed trusted verification.')
+      const checkedDesignSpec = this.contracts.validateDesignSpec(candidate.designSpec, record.evidence.map(item => item.id))
+      if (!checkedDesignSpec.ok || await this.contracts.sha256Fingerprint(checkedDesignSpec.value) !== candidate.designSpecFingerprint) throw new Error('Prototype candidate design specification is no longer valid.')
+      const baseline = record.revisions.find(item => item.revision.id === record.currentRevisionId)
+      if (candidate.localEditScope !== undefined) {
+        if (baseline === undefined || await this.contracts.sha256Fingerprint(baseline.revision.document) !== candidate.localEditScope.baselineDocumentFingerprint) throw new Error('Local prototype edit baseline changed. Refresh and select the element again.')
+        const issues = localEditScopeIssues({ baseline: baseline.revision.document, candidate: candidate.revision.document, selection: candidate.localEditScope.selection })
+        if (issues.length > 0) throw new Error(issues[0])
+      }
+      const revisionId = `rev-${randomUUID()}`
+      const created = await this.contracts.createTrustedRevision({ id: revisionId, ...(record.currentRevisionId === undefined ? {} : { parentRevisionId: record.currentRevisionId }), author: 'agent', document: candidate.revision.document, designSpec: checkedDesignSpec.value, evidence: record.evidence, changeSummary: candidate.revision.changeSummary })
+      if (!created.ok) throw new Error(created.errors[0] ?? 'Prototype candidate could not be applied.')
+      const nextBrief = productBrief(candidate.productBrief) ?? productBrief(record.productBrief)
+      const nextCoverage = nextBrief === undefined ? undefined : productRequirementCoverage(created.value.document, nextBrief)
+      const priorRevisions = record.revisions.map(item => item.revision.id === record.currentRevisionId && productBrief(item.productBrief) === undefined && productBrief(record.productBrief) !== undefined ? { ...item, productBrief: productBrief(record.productBrief) } : item)
+      const revisions = [...priorRevisions, { revision: created.value, designSpec: checkedDesignSpec.value, ...(nextBrief === undefined ? {} : { productBrief: nextBrief }), ...(nextCoverage === undefined ? {} : { requirementCoverage: nextCoverage }) }].slice(-MAX_REVISIONS)
+      const { pendingCandidate: _candidate, ...withoutCandidate } = record
+      const updated = await this.write({ ...withoutCandidate, ...(nextBrief === undefined ? {} : { productBrief: nextBrief }), revisions, currentRevisionId: created.value.id, lastAttempt: undefined, updatedAt: new Date().toISOString() }, projectFence)
+      const readback = updated.revisions.find(item => item.revision.id === created.value.id)
+      if (readback === undefined || !(await this.contracts.verifyTrustedRevision(readback.revision, readback.designSpec, updated.evidence))) throw new Error('Prototype candidate apply read-back verification failed.')
+      if (nextBrief !== undefined && (productBrief(readback.productBrief) === undefined || await this.contracts.sha256Fingerprint(readback.productBrief) !== await this.contracts.sha256Fingerprint(nextBrief))) throw new Error('Prototype candidate requirement apply read-back verification failed.')
+      return { status: 'verified_write', projectId, revisionId: created.value.id, documentFingerprint: created.value.documentFingerprint, changeSummary: created.value.changeSummary }
+    })
+  }
+  async cancelCandidate({ projectId, capability, candidateId }) {
+    return this.mutate(projectId, async projectFence => {
+      const record = await this.read(projectId); this.authorize(record, capability)
+      if (typeof candidateId !== 'string' || !/^candidate-[0-9a-f-]{36}$/i.test(candidateId)) throw new Error('Prototype candidate cancellation is invalid.')
+      const candidate = pendingCandidate(record)
+      if (candidate === undefined || candidate.candidateId !== candidateId) throw new Error('Prototype candidate is no longer available.')
+      const { pendingCandidate: _candidate, ...withoutCandidate } = record
+      const updated = await this.write({ ...withoutCandidate, lastAttempt: { status: 'error', requestId: candidate.requestId, message: '本次原型候选已放弃，未创建新版本。', at: new Date().toISOString() }, updatedAt: new Date().toISOString() }, projectFence)
+      if (pendingCandidate(updated) !== undefined || updated.currentRevisionId !== record.currentRevisionId || updated.revisions.length !== record.revisions.length) throw new Error('Prototype candidate cancellation read-back verification failed.')
+      return { status: 'candidate_cancelled', projectId, candidateId }
     })
   }
   async save({ projectId, sessionId, requestId, expectedRevisionId, designSpec, document, changeSummary }) {
@@ -587,8 +667,11 @@ export class PrototypeProjectStore {
       const checkedDesignSpec = this.contracts.validateDesignSpec(designSpec ?? confirmedDesignSpec, record.evidence.map(item => item.id))
       if (!checkedDesignSpec.ok) throw new Error(checkedDesignSpec.errors[0] ?? 'Prototype design specification validation failed.')
       if (await this.contracts.sha256Fingerprint(checkedDesignSpec.value) !== confirmedDesignSpecFingerprint) throw new Error('The prototype must use the exact design specification confirmed by the user.')
-      const revisionId = `rev-${randomUUID()}`
-      const created = await this.contracts.createTrustedRevision({ id: revisionId, ...(current === undefined ? {} : { parentRevisionId: current }), author: 'agent', document, designSpec: checkedDesignSpec.value, evidence: record.evidence, changeSummary })
+      // The model may only produce a validated, durable *candidate*.  It is
+      // deliberately not a revision yet: applying it is a separate user
+      // decision that rechecks the current revision under the same write fence.
+      const candidateId = `candidate-${randomUUID()}`
+      const created = await this.contracts.createTrustedRevision({ id: candidateId, ...(current === undefined ? {} : { parentRevisionId: current }), author: 'agent', document, designSpec: checkedDesignSpec.value, evidence: record.evidence, changeSummary })
       if (!created.ok) throw new Error(created.errors[0] ?? 'Prototype revision validation failed.')
       if (active.localEditScope !== undefined) {
         const baseline = record.revisions.find(item => item.revision.id === current)
@@ -613,14 +696,20 @@ export class PrototypeProjectStore {
       // checklist that governed that exact current revision. Older non-current
       // entries remain explicitly unknown instead of being assigned a false
       // history.
-      const priorRevisions = record.revisions.map(item => item.revision.id === current && productBrief(item.productBrief) === undefined && storedBrief !== undefined ? { ...item, productBrief: storedBrief } : item)
-      const revisions = [...priorRevisions, { revision: created.value, designSpec: checkedDesignSpec.value, ...(nextBrief === undefined ? {} : { productBrief: nextBrief }), ...(nextCoverage === undefined ? {} : { requirementCoverage: nextCoverage }) }].slice(-MAX_REVISIONS)
-      const updated = await this.write({ ...record, confirmedDesignSpec, confirmedDesignSpecFingerprint, ...(nextBrief === undefined ? {} : { productBrief: nextBrief }), revisions, currentRevisionId: created.value.id, generationAttempt: undefined, lastAttempt: undefined, updatedAt: new Date().toISOString() }, projectFence)
-      const readback = updated.revisions.find(item => item.revision.id === created.value.id)
-      if (readback === undefined || !(await this.contracts.verifyTrustedRevision(readback.revision, readback.designSpec, updated.evidence))) throw new Error('Prototype revision read-back verification failed.')
-      if (nextBrief !== undefined && (productBrief(readback.productBrief) === undefined || await this.contracts.sha256Fingerprint(readback.productBrief) !== await this.contracts.sha256Fingerprint(nextBrief))) throw new Error('Prototype revision requirement read-back verification failed.')
-      if (nextCoverage !== undefined && (productRequirementCoverageValue(readback.requirementCoverage) === undefined || JSON.stringify(readback.requirementCoverage) !== JSON.stringify(nextCoverage))) throw new Error('Prototype revision requirement coverage read-back verification failed.')
-      return { status: 'verified_write', projectId, revisionId: created.value.id, documentFingerprint: created.value.documentFingerprint, changeSummary: created.value.changeSummary }
+      const candidate = {
+        v: 1, candidateId, requestId, sessionId, ...(expectedRevisionId === undefined ? {} : { expectedRevisionId }),
+        designSpec: checkedDesignSpec.value, designSpecFingerprint: confirmedDesignSpecFingerprint,
+        evidenceFingerprints: record.evidence.map(item => item.fingerprint), revision: created.value,
+        ...(active.localEditScope === undefined ? {} : { localEditScope: active.localEditScope }),
+        ...(nextBrief === undefined ? {} : { productBrief: nextBrief }),
+        ...(nextCoverage === undefined ? {} : { requirementCoverage: nextCoverage }), createdAt: new Date().toISOString(),
+      }
+      const updated = await this.write({ ...record, confirmedDesignSpec, confirmedDesignSpecFingerprint, generationAttempt: undefined, pendingCandidate: candidate, lastAttempt: undefined, updatedAt: candidate.createdAt }, projectFence)
+      const readback = pendingCandidate(updated)
+      if (readback === undefined || readback.candidateId !== candidateId || !(await this.contracts.verifyTrustedRevision(readback.revision, readback.designSpec, updated.evidence))) throw new Error('Prototype candidate read-back verification failed.')
+      if (nextBrief !== undefined && (productBrief(readback.productBrief) === undefined || await this.contracts.sha256Fingerprint(readback.productBrief) !== await this.contracts.sha256Fingerprint(nextBrief))) throw new Error('Prototype candidate requirement read-back verification failed.')
+      if (nextCoverage !== undefined && (productRequirementCoverageValue(readback.requirementCoverage) === undefined || JSON.stringify(readback.requirementCoverage) !== JSON.stringify(nextCoverage))) throw new Error('Prototype candidate requirement coverage read-back verification failed.')
+      return { status: 'candidate_ready', projectId, candidateId, documentFingerprint: created.value.documentFingerprint, changeSummary: created.value.changeSummary }
     })
   }
 }

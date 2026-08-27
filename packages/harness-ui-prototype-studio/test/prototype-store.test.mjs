@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,6 +19,11 @@ async function contracts() {
 async function writeLocked(store, record) {
   return store.mutate(record.id, fence => store.write(record, fence))
 }
+async function saveAndApply(store, capability, args) {
+  const candidate = await store.save(args)
+  assert.equal(candidate.status, 'candidate_ready')
+  return store.confirmCandidate({ projectId: args.projectId, capability, candidateId: candidate.candidateId, expectedCurrentRevisionId: args.expectedRevisionId })
+}
 
 test('explicitly rebinds a saved project to another Harness conversation with verified readback', async t => {
   const root = await mkdtemp(join(tmpdir(), 'prototype-session-rebind-')); t.after(() => rm(root, { recursive: true, force: true }))
@@ -32,6 +38,27 @@ test('explicitly rebinds a saved project to another Harness conversation with ve
   assert.equal(rebound.status, 'verified_write'); assert.equal(rebound.previousSessionId, 'session-old'); assert.equal(rebound.sessionId, 'session-new'); assert.equal(rebound.snapshot.sessionId, 'session-new')
   assert.equal((await store.authorizedSnapshot(projectId, capability)).sessionId, 'session-new')
   await assert.rejects(() => store.saveBriefSuggestion({ projectId, sessionId: 'session-old', requestId: 'brief-rebind-old', brief: TEST_BRIEF }), /different Harness session/)
+})
+
+test('persists a bounded verified reference screenshot only for its active generation request', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'prototype-screenshot-')); t.after(() => rm(root, { recursive: true, force: true }))
+  const schema = await contracts(); const store = new PrototypeProjectStore(root, schema)
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLJ4QAAAABJRU5ErkJggg=='
+  const evidence = { v: 1, id: 'ref-screenshot-12345678', source: { url: 'https://example.test/shot', title: '截图参考', capturedAt: '2026-08-28T00:00:00.000Z' }, viewport: { width: 1, height: 1, deviceScaleFactor: 1 }, observations: ['截图'], designTokens: { colors: ['#2563eb'], fonts: ['system-ui'], radius: ['8px'], spacing: ['8px'] }, screenshotFingerprint: createHash('sha256').update(dataUrl).digest('hex'), screenshotDataUrl: dataUrl, fingerprint: '' }
+  evidence.fingerprint = await schema.computeReferenceEvidenceFingerprint(evidence)
+  const projectId = 'prototype-screenshot-1234'; const capability = 'screenshot-capability-abcdefghijklmnopqrstuvwxyz'
+  await store.open({ projectId, sessionId: 'session-shot', capability, evidence: [evidence] })
+  const stored = await store.read(projectId); assert.equal(stored.evidence[0].screenshotDataUrl, undefined); assert.equal(stored.evidence[0].screenshotFingerprint, evidence.screenshotFingerprint)
+  await store.beginGeneration({ projectId, capability, requestId: 'screenshot-request-001', prompt: '使用截图', brief: TEST_BRIEF }).catch(() => {})
+  // This project deliberately has no confirmed design yet; install a minimal
+  // active request directly to test the screenshot authority boundary alone.
+  const record = await store.read(projectId); await writeLocked(store, { ...record, generationAttempt: { status: 'pending', requestId: 'screenshot-request-001', at: new Date().toISOString() } })
+  const shot = await store.referenceScreenshot({ projectId, sessionId: 'session-shot', requestId: 'screenshot-request-001', referenceId: evidence.id })
+  assert.equal(shot.mediaType, 'image/png'); assert.ok(shot.data.byteLength > 0)
+  await assert.rejects(() => store.referenceScreenshot({ projectId, sessionId: 'session-shot', requestId: 'other-request-0001', referenceId: evidence.id }), /active generation request/)
+  await store.cancelGeneration({ projectId, capability, requestId: 'screenshot-request-001' })
+  await store.deleteProject({ projectId, capability, confirmationProjectId: projectId })
+  assert.deepEqual(await readdir(join(root, 'reference-screenshots')), [])
 })
 
 test('renames and explicitly deletes only the authorized prototype project', async t => {
@@ -121,7 +148,7 @@ test('saves revisions with session binding, compare-and-swap, and verified readb
   await store.recordFailure({ projectId, sessionId: 'session-1', requestId: 'request-static-0002', error: '缺少交互流程。' })
   await store.cancelGeneration({ projectId, capability, requestId: 'request-static-0002' })
   await store.beginGeneration({ projectId, capability, requestId: 'request-first-save-003', brief: TEST_BRIEF })
-  const first = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-first-save-003', document, changeSummary: '初始版本' })
+  const first = await saveAndApply(store, capability, { projectId, sessionId: 'session-1', requestId: 'request-first-save-003', document, changeSummary: '初始版本' })
   assert.equal(first.status, 'verified_write')
   await assert.rejects(() => store.reopenDesign({ projectId, capability }), /already has saved history/)
   await store.beginGeneration({ projectId, capability, requestId: 'request-invalid-spec-4', expectedRevisionId: first.revisionId })
@@ -151,7 +178,7 @@ test('saves revisions with session binding, compare-and-swap, and verified readb
   assert.match((await store.authorizedSnapshot(projectId, capability)).lastAttempt.message, /边框系统/)
   await store.cancelGeneration({ projectId, capability, requestId: 'request-legacy-repair8', expectedRevisionId: first.revisionId })
   await store.beginGeneration({ projectId, capability, requestId: 'request-second-save09', expectedRevisionId: first.revisionId })
-  const second = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-second-save09', expectedRevisionId: first.revisionId, designSpec, document: { ...document, title: '产品原型第二版' }, changeSummary: '修改标题' })
+  const second = await saveAndApply(store, capability, { projectId, sessionId: 'session-1', requestId: 'request-second-save09', expectedRevisionId: first.revisionId, designSpec, document: { ...document, title: '产品原型第二版' }, changeSummary: '修改标题' })
   const inspected = await store.inspectRevision({ projectId, capability, targetRevisionId: first.revisionId })
   assert.equal(inspected.revisionId, first.revisionId)
   assert.equal(inspected.current, false)
@@ -182,7 +209,7 @@ test('saves revisions with session binding, compare-and-swap, and verified readb
   await assert.rejects(() => store.beginGeneration({ projectId, capability, requestId: 'request-old-save-0010', expectedRevisionId: second.revisionId }), /revision conflict/)
   /* Restore keeps the full history; a later save starts from the restored revision. */
   await store.beginGeneration({ projectId, capability, requestId: 'request-third-save11', expectedRevisionId: first.revisionId })
-  const third = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-third-save11', expectedRevisionId: first.revisionId, designSpec, document: { ...document, title: '恢复后第三版' }, changeSummary: '恢复后修改' })
+  const third = await saveAndApply(store, capability, { projectId, sessionId: 'session-1', requestId: 'request-third-save11', expectedRevisionId: first.revisionId, designSpec, document: { ...document, title: '恢复后第三版' }, changeSummary: '恢复后修改' })
   assert.equal(third.status, 'verified_write')
   const afterSave = await store.authorizedSnapshot(projectId, capability)
   assert.equal(afterSave.currentRevisionId, third.revisionId)
@@ -408,7 +435,7 @@ test('requires explicit confirmation before replacing the oldest of twenty revis
   assert.equal((await store.authorizedSnapshot(projectId, capability)).generationAttempt.allowRevisionEviction, true)
   await store.recordFailure({ projectId, sessionId: 'session-capacity', requestId: 'request-capacity-allowed', error: '等待修正' })
   assert.equal((await store.authorizedSnapshot(projectId, capability)).generationAttempt.allowRevisionEviction, true)
-  const saved = await store.save({ projectId, sessionId: 'session-capacity', requestId: 'request-capacity-allowed', expectedRevisionId: parentRevisionId, document: { ...document, title: '容量原型 21' }, changeSummary: '第 21 版' })
+  const saved = await saveAndApply(store, capability, { projectId, sessionId: 'session-capacity', requestId: 'request-capacity-allowed', expectedRevisionId: parentRevisionId, document: { ...document, title: '容量原型 21' }, changeSummary: '第 21 版' })
   const snapshot = await store.authorizedSnapshot(projectId, capability)
   assert.equal(snapshot.revisions.length, 20)
   assert.equal(snapshot.revisions.some(item => item.id === 'rev-capacity-0'), false)
@@ -441,15 +468,32 @@ test('generation lifecycle serializes begins and rejects cancelled or stale save
   assert.equal(failed.generationAttempt.prompt, '请保留这条失败后可重试的要求')
   assert.match(failed.generationAttempt.message, /字段不合法/)
   await assert.rejects(() => store.beginGeneration({ projectId, capability, requestId: 'request-race-after-error4' }), /already active/)
-  const repaired = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-failure-003', document, changeSummary: '修正后首版' })
+  const staged = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-failure-003', document, changeSummary: '修正后首版' })
+  assert.equal(staged.status, 'candidate_ready')
+  const stagedSnapshot = await store.authorizedSnapshot(projectId, capability)
+  assert.equal(stagedSnapshot.currentRevisionId, undefined)
+  assert.equal(stagedSnapshot.revisions.length, 0)
+  assert.equal(stagedSnapshot.pendingCandidate.candidateId, staged.candidateId)
+  await assert.rejects(() => store.beginGeneration({ projectId, capability, requestId: 'request-blocked-by-candidate' }), /candidate is already active/)
+  const repaired = await store.confirmCandidate({ projectId, capability, candidateId: staged.candidateId })
   assert.equal(repaired.status, 'verified_write')
   await store.beginGeneration({ projectId, capability, requestId: 'request-success-004', expectedRevisionId: repaired.revisionId, prompt: '增加风险筛选和详情弹窗' })
   assert.equal((await store.authorizedSnapshot(projectId, capability)).generationAttempt.prompt, '增加风险筛选和详情弹窗')
-  const saved = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-success-004', expectedRevisionId: repaired.revisionId, document: { ...document, title: '第二版' }, changeSummary: '完成第二版' })
+  const saved = await saveAndApply(store, capability, { projectId, sessionId: 'session-1', requestId: 'request-success-004', expectedRevisionId: repaired.revisionId, document: { ...document, title: '第二版' }, changeSummary: '完成第二版' })
   assert.equal(saved.status, 'verified_write')
   const complete = await store.authorizedSnapshot(projectId, capability)
   assert.equal(complete.generationAttempt, undefined)
   assert.equal(complete.lastAttempt, undefined)
+  await store.beginGeneration({ projectId, capability, requestId: 'request-discard-candidate-005', expectedRevisionId: saved.revisionId })
+  const discard = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-discard-candidate-005', expectedRevisionId: saved.revisionId, document: { ...document, title: '不应写入的候选' }, changeSummary: '仅预览' })
+  const beforeDiscard = await store.authorizedSnapshot(projectId, capability)
+  assert.equal(beforeDiscard.currentRevisionId, saved.revisionId)
+  assert.equal(beforeDiscard.revisions.length, 2)
+  await store.cancelCandidate({ projectId, capability, candidateId: discard.candidateId })
+  const afterDiscard = await store.authorizedSnapshot(projectId, capability)
+  assert.equal(afterDiscard.pendingCandidate, undefined)
+  assert.equal(afterDiscard.currentRevisionId, saved.revisionId)
+  assert.equal(afterDiscard.revisions.length, 2)
 })
 
 test('first-version quality gate rejects skeletons, fake multi-page navigation, and forms without required feedback', () => {
@@ -540,7 +584,7 @@ test('full revisions keep the confirmed checklist and accept a compact valid pro
   await store.confirmDesign({ projectId, capability, designSpec })
   await store.confirmProductBrief({ projectId, capability, brief })
   await store.beginGeneration({ projectId, capability, requestId: 'request-revision-first-001' })
-  const first = await store.save({ projectId, sessionId: 'session-revision-checklist', requestId: 'request-revision-first-001', document: initial, changeSummary: '首版完整原型' })
+  const first = await saveAndApply(store, capability, { projectId, sessionId: 'session-revision-checklist', requestId: 'request-revision-first-001', document: initial, changeSummary: '首版完整原型' })
 
   const degraded = { ...initial, title: '错误降级版本', screens: [{ id: 'workspace', title: '工作台', nodes: [{ id: 'general-list', type: 'list', label: '一般信息', items: [{ id: 'general-item', title: '普通提醒' }] }, { id: 'general-alert', type: 'alert', title: '提示', tone: 'info' }, { id: 'copy', type: 'text', text: '只剩工作台标题' }, { id: 'open-help', type: 'button', label: '打开帮助', action: { type: 'open-modal', targetId: 'help' } }, { id: 'help', type: 'modal', title: '帮助', children: [{ id: 'help-copy', type: 'text', text: '帮助内容' }] }] }] }
   await store.beginGeneration({ projectId, capability, requestId: 'request-revision-reject-002', expectedRevisionId: first.revisionId })
@@ -556,7 +600,7 @@ test('full revisions keep the confirmed checklist and accept a compact valid pro
     { id: 'workspace', title: '工作台', nodes: [{ id: 'risk-list', type: 'table', label: '供应商风险列表', columns: [{ key: 'name', label: '供应商' }], rows: [{ id: 'risk-row', values: ['高风险供应商'] }] }, { id: 'risk-alert', type: 'alert', title: '仍有风险', tone: 'warning' }, { id: 'copy', type: 'text', text: '风险说明' }, { id: 'open-detail', type: 'button', label: '打开供应商详情', action: { type: 'navigate', targetScreenId: 'detail' } }, { id: 'help', type: 'modal', title: '使用说明', children: [{ id: 'help-copy', type: 'text', text: '查看风险详情' }] }] },
     { id: 'detail', title: '供应商详情', nodes: [{ id: 'detail-copy', type: 'text', text: '供应商详情内容' }] },
   ] }
-  const second = await store.save({ projectId, sessionId: 'session-revision-checklist', requestId: 'request-revision-reject-002', expectedRevisionId: first.revisionId, document: compact, changeSummary: '精简完整原型' })
+  const second = await saveAndApply(store, capability, { projectId, sessionId: 'session-revision-checklist', requestId: 'request-revision-reject-002', expectedRevisionId: first.revisionId, document: compact, changeSummary: '精简完整原型' })
   assert.equal(second.status, 'verified_write')
 
   const updatedBrief = { ...brief, requiredPages: [...brief.requiredPages, '风险报表'], requiredModules: [...brief.requiredModules, '风险趋势图'], requiredFlows: [...brief.requiredFlows, '打开风险报表'] }
@@ -568,7 +612,7 @@ test('full revisions keep the confirmed checklist and accept a compact valid pro
   const expanded = structuredClone(compact)
   expanded.screens[0].nodes.push({ id: 'open-report', type: 'button', label: '打开风险报表', action: { type: 'navigate', targetScreenId: 'report' } })
   expanded.screens.push({ id: 'report', title: '风险报表', nodes: [{ id: 'risk-trend', type: 'chart', label: '风险趋势图', bars: [{ label: '本周', value: 8 }] }] })
-  const third = await store.save({ projectId, sessionId: 'session-revision-checklist', requestId: 'request-requirements-update-003', expectedRevisionId: second.revisionId, document: expanded, changeSummary: '加入风险报表' })
+  const third = await saveAndApply(store, capability, { projectId, sessionId: 'session-revision-checklist', requestId: 'request-requirements-update-003', expectedRevisionId: second.revisionId, document: expanded, changeSummary: '加入风险报表' })
   assert.deepEqual((await store.authorizedSnapshot(projectId, capability)).productBrief, updatedBrief)
 
   const oldPreview = await store.inspectRevision({ projectId, capability, targetRevisionId: second.revisionId })
@@ -613,7 +657,7 @@ test('Host persists and enforces local edit scope through failure, refresh, canc
   await store.open({ projectId, sessionId: 'session-1', capability, evidence: [evidence] })
   await store.confirmDesign({ projectId, capability, designSpec })
   await store.beginGeneration({ projectId, capability, requestId: 'request-local-initial-001', brief: { ...TEST_BRIEF, requiredFlows: ['查看供应商详情'] } })
-  const first = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-local-initial-001', document, changeSummary: '初始原型' })
+  const first = await saveAndApply(store, capability, { projectId, sessionId: 'session-1', requestId: 'request-local-initial-001', document, changeSummary: '初始原型' })
 
   await store.beginGeneration({ projectId, capability, requestId: 'request-local-failure-002', expectedRevisionId: first.revisionId, selection })
   const started = await store.authorizedSnapshot(projectId, capability)
@@ -630,14 +674,14 @@ test('Host persists and enforces local edit scope through failure, refresh, canc
   linkedModal.screens[0].nodes[3].label = '打开审批详情'
   linkedModal.screens[0].nodes[4].title = '审批详情'
   linkedModal.screens[0].nodes[4].children[0].text = '请确认审批结果'
-  const accepted = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-local-accept-003', expectedRevisionId: first.revisionId, document: linkedModal, changeSummary: '修改详情按钮和弹窗' })
+  const accepted = await saveAndApply(store, capability, { projectId, sessionId: 'session-1', requestId: 'request-local-accept-003', expectedRevisionId: first.revisionId, document: linkedModal, changeSummary: '修改详情按钮和弹窗' })
   assert.equal(accepted.status, 'verified_write')
 
   await store.beginGeneration({ projectId, capability, requestId: 'request-local-new-modal-004', expectedRevisionId: accepted.revisionId, selection })
   const newModal = structuredClone(linkedModal)
   newModal.screens[0].nodes[3].action = { type: 'open-modal', targetId: 'approval-modal' }
   newModal.screens[0].nodes.push({ id: 'approval-modal', type: 'modal', title: '审批确认', children: [{ id: 'approval-copy', type: 'text', text: '确认通过此供应商吗？' }] })
-  const newModalSaved = await store.save({ projectId, sessionId: 'session-1', requestId: 'request-local-new-modal-004', expectedRevisionId: accepted.revisionId, document: newModal, changeSummary: '增加审批确认弹窗' })
+  const newModalSaved = await saveAndApply(store, capability, { projectId, sessionId: 'session-1', requestId: 'request-local-new-modal-004', expectedRevisionId: accepted.revisionId, document: newModal, changeSummary: '增加审批确认弹窗' })
   assert.equal(newModalSaved.status, 'verified_write')
 
   await store.beginGeneration({ projectId, capability, requestId: 'request-local-reject-005', expectedRevisionId: newModalSaved.revisionId, selection })

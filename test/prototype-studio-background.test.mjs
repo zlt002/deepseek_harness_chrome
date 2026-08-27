@@ -641,7 +641,7 @@ test('never forwards an AI request before the user confirms the design spec', as
   } finally { background.cleanup() }
 })
 
-test('opens one three-page project from verified evidence without switching tabs or sending screenshots to the Host', async () => {
+test('opens one three-page project from verified evidence without switching tabs and sends bounded screenshots to the Host', async () => {
   const tabs = [
     { id: 2, windowId: 1, url: 'https://example.test/list', title: '列表', status: 'complete', active: true },
     { id: 3, windowId: 1, url: 'https://example.test/detail', title: '详情', status: 'complete' },
@@ -666,7 +666,8 @@ test('opens one three-page project from verified evidence without switching tabs
     const body = JSON.parse(open.init.body)
     assert.equal(body.evidence.length, 3)
     assert.deepEqual(body.evidence.map(item => item.source.url), tabs.map(tab => tab.url))
-    assert.equal(body.evidence.some(item => Object.hasOwn(item, 'screenshotDataUrl')), false)
+    assert.equal(typeof body.evidence[0].screenshotDataUrl === 'string' && body.evidence[0].screenshotDataUrl.startsWith('data:image/'), true)
+    assert.equal(body.evidence.slice(1).every(item => item.screenshotDataUrl === undefined), true)
     assert.deepEqual(progress.map(item => [item.current, item.total, item.tabId]), [[1, 3, 2], [2, 3, 3], [3, 3, 4]])
     assert.deepEqual(background.tabUpdates, [])
     assert.equal(background.tabsCreated.length, 1)

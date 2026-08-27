@@ -119,6 +119,51 @@ test('startup guard replaces a failed module load with a retryable explanation',
   }
 })
 
+test('Prototype Studio previews a candidate before applying it and keeps it out of history until confirmation', async () => {
+  const evidence = referenceEvidence()
+  const projectId = 'prototype-dom-candidate'
+  const saved = savedPrototypeBundle(evidence)
+  const candidateDocument = structuredClone(saved.document)
+  candidateDocument.title = '供应商准入（候选）'
+  const documentFingerprint = createHash('sha256').update(JSON.stringify(canonical(candidateDocument))).digest('hex')
+  const candidate = {
+    v: 1, candidateId: 'candidate-dom-123', requestId: 'request-dom-123', expectedRevisionId: saved.revisionId, documentFingerprint, changeSummary: '突出风险提醒', createdAt: '2026-08-28T01:00:00.000Z',
+    document: candidateDocument, designSpec: saved.designSpec,
+    comparison: { screenCountBefore: 2, screenCountAfter: 2, componentCountBefore: 7, componentCountAfter: 7, details: ['修改内容：风险提醒'] },
+  }
+  const snapshot = { projectId, evidence: [evidence], designConfirmed: true, confirmedDesignSpec: saved.designSpec, designSpec: saved.designSpec, document: saved.document, currentRevisionId: saved.revisionId, revisions: saved.revisions, pendingCandidate: candidate }
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: `chrome-extension://test-extension/prototype-studio.html?referenceId=${evidence.id}&projectId=${projectId}`, runScripts: 'outside-only', pretendToBeVisual: true })
+  Object.defineProperty(dom.window, 'crypto', { value: globalThis.crypto })
+  Object.defineProperty(dom.window, 'sessionStorage', { value: memoryStorage() })
+  dom.window.ResizeObserver = class { observe() {} disconnect() {} }
+  dom.window.chrome = { storage: { local: { get: async () => ({ harnessPrototypeReferencesV1: { v: 1, references: { [evidence.id]: evidence } } }) } }, runtime: { lastError: undefined, sendMessage(message, callback) {
+    if (message.type === 'prototype-studio-snapshot/v1') { callback({ ok: true, snapshot: structuredClone(snapshot) }); return }
+    if (message.type === 'prototype-studio-confirm-candidate/v1') {
+      assert.equal(message.candidateId, candidate.candidateId)
+      assert.equal(message.expectedCurrentRevisionId, saved.revisionId)
+      delete snapshot.pendingCandidate
+      snapshot.document = candidateDocument
+      snapshot.currentRevisionId = 'rev-dom-candidate'
+      snapshot.revisions = [...saved.revisions.map(revision => ({ ...revision, current: false })), { id: 'rev-dom-candidate', createdAt: candidate.createdAt, changeSummary: candidate.changeSummary, current: true }]
+      callback({ ok: true, result: { status: 'verified_write', projectId, revisionId: 'rev-dom-candidate', documentFingerprint, changeSummary: candidate.changeSummary } }); return
+    }
+    callback({ ok: false, error: `unexpected ${message.type}` })
+  } } }
+  try {
+    dom.window.eval(await bundledEntrypoint())
+    const root = dom.window.document.getElementById('root')
+    await waitForText(root, /待应用修改/)
+    assert.match(root.textContent, /突出风险提醒/)
+    assert.match(root.textContent, /当前版本和历史尚未改变/)
+    assert.equal(root.querySelector('iframe')?.getAttribute('title'), '待应用原型预览')
+    assert.equal([...root.querySelectorAll('button')].some(button => button.textContent === '应用修改'), true)
+    ;[...root.querySelectorAll('button')].find(button => button.textContent === '应用修改').click()
+    await waitForText(root, /已应用修改，并完成版本回读确认/)
+    assert.match(root.textContent, /突出风险提醒/)
+    assert.equal(root.querySelector('[aria-label="待应用原型"]'), null)
+  } finally { dom.window.close() }
+})
+
 test('startup guard explains when the development server is unavailable', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div><script src="http://127.0.0.1:3101/entrypoints/prototype-studio/main.tsx"></script></body></html>', {
     url: 'chrome-extension://test-extension/prototype-studio.html',

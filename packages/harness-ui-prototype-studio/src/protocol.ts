@@ -12,3 +12,5 @@ export const PROTOTYPE_STUDIO_REVISION_PREVIEW_PATH = '/api/prototype-studio/rev
 export const PROTOTYPE_STUDIO_RESTORE_PATH = '/api/prototype-studio/restore'
 export const PROTOTYPE_STUDIO_BEGIN_GENERATION_PATH = '/api/prototype-studio/begin-generation'
 export const PROTOTYPE_STUDIO_CANCEL_GENERATION_PATH = '/api/prototype-studio/cancel-generation'
+export const PROTOTYPE_STUDIO_CONFIRM_CANDIDATE_PATH = '/api/prototype-studio/confirm-candidate'
+export const PROTOTYPE_STUDIO_CANCEL_CANDIDATE_PATH = '/api/prototype-studio/cancel-candidate'

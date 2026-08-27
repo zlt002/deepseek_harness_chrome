@@ -730,6 +730,8 @@ const PROTOTYPE_STUDIO_REVISION_PREVIEW_PATH = '/api/prototype-studio/revision-p
 const PROTOTYPE_STUDIO_RESTORE_PATH = '/api/prototype-studio/restore'
 const PROTOTYPE_STUDIO_BEGIN_GENERATION_PATH = '/api/prototype-studio/begin-generation'
 const PROTOTYPE_STUDIO_CANCEL_GENERATION_PATH = '/api/prototype-studio/cancel-generation'
+const PROTOTYPE_STUDIO_CONFIRM_CANDIDATE_PATH = '/api/prototype-studio/confirm-candidate'
+const PROTOTYPE_STUDIO_CANCEL_CANDIDATE_PATH = '/api/prototype-studio/cancel-candidate'
 const PROTOTYPE_HOST_TIMEOUT_MS = 12_000
 const PROTOTYPE_RECOVERY_LATE_COMMIT_MAX_MS = 15_000
 const PROTOTYPE_RECOVERY_LATE_COMMIT_POLL_MS = 100
@@ -2209,7 +2211,7 @@ async function openCapturedPrototype(evidence: Awaited<ReturnType<typeof capture
   if (primary === undefined) throw new Error('没有可用于创建原型项目的参考网页。')
   const storageSnapshot = await persistCapturedReferenceEvidence(evidence)
   const authorization: PrototypeStudioAuthorization = { projectId: `prototype-${crypto.randomUUID()}`, referenceId: primary.id, sessionId, capability: `${crypto.randomUUID()}${crypto.randomUUID()}`, openedAt: Date.now() }
-  const hostEvidence = evidence.map(item => { const { screenshotDataUrl: _screenshot, ...safe } = item; return safe })
+  const hostEvidence = evidence
   let opened: Record<string, unknown>
   try { opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId, evidence: hostEvidence }) } catch (error) {
     await restoreCapturedReferenceEvidence(storageSnapshot)
@@ -2320,7 +2322,7 @@ async function createPrototypeVariant(source: PrototypeStudioAuthorization, wind
     capability: `${crypto.randomUUID()}${crypto.randomUUID()}`,
     openedAt: Date.now(),
   }
-  const hostEvidence = sourceEvidence.map(item => { const { screenshotDataUrl: _screenshot, ...safe } = item; return safe })
+  const hostEvidence = sourceEvidence
   const opened = await prototypeHostRequest(authorization, PROTOTYPE_STUDIO_OPEN_PATH, { sessionId: authorization.sessionId, evidence: hostEvidence })
   await rememberPrototypeStudio(authorization)
   const binding = recoveryBindingFromSnapshot(opened, authorization.projectId, authorization.referenceId)
@@ -5130,7 +5132,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown; nonce?: unknown; pageUrl?: unknown; anchors?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; candidateId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown; nonce?: unknown; pageUrl?: unknown; anchors?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -5549,6 +5551,22 @@ export default defineBackground(() => {
       void prototypeStudioAuthorization(request.projectId).then(authorization => {
         if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
         return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_CANCEL_GENERATION_PATH, { requestId: request.requestId, expectedRevisionId: request.expectedRevisionId ?? null })
+      }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-confirm-candidate/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.candidateId !== 'string' || (request.expectedCurrentRevisionId !== undefined && request.expectedCurrentRevisionId !== null && typeof request.expectedCurrentRevisionId !== 'string')) { sendResponse({ ok: false, error: '应用候选原型的请求无效，请刷新预览后重试。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_CONFIRM_CANDIDATE_PATH, { candidateId: request.candidateId, expectedCurrentRevisionId: request.expectedCurrentRevisionId ?? null })
+      }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'prototype-studio-cancel-candidate/v1') {
+      if (typeof request.projectId !== 'string' || !isPrototypeStudioSender(sender, request.projectId) || typeof request.candidateId !== 'string') { sendResponse({ ok: false, error: '放弃候选原型的请求无效，请刷新预览后重试。' }); return false }
+      void prototypeStudioAuthorization(request.projectId).then(authorization => {
+        if (authorization === undefined) throw new Error('原型授权已过期，请重新提取参考网页。')
+        return prototypeHostRequest(authorization, PROTOTYPE_STUDIO_CANCEL_CANDIDATE_PATH, { candidateId: request.candidateId })
       }).then(result => sendResponse({ ok: true, result })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
