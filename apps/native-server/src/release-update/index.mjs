@@ -1,5 +1,5 @@
 import { access, mkdtemp, rename, writeFile } from 'node:fs/promises'
-import { closeSync, openSync, readFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -42,6 +42,8 @@ export async function launchPreparedUpdate(prepared, { installRoot, nativePid, s
     : 10_000
   const handoffRoot = await mkdtemp(join(prepared.extractRoot, '.accrui-release-update-handoff-'))
   const updaterScriptPath = join(handoffRoot, 'updater.ps1')
+  const launcherPath = join(handoffRoot, 'launch-updater.cmd')
+  const cmdStartedPath = join(handoffRoot, 'cmd-started')
   const readyPath = join(handoffRoot, 'ready')
   const goPath = join(handoffRoot, 'go')
   const goPendingPath = `${goPath}.pending`
@@ -91,6 +93,14 @@ try {
   exit 1
 }`
   await writeFileImpl(updaterScriptPath, Buffer.from(`\uFEFF${command}`, 'utf8'))
+  const launcher = [
+    '@echo off',
+    '> "%~dp0cmd-started" echo started',
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0updater.ps1"',
+    'exit /b %ERRORLEVEL%',
+    '',
+  ].join('\r\n')
+  await writeFileImpl(launcherPath, Buffer.from(launcher, 'ascii'))
   return await new Promise((resolvePromise, rejectPromise) => {
     let child
     let settled = false
@@ -132,12 +142,13 @@ try {
       }
     }
     const onError = error => { void cancel(error) }
-    const onExit = () => {
+    const onExit = exitCode => {
       const readHandoffError = path => {
         try { return readFileSync(path, 'utf8').replace(/[\r\n]+/g, ' ').trim().slice(0, 2_048) } catch { return undefined }
       }
       const updaterError = readHandoffError(errorPath) || readHandoffError(stderrPath)
-      void cancel(new Error(updaterError || '更新启动器在就绪握手前退出。'))
+      const exitDetail = `exit code ${exitCode ?? 'unknown'}；cmd${existsSync(cmdStartedPath) ? '已启动' : '未启动'}`
+      void cancel(new Error(updaterError ? `${updaterError}（${exitDetail}）` : `更新启动器在就绪握手前退出（${exitDetail}）。`))
     }
     const onReady = async () => {
       if (settled || committing) return
@@ -166,7 +177,7 @@ try {
     try {
       stderrFd = openSync(stderrPath, 'a')
       try {
-        child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', updaterScriptPath], { detached: true, stdio: ['ignore', 'ignore', stderrFd] })
+        child = (spawnImpl ?? spawn)('cmd.exe', ['/d', '/s', '/c', launcherPath], { detached: true, windowsHide: true, stdio: ['ignore', 'ignore', stderrFd] })
       } finally {
         closeStderr()
       }
