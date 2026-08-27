@@ -26,6 +26,7 @@ type PreparedWriteState = { preparation: PreparedWrite; content: string; idempot
 type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'proposals' } | { kind: 'prepare'; content: string } | { kind: 'commit'; content: string; token: string }
 
 const initialState: ReviewState = { status: 'initializing' }
+const SIDE_PANEL_STARTUP_RETRY_DELAYS_MS = [500, 1_000, 2_000, 3_000] as const
 
 function requestId(): string { return crypto.randomUUID() }
 
@@ -62,6 +63,8 @@ function App(): React.JSX.Element {
   const [editorEpoch, setEditorEpoch] = useState(0)
   const [annotations, setAnnotations] = useState<LocalAnnotation[]>([])
   const [proposalNotice, setProposalNotice] = useState<string>()
+  const [aiTarget, setAiTarget] = useState<{ id: string; title: string }>()
+  const [sidePanelRecoveryAnnotation, setSidePanelRecoveryAnnotation] = useState<string>()
   const [candidateReviewActive, setCandidateReviewActive] = useState(false)
   const [activeDiff, setActiveDiff] = useState<{ before: string; after: string }>()
   const [preparedWrite, setPreparedWrite] = useState<PreparedWriteState>()
@@ -81,6 +84,9 @@ function App(): React.JSX.Element {
   const candidateReviewActiveRef = useRef(false)
   const preparedWriteRef = useRef<PreparedWriteState | undefined>(undefined)
   const commitRef = useRef<CommitAttempt | undefined>(undefined)
+  const sidePanelWindowIdRef = useRef<number | undefined>(undefined)
+  const sidePanelStartupRetryRef = useRef<{ annotationId: string; retryIndex: number; timer?: number } | undefined>(undefined)
+  const deliverAnnotationRef = useRef<(annotation: LocalAnnotation) => boolean>(() => false)
 
   /** Milkdown emits markdownUpdated after a debounce; persistence checks read it synchronously. */
   const syncEditorMarkdown = useCallback((): string => {
@@ -99,6 +105,15 @@ function App(): React.JSX.Element {
     preparedWrite: preparedWriteRef.current !== undefined,
     committing: commitRef.current !== undefined,
   }), [syncEditorMarkdown])
+
+  // Resolve this before a button click. chrome.sidePanel.open must be called
+  // synchronously from the click handler or Chrome can reject the user gesture.
+  useEffect(() => {
+    if (typeof chrome === 'undefined' || chrome.windows?.getCurrent === undefined) return
+    void chrome.windows.getCurrent().then((current) => {
+      if (current.id !== undefined) sidePanelWindowIdRef.current = current.id
+    }).catch(() => {})
+  }, [])
 
   const post = useCallback((message: MarkdownReviewPortRequest): boolean => {
     const port = portRef.current
@@ -216,6 +231,8 @@ function App(): React.JSX.Element {
           commitRef.current = undefined
           setCommitting(false)
           setExternalUpdatePending(false)
+          setAiTarget(undefined)
+          setSidePanelRecoveryAnnotation(undefined)
         } else if (message.error !== undefined) dispatch({ type: 'request-failed', error: message.error })
       }
       if (message.type === 'markdown-review-proposals-response' && expected.kind === 'proposals') {
@@ -224,16 +241,35 @@ function App(): React.JSX.Element {
             proposalSequenceRef.current = Math.max(proposalSequenceRef.current, proposal.sequence)
             proposalQueueRef.current.push(proposal)
           }
+          if (message.proposals.length > 0) {
+            const candidateSelectionIds = new Set(message.proposals.map(proposal => proposal.selectionId))
+            setAnnotations((items) => {
+              const next = items.map((item) => candidateSelectionIds.has(item.id) ? { ...item, deliveryStatus: 'candidate' as const, lastError: undefined } : item)
+              annotationsRef.current = next
+              return next
+            })
+            setProposalNotice('AI 候选已返回，等待你审阅。')
+          }
           applyQueuedProposal()
         } else if (message.error !== undefined) setProposalNotice(`无法读取 AI 候选：${message.error.message}`)
       }
       if (message.type === 'markdown-review-deliver-response' && expected.kind === 'deliver') {
         if (message.ok && message.deliveryId !== undefined) {
+          const retry = sidePanelStartupRetryRef.current
+          if (retry?.annotationId === expected.annotationId) {
+            if (retry.timer !== undefined) window.clearTimeout(retry.timer)
+            sidePanelStartupRetryRef.current = undefined
+          }
           setAnnotations((items) => {
-            const next = items.map((item) => item.id === message.deliveryId ? { ...item, deliveryStatus: 'delivered' as const, lastError: undefined } : item)
+            const next = items.map((item) => item.id === message.deliveryId ? { ...item, deliveryStatus: message.status!, lastError: undefined } : item)
             annotationsRef.current = next
             return next
           })
+          setAiTarget({ id: message.targetSessionId!, title: message.targetSessionTitle! })
+          setSidePanelRecoveryAnnotation(undefined)
+          setProposalNotice(message.status === 'queued'
+            ? `已发送到“${message.targetSessionTitle}”，当前会话正在运行，已排队。`
+            : `已发送到“${message.targetSessionTitle}”，AI 正在处理。`)
         } else if (message.error !== undefined) {
           const error = message.error
           setAnnotations((items) => {
@@ -241,6 +277,30 @@ function App(): React.JSX.Element {
             annotationsRef.current = next
             return next
           })
+          const retry = sidePanelStartupRetryRef.current
+          if (error.code === 'sidepanel_unavailable' && retry?.annotationId === expected.annotationId && retry.retryIndex < SIDE_PANEL_STARTUP_RETRY_DELAYS_MS.length) {
+            const delay = SIDE_PANEL_STARTUP_RETRY_DELAYS_MS[retry.retryIndex++]!
+            setProposalNotice(`侧边栏正在启动，将在 ${delay / 1_000} 秒后重新发送…`)
+            retry.timer = window.setTimeout(() => {
+              if (sidePanelStartupRetryRef.current !== retry) return
+              retry.timer = undefined
+              const current = annotationsRef.current.find((item) => item.id === retry.annotationId)
+              if (current !== undefined) deliverAnnotationRef.current(current)
+            }, delay)
+          } else if (error.code === 'sidepanel_unavailable') {
+            if (retry?.annotationId === expected.annotationId) {
+              if (retry.timer !== undefined) window.clearTimeout(retry.timer)
+              sidePanelStartupRetryRef.current = undefined
+            }
+            setSidePanelRecoveryAnnotation(expected.annotationId)
+            setProposalNotice('侧边栏未打开或尚未准备好。请打开侧边栏后重新发送。')
+          } else {
+            if (retry?.annotationId === expected.annotationId) {
+              if (retry.timer !== undefined) window.clearTimeout(retry.timer)
+              sidePanelStartupRetryRef.current = undefined
+            }
+            setProposalNotice(`无法发送给 AI：${error.message}`)
+          }
           if (error.reopenRequired) dispatch({ type: 'request-failed', error })
         }
       }
@@ -291,6 +351,9 @@ function App(): React.JSX.Element {
       portRef.current = undefined
       for (const timeout of deliveryTimeoutsRef.current.values()) window.clearTimeout(timeout)
       deliveryTimeoutsRef.current.clear()
+      const retry = sidePanelStartupRetryRef.current
+      if (retry?.timer !== undefined) window.clearTimeout(retry.timer)
+      sidePanelStartupRetryRef.current = undefined
       pendingRef.current.clear()
       commitRef.current = undefined
       setCommitting(false)
@@ -313,6 +376,9 @@ function App(): React.JSX.Element {
       port.onDisconnect.removeListener(disconnected)
       for (const timeout of deliveryTimeoutsRef.current.values()) window.clearTimeout(timeout)
       deliveryTimeoutsRef.current.clear()
+      const retry = sidePanelStartupRetryRef.current
+      if (retry?.timer !== undefined) window.clearTimeout(retry.timer)
+      sidePanelStartupRetryRef.current = undefined
       port.disconnect()
       if (portRef.current === port) portRef.current = undefined
     }
@@ -349,6 +415,7 @@ function App(): React.JSX.Element {
       annotationsRef.current = next
       return next
     })
+    setSidePanelRecoveryAnnotation(undefined)
     const request = requestId()
     pendingRef.current.set(request, { kind: 'deliver', annotationId: annotation.id })
     if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-deliver-request', requestId: request, reviewId, harnessSessionId: activeSnapshot.harnessSessionId, deliveryId: annotation.id, annotation: { id: annotation.id, anchor: annotation.anchor, comment: annotation.comment } })) {
@@ -373,6 +440,8 @@ function App(): React.JSX.Element {
     deliveryTimeoutsRef.current.set(request, timeout)
     return true
   }, [failSendingAnnotations, post, reviewId])
+  deliverAnnotationRef.current = deliverAnnotation
+
   const submitAnnotation = useCallback((selection: VisualSelection, comment: string): boolean => {
     const activeSnapshot = snapshotRef.current
     const anchor = visualAnchorFor(activeSnapshot, selection)
@@ -387,6 +456,35 @@ function App(): React.JSX.Element {
     deliverAnnotation(annotation)
     return true
   }, [deliverAnnotation, reviewId])
+  const openSidePanelAndRetry = useCallback(async () => {
+    const annotationId = sidePanelRecoveryAnnotation
+    const annotation = annotationId === undefined ? undefined : annotationsRef.current.find((item) => item.id === annotationId)
+    const windowId = sidePanelWindowIdRef.current
+    if (chrome.sidePanel?.open === undefined) {
+      setProposalNotice('无法自动打开侧边栏；请从浏览器工具栏打开侧边栏后重新发送。')
+      return
+    }
+    if (windowId === undefined) {
+      setProposalNotice('无法确认当前浏览器窗口；请从浏览器工具栏打开侧边栏后重新发送。')
+      return
+    }
+    try {
+      // Keep this before the first await: Chrome requires a direct user gesture.
+      const opened = snapshot?.sidePanelTabId === undefined
+        ? chrome.sidePanel.open({ windowId })
+        : chrome.sidePanel.open({ tabId: snapshot.sidePanelTabId })
+      await opened
+      setProposalNotice('侧边栏已打开，正在重新发送…')
+      if (annotation !== undefined) {
+        const priorRetry = sidePanelStartupRetryRef.current
+        if (priorRetry?.timer !== undefined) window.clearTimeout(priorRetry.timer)
+        sidePanelStartupRetryRef.current = { annotationId: annotation.id, retryIndex: 0 }
+        deliverAnnotation(annotation)
+      } else loadSnapshot()
+    } catch (error) {
+      setProposalNotice(`无法打开侧边栏：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, [deliverAnnotation, loadSnapshot, sidePanelRecoveryAnnotation, snapshot])
   const acceptCandidate = () => {
     if (editorRef.current?.acceptCandidate() !== true) {
       setProposalNotice('当前没有可接受的 AI 修改。')
@@ -463,7 +561,8 @@ function App(): React.JSX.Element {
     <header className="review-header">
       <div className="review-title" title={snapshot?.resource.displayPath ?? 'Markdown 审阅'}><strong>Markdown 审阅</strong><span>{snapshot?.resource.displayPath ?? '正在确认已绑定的文件…'}</span></div>
       <div className="review-header-actions">
-        {snapshot !== undefined && <span className="session-status" title={`固定投递到会话 ${snapshot.harnessSessionId}`}>已绑定会话</span>}
+        {snapshot !== undefined && <span className="session-status" title={`文件授权所属会话 ${snapshot.harnessSessionId}`}>文件已绑定工作区</span>}
+        {aiTarget !== undefined && <span className="session-status" title={`当前 AI 会话 ${aiTarget.id}`}>AI：{aiTarget.title}</span>}
         <span className={dirty ? 'status draft' : 'status'}>{dirty ? '本地草稿未保存' : '已与文件同步'}</span>
         {snapshot?.truncated === true && <span className="status truncated" title="文件快照已截断，不能安全保存或发送完整文档">内容已截断</span>}
         <span className="history-actions" role="group" aria-label="编辑历史"><button type="button" className="secondary" title="撤销（Ctrl+Z）" aria-label="撤销（Ctrl+Z）" onClick={() => { if (editorRef.current?.undo() === true) syncEditorMarkdown() }}>撤销</button><button type="button" className="secondary" title="重做（Ctrl+Y）" aria-label="重做（Ctrl+Y）" onClick={() => { if (editorRef.current?.redo() === true) syncEditorMarkdown() }}>重做</button></span>
@@ -471,14 +570,14 @@ function App(): React.JSX.Element {
         <button className="secondary" type="button" onClick={requestSnapshotReload} disabled={state.status === 'loading' || state.status === 'reopen-required'}>重新读取</button>
       </div>
     </header>
-    {state.error !== undefined && !showRecoveryState && <section className="notice" role="alert">{state.error.message}{state.status !== 'reopen-required' && <><br /><button className="secondary" type="button" onClick={requestSnapshotReload}>重试</button></>}</section>}
-    {activityNotice !== undefined && <section className="proposal-notice" role="status">{activityNotice}</section>}
+    {state.error !== undefined && !showRecoveryState && <section className="notice" role="alert">{state.error.message}{state.status !== 'reopen-required' && <><br /><button className="secondary" type="button" onClick={state.error.code === 'sidepanel_unavailable' ? () => { void openSidePanelAndRetry() } : requestSnapshotReload}>{state.error.code === 'sidepanel_unavailable' ? '打开侧边栏后重试' : '重试'}</button></>}</section>}
+    {activityNotice !== undefined && <section className="proposal-notice" role="status">{activityNotice}{sidePanelRecoveryAnnotation !== undefined && <button className="secondary" type="button" onClick={() => { void openSidePanelAndRetry() }}>打开侧边栏并重试</button>}</section>}
     {externalUpdatePending && <section className="save-confirm" role="alert"><span>外部文件已更新。本地草稿、批注和 AI 修改尚未被覆盖。</span><button type="button" onClick={discardLocalWorkAndReload} disabled={committing}>放弃本地更改并重新读取</button></section>}
     {preparedWrite !== undefined && <section className="save-confirm" role="alert"><span>将把当前草稿写入已核对的文件版本。</span><button type="button" onClick={() => { preparedWriteRef.current = undefined; setPreparedWrite(undefined) }} className="secondary" disabled={committing}>取消</button><button type="button" onClick={commitSave} disabled={committing}>{committing ? '正在确认写入…' : '确认写入'}</button></section>}
     {showRecoveryState ? <section className={`review-recovery${snapshot === undefined && state.error === undefined ? ' is-loading' : ''}`} role={state.error === undefined ? undefined : 'alert'}>
       <strong>{state.status === 'reopen-required' ? '需要重新打开文档' : snapshot === undefined && state.error === undefined ? '正在读取文档' : '暂时无法显示文档'}</strong>
       <span>{state.error?.message ?? '正在确认文件快照，请稍候…'}</span>
-      {state.error !== undefined && state.status !== 'reopen-required' && <button className="secondary" type="button" onClick={requestSnapshotReload}>重试</button>}
+      {state.error !== undefined && state.status !== 'reopen-required' && <button className="secondary" type="button" onClick={state.error.code === 'sidepanel_unavailable' ? () => { void openSidePanelAndRetry() } : requestSnapshotReload}>{state.error.code === 'sidepanel_unavailable' ? '打开侧边栏后重试' : '重试'}</button>}
     </section> : <section className="review-main">
       <section className="document-workspace" aria-label="Markdown 文档" title="在排版后的正文中直接编辑；标题、段落、列表、表格、代码块和跨块选区都可作为 AI 上下文。HTML 保留为安全文本；Mermaid 仅在本地安全渲染。">
         <div className="document-canvas"><VisualMarkdownEditor ref={editorRef} key={editorEpoch} initialMarkdown={snapshot.content} readOnly={false} annotations={annotations} canAnnotate={!snapshot.truncated && state.status !== 'reopen-required'} onSubmitAnnotation={submitAnnotation} onRetryAnnotation={(annotationId) => { const annotation = annotations.find((item) => item.id === annotationId); if (annotation !== undefined) deliverAnnotation(annotation) }} /* Host readOnly means no direct disk capability; local drafts stay editable. */ onMarkdownChange={onMarkdownChange} onReady={applyQueuedProposal} onCandidateReviewChange={(active) => { setCandidateReviewActive(active); candidateReviewActiveRef.current = active; if (!active) queueMicrotask(() => { syncEditorMarkdown(); applyQueuedProposal() }) }} /></div>

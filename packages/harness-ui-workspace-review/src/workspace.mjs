@@ -217,9 +217,11 @@ export class WorkspaceReviewRuntime {
     return registered
   }
 
-  async proposeEdit(sessionId, reviewId, selectionId, replacementMarkdown, summary = '') {
+  async proposeEdit(sessionId, sessionCwd, reviewId, selectionId, replacementMarkdown, summary = '') {
     const record = this.#reviews.get(boundedId(reviewId, 'review id'))
-    if (record === undefined || record.sessionId !== sessionId) throw new Error('Markdown review is not bound to the calling Harness session')
+    if (record === undefined) throw new Error('Markdown review is unavailable; reopen the file from the workspace tree')
+    const root = await canonicalRoot(sessionCwd)
+    if (record.root !== root) throw new Error('Markdown review does not belong to the calling Harness session workspace')
     const selection = record.selections.get(boundedId(selectionId, 'selection id'))
     if (selection === undefined) throw new Error('Markdown review selection is unavailable; ask the user to select and send it again')
     const replacement = boundedText(replacementMarkdown, MAX_REPLACEMENT_CHARS, 'replacement Markdown', true)

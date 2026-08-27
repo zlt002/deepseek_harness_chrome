@@ -51,6 +51,11 @@ export interface VisualMarkdownReviewFeedback extends MarkdownReviewFeedbackBase
   readonly blocks: ReadonlyArray<{ readonly kind: string; readonly text: string }>
 }
 export type MarkdownReviewFeedback = SourceMarkdownReviewFeedback | VisualMarkdownReviewFeedback
+export interface WorkspaceReviewFeedbackDelivery {
+  readonly targetSessionId: string
+  readonly targetSessionTitle: string
+  readonly status: 'queued' | 'processing'
+}
 
 export function feedbackMessage(event: MessageEvent, parent: Window, config: WorkspaceReviewBridgeConfig): MarkdownReviewFeedback | undefined {
   const value: unknown = event.data
@@ -61,13 +66,14 @@ export function feedbackMessage(event: MessageEvent, parent: Window, config: Wor
 }
 
 /** Return bounded delivery status to the extension review page. */
-export function respondFeedback(parent: Window, config: WorkspaceReviewBridgeConfig, deliveryId: string, accepted: boolean, error?: unknown): void {
+export function respondFeedback(parent: Window, config: WorkspaceReviewBridgeConfig, deliveryId: string, accepted: boolean, error?: unknown, delivery?: WorkspaceReviewFeedbackDelivery): void {
   const message = typeof error === 'string' ? error.trim().slice(0, 4_000) : ''
   parent.postMessage({
     type: 'markdown-review-feedback-accepted/v1',
     nonce: config.nonce,
     deliveryId,
     accepted,
+    ...(accepted && delivery !== undefined ? { targetSessionId: delivery.targetSessionId, targetSessionTitle: delivery.targetSessionTitle, status: delivery.status } : {}),
     ...(accepted || message === '' ? {} : { error: message }),
   }, config.parentOrigin)
 }

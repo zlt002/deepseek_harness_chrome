@@ -94,7 +94,7 @@ test('a produced Markdown chip opens Markdown Review through the active Cordis r
     assert.ok(chip, 'the actual ProducedFiles chip must be clickable')
     chip.props.onClick()
     await new Promise(resolve => setImmediate(resolve))
-    assert.deepEqual(posts, [[
+    assert.deepEqual(posts.filter(([message]) => message.type === 'markdown-review-open/v1'), [[
       { type: 'markdown-review-open/v1', nonce: 'nonce', review: { reviewId: 'review-1', resourceId: 'resource-1' } },
       'chrome-extension://test-extension',
     ]])

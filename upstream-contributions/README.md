@@ -59,6 +59,10 @@ destination, while unclaimed links retain the official safe-link fallback.
 may claim a path using the Tool call's session and workspace root; unclaimed
 paths retain the Host opener and the Tool row's normal detail interaction.
 
+`0024` provides an ordered composer paste-text transform registry. Registered
+transforms run only on plain clipboard text before it enters the composer
+machine; without a registration the exact clipboard text is preserved.
+
 Verify against the pinned upstream commit:
 
 ```sh

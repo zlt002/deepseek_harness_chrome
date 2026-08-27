@@ -43,6 +43,8 @@ export interface MarkdownReviewSnapshot {
   type: 'markdown-review-snapshot'
   reviewId: string
   harnessSessionId: string
+  /** The original Browser Target where the Side Panel should be reopened. */
+  sidePanelTabId?: number
   resource: ReviewResourceIdentity
   content: string
   truncated: boolean
@@ -157,6 +159,9 @@ export interface DeliverResponse {
   requestId: string
   ok: boolean
   deliveryId?: string
+  targetSessionId?: string
+  targetSessionTitle?: string
+  status?: 'queued' | 'processing'
   error?: MarkdownReviewError
 }
 
@@ -365,6 +370,7 @@ export function isMarkdownReviewSnapshot(value: unknown): value is MarkdownRevie
     && value.type === 'markdown-review-snapshot'
     && isMarkdownReviewId(value.reviewId)
     && isMarkdownReviewId(value.harnessSessionId)
+    && (value.sidePanelTabId === undefined || (typeof value.sidePanelTabId === 'number' && Number.isSafeInteger(value.sidePanelTabId) && value.sidePanelTabId >= 0))
     && isResourceIdentity(value.resource)
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
     && typeof value.truncated === 'boolean'
@@ -414,8 +420,10 @@ export function isMarkdownReviewPortResponse(value: unknown): value is MarkdownR
       && (value.ok ? isMarkdownReviewSnapshot(value.snapshot) && value.error === undefined : isMarkdownReviewError(value.error) && value.snapshot === undefined)
   }
   if (value.type === 'markdown-review-deliver-response') {
-    return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'deliveryId', 'error'].includes(key))
-      && (value.ok ? isMarkdownReviewId(value.deliveryId) && value.error === undefined : isMarkdownReviewError(value.error) && value.deliveryId === undefined)
+    return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'deliveryId', 'targetSessionId', 'targetSessionTitle', 'status', 'error'].includes(key))
+      && (value.ok
+        ? isMarkdownReviewId(value.deliveryId) && isMarkdownReviewId(value.targetSessionId) && boundedText(value.targetSessionTitle, MAX_PATH_LENGTH) && (value.status === 'queued' || value.status === 'processing') && value.error === undefined
+        : isMarkdownReviewError(value.error) && value.deliveryId === undefined && value.targetSessionId === undefined && value.targetSessionTitle === undefined && value.status === undefined)
   }
   if (value.type === 'markdown-review-proposals-response') {
     return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'reviewId', 'proposals', 'error'].includes(key))

@@ -115,6 +115,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
     const root = createRoot(dom.window.document.getElementById('app'))
     const host = []
     const notices = []
+    const reviewOpenPosts = () => posts.filter(([message]) => message.type === 'markdown-review-open/v1')
     const flushAsync = async () => {
       await new Promise(resolve => setImmediate(resolve))
       await new Promise(resolve => setImmediate(resolve))
@@ -142,7 +143,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
       await flushAsync()
     }
     assert.deepEqual(host, [], 'Markdown must not fall through to the system opener')
-    assert.equal(posts.length, 3, 'Read, Write, and Edit Markdown paths must each open Review')
+    assert.equal(reviewOpenPosts().length, 3, 'Read, Write, and Edit Markdown paths must each open Review')
 
     // Cold/persisted sessions can retain their session identity before their
     // cwd is projected into the chat owner. A relative path is still bounded
@@ -153,7 +154,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
     coldMarkdown.click()
     await flushAsync()
     assert.deepEqual(host, [], 'a relative cold-session Markdown file must not use the system opener')
-    assert.equal(posts.length, 4, 'a relative cold-session Markdown file must open Review')
+    assert.equal(reviewOpenPosts().length, 4, 'a relative cold-session Markdown file must open Review')
 
     // Without cwd, an absolute path cannot be proven to belong to the session
     // workspace. It intentionally remains on the official Host fallback.
@@ -162,7 +163,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
     assert.ok(coldAbsolute, 'an unproven absolute Markdown path must remain clickable')
     coldAbsolute.click()
     assert.deepEqual(host, ['/outside-workspace/private.md'])
-    assert.equal(posts.length, 4, 'an unproven absolute Markdown path must not open Review')
+    assert.equal(reviewOpenPosts().length, 4, 'an unproven absolute Markdown path must not open Review')
 
     render('other', 'read', 'spec/notes.txt', '/workspace')
     const nonMarkdown = dom.window.document.querySelector('button')

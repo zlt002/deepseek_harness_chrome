@@ -61,6 +61,9 @@ test('the installed DSH MCP client discovers and executes the Connector tool thr
 
     assert.deepEqual(ctx.tools.schemas().map((schema) => schema.name).sort(), [
       'mcp__chrome__code_search',
+      'mcp__chrome__html_workbench_commit',
+      'mcp__chrome__html_workbench_preview',
+      'mcp__chrome__html_workbench_read',
       'mcp__chrome__knowledge_search',
       'mcp__chrome__light_document_read',
       'mcp__chrome__light_document_search',

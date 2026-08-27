@@ -107,6 +107,10 @@ importers:
 
   packages/harness-ui-document-intake: {}
 
+  packages/harness-ui-file-url-paste: {}
+
+  packages/harness-ui-html-workbench: {}
+
   packages/harness-ui-knowledge-scope: {}
 
   packages/harness-ui-message-annotations: {}

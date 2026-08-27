@@ -1,5 +1,5 @@
 import type { ISessions } from '@deepseek-ai/dsh-client-runtime/client'
-import { ReviewFeedbackStore, type WorkspaceMarkdownFeedbackInput } from './AnnotationStore.ts'
+import { assistantMessageFeedback, ReviewFeedbackStore, type WorkspaceMarkdownFeedbackInput } from './AnnotationStore.ts'
 import { WorkspaceMarkdownSubmitter } from './workspace-markdown-submission.js'
 
 /** Public review-feedback face shared by assistant annotations and Markdown review. */
@@ -16,3 +16,5 @@ export class ReviewFeedbackService extends ReviewFeedbackStore {
     return this.workspaceMarkdown.submit(sessionId, feedback)
   }
 }
+
+export { assistantMessageFeedback }

@@ -7,7 +7,7 @@ async function loadBackground() {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener; let connectListener
-  const created = []; const forwarded = []; const fetches = []; const storage = { harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }
+  const created = []; const forwarded = []; const rehydrates = []; const fetches = []; const storage = { harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }
   const page = { id: 42, windowId: 7, url: 'https://docs.example.test/source', title: 'Source' }
   const reviewTab = { id: 91, windowId: 7, url: '', title: 'Markdown Review' }
   const nativeListeners = new Set()
@@ -37,7 +37,10 @@ async function loadBackground() {
       getURL: path => `chrome-extension://test/${path.replace(/^\//, '')}`,
       onMessage: { addListener: listener => { runtimeListener = listener } },
       onConnect: { addListener: listener => { connectListener = listener } },
-      sendMessage: async message => { if (message.type === 'markdown-review-feedback-forward/v1') { forwarded.push(message); return { ok: true } } },
+      sendMessage: async message => {
+        if (message.type === 'markdown-review-feedback-forward/v1') { forwarded.push(message); return { ok: true, status: 'queued', targetSessionId: 'session-2', targetSessionTitle: '当前会话' } }
+        if (message.type === 'markdown-review-rehydrate-forward/v1') { rehydrates.push(message); return { ok: true, review: { ...openReview, capability: 'fresh-capability' } } }
+      },
       connectNative: () => ({
         onDisconnect: { addListener: () => {}, removeListener: () => {} },
         onMessage: { addListener: listener => nativeListeners.add(listener), removeListener: listener => nativeListeners.delete(listener) },
@@ -74,7 +77,7 @@ async function loadBackground() {
     postMessage: message => responses.push(message), disconnect: () => { for (const listener of disconnectListeners) listener() },
   }
   return {
-    created, fetches, forwarded, responses,
+    created, fetches, forwarded, rehydrates, responses,
     open: review => runtimeMessage({ type: 'open-markdown-review/v1', review }, { url: 'chrome-extension://test/sidepanel.html' }),
     connect: () => connectListener(port),
     portMessage: message => { for (const listener of portMessageListeners) listener(message) },
@@ -97,6 +100,7 @@ test('opens a capability-free review URL, proxies a bounded snapshot, and delive
     const snapshot = background.responses.find(message => message.requestId === 'snapshot-1')
     assert.equal(snapshot.ok, true, JSON.stringify(snapshot))
     assert.equal(snapshot.snapshot.harnessSessionId, 'session-1')
+    assert.equal(snapshot.snapshot.sidePanelTabId, 42)
     const snapshotFetch = background.fetches.find(({ url }) => new URL(url).pathname.endsWith('/snapshot'))
     assert.equal(snapshotFetch.init.headers.authorization, `Bearer ${openReview.capability}`)
 
@@ -107,6 +111,7 @@ test('opens a capability-free review URL, proxies a bounded snapshot, and delive
     await new Promise(resolve => setTimeout(resolve, 0))
     const delivered = background.responses.find(message => message.requestId === 'deliver-1')
     assert.deepEqual({ ok: delivered.ok, deliveryId: delivered.deliveryId }, { ok: true, deliveryId: 'annotation-1' })
+    assert.deepEqual({ targetSessionId: delivered.targetSessionId, status: delivered.status }, { targetSessionId: 'session-2', status: 'queued' })
     assert.equal(background.forwarded[0].feedback.harnessSessionId, 'session-1')
     assert.equal(background.forwarded[0].feedback.displayPath, 'README.md')
     assert.equal(background.forwarded[0].feedback.selectionId, 'annotation-1')
@@ -148,6 +153,107 @@ test('forwards a bounded dirty visual selection with structure rather than fake 
     assert.deepEqual([feedback.editorRevision, feedback.from, feedback.to], [4, 8, 31])
     assert.equal('startUtf16' in feedback, false)
   } finally { background.cleanup() }
+})
+
+test('rehydrates one expired capability then retries the original request once', async () => {
+  const background = await loadBackground()
+  const originalFetch = globalThis.fetch
+  let snapshots = 0
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.fetch = async (url, init) => {
+      const pathname = new URL(String(url)).pathname
+      if (pathname.endsWith('/snapshot') && ++snapshots === 1) return new Response(JSON.stringify({ error: 'review capability is expired; reopen from the file tree' }), { status: 401, headers: { 'content-type': 'application/json' } })
+      return originalFetch(url, init)
+    }
+    background.portMessage({ v: 1, type: 'markdown-review-snapshot-request', requestId: 'expired-snapshot', reviewId: 'review-1' })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'expired-snapshot') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.responses.find(message => message.requestId === 'expired-snapshot')
+    assert.equal(response?.ok, true, JSON.stringify(response))
+    assert.equal(background.rehydrates.length, 1)
+    assert.equal(snapshots, 2)
+  } finally {
+    globalThis.fetch = originalFetch
+    background.cleanup()
+  }
+})
+
+test('shares one rehydrate while concurrent expired review requests retry with the fresh capability', async () => {
+  const background = await loadBackground()
+  const originalFetch = globalThis.fetch
+  const originalSendMessage = globalThis.chrome.runtime.sendMessage
+  let rehydrateCalls = 0
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.chrome.runtime.sendMessage = async message => {
+      if (message.type === 'markdown-review-rehydrate-forward/v1') {
+        rehydrateCalls += 1
+        await new Promise(resolve => setTimeout(resolve, 5))
+        return { ok: true, review: { ...openReview, capability: 'fresh-capability' } }
+      }
+      return originalSendMessage(message)
+    }
+    globalThis.fetch = async (url, init) => {
+      if (new URL(String(url)).pathname.endsWith('/snapshot') && init.headers.authorization === `Bearer ${openReview.capability}`) {
+        return new Response(JSON.stringify({ error: 'review capability is expired; reopen from the file tree' }), { status: 401, headers: { 'content-type': 'application/json' } })
+      }
+      return originalFetch(url, init)
+    }
+    background.portMessage({ v: 1, type: 'markdown-review-snapshot-request', requestId: 'expired-a', reviewId: 'review-1' })
+    background.portMessage({ v: 1, type: 'markdown-review-snapshot-request', requestId: 'expired-b', reviewId: 'review-1' })
+    for (let attempt = 0; attempt < 30 && background.responses.filter(message => message.requestId === 'expired-a' || message.requestId === 'expired-b').length < 2; attempt += 1) await new Promise(resolve => setTimeout(resolve, 2))
+    assert.deepEqual(background.responses.filter(message => message.requestId === 'expired-a' || message.requestId === 'expired-b').map(message => message.ok), [true, true])
+    assert.equal(rehydrateCalls, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.chrome.runtime.sendMessage = originalSendMessage
+    background.cleanup()
+  }
+})
+
+test('reports a closed Side Panel as a retryable delivery error without requiring the file to reopen', async () => {
+  const background = await loadBackground()
+  const originalSendMessage = globalThis.chrome.runtime.sendMessage
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.chrome.runtime.sendMessage = async message => message.type === 'markdown-review-feedback-forward/v1'
+      ? { ok: false, error: '侧边栏未打开或尚未准备好。请打开侧边栏后重新发送。' }
+      : originalSendMessage(message)
+    background.portMessage({
+      v: 1, type: 'markdown-review-deliver-request', requestId: 'closed-sidepanel', reviewId: 'review-1', harnessSessionId: 'session-1', deliveryId: 'annotation-1',
+      annotation: { id: 'annotation-1', anchor: { version: 1, startUtf16: 2, endUtf16: 8, quote: 'Review', prefix: '# ', suffix: ' me', sourceFingerprint: 'fingerprint-1' }, comment: '更明确一些' },
+    })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'closed-sidepanel') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.responses.find(message => message.requestId === 'closed-sidepanel')
+    assert.deepEqual({ ok: response?.ok, code: response?.error?.code, reopenRequired: response?.error?.reopenRequired }, { ok: false, code: 'sidepanel_unavailable', reopenRequired: undefined })
+  } finally {
+    globalThis.chrome.runtime.sendMessage = originalSendMessage
+    background.cleanup()
+  }
+})
+
+test('turns a missing Side Panel receiver into a retryable delivery error', async () => {
+  const background = await loadBackground()
+  const originalSendMessage = globalThis.chrome.runtime.sendMessage
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.chrome.runtime.sendMessage = async message => {
+      if (message.type === 'markdown-review-feedback-forward/v1') throw new Error('Could not establish connection. Receiving end does not exist.')
+      return originalSendMessage(message)
+    }
+    background.portMessage({
+      v: 1, type: 'markdown-review-deliver-request', requestId: 'missing-sidepanel-receiver', reviewId: 'review-1', harnessSessionId: 'session-1', deliveryId: 'annotation-1',
+      annotation: { id: 'annotation-1', anchor: { version: 1, startUtf16: 2, endUtf16: 8, quote: 'Review', prefix: '# ', suffix: ' me', sourceFingerprint: 'fingerprint-1' }, comment: '更明确一些' },
+    })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'missing-sidepanel-receiver') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.responses.find(message => message.requestId === 'missing-sidepanel-receiver')
+    assert.deepEqual({ ok: response?.ok, code: response?.error?.code, message: response?.error?.message, reopenRequired: response?.error?.reopenRequired }, {
+      ok: false, code: 'sidepanel_unavailable', message: '侧边栏未打开或尚未准备好。请打开侧边栏后重新发送。', reopenRequired: undefined,
+    })
+  } finally {
+    globalThis.chrome.runtime.sendMessage = originalSendMessage
+    background.cleanup()
+  }
 })
 
 test('bounds every Host request and reports an aborted commit as uncertain rather than a Verified Write', async () => {

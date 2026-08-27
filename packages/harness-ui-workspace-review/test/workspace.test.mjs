@@ -64,15 +64,15 @@ test('returns a bounded read-only snapshot while fingerprinting the admitted fil
   assert.equal(snapshot.resource.fingerprint.length, 64)
 })
 
-test('registers a fingerprint-bound selection and queues a session-bound visual proposal', async (t) => {
+test('registers a fingerprint-bound selection and queues a same-workspace visual proposal from the current session', async (t) => {
   const root = await fixture(t); const runtime = new WorkspaceReviewRuntime()
   const opened = await runtime.open('session-a', root, 'README.md')
   const selection = await runtime.registerSelection(opened.reviewId, opened.capability, {
     id: 'selection-1', startUtf16: 7, endUtf16: 14, quote: 'content', prefix: '# Safe\n', suffix: '', sourceFingerprint: opened.fingerprint,
   })
   assert.equal(selection.quote, 'content')
-  await assert.rejects(runtime.proposeEdit('session-b', opened.reviewId, selection.id, 'better'), /calling Harness session/)
-  const queued = await runtime.proposeEdit('session-a', opened.reviewId, selection.id, '**better**', 'Improve the sentence')
+  await assert.rejects(runtime.proposeEdit('session-b', `${root}-other`, opened.reviewId, selection.id, 'better'), /workspace/)
+  const queued = await runtime.proposeEdit('session-b', root, opened.reviewId, selection.id, '**better**', 'Improve the sentence')
   assert.equal(queued.status, 'queued')
   const proposals = runtime.proposals(opened.reviewId, opened.capability, 0)
   assert.equal(proposals.proposals.length, 1)
@@ -88,7 +88,7 @@ test('queues visual draft selections without pretending ProseMirror positions ar
     id: 'visual-1', version: 2, editorRevision: 3, from: 2, to: 18, quote: 'Safe\ncontent',
     blocks: [{ kind: 'heading', text: 'Safe' }, { kind: 'paragraph', text: 'content' }], sourceFingerprint: opened.fingerprint,
   })
-  await runtime.proposeEdit('session-a', opened.reviewId, 'visual-1', '# Better\n\nNew paragraph', 'Rewrite selected blocks')
+  await runtime.proposeEdit('session-a', root, opened.reviewId, 'visual-1', '# Better\n\nNew paragraph', 'Rewrite selected blocks')
   const proposal = runtime.proposals(opened.reviewId, opened.capability, 0).proposals[0]
   assert.deepEqual({ kind: proposal.kind, editorRevision: proposal.editorRevision, from: proposal.from, to: proposal.to }, { kind: 'selection', editorRevision: 3, from: 2, to: 18 })
   assert.equal(proposal.replacementMarkdown, '# Better\n\nNew paragraph')
@@ -104,8 +104,8 @@ test('queues a full-table candidate for a partial-table visual selection while r
     table: { from: 5, to: 50, rowCount: 3, columnCount: 2, selectedRowStart: 1, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: false, header: ['字段', '类型'], rows: [['客户系', '文本输入'], ['客户名称(全称)', '文本输入']] },
     sourceFingerprint: opened.fingerprint,
   })
-  await assert.rejects(runtime.proposeEdit('session-a', opened.reviewId, 'table-partial', '| 客户名称(全称) | 文本输入 |'), /complete Markdown table/i)
-  await runtime.proposeEdit('session-a', opened.reviewId, 'table-partial', '| 字段 | 类型 |\n| --- | --- |\n| 客户名称(全称) | 文本输入 |')
+  await assert.rejects(runtime.proposeEdit('session-a', root, opened.reviewId, 'table-partial', '| 客户名称(全称) | 文本输入 |'), /complete Markdown table/i)
+  await runtime.proposeEdit('session-a', root, opened.reviewId, 'table-partial', '| 字段 | 类型 |\n| --- | --- |\n| 客户名称(全称) | 文本输入 |')
   assert.equal(runtime.proposals(opened.reviewId, opened.capability, 0).proposals.length, 1)
 })
 
@@ -118,8 +118,8 @@ test('requires a complete, column-consistent Markdown table before queuing a who
     table: { from: 5, to: 50, rowCount: 3, columnCount: 2, selectedRowStart: 0, selectedRowEnd: 2, selectedColumnStart: 0, selectedColumnEnd: 1, isWholeTable: true, header: ['字段', '类型'], rows: [['客户系', '文本输入'], ['客户名称(全称)', '文本输入']] },
     sourceFingerprint: opened.fingerprint,
   })
-  await assert.rejects(runtime.proposeEdit('session-a', opened.reviewId, 'table-whole', '| 客户名称(全称) | 文本输入 |'), /complete Markdown table/i)
-  await runtime.proposeEdit('session-a', opened.reviewId, 'table-whole', '| 字段 | 类型 |\n| --- | --- |\n| 客户名称(全称) | 文本输入 |')
+  await assert.rejects(runtime.proposeEdit('session-a', root, opened.reviewId, 'table-whole', '| 客户名称(全称) | 文本输入 |'), /complete Markdown table/i)
+  await runtime.proposeEdit('session-a', root, opened.reviewId, 'table-whole', '| 字段 | 类型 |\n| --- | --- |\n| 客户名称(全称) | 文本输入 |')
   assert.equal(runtime.proposals(opened.reviewId, opened.capability, 0).proposals.length, 1)
 })
 
@@ -130,7 +130,7 @@ test('refuses stale selection proposals after the workspace file changes', async
     id: 'selection-1', startUtf16: 7, endUtf16: 14, quote: 'content', prefix: '# Safe\n', suffix: '', sourceFingerprint: opened.fingerprint,
   })
   await writeFile(join(root, 'README.md'), '# Safe\nexternal')
-  await assert.rejects(runtime.proposeEdit('session-a', opened.reviewId, 'selection-1', 'better'), /changed after the selection/)
+  await assert.rejects(runtime.proposeEdit('session-a', root, opened.reviewId, 'selection-1', 'better'), /changed after the selection/)
 })
 
 test('writes only through a one-time approval and verifies same-resource readback', async (t) => {

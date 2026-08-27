@@ -15,7 +15,7 @@ import { fitMermaidPreview, wireMermaidFullscreen, wireMermaidViewer, wireMermai
 import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/classic.css'
 
-export type AnnotationDeliveryStatus = 'sending' | 'delivered' | 'failed'
+export type AnnotationDeliveryStatus = 'sending' | 'queued' | 'processing' | 'candidate' | 'delivered' | 'failed'
 
 export interface VisualReviewAnnotation {
   id: string
@@ -30,6 +30,9 @@ const annotationPluginKey = new PluginKey<AnnotationPluginState>('markdown-revie
 
 function deliveryLabel(annotation: VisualReviewAnnotation): string {
   if (annotation.deliveryStatus === 'sending') return '正在提交给 AI'
+  if (annotation.deliveryStatus === 'queued') return '已排队，等待当前会话完成'
+  if (annotation.deliveryStatus === 'processing') return 'AI 正在处理'
+  if (annotation.deliveryStatus === 'candidate') return 'AI 候选已返回，等待审阅'
   if (annotation.deliveryStatus === 'failed') return `提交给 AI 失败${annotation.lastError === undefined ? '' : `：${annotation.lastError}`}`
   return '已提交给 AI'
 }

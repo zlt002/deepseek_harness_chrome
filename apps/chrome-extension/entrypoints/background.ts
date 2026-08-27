@@ -1,20 +1,62 @@
 // Kept self-contained because focused background adapters evaluate this source
 // as a data URL and production WXT bundles it as a single service worker.
-import {
-  CONNECTOR_CANCEL,
-  CONNECTOR_REQUEST,
-  CONNECTOR_RESPONSE,
-  sameBrowserTarget,
-  sameBrowserTargetList,
-  sameUnavailableBrowserTargetList,
-  validBrowserTarget as isBrowserTarget,
-  validUnavailableBrowserTarget as isUnavailableBrowserTarget,
-} from '../../native-server/src/connector-protocol.mjs'
-import type {
-  BrowserTarget,
-  ConnectorCorrelation,
-  UnavailableBrowserTarget,
-} from '../../native-server/src/connector-protocol.mjs'
+// Keep this browser-side copy in lockstep with the wire contract. A relative
+// import from the Native Server cannot be resolved from a data URL.
+const CONNECTOR_REQUEST = 'connector_request'
+const CONNECTOR_RESPONSE = 'connector_response'
+const CONNECTOR_CANCEL = 'connector_cancel'
+
+interface BrowserTarget {
+  browser: 'chrome'
+  windowId: number
+  tabId: number
+  url: string
+}
+
+interface ConnectorCorrelation {
+  requestId: string
+  runId: string
+  generation: string
+}
+
+interface UnavailableBrowserTarget {
+  browserTarget: BrowserTarget
+  reason: 'closed_or_changed'
+}
+
+function isBrowserTarget(value: unknown): value is BrowserTarget {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const target = value as Partial<BrowserTarget>
+  return Object.keys(value as object).length === 4 && target.browser === 'chrome'
+    && Number.isInteger(target.windowId) && target.windowId! >= 0
+    && Number.isInteger(target.tabId) && target.tabId! >= 0
+    && typeof target.url === 'string' && target.url.length > 0
+}
+
+function sameBrowserTarget(left: unknown, right: unknown): boolean {
+  return isBrowserTarget(left) && isBrowserTarget(right)
+    && left.browser === right.browser && left.windowId === right.windowId
+    && left.tabId === right.tabId && left.url === right.url
+}
+
+function isUnavailableBrowserTarget(value: unknown): value is UnavailableBrowserTarget {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value as object).length === 2
+    && (value as Partial<UnavailableBrowserTarget>).reason === 'closed_or_changed'
+    && isBrowserTarget((value as Partial<UnavailableBrowserTarget>).browserTarget)
+}
+
+function sameBrowserTargetList(left: unknown, right: unknown): boolean {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+    && left.every((target, index) => sameBrowserTarget(target, right[index]))
+}
+
+function sameUnavailableBrowserTargetList(left: unknown, right: unknown): boolean {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+    && left.every((item, index) => isUnavailableBrowserTarget(item)
+      && isUnavailableBrowserTarget(right[index]) && item.reason === right[index].reason
+      && sameBrowserTarget(item.browserTarget, right[index].browserTarget))
+}
 import { sameRuntimeReleaseIdentity, validRuntimeIdentitySummary } from '../../native-server/src/runtime-identity-contract.mjs'
 import type { RuntimeIdentitySummary } from '../../native-server/src/runtime-identity-contract.mjs'
 import {
@@ -35,6 +77,18 @@ import {
   isSpreadsheetResourceIdentity,
   isReadWorkTabRequest,
 } from './background/office-request-contract'
+
+type HtmlWorkbenchRequest = ConnectorCorrelation & { type: 'connector_request'; browserTarget: BrowserTarget; tool: 'html_workbench'; action: 'read' | 'preflight' | 'refresh_readback'; expectedSourceFingerprint?: string }
+type HtmlWorkbenchPicker = { nonce: string; sessionId: string; url: string; anchors: unknown[] }
+const htmlWorkbenchPickers = new Map<number, HtmlWorkbenchPicker>()
+function isHtmlWorkbenchRequest(value: unknown): value is HtmlWorkbenchRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const item = value as Record<string, unknown>
+  return item.type === 'connector_request' && item.tool === 'html_workbench' && typeof item.requestId === 'string' && typeof item.runId === 'string' && typeof item.generation === 'string' && isBrowserTarget(item.browserTarget)
+    && (item.action === 'read' || item.action === 'preflight' || item.action === 'refresh_readback')
+    && (item.expectedSourceFingerprint === undefined || (typeof item.expectedSourceFingerprint === 'string' && /^[a-f0-9]{64}$/i.test(item.expectedSourceFingerprint)))
+}
+function validHtmlWorkbenchAnchor(value: unknown): boolean { return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && typeof (value as Record<string, unknown>).selector === 'string' && String((value as Record<string, unknown>).selector).length > 0 && String((value as Record<string, unknown>).selector).length <= 2_000 && Array.isArray((value as Record<string, unknown>).structurePath) && ((value as Record<string, unknown>).structurePath as unknown[]).length > 0 && ((value as Record<string, unknown>).structurePath as unknown[]).length <= 64 && ((value as Record<string, unknown>).structurePath as unknown[]).every(part => typeof part === 'string' && part.length <= 256) && typeof (value as Record<string, unknown>).fingerprint === 'string' && /^[a-f0-9]{64}$/i.test(String((value as Record<string, unknown>).fingerprint)) && typeof (value as Record<string, unknown>).text === 'string' && String((value as Record<string, unknown>).text).length <= 4_000 && typeof (value as Record<string, unknown>).outerHTML === 'string' && String((value as Record<string, unknown>).outerHTML).length <= 16_000 }
 import { MARKDOWN_REVIEW_PORT, isMarkdownReviewPortRequest } from './markdown-review/protocol'
 import type { CommitWriteRequest, DeliverRequest, MarkdownReviewPortRequest, PrepareWriteRequest } from './markdown-review/protocol'
 import type {
@@ -158,12 +212,15 @@ interface OpenMarkdownReview {
 interface MarkdownReviewRecord extends OpenMarkdownReview {
   tabId: number
   windowId: number
+  /** Browser Target active before its dedicated Markdown Review Tab opened. */
+  sourceTabId?: number
 }
 type PersistedMarkdownReview = Omit<MarkdownReviewRecord, 'capability' | 'v'>
 
 const markdownReviews = new Map<string, MarkdownReviewRecord>()
 const markdownReviewKeys = new Map<string, string>()
 const markdownReviewPorts = new Map<number, chrome.runtime.Port>()
+const markdownReviewRehydrates = new Map<string, Promise<void>>()
 
 function boundedReviewText(value: unknown, maximum: number, allowEmpty = false): value is string {
   return typeof value === 'string' && value.length <= maximum && (allowEmpty || value.trim() !== '')
@@ -3201,6 +3258,51 @@ function respondToOfficeRequest(port: chrome.runtime.Port, request: RoutedOffice
   void respond(execute())
 }
 
+async function htmlWorkbenchPageState(tabId: number, refresh: boolean): Promise<{ domFingerprint: string; sourceFingerprint: string; url: string }> {
+  if (refresh) {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => { chrome.webNavigation.onCompleted.removeListener(completed); reject(new Error('html_workbench_reload_timeout')) }, 10_000)
+      const completed = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => { if (details.tabId !== tabId || details.frameId !== 0) return; clearTimeout(timeout); chrome.webNavigation.onCompleted.removeListener(completed); resolve() }
+      chrome.webNavigation.onCompleted.addListener(completed)
+      void chrome.tabs.reload(tabId).catch(error => { clearTimeout(timeout); chrome.webNavigation.onCompleted.removeListener(completed); reject(error) })
+    })
+  }
+  const execution = await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', func: async () => {
+    const domFingerprint = (text: string) => { let value = 2166136261; for (let index = 0; index < text.length; index += 1) value = Math.imul(value ^ text.charCodeAt(index), 16777619); return (value >>> 0).toString(16).padStart(64, '0') }
+    const sourceFingerprint = async (text: string) => {
+      const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+      return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('')
+    }
+    const text = document.documentElement?.outerHTML ?? ''
+    const source = await fetch(location.href, { cache: 'no-store' }).then(reply => {
+      if (reply.ok || (location.protocol === 'file:' && reply.status === 0 && reply.url === location.href)) return reply.text()
+      return Promise.reject(new Error(`file_source_readback_${reply.status}`))
+    })
+    return { domFingerprint: domFingerprint(text), sourceFingerprint: await sourceFingerprint(source), url: location.href }
+  } })
+  const result = execution[0]?.result
+  if (!result || typeof result.domFingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(result.sourceFingerprint) || typeof result.url !== 'string') throw new Error('file_access_permission_missing_or_page_unreadable')
+  return result
+}
+
+function respondToHtmlWorkbenchRequest(port: chrome.runtime.Port, request: HtmlWorkbenchRequest): void {
+  void (async () => {
+    const binding = boundBrowserTargets.get(request.runId)
+    if (binding === undefined || !sameBrowserTarget(binding.browserTarget, request.browserTarget)) throw new Error('Browser Target changed before HTML Workbench operation.')
+    const tab = await chrome.tabs.get(request.browserTarget.tabId)
+    if (tab.url !== request.browserTarget.url || !tab.url?.startsWith('file:')) throw new Error('HTML Workbench requires the unchanged local file:// Browser Target.')
+    const picker = htmlWorkbenchPickers.get(request.browserTarget.tabId)
+    if (request.action === 'refresh_readback') {
+      await new Promise(resolve => setTimeout(resolve, 100))
+      const page = await htmlWorkbenchPageState(request.browserTarget.tabId, true)
+      return { ...page, verified: page.sourceFingerprint === request.expectedSourceFingerprint && page.url === request.browserTarget.url, selections: picker?.anchors ?? [] }
+    }
+    const page = await htmlWorkbenchPageState(request.browserTarget.tabId, false)
+    return { domFingerprint: page.domFingerprint, selections: picker?.url === request.browserTarget.url ? picker.anchors : [] }
+  })().then(result => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
+    .catch(error => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
+}
+
 async function queueResourceWrite<T>(resource: { origin: string; fingerprint: string }, action: () => Promise<T>): Promise<T> {
   const key = `${resource.origin}|${resource.fingerprint}`
   const prior = resourceWriteQueues.get(key) ?? Promise.resolve()
@@ -4425,6 +4527,10 @@ function connectNativePort(): chrome.runtime.Port {
       respondToOfficeRequest(port, message)
       return
     }
+    if (isHtmlWorkbenchRequest(message)) {
+      respondToHtmlWorkbenchRequest(port, message)
+      return
+    }
     if (isTeamKnowledgeItemRequest(message)) {
       respondToTeamKnowledgeItem(port, message)
       return
@@ -4632,6 +4738,7 @@ async function persistMarkdownReview(record: MarkdownReviewRecord): Promise<void
     fingerprint: record.fingerprint,
     tabId: record.tabId,
     windowId: record.windowId,
+    ...(record.sourceTabId === undefined ? {} : { sourceTabId: record.sourceTabId }),
   }
   await storage.set({ [MARKDOWN_REVIEW_STORAGE_KEY]: reviews })
 }
@@ -4660,11 +4767,55 @@ async function recoverMarkdownReview(reviewIdValue: string, tabId: number): Prom
   if (review.reviewId !== persisted.reviewId || review.harnessSessionId !== persisted.harnessSessionId || review.resourceId !== persisted.resourceId) return undefined
   const tab = await chrome.tabs.get(tabId)
   if (tab.id !== tabId || tab.windowId !== persisted.windowId) return undefined
-  const record = { ...review, tabId, windowId: tab.windowId } satisfies MarkdownReviewRecord
+  const record = { ...review, tabId, windowId: tab.windowId, ...(Number.isSafeInteger(persisted.sourceTabId) ? { sourceTabId: persisted.sourceTabId } : {}) } satisfies MarkdownReviewRecord
   markdownReviews.set(record.reviewId, record)
   markdownReviewKeys.set(markdownReviewKey(record.harnessSessionId, record.resourceId), record.reviewId)
   await persistMarkdownReview(record)
   return record
+}
+
+/** A capability expiry is safe to retry once: Host authorization fails before every read or Verified Write. */
+function expiredWorkspaceReviewCapability(error: unknown): boolean {
+  const message = asError(error)
+  return /(?:review\s+)?capability\s+(?:is\s+)?expired|authorization\s+(?:is\s+)?expired/i.test(message)
+}
+
+async function rehydrateMarkdownReview(record: MarkdownReviewRecord): Promise<void> {
+  const active = markdownReviewRehydrates.get(record.reviewId)
+  if (active !== undefined) return active
+  const pending = refreshMarkdownReviewCapability(record)
+  markdownReviewRehydrates.set(record.reviewId, pending)
+  try {
+    await pending
+  } finally {
+    if (markdownReviewRehydrates.get(record.reviewId) === pending) markdownReviewRehydrates.delete(record.reviewId)
+  }
+}
+
+async function refreshMarkdownReviewCapability(record: MarkdownReviewRecord): Promise<void> {
+  const requestId = crypto.randomUUID()
+  const response = await chrome.runtime.sendMessage({
+    type: 'markdown-review-rehydrate-forward/v1', requestId,
+    review: { reviewId: record.reviewId, harnessSessionId: record.harnessSessionId, resourceId: record.resourceId },
+  }) as { ok?: boolean; review?: unknown; error?: string } | undefined
+  if (response?.ok !== true || !isOpenMarkdownReview(response.review)) throw new Error(response?.error ?? '无法恢复文档授权。请从文件树重新打开。')
+  const review = response.review
+  if (review.reviewId !== record.reviewId || review.harnessSessionId !== record.harnessSessionId || review.resourceId !== record.resourceId || review.displayPath !== record.displayPath) {
+    throw new Error('恢复的文档授权与当前文件不一致。请从文件树重新打开。')
+  }
+  Object.assign(record, review)
+  await persistMarkdownReview(record)
+}
+
+async function retryExpiredWorkspaceReviewCapability<T>(record: MarkdownReviewRecord, operation: () => Promise<T>): Promise<T> {
+  const attemptedCapability = record.capability
+  try {
+    return await operation()
+  } catch (error) {
+    if (!expiredWorkspaceReviewCapability(error)) throw error
+    if (record.capability === attemptedCapability) await rehydrateMarkdownReview(record)
+    return operation()
+  }
 }
 
 async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<MarkdownReviewRecord> {
@@ -4689,15 +4840,17 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
 
   const window = await chrome.windows.getLastFocused()
   if (window.id === undefined || window.id < 0) throw new Error('Chrome could not identify the window for Markdown review.')
+  let sourceTabId: number | undefined
   try {
     const target = await activeBrowserTarget(window.id)
+    sourceTabId = target.tabId
     await updateBrowserTargetSettings(settings => ({ ...settings, candidate: target }))
   } catch { /* opening review remains allowed when Browser Target mode is none */ }
   const url = new URL(chrome.runtime.getURL('markdown-review.html'))
   url.searchParams.set('reviewId', review.reviewId)
   const tab = await chrome.tabs.create({ windowId: window.id, active: true, url: url.toString() })
   if (tab.id === undefined) throw new Error('Chrome did not return the Markdown Review Tab identity.')
-  const record = { ...review, tabId: tab.id, windowId: tab.windowId } satisfies MarkdownReviewRecord
+  const record = { ...review, tabId: tab.id, windowId: tab.windowId, ...(sourceTabId === undefined ? {} : { sourceTabId }) } satisfies MarkdownReviewRecord
   markdownReviews.set(record.reviewId, record)
   markdownReviewKeys.set(key, record.reviewId)
   await persistMarkdownReview(record)
@@ -4739,7 +4892,7 @@ async function workspaceReviewHostRequest(record: MarkdownReviewRecord, path: st
   }
 }
 
-async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ v: 1; type: 'markdown-review-snapshot'; reviewId: string; harnessSessionId: string; resource: { resourceId: string; displayPath: string; revision: string; fingerprint: string }; content: string; truncated: boolean; readOnly: true }> {
+async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ v: 1; type: 'markdown-review-snapshot'; reviewId: string; harnessSessionId: string; sidePanelTabId?: number; resource: { resourceId: string; displayPath: string; revision: string; fingerprint: string }; content: string; truncated: boolean; readOnly: true }> {
   const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_SNAPSHOT_PATH, {}, 'snapshot')
   const resource = payload.resource as Record<string, unknown> | undefined
   if (payload.v !== 1 || payload.type !== 'markdown-review-snapshot' || payload.reviewId !== record.reviewId
@@ -4755,6 +4908,7 @@ async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ 
     type: 'markdown-review-snapshot',
     reviewId: record.reviewId,
     harnessSessionId: record.harnessSessionId,
+    ...(record.sourceTabId === undefined ? {} : { sidePanelTabId: record.sourceTabId }),
     resource: { resourceId: record.resourceId, displayPath: record.displayPath, revision: record.revision, fingerprint: record.fingerprint },
     content: payload.content,
     truncated: payload.truncated,
@@ -4840,11 +4994,29 @@ function isHostMarkdownSnapshot(value: unknown, record: MarkdownReviewRecord): b
 
 function markdownReviewError(error: unknown, code: 'snapshot_unavailable' | 'delivery_rejected'): { code: string; message: string; reopenRequired?: boolean } {
   const message = asError(error)
-  const reopenRequired = /capability|authorization|reopen|not found|unavailable/i.test(message)
-  return { code, message, ...(reopenRequired ? { reopenRequired: true } : {}) }
+  const sidePanelUnavailable = /侧边栏|side panel|bound harness workspace/i.test(message)
+  const reopenRequired = !sidePanelUnavailable && /capability|authorization|reopen|not found/i.test(message)
+  return { code: sidePanelUnavailable ? 'sidepanel_unavailable' : code, message, ...(reopenRequired ? { reopenRequired: true } : {}) }
 }
 
-async function deliverMarkdownReview(record: MarkdownReviewRecord, request: DeliverRequest): Promise<string> {
+const SIDE_PANEL_UNAVAILABLE_MESSAGE = '侧边栏未打开或尚未准备好。请打开侧边栏后重新发送。'
+
+function missingSidePanelReceiver(error: unknown): boolean {
+  return /could not establish connection\.\s*receiving end does not exist\.?/i.test(asError(error))
+}
+
+interface MarkdownReviewDelivery { readonly deliveryId: string; readonly targetSessionId: string; readonly targetSessionTitle: string; readonly status: 'queued' | 'processing' }
+
+function markdownReviewDelivery(value: unknown, deliveryId: string): MarkdownReviewDelivery | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  return item.ok === true && item.status !== undefined && (item.status === 'queued' || item.status === 'processing')
+    && reviewId(item.targetSessionId) && boundedReviewText(item.targetSessionTitle, 2_048)
+    ? { deliveryId, targetSessionId: item.targetSessionId, targetSessionTitle: item.targetSessionTitle, status: item.status }
+    : undefined
+}
+
+async function deliverMarkdownReview(record: MarkdownReviewRecord, request: DeliverRequest): Promise<MarkdownReviewDelivery> {
   if (request.harnessSessionId !== record.harnessSessionId || request.annotation.id !== request.deliveryId) {
     throw new Error('Markdown review delivery does not match its bound Harness session.')
   }
@@ -4871,9 +5043,16 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Deli
       : { editorRevision: anchor.editorRevision, from: anchor.from, to: anchor.to, blocks: anchor.blocks, ...(anchor.table === undefined ? {} : { table: anchor.table }) }),
   }
   await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_SELECTION_PATH, { selection: { id: request.annotation.id, ...anchor } }, 'selection delivery')
-  const response = await chrome.runtime.sendMessage({ type: 'markdown-review-feedback-forward/v1', feedback }) as { ok?: boolean; error?: string } | undefined
-  if (response?.ok !== true) throw new Error(response?.error ?? 'The bound Harness Side Panel is unavailable. Reopen it and resend the annotation.')
-  return request.annotation.id
+  let response: { ok?: boolean; error?: string } | undefined
+  try {
+    response = await chrome.runtime.sendMessage({ type: 'markdown-review-feedback-forward/v1', feedback }) as { ok?: boolean; error?: string } | undefined
+  } catch (error) {
+    if (missingSidePanelReceiver(error)) throw new Error(SIDE_PANEL_UNAVAILABLE_MESSAGE)
+    throw error
+  }
+  const delivery = markdownReviewDelivery(response, request.annotation.id)
+  if (delivery === undefined) throw new Error(response?.error ?? SIDE_PANEL_UNAVAILABLE_MESSAGE)
+  return delivery
 }
 
 export default defineBackground(() => {
@@ -4896,27 +5075,27 @@ export default defineBackground(() => {
           return
         }
         if (message.type === 'markdown-review-snapshot-request') {
-          const snapshot = await workspaceReviewSnapshot(record)
+          const snapshot = await retryExpiredWorkspaceReviewCapability(record, () => workspaceReviewSnapshot(record))
           port.postMessage({ v: 1, type: 'markdown-review-snapshot-response', requestId: message.requestId, ok: true, snapshot })
           return
         }
         if (message.type === 'markdown-review-proposals-request') {
-          const proposals = await workspaceReviewProposals(record, message.afterSequence as number)
+          const proposals = await retryExpiredWorkspaceReviewCapability(record, () => workspaceReviewProposals(record, message.afterSequence as number))
           port.postMessage({ v: 1, type: 'markdown-review-proposals-response', requestId: message.requestId, ok: true, ...proposals })
           return
         }
         if (message.type === 'markdown-review-prepare-write-request') {
-          const preparation = await prepareMarkdownWrite(record, message)
+          const preparation = await retryExpiredWorkspaceReviewCapability(record, () => prepareMarkdownWrite(record, message))
           port.postMessage({ v: 1, type: 'markdown-review-prepare-write-response', requestId: message.requestId, ok: true, preparation })
           return
         }
         if (message.type === 'markdown-review-commit-write-request') {
-          const result = await commitMarkdownWrite(record, message)
+          const result = await retryExpiredWorkspaceReviewCapability(record, () => commitMarkdownWrite(record, message))
           port.postMessage({ v: 1, type: 'markdown-review-commit-write-response', requestId: message.requestId, ok: true, result })
           return
         }
-        const deliveryId = await deliverMarkdownReview(record, message)
-        port.postMessage({ v: 1, type: 'markdown-review-deliver-response', requestId: message.requestId, ok: true, deliveryId })
+        const delivery = await retryExpiredWorkspaceReviewCapability(record, () => deliverMarkdownReview(record, message))
+        port.postMessage({ v: 1, type: 'markdown-review-deliver-response', requestId: message.requestId, ok: true, ...delivery })
       })().catch(error => port.postMessage({
         v: 1,
         type: `${message.type.replace(/-request$/, '')}-response`,
@@ -4951,7 +5130,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown; nonce?: unknown; pageUrl?: unknown; anchors?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -4966,6 +5145,38 @@ export default defineBackground(() => {
       void startHarnessForSettings()
         .then((url) => sendResponse({ ok: true, url }))
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'html-workbench-select/v1') {
+      if (!isSidePanelSender(sender) || !Number.isInteger(request.tabId) || typeof request.sessionId !== 'string' || request.sessionId.length === 0 || request.sessionId.length > 160) { sendResponse({ ok: false, error: 'HTML 元素选择请求无效。' }); return false }
+      void chrome.tabs.get(request.tabId as number).then(async tab => {
+        if (!tab.url?.startsWith('file:')) throw new Error('请选择本地 file:// HTML Browser Target。')
+        const nonce = crypto.randomUUID(); htmlWorkbenchPickers.set(tab.id!, { nonce, sessionId: request.sessionId as string, url: tab.url, anchors: [] })
+        await chrome.scripting.executeScript({ target: { tabId: tab.id! }, world: 'ISOLATED', args: [nonce, request.sessionId as string], func: (pickerNonce: string, sessionId: string) => {
+          const key = '__accruiHtmlWorkbenchPicker'
+          const old = (globalThis as Record<string, unknown>)[key] as { stop?: () => void } | undefined; old?.stop?.()
+          const hash = (text: string) => { let h = 2166136261; for (let i = 0; i < text.length; i += 1) h = Math.imul(h ^ text.charCodeAt(i), 16777619); return (h >>> 0).toString(16).padStart(64, '0') }
+          const selector = (node: Element) => { const parts: string[] = []; let current: Element | null = node; while (current && parts.length < 16) { const id = current.id ? `#${CSS.escape(current.id)}` : ''; const cls = !id ? [...current.classList].slice(0, 2).map(item => `.${CSS.escape(item)}`).join('') : ''; let item = `${current.tagName.toLowerCase()}${id || cls}`; if (!id) { let index = 1; let sibling = current.previousElementSibling; while (sibling) { if (sibling.tagName === current.tagName) index += 1; sibling = sibling.previousElementSibling }; item += `:nth-of-type(${index})` } parts.unshift(item); if (id) break; current = current.parentElement }; return parts.join(' > ') }
+          const selected: Element[] = []; const root = document.documentElement; const previousPicking = root.getAttribute('data-accrui-html-workbench-picking'); root.setAttribute('data-accrui-html-workbench-picking', 'true'); const style = document.createElement('style'); style.textContent = '[data-accrui-html-workbench-picking]{user-select:none!important;-webkit-user-select:none!important}[data-accrui-html-selected]{outline:2px solid #2563eb!important;outline-offset:2px!important}#accrui-html-workbench-picker{position:fixed;right:16px;bottom:16px;z-index:2147483647;display:flex;gap:6px;align-items:center;padding:9px 10px;border-radius:10px;background:#111827;color:#fff;font:13px sans-serif;box-shadow:0 6px 22px #0008}#accrui-html-workbench-picker button{border:0;border-radius:6px;padding:5px 8px;background:#374151;color:#fff;cursor:pointer}#accrui-html-workbench-picker button[data-send]{background:#2563eb}'; root.append(style)
+          const panel = document.createElement('div'); panel.id = 'accrui-html-workbench-picker'; panel.setAttribute('role', 'status'); const count = document.createElement('span'); const parent = document.createElement('button'); parent.textContent = '选择父级'; const cancel = document.createElement('button'); cancel.textContent = '取消'; const send = document.createElement('button'); send.textContent = '发送给 AI'; send.setAttribute('data-send', ''); panel.append(count, parent, cancel, send); document.documentElement.append(panel)
+          const update = () => { count.textContent = `已选 ${selected.length} 个（Shift 多选）`; send.toggleAttribute('disabled', selected.length === 0) }
+          const anchors = () => selected.slice(0, 12).map(item => { const value = selector(item); const structurePath = value.split(' > '); return value.length > 0 && value.length <= 2_000 && structurePath.length <= 64 && structurePath.every(part => part.length <= 256) ? { selector: value, structurePath, fingerprint: hash(item.outerHTML), text: item.textContent?.slice(0, 4000) ?? '', outerHTML: item.outerHTML.slice(0, 16000) } : null }).filter((item): item is { selector: string; structurePath: string[]; fingerprint: string; text: string; outerHTML: string } => item !== null)
+          const clearNativeSelection = () => document.getSelection()?.removeAllRanges()
+          const preventNativeSelection = (event: Event) => { if (panel.contains(event.target as Node)) return; event.preventDefault(); clearNativeSelection() }
+          const stop = () => { document.removeEventListener('click', click, true); document.removeEventListener('keydown', keydown, true); document.removeEventListener('mousedown', preventNativeSelection, true); document.removeEventListener('selectstart', preventNativeSelection, true); document.removeEventListener('dragstart', preventNativeSelection, true); clearNativeSelection(); style.remove(); panel.remove(); selected.forEach(node => node.removeAttribute('data-accrui-html-selected')); if (previousPicking === null) root.removeAttribute('data-accrui-html-workbench-picking'); else root.setAttribute('data-accrui-html-workbench-picking', previousPicking); delete (globalThis as Record<string, unknown>)[key] }
+          const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape') stop() }
+          const click = (event: MouseEvent) => { if (panel.contains(event.target as Node)) return; const raw = event.target; if (!(raw instanceof Element)) return; event.preventDefault(); event.stopPropagation(); clearNativeSelection(); const node = event.altKey ? raw.parentElement ?? raw : raw; if (!event.shiftKey) { selected.splice(0).forEach(item => item.removeAttribute('data-accrui-html-selected')) }; if (!selected.includes(node)) { selected.push(node); node.setAttribute('data-accrui-html-selected', 'true') }; update() }
+          parent.onclick = () => { const node = selected.at(-1)?.parentElement; if (!node) return; selected.forEach(item => item.removeAttribute('data-accrui-html-selected')); selected.splice(0, selected.length, node); node.setAttribute('data-accrui-html-selected', 'true'); update() }; cancel.onclick = stop; send.onclick = () => { if (selected.length === 0) return; void chrome.runtime.sendMessage({ type: 'html-workbench-selection/v1', nonce: pickerNonce, sessionId, pageUrl: location.href, anchors: anchors() }); stop() }
+          update(); document.addEventListener('mousedown', preventNativeSelection, true); document.addEventListener('selectstart', preventNativeSelection, true); document.addEventListener('dragstart', preventNativeSelection, true); document.addEventListener('click', click, true); document.addEventListener('keydown', keydown, true); (globalThis as Record<string, unknown>)[key] = { stop }
+        } })
+      }).then(() => sendResponse({ ok: true })).catch(error => sendResponse({ ok: false, error: asError(error).includes('Cannot access') ? '无法访问本地文件。请在扩展详情中开启“允许访问文件网址”。' : asError(error) }))
+      return true
+    }
+    if (request.type === 'html-workbench-selection/v1') {
+      const tabId = sender.tab?.id; const picker = tabId === undefined ? undefined : htmlWorkbenchPickers.get(tabId)
+      if (!picker || request.nonce !== picker.nonce || request.sessionId !== picker.sessionId || request.pageUrl !== picker.url || !Array.isArray(request.anchors) || request.anchors.length < 1 || request.anchors.length > 12 || !request.anchors.every(validHtmlWorkbenchAnchor)) { sendResponse({ ok: false, error: 'HTML 页面选择已失效，请重新启用选择。' }); return false }
+      picker.anchors = request.anchors
+      void chrome.runtime.sendMessage({ type: 'html-workbench-prompt-forward/v1', payload: { sessionId: picker.sessionId, pageUrl: picker.url, anchors: picker.anchors } }).then(reply => sendResponse(reply)).catch(error => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
     if (request.type === 'release-update/v1') {

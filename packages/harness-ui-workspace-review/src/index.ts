@@ -67,7 +67,10 @@ export function apply(ctx: HostContext): void {
     execute(args: unknown, exec: ToolExecutionContext) {
       if (exec.agent === undefined) throw new Error('propose_workspace_markdown_edit requires an owning Harness session')
       const parsed = proposeEditArgs(args)
-      return reviews.proposeEdit(String(exec.agent.id), parsed.review_id, parsed.selection_id, parsed.replacement_markdown, parsed.summary ?? '')
+      const sessionId = String(exec.agent.id)
+      const session = ctx.sessions.get(sessionId)
+      if (session?.header.cwd === undefined) throw new Error('propose_workspace_markdown_edit requires the current Harness session workspace')
+      return reviews.proposeEdit(sessionId, session.header.cwd, parsed.review_id, parsed.selection_id, parsed.replacement_markdown, parsed.summary ?? '')
     },
     presentCall: (args: unknown) => ({
       card: 'generic',

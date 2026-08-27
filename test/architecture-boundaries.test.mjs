@@ -108,9 +108,11 @@ test('product plugin manifest drives portable client builds and root quality com
     'harness-ui-workspace-review',
     'harness-ui-prototype-studio',
     'harness-skill-settings',
+    'harness-ui-file-url-paste',
+    'harness-ui-html-workbench',
   ])
-  assert.equal(PRODUCT_UI_PLUGIN_PACKAGE_NAMES.length, 15)
-  assert.equal(PRODUCT_TYPECHECK_PLUGIN_PACKAGE_NAMES.length, 15)
+  assert.equal(PRODUCT_UI_PLUGIN_PACKAGE_NAMES.length, 17)
+  assert.equal(PRODUCT_TYPECHECK_PLUGIN_PACKAGE_NAMES.length, 17)
   assert.deepEqual(PRODUCT_UI_PLUGIN_PACKAGE_NAMES.slice(7, 11), [
     '@accrui/harness-ui-subagent-compact',
     '@accrui/harness-ui-session-log-copy',

@@ -2,8 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { bundleTypescript } from './helpers/bundle-typescript.mjs'
+import { JSDOM } from '../.generated/harness-product/node_modules/jsdom/lib/api.js'
 
-async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion } = {}) {
+async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion, runtimeGetUrl, backgroundFetch } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
@@ -58,12 +59,14 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
     return port
   }
   const stored = sessionStorage ?? { harnessBrowserTargetSettings: settings }
+  const originalFetch = globalThis.fetch
+  if (backgroundFetch !== undefined) globalThis.fetch = backgroundFetch
   globalThis.chrome = {
     action: { onClicked: { addListener: () => {} } },
     runtime: {
       connectNative,
       getManifest: manifestVersion ? () => ({ version: manifestVersion }) : undefined,
-      getURL: (path) => `chrome-extension://test/${path}`,
+      getURL: runtimeGetUrl ?? ((path) => `chrome-extension://test/${path}`),
       lastError: undefined,
       onMessage: { addListener: (listener) => { runtimeListener = listener } },
       sendMessage: async () => {},
@@ -104,9 +107,9 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
     sessionStorage: stored,
     createdUrls,
     removedTabs,
-    sendRuntimeMessage: (message) => new Promise((resolve, reject) => {
+    sendRuntimeMessage: (message, sender = {}) => new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('runtime response timeout')), 100)
-      const keepChannelOpen = runtimeListener(message, {}, (response) => {
+      const keepChannelOpen = runtimeListener(message, sender, (response) => {
         clearTimeout(timeout)
         resolve(response)
       })
@@ -127,6 +130,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
     emitNative: (message, portIndex = ports.length - 1) => ports[portIndex].emit(message),
     disconnectNative: () => ports.at(-1).disconnect(),
     cleanup: () => {
+      globalThis.fetch = originalFetch
       delete globalThis.chrome
       delete globalThis.defineBackground
       delete globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS
@@ -154,6 +158,83 @@ test('background creates the selected-session full-screen Harness Tab before clo
   } finally {
     background.cleanup()
   }
+})
+
+test('HTML Workbench picker clears native text selection for Shift multi-select and restores the page on cancel', async () => {
+  const target = { id: 42, windowId: 7, url: 'file:///tmp/html-workbench-picker.html', title: 'Picker fixture' }
+  const dom = new JSDOM('<main><p id="first">first selectable text</p><p id="second">second selectable text</p></main>', { runScripts: 'outside-only', pretendToBeVisual: true })
+  const { window } = dom
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: target,
+    executeScript: async (options) => {
+      if (!options.args || !options.func) return []
+      window.chrome = { runtime: { sendMessage: async () => ({ ok: true }) } }
+      window.CSS ??= { escape: value => value }
+      const picker = window.eval(`(${options.func.toString()})`)
+      await picker(...options.args)
+      return []
+    },
+  })
+  try {
+    const response = await background.sendRuntimeMessage({ type: 'html-workbench-select/v1', tabId: 42, sessionId: 'picker-session' }, { url: 'chrome-extension://test/sidepanel.html' })
+    assert.deepEqual(response, { ok: true })
+    const firstText = window.document.querySelector('#first').firstChild
+    const selection = window.document.getSelection(); const range = window.document.createRange(); range.selectNodeContents(firstText); selection.removeAllRanges(); selection.addRange(range)
+    const second = window.document.querySelector('#second')
+    const down = new window.MouseEvent('mousedown', { bubbles: true, cancelable: true, shiftKey: true }); second.dispatchEvent(down)
+    second.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }))
+    assert.equal(down.defaultPrevented, true, 'picker must block the pre-click native selection gesture')
+    assert.equal(selection.rangeCount, 0, 'Shift multi-select must not leave a native text selection')
+    assert.equal(second.hasAttribute('data-accrui-html-selected'), true)
+    assert.equal(window.document.documentElement.getAttribute('data-accrui-html-workbench-picking'), 'true')
+    ;[...window.document.querySelectorAll('#accrui-html-workbench-picker button')].find(button => button.textContent === '取消').click()
+    assert.equal(window.document.documentElement.hasAttribute('data-accrui-html-workbench-picking'), false)
+    assert.equal(window.document.querySelector('#accrui-html-workbench-picker'), null)
+  } finally { background.cleanup(); dom.window.close() }
+})
+
+test('HTML Workbench reads a same-URL local source when Chromium reports a readable status-0 response', async () => {
+  const target = { id: 42, windowId: 7, url: 'file:///tmp/supply-hall.html', title: 'Supply hall' }
+  const browserTarget = { browser: 'chrome', windowId: 7, tabId: target.id, url: target.url }
+  const dom = new JSDOM('<main>Supply hall</main>', { url: target.url, runScripts: 'outside-only' })
+  const { window } = dom
+  const source = '<!doctype html><main>Supply hall</main>'
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: target,
+    runtimeGetUrl: path => `https://extension.invalid/${path}`,
+    backgroundFetch: async () => ({ ok: false }),
+    executeScript: async (options) => {
+      window.fetch = async (url) => {
+        assert.equal(url, target.url)
+        return { ok: false, status: 0, url: target.url, text: async () => source }
+      }
+      Object.defineProperty(window, 'crypto', { value: globalThis.crypto })
+      window.TextEncoder = TextEncoder
+      const injected = window.eval(`(${options.func.toString()})`)
+      try {
+        return [{ result: await injected() }]
+      } catch (error) {
+        assert.match(error.message, /^file_source_readback_0$/)
+        return []
+      }
+    },
+  })
+  const responseFor = async (requestId) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === requestId)
+      if (response !== undefined) return response
+    }
+    throw new Error(`missing ${requestId} response`)
+  }
+  try {
+    const started = await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(started, { ok: true, url: 'http://127.0.0.1:43123' })
+    background.emitNative({ type: 'connector_request', requestId: 'html-status-zero', runId: 'run-follow', generation: 'generation-1', browserTarget, tool: 'html_workbench', action: 'read' })
+    const response = await responseFor('html-status-zero')
+    assert.equal(response.error, undefined)
+    assert.match(response.result.domFingerprint, /^[a-f0-9]{64}$/)
+  } finally { background.cleanup(); dom.window.close() }
 })
 
 test('background prepares the Side Panel handoff but never calls the user-gesture-only open API', async () => {

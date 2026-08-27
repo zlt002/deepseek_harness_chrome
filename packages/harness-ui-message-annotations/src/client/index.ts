@@ -1,7 +1,7 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { reviewFeedbackPrompt } from './review-feedback-format.js'
-import { ReviewFeedbackService } from './ReviewFeedbackService.ts'
+import { assistantMessageFeedback, ReviewFeedbackService } from './ReviewFeedbackService.ts'
 import { AnnotationComposer, AnnotationStrip } from './MessageAnnotations.tsx'
 
 export const inject = ['slots', 'composerSubmissionTransforms', 'sessions']
@@ -15,11 +15,11 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => transforms.register({
     id: 'review-feedback',
     emptySubmission: (sessionId) => ({
-      getSnapshot: () => annotations.feedback(String(sessionId)).length > 0,
+      getSnapshot: () => assistantMessageFeedback(annotations.feedback(String(sessionId))).length > 0,
       subscribe: listener => annotations.snapshot.subscribe(listener),
     }),
     prepare: (sessionId, text) => {
-      const items = annotations.feedback(String(sessionId))
+      const items = assistantMessageFeedback(annotations.feedback(String(sessionId)))
       if (items.length === 0) return { text }
       const ids = items.map(item => item.id)
       return {

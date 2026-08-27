@@ -5,8 +5,8 @@ import {
   DOCUMENT_INTAKE_ACCEPTED_EXTENSIONS,
   DOCUMENT_INTAKE_ACCEPTED_MEDIA_TYPES,
   classifyDocuments,
-  documentDraftLine,
 } from '../formats.ts'
+import type { PendingDocuments } from './pending-documents.mjs'
 
 export interface ComposerFileIntake {
   accept(sessionId: SessionId, files: readonly File[]): string | null
@@ -19,12 +19,13 @@ export const ACCEPT = [...DOCUMENT_INTAKE_ACCEPTED_EXTENSIONS, ...DOCUMENT_INTAK
  * @param ctx - client root context; conversation and sessions are read at call time.
  * @returns the optional composerFileIntake face.
  */
-export function createDocumentIntake(ctx: ClientContext): ComposerFileIntake {
+export function createDocumentIntake(ctx: ClientContext, documents: PendingDocuments): ComposerFileIntake {
   return {
     accept(sessionId, files) {
       const rejected = classify(files)
       if (rejected !== null) return rejected
-      void upload(ctx, sessionId, files)
+      const pending = documents.begin(sessionId, files)
+      void upload(ctx, sessionId, files, pending.map(file => file.id), documents)
       return null
     },
   }
@@ -39,7 +40,7 @@ export function classify(files: readonly File[]): string | null {
   return classifyDocuments(files)
 }
 
-async function upload(ctx: ClientContext, sessionId: SessionId, files: readonly File[]): Promise<void> {
+async function upload(ctx: ClientContext, sessionId: SessionId, files: readonly File[], ids: readonly number[], documents: PendingDocuments): Promise<void> {
   const input = inputOf(ctx, sessionId)
   try {
     const payload = {
@@ -55,17 +56,15 @@ async function upload(ctx: ClientContext, sessionId: SessionId, files: readonly 
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    const body = await response.json() as { error?: string; files?: ReadonlyArray<{ relativePath: string; kind: 'docx' | 'pdf' | 'pptx' | 'xlsx' | 'md' | 'txt' }> }
+    const body = await response.json() as { error?: string; files?: ReadonlyArray<{ name?: string; relativePath: string; kind: 'docx' | 'pdf' | 'pptx' | 'xlsx' | 'md' | 'txt' }> }
     if (!response.ok || body.files === undefined) {
       throw new Error(body.error ?? `文档上传失败：HTTP ${String(response.status)}`)
     }
-    if (input === undefined) return
-    const current = input.state.getSnapshot().draft
-    const lines = body.files.map(file => documentDraftLine(file.relativePath, file.kind))
-    const next = current.trim() === '' ? lines.join('\n') : `${current.replace(/\s+$/u, '')}\n${lines.join('\n')}`
-    input.setDraft(next)
+    documents.resolve(sessionId, ids, body.files)
   } catch (error) {
-    input?.notify('error', error instanceof Error ? error.message : String(error))
+    const message = error instanceof Error ? error.message : String(error)
+    documents.fail(sessionId, ids, message)
+    input?.notify('error', message)
   }
 }
 

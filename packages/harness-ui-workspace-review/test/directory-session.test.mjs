@@ -42,3 +42,9 @@ test('resolves the selected workspace path from the public items snapshot', () =
 
   assert.equal(client.workspacePathForDirectory(workspaces, 'html'), '/Users/me/html')
 })
+
+test('compares Windows session cwd values without treating slash, drive-case, or trailing separator as a different workspace', () => {
+  assert.equal(client.sameWorkspaceCwd('C:\\Work\\PRD\\', 'c:/work/prd'), true)
+  assert.equal(client.sameWorkspaceCwd('/Users/me/one/', '/Users/me/one'), true)
+  assert.equal(client.sameWorkspaceCwd('/Users/me/One', '/Users/me/one'), false)
+})

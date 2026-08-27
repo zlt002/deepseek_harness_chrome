@@ -3,7 +3,7 @@ import type { ChatFileMentions, IConversation } from '@deepseek-ai/dsh-client-ui
 import type { ToolFileLinkProvider } from '@deepseek-ai/dsh-client-ui-tool/client'
 import { createElement, useSyncExternalStore } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { feedbackMessage, rehydrateMessage, requestOpenReview, respondFeedback, respondRehydrate, type MarkdownReviewFeedback, workspaceReviewBridgeConfig } from './bridge.ts'
+import { feedbackMessage, rehydrateMessage, requestOpenReview, respondFeedback, respondRehydrate, type MarkdownReviewFeedback, type WorkspaceReviewFeedbackDelivery, workspaceReviewBridgeConfig } from './bridge.ts'
 import { openWorkspaceMarkdown, rehydrateWorkspaceMarkdown } from './api.ts'
 import { createWorkspaceReviewHeaderAction } from './WorkspaceReviewAction.tsx'
 import { WorkspaceReviewDirectoryActions } from './WorkspaceReviewDirectoryActions.tsx'
@@ -11,11 +11,23 @@ import { WorkspaceReviewTree } from './WorkspaceReviewTree.tsx'
 import { workspaceFilePath } from './workspace-file-path.mjs'
 import { workspaceMarkdownLink } from './workspace-markdown-link.mjs'
 import type { WorkspacePickerDirectoryActionsProps, WorkspacePickerDirectoryProps } from './directory-slot.ts'
-import { selectReadyWorkspaceDirectorySession, workspacePathForDirectory } from './directory-session.ts'
+import { sameWorkspaceCwd, selectReadyWorkspaceDirectorySession, workspacePathForDirectory } from './directory-session.ts'
 
 interface ReviewFeedback {
-  /** Create one immediate AI request in the feedback item's explicitly bound Harness session. */
+  /** Create one queued AI request in the current Harness session. */
   submitWorkspaceMarkdown(sessionId: string, feedback: MarkdownReviewFeedback): Promise<void>
+}
+
+function currentWorkspaceReviewTarget(ctx: ClientContext, feedback: MarkdownReviewFeedback): WorkspaceReviewFeedbackDelivery {
+  const sessions = ctx.sessions.list.getSnapshot()
+  const currentSessionId = sessions.current
+  if (currentSessionId === undefined) throw new Error('请先在侧边栏选择一个 Harness 会话，再发送给 AI。')
+  const current = sessions.byId[currentSessionId]
+  const document = sessions.byId[feedback.harnessSessionId as SessionId]
+  if (current === undefined || document === undefined || !sameWorkspaceCwd(current.cwd, document.cwd)) {
+    throw new Error('当前会话不属于此文档所在工作区。请在同一工作区选择会话后重试。')
+  }
+  return { targetSessionId: String(currentSessionId), targetSessionTitle: current.displayTitle, status: current.running ? 'queued' : 'processing' }
 }
 
 interface ProducedFileFact {
@@ -97,8 +109,13 @@ export function apply(ctx: ClientContext): void {
     const receive = (event: MessageEvent): void => {
       const feedback = feedbackMessage(event, window.parent, bridge)
       if (feedback !== undefined) {
-        void reviewFeedback.submitWorkspaceMarkdown(feedback.harnessSessionId, feedback)
-          .then(() => respondFeedback(window.parent, bridge, feedback.id, true))
+        let target: WorkspaceReviewFeedbackDelivery
+        try { target = currentWorkspaceReviewTarget(ctx, feedback) } catch (error) {
+          respondFeedback(window.parent, bridge, feedback.id, false, error instanceof Error ? error.message : String(error))
+          return
+        }
+        void reviewFeedback.submitWorkspaceMarkdown(target.targetSessionId, feedback)
+          .then(() => respondFeedback(window.parent, bridge, feedback.id, true, undefined, target))
           .catch(error => respondFeedback(window.parent, bridge, feedback.id, false, error instanceof Error ? error.message : String(error)))
         return
       }
@@ -108,7 +125,9 @@ export function apply(ctx: ClientContext): void {
         .then(review => respondRehydrate(window.parent, bridge, request.requestId, review))
         .catch(error => respondRehydrate(window.parent, bridge, request.requestId, undefined, error instanceof Error ? error.message : String(error)))
     }
-    window.addEventListener('message', receive); return () => window.removeEventListener('message', receive)
+    window.addEventListener('message', receive)
+    window.parent.postMessage({ type: 'workspace-review-bridge-ready/v1', nonce: bridge.nonce }, bridge.parentOrigin)
+    return () => window.removeEventListener('message', receive)
   }, 'accrui-workspace-review: feedback bridge')
   const useSessionForWorkspace = (workspaceId: string | undefined): string | undefined => {
     const workspaces = useSyncExternalStore(ctx.workspaces.list.subscribe, ctx.workspaces.list.getSnapshot, ctx.workspaces.list.getSnapshot)
@@ -144,5 +163,5 @@ export function apply(ctx: ClientContext): void {
 
 export { WorkspaceReviewHeaderAction } from './WorkspaceReviewAction.tsx'
 export { WorkspaceReviewTree } from './WorkspaceReviewTree.tsx'
-export { selectReadyWorkspaceDirectorySession, workspacePathForDirectory } from './directory-session.ts'
+export { sameWorkspaceCwd, selectReadyWorkspaceDirectorySession, workspacePathForDirectory } from './directory-session.ts'
 export { workspaceReviewBridgeConfig, requestOpenReview, rehydrateMessage, respondFeedback, respondRehydrate } from './bridge.ts'

@@ -43,6 +43,16 @@ function generationAttempt(record) {
   if (item.allowRevisionEviction !== undefined && item.allowRevisionEviction !== true) return undefined
   return item
 }
+function pendingCandidate(record) {
+  const item = record.pendingCandidate
+  if (!exactObject(item) || item.v !== 1 || typeof item.candidateId !== 'string' || !/^candidate-[0-9a-f-]{36}$/i.test(item.candidateId)
+    || !REQUEST_ID.test(item.requestId) || !optionalRevisionId(item.expectedRevisionId) || typeof item.sessionId !== 'string' || item.sessionId.length < 1 || item.sessionId.length > 160
+    || typeof item.designSpecFingerprint !== 'string' || !HASH.test(item.designSpecFingerprint) || !Array.isArray(item.evidenceFingerprints) || item.evidenceFingerprints.length < 1 || item.evidenceFingerprints.length > 3 || item.evidenceFingerprints.some(value => typeof value !== 'string' || !HASH.test(value))
+    || !exactObject(item.revision) || typeof item.revision.id !== 'string' || item.revision.id !== item.candidateId || typeof item.createdAt !== 'string') return undefined
+  if (item.productBrief !== undefined && productBrief(item.productBrief) === undefined) return undefined
+  if (item.requirementCoverage !== undefined && productRequirementCoverageValue(item.requirementCoverage) === undefined) return undefined
+  return item
+}
 function briefSuggestionAttempt(record) {
   const item = record.briefSuggestionAttempt
   if (!exactObject(item) || !REQUEST_ID.test(item.requestId) || !Number.isSafeInteger(item.expiresAt) || item.expiresAt <= Date.now() || (item.status !== 'pending' && item.status !== 'saved')) return undefined
@@ -278,6 +288,7 @@ export class PrototypeProjectStore {
   }
   snapshot(record) {
     const current = record.revisions.find(item => item.revision.id === record.currentRevisionId)
+    const candidate = pendingCandidate(record)
     const confirmedDesignSpec = record.confirmedDesignSpec ?? current?.designSpec
     const currentBrief = productBrief(current?.productBrief) ?? productBrief(record.productBrief)
     const currentCoverage = current === undefined || currentBrief === undefined ? undefined : productRequirementCoverage(current.revision.document, currentBrief)
@@ -292,6 +303,15 @@ export class PrototypeProjectStore {
       ...(currentBrief === undefined ? {} : { productBrief: currentBrief }),
       ...(currentCoverage === undefined ? {} : { requirementCoverage: currentCoverage }),
       ...(generationAttempt(record) === undefined ? {} : { generationAttempt: generationAttempt(record) }),
+      ...(candidate === undefined ? {} : { pendingCandidate: {
+        v: 1, candidateId: candidate.candidateId, requestId: candidate.requestId,
+        ...(candidate.expectedRevisionId === undefined ? {} : { expectedRevisionId: candidate.expectedRevisionId }),
+        documentFingerprint: candidate.revision.documentFingerprint, changeSummary: candidate.revision.changeSummary, createdAt: candidate.createdAt,
+        document: candidate.revision.document, designSpec: candidate.designSpec,
+        ...(candidate.productBrief === undefined ? {} : { productBrief: candidate.productBrief }),
+        ...(candidate.requirementCoverage === undefined ? {} : { requirementCoverage: candidate.requirementCoverage }),
+        comparison: revisionComparison(current?.revision.document, candidate.revision.document),
+      } }),
       ...(briefSuggestionAttempt(record) === undefined ? {} : { briefSuggestionAttempt: briefSuggestionAttempt(record) }),
       ...(briefSuggestionAttempt(record) === undefined || productBrief(record.suggestedProductBrief) === undefined ? {} : { suggestedProductBrief: productBrief(record.suggestedProductBrief) }),
       // Legacy consumers still read this field. New generation state is the
@@ -315,7 +335,7 @@ export class PrototypeProjectStore {
     if (!PROJECT_ID.test(projectId) || confirmationProjectId !== projectId) throw new Error('Prototype project deletion confirmation is invalid.')
     return this.mutate(projectId, async projectFence => {
       const record = await this.read(projectId); this.authorize(record, capability)
-      if (generationAttempt(record) !== undefined || briefSuggestionAttempt(record) !== undefined) throw new Error('Finish or stop the active AI request before deleting this project.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined || briefSuggestionAttempt(record) !== undefined) throw new Error('Finish, apply, or discard the active AI request before deleting this project.')
       await projectFence.assertOwnership(); await unlink(this.file(projectId)); await projectFence.assertOwnership()
       try { await this.read(projectId); throw new Error('Prototype project deletion read-back verification failed.') } catch (error) { if (error?.code !== 'ENOENT') throw error }
       return { status: 'verified_delete', projectId }
@@ -327,7 +347,7 @@ export class PrototypeProjectStore {
       const record = await this.read(projectId)
       this.authorize(record, capability)
       if (record.sessionId !== expectedSessionId) throw new Error('Prototype project session changed before rebind.')
-      if (generationAttempt(record) !== undefined || briefSuggestionAttempt(record) !== undefined) throw new Error('Finish or stop the active AI request before continuing in another conversation.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined || briefSuggestionAttempt(record) !== undefined) throw new Error('Finish, apply, or discard the active AI request before continuing in another conversation.')
       record.sessionId = sessionId
       record.updatedAt = new Date().toISOString()
       const readback = await this.write(record, projectFence)
@@ -407,7 +427,7 @@ export class PrototypeProjectStore {
     return this.mutate(projectId, async (projectFence) => {
       const record = await this.read(projectId)
       this.authorize(record, capability)
-      if (generationAttempt(record) !== undefined) throw new Error('A prototype generation request is still active. Stop it before adjusting the design specification.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request or candidate is still active. Stop it before adjusting the design specification.')
       if (record.currentRevisionId !== undefined || record.revisions.length !== 0) throw new Error('This prototype already has saved history. Create a new prototype project before changing its design specification.')
       if (record.confirmedDesignSpec === undefined || typeof record.confirmedDesignSpecFingerprint !== 'string') throw new Error('The design specification is not currently confirmed.')
       const { confirmedDesignSpec: _designSpec, confirmedDesignSpecFingerprint: _fingerprint, ...unconfirmed } = record
@@ -421,7 +441,7 @@ export class PrototypeProjectStore {
       const record = await this.read(projectId)
       this.authorize(record, capability)
       if (record.confirmedDesignSpec === undefined || typeof record.confirmedDesignSpecFingerprint !== 'string') throw new Error('Confirm the design specification before confirming product requirements.')
-      if (generationAttempt(record) !== undefined) throw new Error('A prototype generation request is still active. Stop it before changing product requirements.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request or candidate is still active. Stop it before changing product requirements.')
       if (record.currentRevisionId !== undefined || record.revisions.length !== 0) throw new Error('The product requirement checklist is already bound to saved prototype history.')
       const checked = productBrief(brief)
       if (checked === undefined) throw new Error('Product requirement checklist is invalid.')
@@ -438,7 +458,7 @@ export class PrototypeProjectStore {
       const record = await this.read(projectId); this.authorize(record, capability)
       if (!REQUEST_ID.test(requestId)) throw new Error('Product brief suggestion request is invalid.')
       if (record.confirmedDesignSpec === undefined || typeof record.confirmedDesignSpecFingerprint !== 'string') throw new Error('Confirm the design specification before suggesting product requirements.')
-      if (generationAttempt(record) !== undefined) throw new Error('A prototype generation request is still active.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request or candidate is still active.')
       const active = briefSuggestionAttempt(record)
       if (active?.status === 'saved' && active.requestId === requestId) throw new Error('This product brief suggestion request was already saved.')
       const expiresAt = active?.status === 'pending' && active.requestId === requestId ? active.expiresAt : Date.now() + BRIEF_SUGGESTION_TTL_MS
@@ -465,7 +485,7 @@ export class PrototypeProjectStore {
       this.authorize(record, capability)
       if (!REQUEST_ID.test(requestId) || !optionalRevisionId(expectedRevisionId)) throw new Error('Prototype generation request is invalid.')
       if (prompt !== undefined && (typeof prompt !== 'string' || prompt.trim().length === 0 || prompt.length > 6_000)) throw new Error('Prototype generation prompt is invalid.')
-      if (generationAttempt(record) !== undefined) throw new Error('A prototype generation request is already active for this project.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request or candidate is already active for this project.')
       if (!sameRevisionId(record.currentRevisionId, expectedRevisionId)) throw new Error(`Prototype revision conflict: current revision is ${record.currentRevisionId ?? 'empty'}. Read it before generating again.`)
       const checkedSelection = selection === undefined ? undefined : localEditSelection(selection)
       if (selection !== undefined && checkedSelection === undefined) throw new Error('Local prototype edit selection is invalid.')
@@ -526,7 +546,7 @@ export class PrototypeProjectStore {
       const record = await this.read(projectId)
       this.authorize(record, capability)
       if (typeof targetRevisionId !== 'string' || targetRevisionId.length === 0 || targetRevisionId.length > 160 || typeof expectedCurrentRevisionId !== 'string' || expectedCurrentRevisionId.length === 0 || expectedCurrentRevisionId.length > 160) throw new Error('Prototype Studio restore arguments are invalid.')
-      if (generationAttempt(record) !== undefined) throw new Error('A prototype generation request is still active. Cancel it before restoring a version.')
+      if (generationAttempt(record) !== undefined || pendingCandidate(record) !== undefined) throw new Error('A prototype generation request or candidate is still active. Cancel or discard it before restoring a version.')
       if (record.currentRevisionId !== expectedCurrentRevisionId) throw new Error(`Prototype revision conflict: current revision is ${record.currentRevisionId ?? 'empty'}. Read it before restoring again.`)
       const target = record.revisions.find(item => item.revision.id === targetRevisionId)
       if (target === undefined) throw new Error('The requested prototype revision does not exist.')

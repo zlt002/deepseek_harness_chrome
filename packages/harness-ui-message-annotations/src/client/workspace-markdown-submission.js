@@ -51,8 +51,8 @@ export class WorkspaceMarkdownSubmitter {
       throw new Error('目标 Harness 会话没有可用的对话服务；请重新连接 Harness 后重试。')
     }
 
-    // `conversation` comes from the session scope, so the prompt is attached
-    // to the document's bound session rather than whichever composer is open.
+    // The caller resolves the side panel's current session at click time; this
+    // public scoped conversation service keeps the prompt in that same session.
     await conversation.send(reviewFeedbackPrompt('', [item]))
     this.store.accept(sessionId, [feedback.id])
   }

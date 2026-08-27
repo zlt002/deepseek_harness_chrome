@@ -11,6 +11,7 @@ import {
   documentKindOf,
 } from '../src/formats.mjs'
 import { saveSessionDocuments } from '../src/save.mjs'
+import { documentSubmissionPrompt, PendingDocuments } from '../src/client/pending-documents.mjs'
 
 const root = new URL('../', import.meta.url)
 const source = (path) => readFile(new URL(path, root), 'utf8')
@@ -31,11 +32,101 @@ test('declares an out-of-tree document intake plugin against public composer con
 
 test('does not leave a persistent success notice after a document upload', async () => {
   const intake = await source('src/client/intake.ts')
-  // The draft already carries the actionable upload feedback. A success
-  // input notice is persistent in the stock composer, so it would survive
-  // the send and leave the attachment bar behind; failures must still notify.
+  // A success notice is persistent in the stock composer, so it would survive
+  // the send and leave an obsolete attachment bar behind; failures must still notify.
   assert.doesNotMatch(intake, /input\.notify\('info'/)
   assert.match(intake, /input\?\.notify\('error'/)
+})
+
+test('keeps uploaded document instructions out of the visible draft and delivers them through the submit transform', async () => {
+  const [client, intake] = await Promise.all([
+    source('src/client/index.ts'),
+    source('src/client/intake.ts'),
+  ])
+  assert.match(client, /composerSubmissionTransforms/)
+  assert.match(client, /id: 'document-intake'/)
+  assert.match(intake, /documents\.resolve\(sessionId, ids, body\.files\)/)
+  assert.doesNotMatch(intake, /setDraft\(/)
+})
+
+test('renders session documents as composer-adjacent removable cards instead of silently hiding them', async () => {
+  const [client, strip, styles] = await Promise.all([
+    source('src/client/index.ts'),
+    source('src/client/DocumentAttachmentStrip.tsx'),
+    source('src/client/DocumentAttachmentStrip.module.css'),
+  ])
+  assert.match(client, /conversation\.composer\.above/)
+  assert.match(client, /id: 'accrui-document-intake-strip',[\s\S]*order: 30/)
+  assert.match(client, /DocumentAttachmentStrip/)
+  assert.match(strip, /useSyncExternalStore/)
+  assert.match(strip, /documents\.remove\(sessionId, file\.id\)/)
+  assert.match(strip, /正在添加/)
+  assert.match(strip, /添加失败/)
+  assert.match(styles, /\.card\s*\{[\s\S]*min-width:\s*156px[\s\S]*min-height:\s*48px[\s\S]*border-radius:\s*12px/)
+  assert.match(styles, /\.icon\s*\{[\s\S]*width:\s*32px[\s\S]*height:\s*32px/)
+  assert.match(styles, /\.remove\s*\{[\s\S]*width:\s*18px[\s\S]*height:\s*18px/)
+  assert.match(styles, /--dsw-alias-button-contrast-fill/)
+  assert.doesNotMatch(styles, /button-contrast-hover/)
+})
+
+test('accumulates single and multi-select uploads for one hidden submission and clears only accepted files', () => {
+  const documents = new PendingDocuments()
+  documents.add('session-1', [
+    { relativePath: '.dsh-uploads/first.txt', kind: 'txt' },
+    { relativePath: '.dsh-uploads/second.md', kind: 'md' },
+  ])
+  documents.add('session-1', [
+    { relativePath: '.dsh-uploads/third.pdf', kind: 'pdf' },
+  ])
+  const submitted = documents.snapshot('session-1')
+  const prompt = documentSubmissionPrompt('请比较这些文件', submitted)
+  assert.match(prompt, /first\.txt/)
+  assert.match(prompt, /second\.md/)
+  assert.match(prompt, /third\.pdf/)
+  assert.equal(documents.availability('session-1').getSnapshot(), true)
+
+  documents.add('session-1', [{ relativePath: '.dsh-uploads/during-send.xlsx', kind: 'xlsx' }])
+  documents.accept('session-1', submitted.map(file => file.id))
+  assert.deepEqual(documents.snapshot('session-1').map(file => file.relativePath), ['.dsh-uploads/during-send.xlsx'])
+
+  documents.add('session-2', [{ relativePath: '.dsh-uploads/only.md', kind: 'md' }])
+  const single = documents.snapshot('session-2')
+  assert.match(documentSubmissionPrompt('', single), /only\.md/)
+  documents.accept('session-2', single.map(file => file.id))
+  assert.equal(documents.availability('session-2').getSnapshot(), false)
+})
+
+test('keeps upload progress and failures visible, excludes removed files from the hidden submission, and clears accepted cards', () => {
+  const documents = new PendingDocuments()
+  const [first, second] = documents.begin('session-1', [
+    { name: 'events.jsonl', size: 120 },
+    { name: 'broken.json', size: 48 },
+  ])
+  assert.deepEqual(documents.snapshot('session-1').map(file => file.status), ['uploading', 'uploading'])
+
+  documents.resolve('session-1', [first.id], [{ name: 'events.jsonl', relativePath: '.dsh-uploads/events.jsonl', kind: 'txt' }])
+  documents.fail('session-1', [second.id], new Error('网络中断'))
+  assert.deepEqual(documents.ready('session-1').map(file => file.name), ['events.jsonl'])
+  assert.equal(documents.snapshot('session-1')[1]?.status, 'error')
+  assert.match(documents.snapshot('session-1')[1]?.error ?? '', /网络中断/)
+
+  documents.remove('session-1', first.id)
+  assert.equal(documentSubmissionPrompt('', documents.ready('session-1')), '')
+  assert.equal(documents.availability('session-1').getSnapshot(), false)
+
+  const [accepted] = documents.begin('session-1', [{ name: 'brief.md', size: 21 }])
+  documents.resolve('session-1', [accepted.id], [{ name: 'brief.md', relativePath: '.dsh-uploads/brief.md', kind: 'md' }])
+  const submitting = documents.ready('session-1')
+  assert.match(documentSubmissionPrompt('', submitting), /brief\.md/)
+  documents.accept('session-1', submitting.map(file => file.id))
+  assert.equal(documents.snapshot('session-1').length, 1)
+  assert.equal(documents.snapshot('session-1')[0]?.status, 'error')
+})
+
+test('keeps the empty session snapshot referentially stable for React subscriptions', () => {
+  const documents = new PendingDocuments()
+
+  assert.strictEqual(documents.snapshot('missing-session'), documents.snapshot('missing-session'))
 })
 
 test('uses the public Harness paperclip icon and composer toolbar geometry', async () => {

@@ -28,6 +28,8 @@ test('review chrome stays compact and replaces empty error canvases with recover
   assert.match(main, /showRecoveryState/)
   assert.match(main, /const activityNotice = saveNotice \?\? proposalNotice/)
   assert.match(main, /activityNotice !== undefined/)
+  assert.match(main, /setAiTarget\(undefined\)/)
+  assert.match(main, /setSidePanelRecoveryAnnotation\(undefined\)/)
   assert.match(main, /review-recovery/)
   assert.doesNotMatch(main, /className="workspace-toolbar"/)
   assert.match(style, /\.review-header\s*\{[\s\S]*height: 44px;/)
@@ -162,6 +164,18 @@ test('annotation delivery survives editor startup and reports a disconnected sen
   assert.doesNotMatch(main, /const addAnnotation/)
 })
 
+test('opening the Side Panel preserves the click gesture and waits for a cold start', () => {
+  assert.match(main, /const sidePanelWindowIdRef = useRef<number \| undefined>\(undefined\)/)
+  assert.match(main, /void chrome\.windows\.getCurrent\(\)\.then/)
+  const retryHandler = main.match(/const openSidePanelAndRetry = useCallback\(async \(\) => \{([\s\S]*?)\n  \}, \[deliverAnnotation, loadSnapshot, sidePanelRecoveryAnnotation, snapshot\]\)/)?.[1]
+  assert.notEqual(retryHandler, undefined)
+  assert.match(retryHandler, /snapshot\?\.sidePanelTabId === undefined[\s\S]*chrome\.sidePanel\.open\(\{ tabId: snapshot\.sidePanelTabId \}\)/)
+  assert.match(retryHandler, /await opened/)
+  assert.doesNotMatch(retryHandler, /await chrome\.windows\.getCurrent/)
+  assert.match(main, /SIDE_PANEL_STARTUP_RETRY_DELAYS_MS = \[500, 1_000, 2_000, 3_000\]/)
+  assert.match(main, /error\.code === 'sidepanel_unavailable'[\s\S]*SIDE_PANEL_STARTUP_RETRY_DELAYS_MS/)
+})
+
 test('oversized visual selections are explained and never delivered', () => {
   assert.match(main, /selection\.limitReason !== undefined/)
   assert.match(editor, /quote_too_long/)
@@ -178,7 +192,11 @@ test('visual editing exposes undo and redo while retaining the native shortcuts'
   assert.match(main, /重做/)
   assert.match(main, /Ctrl\+Z/)
   assert.match(main, /Ctrl\+Y/)
-  assert.match(main, /已绑定会话/)
+  assert.match(main, /文件已绑定工作区/)
+  assert.match(main, /打开侧边栏并重试/)
+  assert.match(main, /已发送到“\$\{message\.targetSessionTitle\}”/)
+  assert.match(editor, /已排队，等待当前会话完成/)
+  assert.match(editor, /AI 候选已返回，等待审阅/)
   assert.match(main, /key=\{editorEpoch\}/)
   assert.match(main, /setEditorEpoch\(\(epoch\) => epoch \+ 1\)/)
   assert.doesNotMatch(main, /key=\{`\$\{snapshot\.resource\.revision\}:\$\{snapshot\.resource\.fingerprint\}`\}/)

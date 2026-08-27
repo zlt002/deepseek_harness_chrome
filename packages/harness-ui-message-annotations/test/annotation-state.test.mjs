@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { annotationsPrompt } from '../src/client/annotation-format.js'
 import { reviewFeedbackPrompt } from '../src/client/review-feedback-format.js'
-import { addAnnotation, removeAcceptedAnnotations } from '../src/client/annotation-state.js'
+import { addAnnotation, assistantMessageFeedback, removeAcceptedAnnotations } from '../src/client/annotation-state.js'
 import { assistantMessageIdForRange, popoverPosition, selectionAnchor } from '../src/client/selection-geometry.js'
 import { WorkspaceMarkdownSubmitter } from '../src/client/workspace-markdown-submission.js'
 
@@ -102,6 +102,18 @@ test('submits one workspace annotation directly through its scoped conversation 
   assert.equal(sent.length, 1)
   assert.match(sent[0], /<workspace_markdown_annotations>/)
   assert.equal(store.feedback('session-1').length, 0)
+})
+
+test('a failed older Markdown review never joins the next one-click AI request', () => {
+  const older = { ...markdownFeedback('older'), reviewId: 'review-old', selectionId: 'selection-old' }
+  const current = { ...markdownFeedback('current'), reviewId: 'review-current', selectionId: 'selection-current' }
+  const olderItem = { ...older, source: 'workspace-markdown', anchor: { version: 1, startUtf16: older.startUtf16, endUtf16: older.endUtf16, quote: older.quote, prefix: older.prefix, suffix: older.suffix, sourceFingerprint: older.fingerprint } }
+  const currentItem = { ...current, source: 'workspace-markdown', anchor: { version: 1, startUtf16: current.startUtf16, endUtf16: current.endUtf16, quote: current.quote, prefix: current.prefix, suffix: current.suffix, sourceFingerprint: current.fingerprint } }
+  const ordinaryComposerPrompt = reviewFeedbackPrompt('', assistantMessageFeedback([olderItem, currentItem]))
+  const directClickPrompt = reviewFeedbackPrompt('', [currentItem])
+  assert.doesNotMatch(ordinaryComposerPrompt, /workspace_markdown_annotations/)
+  assert.match(directClickPrompt, /"review_id": "review-current"/)
+  assert.doesNotMatch(directClickPrompt, /review-old/)
 })
 
 test('a retry after accepted delivery reuses the success tombstone instead of creating another AI turn', async () => {

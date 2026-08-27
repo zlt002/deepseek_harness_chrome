@@ -1,0 +1,28 @@
+{
+  "name": "@accrui/harness-ui-file-url-paste",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Out-of-tree AccrUI readable local-file URL paste transform for Harness",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-file-url-paste",
+    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-file-url-paste",
+    "test": "node --test test/*.test.mjs"
+  }
+}

@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
+import { readFile } from 'node:fs/promises'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
@@ -17,6 +18,7 @@ import {
   validUnavailableBrowserTarget,
 } from './connector-protocol.mjs'
 import { RunTargetRegistry } from './run-target-registry.mjs'
+import { atomicWrite, fingerprint as htmlFingerprint, previewEdits, readWorkspace, validEdits } from './html-workbench.mjs'
 
 export { isRetryableKnowledgeTransport, knowledgeErrorChain, knowledgeHttpsFetch } from './knowledge-transport.mjs'
 
@@ -107,6 +109,10 @@ function errorResponse(id, code, message) {
 function validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowserTargets) {
   return validBrowserTargetBinding(browserTarget, browserTargets, unavailableBrowserTargets)
 }
+
+function validHtmlWorkbenchPreviewArguments(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && validEdits(value.edits) }
+function validHtmlWorkbenchCommitArguments(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256 }
+function validHtmlWorkbenchDomFingerprint(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value) }
 
 function validOfficeDocumentIdentity(value) {
   if (value === null) return true
@@ -1320,6 +1326,8 @@ export class BrowserConnector {
     this.presentationChallenges = new Map()
     this.presentationWriteLocks = new Map()
     this.officeDocumentWrites = new Map()
+    this.htmlWorkbenchChallenges = new Map()
+    this.htmlWorkbenchWriteLocks = new Map()
     this.uncertainSelectionWrite = undefined
     this.officeDocumentWriteStore = options.officeDocumentWriteStore ?? new OfficeDocumentWriteRecordStore()
   }
@@ -1367,6 +1375,8 @@ export class BrowserConnector {
     this.presentationChallenges.clear()
     this.presentationWriteLocks.clear()
     this.officeDocumentWrites.clear()
+    this.htmlWorkbenchChallenges.clear()
+    this.htmlWorkbenchWriteLocks.clear()
     this.uncertainSelectionWrite = undefined
     this.teamKnowledgeBatchChallenges.clear()
     this.runTargets.clear()
@@ -1390,6 +1400,8 @@ export class BrowserConnector {
       this.presentationChallenges.clear()
       this.presentationWriteLocks.clear()
       this.officeDocumentWrites.clear()
+      this.htmlWorkbenchChallenges.clear()
+      this.htmlWorkbenchWriteLocks.clear()
       this.teamKnowledgeBatchChallenges.clear()
       this.uncertainSelectionWrite = undefined
     }
@@ -1413,10 +1425,11 @@ export class BrowserConnector {
     const isOfficeDocumentRequest = pending.request.tool === 'light_document'
     const isSpreadsheetRequest = pending.request.tool === 'spreadsheet'
     const isPresentationRequest = pending.request.tool === 'presentation'
+    const isHtmlWorkbenchRequest = pending.request.tool === 'html_workbench'
     const isTeamKnowledgeBatchRequest = pending.request.tool === 'team_knowledge_batch'
     const isKnowledgeRequest = pending.request.tool === 'knowledge_search' || pending.request.tool === 'code_search'
     const isSelectedSourceScopeRequest = pending.request.tool === 'selected_source_scope'
-    const isBrowserBoundRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest || isTeamKnowledgeBatchRequest
+    const isBrowserBoundRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest || isHtmlWorkbenchRequest || isTeamKnowledgeBatchRequest
     const sameOpenIdentity = response.runId === pending.request.runId && response.generation === pending.request.generation
     const currentBinding = this.runTargets.get(pending.request.runId)
     const currentTarget = currentBinding.browserTarget
@@ -1480,10 +1493,14 @@ export class BrowserConnector {
       pending.reject(new Error('Extension peer returned an invalid presentation result'))
       return true
     }
+    if (isHtmlWorkbenchRequest && (!response.result || typeof response.result !== 'object' || Array.isArray(response.result))) {
+      pending.reject(new Error('Extension peer returned an invalid HTML Workbench result'))
+      return true
+    }
     pending.resolve(isReadWorkTabRequest ? {
       browserTarget: response.browserTarget,
       result: response.result,
-    } : isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest ? {
+    } : isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest || isHtmlWorkbenchRequest ? {
       browserTarget: response.browserTarget,
       result: response.result,
     } : {
@@ -1565,6 +1582,10 @@ export class BrowserConnector {
     }
     if (['presentation_get_capabilities', 'presentation_get_context', 'presentation_get_selection', 'presentation_get_text_boxes', 'presentation_write_preview', 'presentation_write_commit'].includes(message.params?.name)) {
       await this.#flatPresentation(message, response)
+      return
+    }
+    if (['html_workbench_read', 'html_workbench_preview', 'html_workbench_commit'].includes(message.params?.name)) {
+      await this.#htmlWorkbench(message, response)
       return
     }
     const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create' })[message.params?.name]
@@ -2091,6 +2112,57 @@ export class BrowserConnector {
     } catch (error) {
       this.#toolError(response, message.id, error instanceof Error ? error.message : 'Light-document selection preview failed')
     }
+  }
+
+  async #htmlWorkbench(message, response) {
+    const name = message.params?.name
+    const args = message.params?.arguments ?? {}
+    if ((name === 'html_workbench_preview' && !validHtmlWorkbenchPreviewArguments(args)) || (name === 'html_workbench_commit' && !validHtmlWorkbenchCommitArguments(args)) || (name === 'html_workbench_read' && (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 0))) {
+      this.#reply(response, errorResponse(message.id, -32602, `${String(name)} received invalid arguments.`)); return
+    }
+    const binding = this.runTargets.current(); const runId = binding?.runId; const browserTarget = binding?.browserTarget
+    if (!validBrowserTarget(browserTarget) || !browserTarget.url.startsWith('file:')) { this.#toolError(response, message.id, 'HTML Workbench requires a bound local file:// HTML Browser Target.'); return }
+    const send = async (action, extra = {}) => this.#requestExtension({ type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'html_workbench', action, ...extra }, undefined, this.officeRequestTimeoutMs)
+    if (name === 'html_workbench_read') {
+      try {
+        const inspected = await send('read'); const snapshot = await readWorkspace(browserTarget.url, inspected.result.selections)
+        const result = { runId, browserTarget: inspected.browserTarget, resource: { kind: 'local_html', url: snapshot.url, fingerprint: snapshot.fingerprint }, selections: snapshot.selections, html: snapshot.html.slice(0, 100000), stylesheets: snapshot.stylesheets.map(item => ({ ...item, content: item.content.slice(0, 100000) })) }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'HTML Workbench read failed') }
+      return
+    }
+    if (name === 'html_workbench_preview') {
+      try {
+        const inspected = await send('read'); if (!validHtmlWorkbenchDomFingerprint(inspected.result.domFingerprint)) throw new Error('Extension peer did not return a valid local HTML DOM state fingerprint.')
+        const preview = await previewEdits(browserTarget.url, args.edits, inspected.result.selections)
+        const challenge = randomBytes(32).toString('base64url')
+        this.htmlWorkbenchChallenges.set(challenge, { runId, generation: this.generation, browserTarget, domFingerprint: inspected.result.domFingerprint, url: preview.snapshot.url, edits: preview.edits, editFingerprint: preview.editFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        const result = { runId, browserTarget, resource: { kind: 'local_html', url: preview.snapshot.url, fingerprint: preview.snapshot.fingerprint }, diff: preview.diff, challenge, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS }
+        this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+      } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'HTML Workbench preview failed') }
+      return
+    }
+    const grant = this.htmlWorkbenchChallenges.get(args.challenge); this.htmlWorkbenchChallenges.delete(args.challenge)
+    if (!grant || grant.expiresAt < Date.now() || grant.runId !== runId || grant.generation !== this.generation || !sameBrowserTarget(grant.browserTarget, browserTarget)) { this.#toolError(response, message.id, 'HTML Workbench Approval Grant is missing, stale, already used, or belongs to another Browser Target.'); return }
+    const key = `${browserTarget.windowId}:${browserTarget.tabId}:${grant.url}`; const prior = this.htmlWorkbenchWriteLocks.get(key) ?? Promise.resolve(); let release
+    const queued = prior.catch(() => undefined).then(() => new Promise(resolve => { release = resolve })); this.htmlWorkbenchWriteLocks.set(key, queued); await prior.catch(() => undefined)
+    try {
+      const preflight = await send('preflight')
+      if (!validHtmlWorkbenchDomFingerprint(preflight.result.domFingerprint) || preflight.result.domFingerprint !== grant.domFingerprint) throw new Error('fingerprint_mismatch: The Browser Target page changed before the approved write; no file was written.')
+      for (const edit of grant.edits) {
+        const current = await readWorkspace(grant.url); const file = edit.absolute === current.htmlPath ? current.html : current.stylesheets.find(item => edit.absolute.endsWith(item.path))?.content
+        if (file === undefined || htmlFingerprint(file) !== edit.beforeFingerprint) throw new Error('fingerprint_mismatch: A local HTML/CSS file changed before the approved write; no file was written.')
+      }
+      await atomicWrite(grant.edits)
+      const disk = await readWorkspace(grant.url)
+      const persisted = await Promise.all(grant.edits.map(async edit => ({ edit, content: await readFile(edit.absolute, 'utf8') })))
+      if (persisted.some(item => item.content !== item.edit.content)) throw new Error('readback_mismatch: A persisted local HTML/CSS file does not exactly match the approved content.')
+      const expectedSourceFingerprint = htmlFingerprint(disk.html)
+      const readback = await send('refresh_readback', { expectedSourceFingerprint })
+      if (readback.result.verified !== true || readback.result.url !== disk.url || readback.result.sourceFingerprint !== expectedSourceFingerprint) throw new Error(`readback_mismatch: ${String(readback.result.error ?? 'same-target page did not load the exact committed HTML source')}`)
+      const result = { status: 'verified_write', runId, browserTarget: readback.browserTarget, resource: { kind: 'local_html', url: disk.url, fingerprint: disk.fingerprint }, files: persisted.map(item => ({ path: item.edit.path, fingerprint: htmlFingerprint(item.content) })), pageReadback: readback.result }
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
+    } catch (error) { this.#toolError(response, message.id, `uncertain: ${error instanceof Error ? error.message : String(error)}`) } finally { release?.(); if (this.htmlWorkbenchWriteLocks.get(key) === queued) this.htmlWorkbenchWriteLocks.delete(key) }
   }
 
   async #incompleteTeamKnowledgeBatchWriteFence(browserTarget) {

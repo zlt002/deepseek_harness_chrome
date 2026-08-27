@@ -27,9 +27,9 @@ test('accepts visual feedback and rejects an envelope with a hidden extra field'
 test('returns awaited feedback delivery status with a bounded concrete error', () => {
   const messages = []
   const receiver = { postMessage: (message, origin) => { messages.push({ message, origin }) } }
-  respondFeedback(receiver, config, 'annotation-1', true)
+  respondFeedback(receiver, config, 'annotation-1', true, undefined, { targetSessionId: 'session-2', targetSessionTitle: '当前会话', status: 'queued' })
   respondFeedback(receiver, config, 'annotation-2', false, ` ${'x'.repeat(4_100)} `)
-  assert.deepEqual(JSON.parse(JSON.stringify(messages[0])), { message: { type: 'markdown-review-feedback-accepted/v1', nonce: 'nonce-1', deliveryId: 'annotation-1', accepted: true }, origin: config.parentOrigin })
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[0])), { message: { type: 'markdown-review-feedback-accepted/v1', nonce: 'nonce-1', deliveryId: 'annotation-1', accepted: true, targetSessionId: 'session-2', targetSessionTitle: '当前会话', status: 'queued' }, origin: config.parentOrigin })
   assert.equal(messages[1].message.accepted, false)
   assert.equal(messages[1].message.error.length, 4_000)
   assert.equal(messages[1].origin, config.parentOrigin)

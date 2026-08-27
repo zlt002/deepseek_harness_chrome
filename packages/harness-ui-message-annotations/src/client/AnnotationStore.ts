@@ -85,6 +85,7 @@ export interface WorkspaceMarkdownFeedback {
 }
 
 export type ReviewFeedback = MessageAnnotation | WorkspaceMarkdownFeedback
+export { assistantMessageFeedback } from './annotation-state.js'
 
 export interface ReviewFeedbackSnapshot {
   readonly bySession: ReadonlyMap<string, readonly ReviewFeedback[]>

@@ -41,6 +41,7 @@ test('uses the public session-scoped conversation service for one-click Markdown
     source('../src/client/workspace-markdown-submission.js'),
   ])
   assert.match(service, /submitWorkspaceMarkdown/)
+  assert.match(service, /assistantMessageFeedback/)
   assert.match(submitter, /sessions\.scope\(sessionId\)/)
   assert.match(submitter, /scope\.get\('conversation'\)/)
   assert.match(submitter, /conversation\.send\(reviewFeedbackPrompt\('', \[item\]\)\)/)
@@ -58,7 +59,7 @@ test('allows pending review feedback to make the ordinary empty composer submiss
     source('../src/client/index.ts'),
     source('../../../upstream-contributions/0017-composer-submission-transforms.patch'),
   ])
-  assert.match(client, /emptySubmission: \(sessionId\) => \(\{[\s\S]*annotations\.feedback\(String\(sessionId\)\)\.length > 0/)
+  assert.match(client, /emptySubmission: \(sessionId\) => \(\{[\s\S]*assistantMessageFeedback\(annotations\.feedback\(String\(sessionId\)\)\)\.length > 0/)
   assert.match(seam, /emptySubmission\?: \(sessionId: SessionId\) => ObservableSnapshot<boolean>/)
   assert.match(seam, /emptySubmission\(sessionId: SessionId\): ObservableSnapshot<boolean>/)
   assert.match(seam, /const sendable = !empty \|\| emptySubmission/)

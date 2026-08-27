@@ -218,6 +218,11 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
     '# 九、参考文档',
   ]) assert.match(template, new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   for (const rule of ['最终只生成一份 PRD', '功能内容必须写清', 'PRD 只写最终业务结论']) assert.match(template, new RegExp(rule))
+  for (const rule of ['问题基线/规模', '目标值', '业务收益', '度量口径', '用户已确认', '标注“估算”', '不得猜测']) assert.match(skill + template, new RegExp(rule))
+  assert.match(template, /没有依据的数字、目标、成本或收益写 `\[待确认\]`/)
+  assert.match(skill, /主动核对“问题基线\/规模、目标值、业务收益、度量口径”四项/)
+  assert.match(skill, /最多提出 3 个最小业务确认问题/)
+  assert.match(template, /量化维度 \| 现状\/基线 \| 目标值 \| 业务收益 \| 度量口径/)
   for (const heading of ['现状', '调整方式', '调整后效果', '验收清单']) assert.match(template, new RegExp(heading))
   for (const category of ['正常情况', '异常情况', '边界情况', '权限情况', '兼容情况']) assert.match(template, new RegExp(category))
   assert.doesNotMatch(template, /AccrUI 需求交接附录|Evidence ID|Impact ID|测试 seam|验收合同/)

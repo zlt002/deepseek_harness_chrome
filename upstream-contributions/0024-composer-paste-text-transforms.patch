@@ -1,0 +1,193 @@
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+index 5060d309e3..e9d371ed5f 100644
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -25,6 +25,7 @@ import type { IConversation } from './service.ts'
+ import { ComposerBlockRegistry } from './input/blocks.ts'
+ import type { ComposerBlock } from './input/blocks.ts'
+ import { InputHub } from './input/hub.ts'
++import { ComposerPasteTextTransforms } from './input/paste-text-transforms.ts'
+ import { ComposerSubmissionTransforms } from './input/submission-transforms.ts'
+ import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
+ import { PermissionLabelRegistry } from './permission-labels.ts'
+@@ -193,6 +194,8 @@ export function apply(ctx: Context): void {
+   // ctx.conversation.input by the service below sharing this one instance).
+   const submissionTransforms = new ComposerSubmissionTransforms()
+   ctx.provide('composerSubmissionTransforms', submissionTransforms)
++  const pasteTextTransforms = new ComposerPasteTextTransforms()
++  ctx.provide('composerPasteTextTransforms', pasteTextTransforms)
+   const inputHub = new InputHub(ctx, t, submissionTransforms)
+ 
+   // The composer-block registry: a plugin that knows a session cannot send —
+@@ -328,6 +331,7 @@ export function apply(ctx: Context): void {
+           toggleCommandMenu: undefined,
+           stop: undefined,
+           command: undefined,
++          transformPastedText: (text) => text,
+           hooks: {
+             notices: ABSENT_NOTICES,
+             emptySubmission: { getSnapshot: () => false, subscribe: () => () => {} },
+@@ -397,6 +401,7 @@ export function apply(ctx: Context): void {
+           const result = await session.command(line)
+           return result.ok && result.value.matched
+         },
++        transformPastedText: (text) => pasteTextTransforms.transform(text),
+         hooks: {
+           notices: shell.notices,
+           emptySubmission: submissionTransforms.emptySubmission(sessionId),
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+index dea75e3ca7..c826a02959 100644
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -571,6 +571,8 @@ export interface ComposerBarInjected {
+    * Resolves admission: false = rejected/unmatched/transport failure.
+    */
+   command: ((line: string) => Promise<boolean>) | undefined
++  /** Apply registered product-neutral transforms before plain clipboard text enters the draft machine. */
++  transformPastedText?: (text: string) => string
+   /**
+    * Registrant hooks compartment: the renderer binds these to
+    * useNotices/useLexicon (static absent sources without a session — hook
+diff --git a/packages/client/ui-conversation/src/client/index.ts b/packages/client/ui-conversation/src/client/index.ts
+index 039b6e0e28..d1694cc695 100644
+--- a/packages/client/ui-conversation/src/client/index.ts
++++ b/packages/client/ui-conversation/src/client/index.ts
+@@ -18,6 +18,10 @@ export { apply, inject } from './apply.ts'
+ export { ConversationController } from './service.ts'
+ export type { IConversation } from './service.ts'
+ export type { DraftAttachmentId } from './input/contract.ts'
++export {
++  ComposerPasteTextTransforms,
++  type ComposerPasteTextTransform,
++} from './input/paste-text-transforms.ts'
+ export {
+   ComposerSubmissionTransforms,
+   type ComposerSubmissionPreparation,
+@@ -56,6 +60,8 @@ declare module '@deepseek-ai/cordis' {
+     composerFileIntake?: import('./contract/slots.ts').ComposerFileIntake
+     /** Product-neutral prompt enrichments committed only after successful delivery. */
+     composerSubmissionTransforms: import('./input/submission-transforms.ts').ComposerSubmissionTransforms
++    /** Product-neutral text-only transforms performed before the composer accepts a paste. */
++    composerPasteTextTransforms: import('./input/paste-text-transforms.ts').ComposerPasteTextTransforms
+     /** Product-neutral presentation labels for the resident permission control. */
+     permissionLabels: import('./permission-labels.ts').PermissionLabelRegistry
+   }
+diff --git a/packages/client/ui-conversation/src/client/input/paste-text-transforms.ts b/packages/client/ui-conversation/src/client/input/paste-text-transforms.ts
+new file mode 100644
+index 0000000000..0b141fa37a
+--- /dev/null
++++ b/packages/client/ui-conversation/src/client/input/paste-text-transforms.ts
+@@ -0,0 +1,31 @@
++/** One product-neutral transformation performed before text enters the composer machine. */
++export interface ComposerPasteTextTransform {
++  /** Stable registry key; duplicate keys are rejected. */
++  readonly id: string
++  /** Return the plain text that the composer should paste. */
++  transform(text: string): string
++}
++
++/** Ordered registry for independent text-only composer paste transformations. */
++export class ComposerPasteTextTransforms {
++  private readonly transforms = new Map<string, ComposerPasteTextTransform>()
++
++  register(transform: ComposerPasteTextTransform): () => void {
++    if (this.transforms.has(transform.id)) {
++      throw new Error(`composer paste text transform already registered: ${transform.id}`)
++    }
++    this.transforms.set(transform.id, transform)
++    let active = true
++    return () => {
++      if (!active) return
++      active = false
++      this.transforms.delete(transform.id)
++    }
++  }
++
++  transform(text: string): string {
++    let current = text
++    for (const transform of this.transforms.values()) current = transform.transform(current)
++    return current
++  }
++}
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+index c60bdc3a0c..5fefd82d41 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.tsx
+@@ -45,7 +45,7 @@ export type InputBarProps = ComposerBarProps
+ 
+ export function InputBar({
+   useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages,
+-  resolveSubmitMode, toggleCommandMenu, stop, command, t,
++  resolveSubmitMode, toggleCommandMenu, stop, command, transformPastedText = (text: string) => text, t,
+   renderSlot, useNotices, useEmptySubmission, useLexicon, useMenuLauncher, permissionLabels,
+   useProjection, sessionId, variant, disabled: inert = false, blocked,
+   workspacePickerOpen = false, onRequestWorkspace,
+@@ -400,7 +400,7 @@ export function InputBar({
+       .map(item => item.getAsFile())
+       .filter((file): file is File => file !== null)
+     if (files.length > 0) intakeImages(files)
+-    const text = e.clipboardData.getData('text/plain')
++    const text = transformPastedText(e.clipboardData.getData('text/plain'))
+     if (text === '') {
+       if (files.length > 0) e.preventDefault()
+       return
+diff --git a/packages/client/ui-conversation/tests/input-bar.client.spec.tsx b/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
+index 38c14d6677..12362c2cb7 100644
+--- a/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/input-bar.client.spec.tsx
+@@ -83,6 +83,7 @@ interface BenchOptions {
+   placeholder?: string
+   t?: InputBarProps['t']
+   command?: (line: string) => Promise<boolean>
++  transformPastedText?: (text: string) => string
+   accessory?: React.ReactNode
+   overlay?: React.ReactNode
+   leftItems?: React.ReactNode
+@@ -182,6 +183,7 @@ function bench(over?: BenchOptions) {
+     useMenuLauncher: bindSnapshotSelector(menuLauncher),
+     stop,
+     command: over?.command ?? (() => Promise.resolve(true)),
++    transformPastedText: over?.transformPastedText ?? (text => text),
+     // Mirrors the real lookup chain (conversation namespace, then common).
+     t: over?.t ?? makeTranslate(zh, commonZh),
+     renderSlot,
+@@ -210,6 +212,14 @@ function bench(over?: BenchOptions) {
+ }
+ 
+ describe('image draft rail', () => {
++  it('passes pasted plain text through the injected composer transform before the machine accepts it', () => {
++    const transformPastedText = vi.fn((text: string) => text.replace('%E4%B8%AD%E6%96%87', '中文'))
++    const { textarea, shell } = bench({ transformPastedText })
++    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'file:///D:/%E4%B8%AD%E6%96%87.html' } })
++    expect(transformPastedText).toHaveBeenCalledWith('file:///D:/%E4%B8%AD%E6%96%87.html')
++    expect(shell.snapshot.draft).toBe('file:///D:/中文.html')
++  })
++
+   it('collects clipboard files while preserving text from a mixed paste', () => {
+     const addImages = vi.fn(() => null)
+     const { textarea, shell } = bench({ addImages })
+diff --git a/packages/client/ui-conversation/tests/paste-text-transforms.client.spec.ts b/packages/client/ui-conversation/tests/paste-text-transforms.client.spec.ts
+new file mode 100644
+index 0000000000..15c33da54b
+--- /dev/null
++++ b/packages/client/ui-conversation/tests/paste-text-transforms.client.spec.ts
+@@ -0,0 +1,19 @@
++import { describe, expect, it } from 'vitest'
++import { ComposerPasteTextTransforms } from '../src/client/input/paste-text-transforms.ts'
++
++describe('ComposerPasteTextTransforms', () => {
++  it('composes transforms in registration order', () => {
++    const transforms = new ComposerPasteTextTransforms()
++    transforms.register({ id: 'first', transform: text => `${text} A` })
++    transforms.register({ id: 'second', transform: text => `${text} B` })
++    expect(transforms.transform('paste')).toBe('paste A B')
++  })
++
++  it('rejects duplicate transform identities and removes disposed transforms', () => {
++    const transforms = new ComposerPasteTextTransforms()
++    const stop = transforms.register({ id: 'same', transform: text => `${text}!` })
++    expect(() => transforms.register({ id: 'same', transform: text => text })).toThrow('same')
++    stop()
++    expect(transforms.transform('paste')).toBe('paste')
++  })
++})

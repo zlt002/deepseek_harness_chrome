@@ -57,9 +57,10 @@ test('Markdown feedback rejects invalid ranges and bounded visual block data wit
 })
 
 test('side panel returns the bounded Harness delivery error instead of replacing it', async () => {
-  const [shell, review, timeouts] = await Promise.all([
+  const [shell, review, workspaceReview, timeouts] = await Promise.all([
     readFile(new URL('./main.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../markdown-review/main.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../../../packages/harness-ui-workspace-review/src/client/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../markdown-review/delivery-timeouts.ts', import.meta.url), 'utf8'),
   ])
   assert.match(shell, /value\.type === 'markdown-review-feedback-accepted\/v1'/)
@@ -68,4 +69,8 @@ test('side panel returns the bounded Harness delivery error instead of replacing
   assert.match(review, /MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS/)
   assert.match(timeouts, /MARKDOWN_AI_ACK_TIMEOUT_MS = 15_000/)
   assert.match(timeouts, /MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS = 20_000/)
+  assert.match(shell, /workspaceReviewBridgeReadyRef/)
+  assert.match(shell, /forwardPendingMarkdownReviewFeedback/)
+  assert.match(shell, /value\.type === 'workspace-review-bridge-ready\/v1'[\s\S]*forwardPendingMarkdownReviewFeedback\(\)/)
+  assert.match(workspaceReview, /type: 'workspace-review-bridge-ready\/v1'/)
 })

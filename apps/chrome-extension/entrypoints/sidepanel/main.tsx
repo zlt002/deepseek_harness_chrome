@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom/client'
 import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessHandoffTabFromLocation, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from './harness-frame'
 import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
 import { MARKDOWN_AI_ACK_TIMEOUT_MS } from '../markdown-review/delivery-timeouts'
-import { validateWorkspaceMarkdownFeedback } from './markdown-feedback-validator'
+import { validateWorkspaceMarkdownFeedback, type WorkspaceMarkdownFeedback } from './markdown-feedback-validator'
 import './style.css'
 
 type HarnessStatus = 'starting' | 'ready' | 'error'
@@ -59,6 +59,7 @@ type BrowserTargetCommand =
   | { command: 'capture-design-reference'; tabId: number; sessionId?: string }
   | { command: 'capture-responsive-design-reference'; tabId: number; sessionId?: string }
   | { command: 'capture-design-references'; tabIds: number[]; sessionId?: string }
+  | { command: 'html-workbench-select'; tabId: number; sessionId?: string }
 
 function isActiveTab(value: unknown): value is ActiveTab {
   return typeof value === 'object' && value !== null
@@ -77,6 +78,7 @@ function isBrowserTargetCommand(value: unknown): value is BrowserTargetCommand {
   if (command.command === 'toggle-pinned-tab') return Number.isInteger(command.tabId) && typeof command.checked === 'boolean'
   if (command.command === 'capture-design-reference' || command.command === 'capture-responsive-design-reference') return Number.isInteger(command.tabId) && (command.sessionId === undefined || boundedString(command.sessionId, 160))
   if (command.command === 'capture-design-references') return Array.isArray(command.tabIds) && command.tabIds.length >= 2 && command.tabIds.length <= 3 && command.tabIds.every(Number.isInteger) && new Set(command.tabIds).size === command.tabIds.length && (command.sessionId === undefined || boundedString(command.sessionId, 160))
+  if (command.command === 'html-workbench-select') return Number.isInteger(command.tabId) && (command.sessionId === undefined || boundedString(command.sessionId, 160))
   return command.command === 'set-primary' && Number.isInteger(command.tabId)
 }
 
@@ -353,6 +355,7 @@ function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<{ epoch: string; sequence: number; tab: ActiveTab }>()
   const frameRef = useRef<HTMLIFrameElement>(null)
   const frameReadyRef = useRef(false)
+  const workspaceReviewBridgeReadyRef = useRef(false)
   const bridgeSequenceRef = useRef(0)
   const targetSettingsRef = useRef(targetSettings)
   const availableTabsRef = useRef(availableTabs)
@@ -369,7 +372,7 @@ function App(): React.JSX.Element {
   const accountLoginTimerRef = useRef<number | undefined>(undefined)
   const searchProgressSequenceRef = useRef(0)
   const reviewRehydrateRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
-  const reviewFeedbackRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
+  const reviewFeedbackRef = useRef(new Map<string, { feedback: WorkspaceMarkdownFeedback; sendResponse: (response?: unknown) => void; timeout: number }>())
   const prototypePromptRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
@@ -386,7 +389,7 @@ function App(): React.JSX.Element {
   const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, ...(activeHarnessSessionId === undefined ? {} : { sessionId: activeHarnessSessionId }) }), [activeHarnessSessionId, frameNonce, surface, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
 
-  useEffect(() => { frameReadyRef.current = false }, [frameNonce])
+  useEffect(() => { frameReadyRef.current = false; workspaceReviewBridgeReadyRef.current = false }, [frameNonce])
 
   useEffect(() => {
     if (surface !== 'sidepanel') return
@@ -448,6 +451,14 @@ function App(): React.JSX.Element {
     })
   }, [frameNonce, frameOrigin])
 
+  const forwardPendingMarkdownReviewFeedback = useCallback(() => {
+    const target = frameRef.current?.contentWindow
+    if (!workspaceReviewBridgeReadyRef.current || frameOrigin === undefined || target === null || target === undefined) return
+    for (const pending of reviewFeedbackRef.current.values()) {
+      target.postMessage({ type: 'markdown-review-feedback/v1', nonce: frameNonce, feedback: pending.feedback }, frameOrigin)
+    }
+  }, [frameNonce, frameOrigin])
+
   useEffect(() => {
     const accept = (epoch: unknown, sequence: unknown, tab: unknown): void => {
       if (typeof epoch !== 'string' || epoch.length === 0 || typeof sequence !== 'number' || !Number.isInteger(sequence) || !isActiveTab(tab)) return
@@ -476,10 +487,19 @@ function App(): React.JSX.Element {
         target.postMessage({ type: 'prototype-studio-prompt/v1', nonce: frameNonce, deliveryId, payload: value.payload }, frameOrigin)
         return true
       }
+      if (value.type === 'html-workbench-prompt-forward/v1') {
+        const payload = value.payload as { sessionId?: unknown; pageUrl?: unknown; anchors?: unknown[] } | undefined
+        const target = frameRef.current?.contentWindow
+        if (!payload || !boundedString(payload.sessionId, 160) || !boundedString(payload.pageUrl, 4096) || !payload.pageUrl.startsWith('file:') || !Array.isArray(payload.anchors) || payload.anchors.length < 1 || payload.anchors.length > 12 || frameOrigin === undefined || target === null || target === undefined) { sendResponse({ ok: false, error: 'Harness 对话未准备好接收 HTML 页面选择。' }); return false }
+        const deliveryId = crypto.randomUUID(); const timeout = window.setTimeout(() => { const pending = prototypePromptRef.current.get(deliveryId); if (pending === undefined) return; prototypePromptRef.current.delete(deliveryId); pending.sendResponse({ ok: false, error: 'HTML 页面选择发送至 Harness 超时。' }) }, 5_000)
+        prototypePromptRef.current.set(deliveryId, { sendResponse, timeout })
+        target.postMessage({ type: 'html-workbench-prompt/v1', nonce: frameNonce, deliveryId, payload }, frameOrigin)
+        return true
+      }
       if (value.type === 'markdown-review-rehydrate-forward/v1') {
         const target = frameRef.current?.contentWindow
         if (!boundedString(value.requestId, 160) || !isMarkdownReviewIdentity(value.review) || frameOrigin === undefined || target === null || target === undefined) {
-          sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' })
+          sendResponse({ ok: false, error: '侧边栏未打开或尚未准备好。请打开侧边栏后重试。' })
           return false
         }
         const requestId = value.requestId
@@ -496,7 +516,7 @@ function App(): React.JSX.Element {
       if (value.type === 'markdown-review-feedback-forward/v1') {
         const target = frameRef.current?.contentWindow
         if (frameOrigin === undefined || target === null || target === undefined) {
-          sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' })
+          sendResponse({ ok: false, error: '侧边栏未打开或尚未准备好。请打开侧边栏后重新发送。' })
           return false
         }
         const validation = validateWorkspaceMarkdownFeedback(value.feedback)
@@ -511,8 +531,8 @@ function App(): React.JSX.Element {
           reviewFeedbackRef.current.delete(deliveryId)
           pending.sendResponse({ ok: false, error: 'Harness 未在 15 秒内确认 AI 请求；可以重试，同一批注不会重复发送。' })
         }, MARKDOWN_AI_ACK_TIMEOUT_MS)
-        reviewFeedbackRef.current.set(deliveryId, { sendResponse, timeout })
-        target.postMessage({ type: 'markdown-review-feedback/v1', nonce: frameNonce, feedback: validation.feedback }, frameOrigin)
+        reviewFeedbackRef.current.set(deliveryId, { feedback: validation.feedback, sendResponse, timeout })
+        forwardPendingMarkdownReviewFeedback()
         return true
       }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
@@ -534,7 +554,7 @@ function App(): React.JSX.Element {
     }
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)
-  }, [connect, frameNonce, frameOrigin])
+  }, [connect, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin])
 
   const projectBrowserTargetSnapshot = useCallback((capturingTabId: number | undefined) => {
     if (frameOrigin === undefined || !frameReadyRef.current) return
@@ -575,6 +595,12 @@ function App(): React.JSX.Element {
     const tab = availableTabsRef.current.find((item) => item.tabId === command.tabId)
       ?? (command.command === 'toggle-pinned-tab' && !command.checked ? settings.pinnedTabs.find((item) => item.tabId === command.tabId) : undefined)
     if (tab === undefined) { setTargetError('The selected Chrome tab is no longer available.'); return }
+    if (command.command === 'html-workbench-select') {
+      if (!tab.url.startsWith('file:')) { setTargetError('HTML 工作台只支持本地 file:// HTML Browser Target。'); return }
+      const response = await chrome.runtime.sendMessage({ type: 'html-workbench-select/v1', tabId: tab.tabId, sessionId: command.sessionId ?? activeHarnessSessionId }) as { ok?: unknown; error?: unknown }
+      if (response?.ok !== true) setTargetError(typeof response?.error === 'string' ? response.error : '无法启用 HTML 元素选择。请确认扩展详情中已开启“允许访问文件网址”。')
+      return
+    }
     if (command.command === 'capture-design-reference') {
       if (command.sessionId === undefined) { setTargetError('请先打开一个 Harness 对话，再采集参考网页。'); return }
       setTargetError(undefined)
@@ -720,7 +746,7 @@ function App(): React.JSX.Element {
   useLayoutEffect(() => {
     const onFrameMessage = (event: MessageEvent<unknown>): void => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
-      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; apiKey?: unknown; protocol?: unknown }
+      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; targetSessionId?: unknown; targetSessionTitle?: unknown; status?: unknown; apiKey?: unknown; protocol?: unknown }
       if (value.nonce !== frameNonce) return
       if (value.type === 'prototype-studio-prompt-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = prototypePromptRef.current.get(value.deliveryId)
@@ -729,14 +755,26 @@ function App(): React.JSX.Element {
         pending.sendResponse(value.accepted === true ? { ok: true } : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness rejected the prototype request.' })
         return
       }
+      if (value.type === 'html-workbench-prompt-accepted/v1' && boundedString(value.deliveryId, 160)) {
+        const pending = prototypePromptRef.current.get(value.deliveryId)
+        if (pending === undefined) return
+        prototypePromptRef.current.delete(value.deliveryId); window.clearTimeout(pending.timeout)
+        pending.sendResponse(value.accepted === true ? { ok: true } : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness 未接受 HTML 页面选择。' })
+        return
+      }
       if (value.type === 'markdown-review-feedback-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = reviewFeedbackRef.current.get(value.deliveryId)
         if (pending === undefined) return
         reviewFeedbackRef.current.delete(value.deliveryId)
         window.clearTimeout(pending.timeout)
-        pending.sendResponse(value.accepted === true
-          ? { ok: true }
+        pending.sendResponse(value.accepted === true && boundedString(value.targetSessionId, 160) && boundedString(value.targetSessionTitle, 2_048) && (value.status === 'queued' || value.status === 'processing')
+          ? { ok: true, targetSessionId: value.targetSessionId, targetSessionTitle: value.targetSessionTitle, status: value.status }
           : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness rejected the Markdown annotation.' })
+        return
+      }
+      if (value.type === 'workspace-review-bridge-ready/v1') {
+        workspaceReviewBridgeReadyRef.current = true
+        forwardPendingMarkdownReviewFeedback()
         return
       }
       if (value.type === 'markdown-review-rehydrate-response/v1' && boundedString(value.requestId, 160)) {
@@ -823,7 +861,7 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, loadRecentPrototypes, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
+  }, [activeHarnessSessionId, connect, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, loadRecentPrototypes, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (

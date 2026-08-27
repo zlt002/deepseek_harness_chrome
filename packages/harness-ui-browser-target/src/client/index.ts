@@ -62,7 +62,7 @@ export function apply(ctx: ClientContext): void {
   const injected = (): BrowserTargetInjected => ({
     hooks: { browserTarget: bridge.source, browserTargetPanel: panel },
     onBrowserTargetCommand: command => {
-      if (command.command !== 'capture-design-reference' && command.command !== 'capture-responsive-design-reference' && command.command !== 'capture-design-references') { bridge.send(command, window.parent); return }
+      if (command.command !== 'capture-design-reference' && command.command !== 'capture-responsive-design-reference' && command.command !== 'capture-design-references' && command.command !== 'html-workbench-select') { bridge.send(command, window.parent); return }
       const sessionId = ctx.sessions.list.getSnapshot().current
       bridge.send({ ...command, ...(sessionId === undefined ? {} : { sessionId: String(sessionId) }) }, window.parent)
     },

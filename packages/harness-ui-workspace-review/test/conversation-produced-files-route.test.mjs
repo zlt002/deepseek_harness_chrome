@@ -37,11 +37,12 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
     url: 'http://127.0.0.1:3101/?dshWorkspaceReviewNonce=nonce&dshWorkspaceReviewParentOrigin=chrome-extension%3A%2F%2Faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   })
   const posted = []
+  const reviewOpenPosts = () => posted.filter(([message]) => message.type === 'markdown-review-open/v1')
   const waitForPosts = async count => {
-    for (let attempt = 0; attempt < 10 && posted.length < count; attempt += 1) {
+    for (let attempt = 0; attempt < 10 && reviewOpenPosts().length < count; attempt += 1) {
       await new Promise(resolve => setImmediate(resolve))
     }
-    assert.equal(posted.length, count, `expected ${count} review-open event(s)`)
+    assert.equal(reviewOpenPosts().length, count, `expected ${count} review-open event(s)`)
   }
   const globals = new Map(['window', 'document', 'navigator', 'HTMLElement', 'Event', 'fetch', 'getComputedStyle']
     .map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]))
@@ -117,7 +118,7 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
 
     assert.deepEqual(hostOpen, [], 'Markdown must not fall through to the system opener')
     assert.equal(requests.length, 2, 'both the closing prose link and produced-file chip must request Review')
-    assert.deepEqual(posted[0], [{
+    assert.deepEqual(reviewOpenPosts()[0], [{
       type: 'markdown-review-open/v1', nonce: 'nonce', review: {
         v: 1, reviewId: 'review-1', harnessSessionId: 'session-1', capability: 'capability-1',
         resourceId: 'resource-1', displayPath: 'pmd-workspace/spec/process.md', revision: 'r1', fingerprint: 'f1',

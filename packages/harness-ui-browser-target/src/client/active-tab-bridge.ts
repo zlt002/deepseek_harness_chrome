@@ -44,6 +44,7 @@ export type BrowserTargetCommand =
   | { command: 'capture-design-reference'; tabId: number; sessionId?: string }
   | { command: 'capture-responsive-design-reference'; tabId: number; sessionId?: string }
   | { command: 'capture-design-references'; tabIds: number[]; sessionId?: string }
+  | { command: 'html-workbench-select'; tabId: number; sessionId?: string }
 
 interface BrowserTargetSnapshotMessage extends BrowserTargetSnapshot {
   type: 'browser-target-snapshot/v1'
