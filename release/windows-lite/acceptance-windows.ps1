@@ -30,6 +30,29 @@ function Read-Version([string]$Root) {
   return (Get-Content -LiteralPath (Join-Path $Root 'extension\manifest.json') -Raw | ConvertFrom-Json).version
 }
 
+function Assert-ExtensionResources([string]$Root) {
+  $extensionRoot = Join-Path $Root 'extension'
+  $manifestPath = Join-Path $extensionRoot 'manifest.json'
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  $resources = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  if ($null -ne $manifest.background -and -not [string]::IsNullOrWhiteSpace($manifest.background.service_worker)) { [void]$resources.Add($manifest.background.service_worker) }
+  if ($null -ne $manifest.side_panel -and -not [string]::IsNullOrWhiteSpace($manifest.side_panel.default_path)) { [void]$resources.Add($manifest.side_panel.default_path) }
+  foreach ($contentScript in @($manifest.content_scripts)) {
+    foreach ($resource in @($contentScript.js) + @($contentScript.css)) {
+      if (-not [string]::IsNullOrWhiteSpace($resource)) { [void]$resources.Add($resource) }
+    }
+  }
+  foreach ($webResource in @($manifest.web_accessible_resources)) {
+    foreach ($resource in @($webResource.resources)) {
+      if (-not [string]::IsNullOrWhiteSpace($resource)) { [void]$resources.Add($resource) }
+    }
+  }
+  foreach ($resource in @($resources)) {
+    $resourcePath = Join-Path $extensionRoot $resource
+    if (-not (Test-Path -LiteralPath $resourcePath -PathType Leaf)) { throw "Installed extension resource is missing: $resourcePath" }
+  }
+}
+
 function Assert-Equal($Actual, $Expected, [string]$Message) {
   if ($Actual -ne $Expected) { throw "$Message Expected=$Expected Actual=$Actual" }
 }
@@ -266,6 +289,7 @@ try {
   if (-not (Test-Path -LiteralPath $respawnSupervisor.SuspendedPath -PathType Leaf)) { throw 'Installer never suspended Native Messaging registration during upgrade.' }
   Write-Host 'Browser-style Native Host respawn stopped after registration was suspended.'
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Upgrade did not install the candidate.'
+  Assert-ExtensionResources $installRoot
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) '1.1.62' 'Previous version was not retained for rollback.'
   foreach ($relativePath in @('workspace\user.txt', 'logs\user.txt', '.webmcp\user.txt')) {
     Assert-Equal (Get-Content -LiteralPath (Join-Path $installRoot $relativePath) -Raw) 'preserve-me' "User data was not preserved: $relativePath"
@@ -307,12 +331,14 @@ try {
   $manager = Join-Path $installRoot 'manage-install.ps1'
   & $manager -Rollback
   Assert-Equal (Read-Version $installRoot) '1.1.62' 'Rollback did not restore the previous version.'
+  Assert-ExtensionResources $installRoot
   Assert-Equal (Read-Version (Join-Path $installRoot 'rollback')) $ExpectedVersion 'Rollback did not retain the candidate for recovery.'
   Assert-Equal (Get-ItemPropertyValue -Path $productKey -Name Version) '1.1.62' 'Product registry version is stale after rollback.'
   Invoke-NativeMessageSmoke
 
   & $manager -Rollback
   Assert-Equal (Read-Version $installRoot) $ExpectedVersion 'Second rollback did not restore the candidate.'
+  Assert-ExtensionResources $installRoot
   Assert-Equal (Get-ItemPropertyValue -Path $productKey -Name Version) $ExpectedVersion 'Product registry version is stale after restoring the candidate.'
   Invoke-ProductUiSmoke
   Write-Host 'Windows install, Native Messaging, upgrade, rollback, and restore acceptance passed.'

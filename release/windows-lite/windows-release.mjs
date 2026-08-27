@@ -345,6 +345,23 @@ function readZipUtf16Le(zipPath, entry) {
   return content.subarray(content[0] === 0xff && content[1] === 0xfe ? 2 : 0).toString('utf16le')
 }
 
+function manifestExtensionResourceEntries(manifest) {
+  const entries = new Set()
+  if (typeof manifest?.background?.service_worker === 'string') entries.add(manifest.background.service_worker)
+  if (typeof manifest?.side_panel?.default_path === 'string') entries.add(manifest.side_panel.default_path)
+  for (const contentScript of manifest?.content_scripts ?? []) {
+    for (const resource of [...(contentScript?.js ?? []), ...(contentScript?.css ?? [])]) {
+      if (typeof resource === 'string') entries.add(resource)
+    }
+  }
+  for (const webResource of manifest?.web_accessible_resources ?? []) {
+    for (const resource of webResource?.resources ?? []) {
+      if (typeof resource === 'string') entries.add(resource)
+    }
+  }
+  return [...entries].map((resource) => `extension/${resource.replaceAll('\\', '/')}`)
+}
+
 export async function validateWindowsRelease({ packageDir, zipPath = path.join(path.dirname(packageDir), `${path.basename(packageDir)}.zip`) }) {
   const errors = []
   const requiredTopLevel = ['install.ps1', 'install-ui.ps1', 'install.vbs', 'payload.zip', 'README.zh-CN.md']
@@ -390,6 +407,9 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       assertAccrUiReplacementVersion(manifest.version)
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error))
+    }
+    for (const resourceEntry of manifestExtensionResourceEntries(manifest)) {
+      if (!payloadEntries.includes(resourceEntry)) errors.push(`payload.zip is missing manifest-declared extension resource ${resourceEntry}`)
     }
   }
   if (payloadEntries.includes(registerNativeHostEntry)) {

@@ -160,7 +160,17 @@ async function createFixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'harness-windows-release-'))
   const extensionDir = path.join(root, 'extension')
   const harnessRuntimeDir = path.join(root, 'harness-runtime')
-  await writeFixture(extensionDir, 'manifest.json', JSON.stringify({ manifest_version: 3, name: 'fixture', version: '0.1.0' }))
+  await writeFixture(extensionDir, 'manifest.json', JSON.stringify({
+    manifest_version: 3,
+    name: 'fixture',
+    version: '0.1.0',
+    background: { service_worker: 'background.js' },
+    side_panel: { default_path: 'sidepanel.html' },
+    content_scripts: [{ matches: ['https://example.test/*'], js: ['content-scripts/office-read.js'] }],
+  }))
+  await writeFixture(extensionDir, 'background.js', 'console.log("background")\n')
+  await writeFixture(extensionDir, 'sidepanel.html', '<!doctype html>')
+  await writeFixture(extensionDir, 'content-scripts/office-read.js', 'console.log("office read")\n')
   await writeFixture(harnessRuntimeDir, HARNESS_RUNTIME_MARKER, JSON.stringify({
     format: 'deepseek-harness-windows-static-web-v1',
     platform: 'win32',
@@ -231,6 +241,9 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.ok(payloadEntries.includes('runtime/skills/docx/SKILL.md'))
   assert.ok(payloadEntries.includes('runtime/skills/pdf/SKILL.md'))
   assert.ok(payloadEntries.includes('runtime/native-server/product-office-skills.mjs'))
+  for (const extensionResource of ['extension/background.js', 'extension/sidepanel.html', 'extension/content-scripts/office-read.js']) {
+    assert.ok(payloadEntries.includes(extensionResource), `payload must retain manifest-declared extension resource: ${extensionResource}`)
+  }
   assert.equal(payloadEntries.some((entry) => /(^|\/)node_modules\//.test(entry)), false)
   assert.match(launcher, /DSH_ROOT=%PACKAGE_DIR%harness/)
   assert.match(launcher, /DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server\.mjs/)
@@ -289,6 +302,17 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.doesNotMatch(installUi, /请不要选择 C 盘|包含中文的安装路径/)
   const validation = await validateWindowsRelease({ packageDir: result.packageDir, zipPath: result.zipPath })
   assert.deepEqual(validation, { valid: true, errors: [], extensionId: ACCR_UI_EXTENSION_ID, version: '1.1.63' })
+})
+
+test('release validation rejects a payload whose manifest still references a deleted extension resource', async () => {
+  const fixture = await createFixture()
+  const result = await buildWindowsRelease({ ...fixture, releaseDir: path.join(fixture.root, 'release'), version: '1.1.83' })
+  const payloadZip = path.join(result.packageDir, 'payload.zip')
+  execFileSync('zip', ['-d', payloadZip, 'extension/content-scripts/office-read.js'], { stdio: 'pipe' })
+
+  const validation = await validateWindowsRelease({ packageDir: result.packageDir, zipPath: result.zipPath })
+  assert.equal(validation.valid, false)
+  assert.ok(validation.errors.includes('payload.zip is missing manifest-declared extension resource extension/content-scripts/office-read.js'))
 })
 
 test('the in-place updater start script re-registers both native-host names through one Node-gated script', async () => {
@@ -371,6 +395,11 @@ test('the in-place updater start script re-registers both native-host names thro
   assert.match(extensionInstall, /\$sourceDirectory = Get-Item -LiteralPath \$Source/)
   assert.match(extensionInstall, /\$manifestFile = Get-Item -LiteralPath \$manifestPath/)
   assert.match(extensionInstall, /\$destinationDirectory = Get-Item -LiteralPath \$Destination/)
+  assert.match(extensionInstall, /\.TrimEnd\('\\'\) \+ '\\'/)
+  assert.doesNotMatch(extensionInstall, /\.TrimEnd\('\\\\'\) \+ '\\\\'/)
+  assert.match(installer, /function Get-ManifestExtensionResourcePaths/)
+  assert.match(installer, /Get-ManifestExtensionResourcePaths \$manifest/)
+  assert.match(installer, /扩展清单引用的资源缺失/)
   assert.match(extensionInstall, /if \(\$relativePath -ieq 'manifest\.json'\) \{ continue \}/)
   assert.doesNotMatch(extensionInstall, /Where-Object \{ \$_\.FullName -eq \$manifestPath \}/)
   assert.ok(extensionInstall.indexOf("Copy-ExtensionFileAtomically $manifestFile (Join-Path $Destination 'manifest.json')") < extensionInstall.indexOf('foreach ($file in @(Get-ChildItem -LiteralPath $destinationDirectory.FullName -Recurse -File))'), 'manifest.json must commit before stale-file removal')
@@ -579,6 +608,9 @@ test('Windows Native Messaging acceptance preserves cmd launcher quoting and fai
   const acceptanceSource = await readFile(new URL('../release/windows-lite/acceptance-windows.ps1', import.meta.url), 'utf8')
   assert.match(smokeSource, /windowsVerbatimArguments:\s*true/)
   assert.match(acceptanceSource, /function Invoke-NativeMessageSmoke/)
+  assert.match(acceptanceSource, /function Assert-ExtensionResources/)
+  assert.match(acceptanceSource, /Installed extension resource is missing/)
+  assert.equal((acceptanceSource.match(/Assert-ExtensionResources \$installRoot/g) ?? []).length, 3)
   assert.match(acceptanceSource, /cscript\.exe \/\/NoLogo \$installLauncher/)
   assert.match(acceptanceSource, /DSH_INSTALL_NONINTERACTIVE = '1'/)
   assert.match(acceptanceSource, /function Invoke-InstallerUiSmoke/)

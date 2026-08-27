@@ -95,6 +95,27 @@ trap {
   exit 1
 }
 
+function Get-ManifestExtensionResourcePaths([object]$Manifest) {
+  $paths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  if ($null -ne $Manifest.background -and -not [string]::IsNullOrWhiteSpace($Manifest.background.service_worker)) {
+    [void]$paths.Add($Manifest.background.service_worker)
+  }
+  if ($null -ne $Manifest.side_panel -and -not [string]::IsNullOrWhiteSpace($Manifest.side_panel.default_path)) {
+    [void]$paths.Add($Manifest.side_panel.default_path)
+  }
+  foreach ($contentScript in @($Manifest.content_scripts)) {
+    foreach ($path in @($contentScript.js) + @($contentScript.css)) {
+      if (-not [string]::IsNullOrWhiteSpace($path)) { [void]$paths.Add($path) }
+    }
+  }
+  foreach ($webResource in @($Manifest.web_accessible_resources)) {
+    foreach ($path in @($webResource.resources)) {
+      if (-not [string]::IsNullOrWhiteSpace($path)) { [void]$paths.Add($path) }
+    }
+  }
+  return @($paths)
+}
+
 function Assert-ReleaseTree([string]$Root) {
   $extensionManifest = Join-Path $Root 'extension\manifest.json'
   $cli = Join-Path $Root 'runtime\harness\apps\cli\lib\server.mjs'
@@ -102,7 +123,12 @@ function Assert-ReleaseTree([string]$Root) {
   if (-not (Test-Path -LiteralPath $extensionManifest -PathType Leaf)) { throw "安装内容不完整：缺少 $extensionManifest" }
   if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "安装内容不完整：缺少 $cli" }
   if (-not (Test-Path -LiteralPath $registerScript -PathType Leaf)) { throw "安装内容不完整：缺少 $registerScript" }
-  return (Get-Content -LiteralPath $extensionManifest -Raw | ConvertFrom-Json)
+  $manifest = Get-Content -LiteralPath $extensionManifest -Raw | ConvertFrom-Json
+  foreach ($relativePath in @(Get-ManifestExtensionResourcePaths $manifest)) {
+    $resourcePath = Join-Path $Root ('extension\' + $relativePath)
+    if (-not (Test-Path -LiteralPath $resourcePath -PathType Leaf)) { throw "安装内容不完整：扩展清单引用的资源缺失 $resourcePath" }
+  }
+  return $manifest
 }
 
 function Get-InstalledProductProcesses([string]$Root) {
@@ -232,8 +258,8 @@ function Install-ExtensionTree([string]$Source, [string]$Destination) {
   $manifestFile = Get-Item -LiteralPath $manifestPath
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
   $destinationDirectory = Get-Item -LiteralPath $Destination
-  $sourcePrefix = $sourceDirectory.FullName.TrimEnd('\\') + '\\'
-  $destinationPrefix = $destinationDirectory.FullName.TrimEnd('\\') + '\\'
+  $sourcePrefix = $sourceDirectory.FullName.TrimEnd('\') + '\'
+  $destinationPrefix = $destinationDirectory.FullName.TrimEnd('\') + '\'
   $sourceFiles = @(Get-ChildItem -LiteralPath $sourceDirectory.FullName -Recurse -File | Sort-Object FullName)
   $expected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
   foreach ($file in $sourceFiles) {
