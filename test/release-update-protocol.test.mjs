@@ -19,13 +19,14 @@ test('Side Panel update command reaches Native Host and returns the verified rel
   })
   const nativeMessages = []
   host.send = message => nativeMessages.push(message)
+  let hostHandling
   const parent = { postMessage: message => {
     if (message.type !== 'release-update-command/v1') return
-    void host.handle({ type: 'release-update-check', requestId: message.requestId })
+    hostHandling = host.handle({ type: 'release-update-check', requestId: message.requestId })
   } }
   const bridge = createReleaseUpdateBridge('nonce', 'chrome-extension://test')
   const promise = bridge.request('check', parent)
-  await new Promise(resolve => setTimeout(resolve, 0))
+  await hostHandling
   const response = nativeMessages.find(message => message.type === 'release_update_checked')
   assert.ok(response, 'Native Host should return a correlated release update response')
   assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://test', data: { type: 'release-update-result/v1', nonce: 'nonce', requestId: response.requestId, update: response.update } }, parent), true)

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { resolve } from 'node:path'
 import test from 'node:test'
 import { launchPreparedUpdate } from '../apps/native-server/src/release-update/index.mjs'
 import { readUpdateStatus } from '../apps/native-server/src/release-update/update-status.mjs'
@@ -34,6 +35,6 @@ test('reads the last persisted updater result from the install root', async () =
       return JSON.stringify({ state: 'failed', version: '1.1.81', updatedAt: '2026-08-27T00:00:00.000Z', error: '安装内容不完整', logPath: '%TEMP%\\accr-ui-harness-install.log' })
     },
   })
-  assert.equal(requestedPath, '/tmp/accr-ui-harness/.accrui-update-status.json')
+  assert.equal(requestedPath, resolve('/tmp/accr-ui-harness', '.accrui-update-status.json'))
   assert.deepEqual(status, { state: 'failed', version: '1.1.81', updatedAt: '2026-08-27T00:00:00.000Z', error: '安装内容不完整', logPath: '%TEMP%\\accr-ui-harness-install.log' })
 })
