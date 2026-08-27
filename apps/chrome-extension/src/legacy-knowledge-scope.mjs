@@ -34,19 +34,10 @@ export function migrateLegacyKnowledgeScope(value) {
     .filter(([, selection]) => selection.self || selection.systems.length > 0)
     .sort(([left], [right]) => left.localeCompare(right))
   const repositoryIds = unique(scope.repoKeys ?? [])
-  if (selectedDomains.length > 1) {
-    return {
-      enabled: state.enabled ?? true,
-      scope: { domainId: '', systemIds: [], repositoryIds },
-      notice: '旧版会话包含多个知识领域，请重新确认知识范围；已保留代码库选择。',
-    }
-  }
-  const selected = selectedDomains[0]
   return {
     enabled: state.enabled ?? true,
     scope: {
-      domainId: selected?.[0] ?? '',
-      systemIds: unique(selected?.[1].systems ?? []),
+      domainSystems: Object.fromEntries(selectedDomains.map(([domainId, selection]) => [domainId, unique(selection.systems)])),
       repositoryIds,
     },
   }

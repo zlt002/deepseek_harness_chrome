@@ -12,6 +12,104 @@ const KIND_BY_EXTENSION = {
   '.md': 'md',
   '.markdown': 'md',
   '.txt': 'txt',
+  // Data, configuration, and source files are retained as plain UTF-8 text.
+  // Keep this an explicit allowlist: file names alone must not turn arbitrary
+  // binaries into a text attachment.
+  '.json': 'txt',
+  '.ipynb': 'txt',
+  '.jsonl': 'txt',
+  '.ndjson': 'txt',
+  '.yaml': 'txt',
+  '.yml': 'txt',
+  '.toml': 'txt',
+  '.ini': 'txt',
+  '.cfg': 'txt',
+  '.conf': 'txt',
+  '.env': 'txt',
+  '.log': 'txt',
+  '.csv': 'txt',
+  '.tsv': 'txt',
+  '.xml': 'txt',
+  '.html': 'txt',
+  '.htm': 'txt',
+  '.css': 'txt',
+  '.js': 'txt',
+  '.mjs': 'txt',
+  '.cjs': 'txt',
+  '.ts': 'txt',
+  '.tsx': 'txt',
+  '.jsx': 'txt',
+  '.vue': 'txt',
+  '.svelte': 'txt',
+  '.astro': 'txt',
+  '.py': 'txt',
+  '.rb': 'txt',
+  '.go': 'txt',
+  '.rs': 'txt',
+  '.java': 'txt',
+  '.c': 'txt',
+  '.h': 'txt',
+  '.cc': 'txt',
+  '.cpp': 'txt',
+  '.cxx': 'txt',
+  '.hpp': 'txt',
+  '.cs': 'txt',
+  '.php': 'txt',
+  '.swift': 'txt',
+  '.kt': 'txt',
+  '.kts': 'txt',
+  '.sh': 'txt',
+  '.bash': 'txt',
+  '.zsh': 'txt',
+  '.fish': 'txt',
+  '.ps1': 'txt',
+  '.bat': 'txt',
+  '.cmd': 'txt',
+  '.sql': 'txt',
+  '.graphql': 'txt',
+  '.gql': 'txt',
+  '.r': 'txt',
+  '.lua': 'txt',
+  '.pl': 'txt',
+  '.pm': 'txt',
+  '.dart': 'txt',
+  '.scala': 'txt',
+  '.ex': 'txt',
+  '.exs': 'txt',
+  '.erl': 'txt',
+  '.hrl': 'txt',
+  '.fs': 'txt',
+  '.fsx': 'txt',
+  '.vb': 'txt',
+  '.clj': 'txt',
+  '.cljs': 'txt',
+  '.edn': 'txt',
+  '.lisp': 'txt',
+  '.scm': 'txt',
+  '.rkt': 'txt',
+  '.tex': 'txt',
+  '.properties': 'txt',
+  '.gradle': 'txt',
+  '.lock': 'txt',
+  '.proto': 'txt',
+  '.rst': 'txt',
+  '.adoc': 'txt',
+  '.org': 'txt',
+  '.wiki': 'txt',
+  '.diff': 'txt',
+  '.patch': 'txt',
+  '.dockerignore': 'txt',
+  '.gitignore': 'txt',
+  '.gitattributes': 'txt',
+  '.gitmodules': 'txt',
+  '.editorconfig': 'txt',
+  '.npmrc': 'txt',
+  '.nvmrc': 'txt',
+  '.babelrc': 'txt',
+  '.prettierrc': 'txt',
+  '.eslintrc': 'txt',
+  '.stylelintrc': 'txt',
+  '.browserslistrc': 'txt',
 }
 
 const KIND_BY_MEDIA = {
@@ -21,7 +119,33 @@ const KIND_BY_MEDIA = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
   'text/markdown': 'md',
   'text/plain': 'txt',
+  'application/json': 'txt',
+  'application/x-ndjson': 'txt',
+  'application/ndjson': 'txt',
+  'application/jsonl': 'txt',
+  'application/yaml': 'txt',
+  'application/x-yaml': 'txt',
+  'application/toml': 'txt',
+  'application/xml': 'txt',
+  'application/graphql': 'txt',
+  'application/x-httpd-php': 'txt',
 }
+
+const KIND_BY_FILE_NAME = {
+  readme: 'txt',
+  license: 'txt',
+  copying: 'txt',
+  notice: 'txt',
+  changelog: 'txt',
+  makefile: 'txt',
+  dockerfile: 'txt',
+}
+
+/** Shared picker and drop allowlist; extensions include their leading dot. */
+export const DOCUMENT_INTAKE_ACCEPTED_EXTENSIONS = Object.freeze(Object.keys(KIND_BY_EXTENSION))
+
+/** MIME fallback for extensionless files only; unknown extensions stay rejected. */
+export const DOCUMENT_INTAKE_ACCEPTED_MEDIA_TYPES = Object.freeze(Object.keys(KIND_BY_MEDIA))
 
 const SKILL_BY_KIND = {
   docx: 'docx',
@@ -37,11 +161,31 @@ const SKILL_BY_KIND = {
  * @returns {'docx' | 'pdf' | 'pptx' | 'xlsx' | 'md' | 'txt' | undefined}
  */
 export function documentKindOf(name, mediaType = '') {
-  const media = KIND_BY_MEDIA[mediaType.trim().toLowerCase()]
-  if (media !== undefined) return media
-  const match = /\.[^.]+$/.exec(name.trim().toLowerCase())
-  if (match === null) return undefined
-  return KIND_BY_EXTENSION[match[0]]
+  const base = name.replace(/\\/g, '/').split('/').pop()?.trim().toLowerCase() ?? ''
+  const match = /\.[^.]+$/.exec(base)
+  // An explicit extension wins over MIME. Browsers commonly label arbitrary
+  // files as text/plain; accepting an unknown extension from that MIME would
+  // make the visible picker rule and the drop rule disagree.
+  if (match !== null) return KIND_BY_EXTENSION[match[0]]
+  const named = KIND_BY_FILE_NAME[base]
+  if (named !== undefined) return named
+  return KIND_BY_MEDIA[mediaType.trim().toLowerCase()]
+}
+
+/** True when a kind is stored as a UTF-8 text attachment rather than an office binary. */
+export function isTextDocumentKind(kind) {
+  return kind === 'md' || kind === 'txt'
+}
+
+/** Reject bytes that cannot safely be treated as UTF-8 text. */
+export function isSafeTextDocumentBytes(bytes) {
+  if (bytes.includes(0)) return false
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -86,7 +230,7 @@ export function classifyDocuments(files) {
   if (files.length === 0) return '没有可附加的文档'
   for (const file of files) {
     if (documentKindOf(file.name, file.type ?? '') === undefined) {
-      return `暂不支持 ${file.name || '该文件'}。请附加 PPTX、XLSX、DOCX、PDF、MD 或 TXT。`
+      return `暂不支持 ${file.name || '该文件'}。请附加 Office/PDF 或常见文本、代码、配置和数据文件。`
     }
     if (file.size > DOCUMENT_INTAKE_MAX_BYTES) {
       return `${file.name} 超过 32MB，无法附加。`

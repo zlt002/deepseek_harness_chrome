@@ -1,4 +1,5 @@
-export interface Scope { domainId: string; systemIds: string[]; repositoryIds: string[] }
+/** A system id is only unique inside its category, so persist the pair. */
+export interface Scope { domainSystems: Record<string, string[]>; repositoryIds: string[] }
 export interface Catalog {
   domains: Array<{ id: string; name: string }>
   systems: Array<{ id: string; name: string; domainId?: string }>

@@ -2,6 +2,8 @@ import type { ClientContext, ISessions, SessionId } from '@deepseek-ai/dsh-clien
 import type { IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   DOCUMENT_INTAKE_PATH,
+  DOCUMENT_INTAKE_ACCEPTED_EXTENSIONS,
+  DOCUMENT_INTAKE_ACCEPTED_MEDIA_TYPES,
   classifyDocuments,
   documentDraftLine,
 } from '../formats.ts'
@@ -10,7 +12,7 @@ export interface ComposerFileIntake {
   accept(sessionId: SessionId, files: readonly File[]): string | null
 }
 
-export const ACCEPT = '.docx,.pdf,.pptx,.xlsx,.md,.markdown,.txt,application/pdf,text/plain,text/markdown'
+export const ACCEPT = [...DOCUMENT_INTAKE_ACCEPTED_EXTENSIONS, ...DOCUMENT_INTAKE_ACCEPTED_MEDIA_TYPES].join(',')
 
 /**
  * Session-scoped document remainder of composer paste/drop.

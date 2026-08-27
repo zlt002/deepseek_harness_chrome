@@ -33,6 +33,9 @@ async function handleImport(directory: ClaudeImportDirectory, req: IncomingMessa
     if (action === 'sessions') return json(res, 200, await directory.listSessions(required(body.projectKey, 'projectKey'), sourceRoot, {
       offset: optionalInteger(body.offset), limit: optionalInteger(body.limit),
     }))
+    if (action === 'detail') return json(res, 200, await directory.detail({
+      projectKey: required(body.projectKey, 'projectKey'), sessionId: required(body.sessionId, 'sessionId'), sourceRoot, signal: controller.signal,
+    }))
     if (action === 'prepare') return json(res, 200, await directory.prepare({
       projectKey: required(body.projectKey, 'projectKey'), sessionId: required(body.sessionId, 'sessionId'),
       workspacePath: required(body.workspacePath, 'workspacePath'), sourceRoot, forceCopy: body.forceCopy === true, signal: controller.signal,

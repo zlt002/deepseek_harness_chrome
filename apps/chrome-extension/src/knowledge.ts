@@ -6,8 +6,7 @@ export const KNOWLEDGE_SESSION_STORAGE_KEY = 'harnessKnowledgeSessionsV1'
 export type KnowledgeKind = 'knowledge' | 'code'
 
 export interface KnowledgeScope {
-  domainId: string
-  systemIds: string[]
+  domainSystems: Record<string, string[]>
   repositoryIds: string[]
 }
 
@@ -49,17 +48,20 @@ export function validSessionIdentity(value: unknown): value is string {
 
 export function validScope(value: unknown): value is KnowledgeScope {
   const record = asRecord(value)
-  return record !== undefined && validSessionIdentity(record.domainId)
-    && Array.isArray(record.systemIds) && record.systemIds.every(validSessionIdentity)
+  return record !== undefined && asRecord(record.domainSystems) !== undefined
+    && Object.entries(asRecord(record.domainSystems)!).every(([domainId, systemIds]) => validSessionIdentity(domainId) && Array.isArray(systemIds) && systemIds.every(validSessionIdentity))
     && Array.isArray(record.repositoryIds) && record.repositoryIds.every(validSessionIdentity)
 }
 
 export function normalizeScope(value: KnowledgeScope): KnowledgeScope {
-  return { domainId: value.domainId, systemIds: unique(value.systemIds), repositoryIds: unique(value.repositoryIds) }
+  return { domainSystems: Object.fromEntries(Object.entries(value.domainSystems).flatMap(([domainId, systemIds]) => {
+    const selected = unique(systemIds)
+    return selected.length === 0 ? [] : [[domainId, selected]]
+  })), repositoryIds: unique(value.repositoryIds) }
 }
 
 export function scopeFingerprint(scope: KnowledgeScope): string {
-  return JSON.stringify([scope.domainId, [...scope.systemIds].sort(), [...scope.repositoryIds].sort()])
+  return JSON.stringify([Object.entries(scope.domainSystems).map(([domainId, systemIds]) => [domainId, [...systemIds].sort()]).sort(([left], [right]) => String(left).localeCompare(String(right))), [...scope.repositoryIds].sort()])
 }
 
 async function api(path: string, init?: RequestInit): Promise<unknown> {
@@ -126,7 +128,7 @@ export async function executeKnowledgeQuery(
   signal: AbortSignal,
 ): Promise<{ result: KnowledgeResult; sessionId?: string }> {
   const body = kind === 'knowledge'
-    ? { question, domain_system_config: { [scope.domainId]: { self: false, systems: scope.systemIds } }, forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
+    ? { question, domain_system_config: Object.fromEntries(Object.entries(scope.domainSystems).map(([domainId, systems]) => [domainId, { self: false, systems }])), forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
     : { question, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
   if (kind === 'code' && scope.repositoryIds.length === 0) throw new Error('knowledge_scope_requires_repository')
   const response = await fetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, {

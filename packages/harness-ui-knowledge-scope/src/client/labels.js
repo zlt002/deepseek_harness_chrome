@@ -12,7 +12,9 @@ export function scopeLabels(scope, catalog) {
   // and may temporarily omit an item, but a wide composer should still show
   // which repository key is selected instead of looking unselected.
   const repositories = selectedNames(scope?.repositoryIds ?? [], catalog.repositories, true)
-  const knowledge = selectedNames(scope?.systemIds ?? [], catalog.systems)
-    ?? catalog.domains.find(domain => domain.id === scope?.domainId)?.name
+  const knowledge = Object.entries(scope?.domainSystems ?? {}).flatMap(([domainId, systemIds]) => systemIds.flatMap(systemId => {
+    const system = catalog.systems.find(item => item.id === systemId && item.domainId === domainId)
+    return system === undefined ? [] : [system.name]
+  })).join('、') || undefined
   return { repositories, knowledge }
 }

@@ -160,3 +160,28 @@ test('parser keeps only bounded user and assistant text', () => {
   ].join(''))
   assert.deepEqual(parsed.messages.map(message => message.text), ['问题', '答案'])
 })
+
+test('reads selected details on demand without selecting or importing the session', async t => {
+  const { projects, importer } = await fixture(t)
+  const sessionId = 'detail-session'
+  await writeFile(path.join(projects, '-tmp-demo', `${sessionId}.jsonl`), [
+    line({ type: 'user', message: { content: '请查看详情' } }),
+    line({ type: 'assistant', message: { content: '这是详细回答' } }),
+  ].join(''))
+  const detail = await importer.detail({ projectKey: '-tmp-demo', sessionId })
+  assert.equal(detail.title, '请查看详情')
+  assert.equal(detail.truncated, false)
+  assert.deepEqual(detail.messages.map(message => [message.role, message.text]), [['user', '请查看详情'], ['assistant', '这是详细回答']])
+})
+
+test('prepares a selected session above the former 8 MiB source-file limit', async t => {
+  const { projects, importer } = await fixture(t)
+  const sessionId = 'large-session'
+  await writeFile(path.join(projects, '-tmp-demo', `${sessionId}.jsonl`), line({ type: 'user', message: { content: 'x'.repeat(8 * 1024 * 1024 + 1) } }))
+  const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
+  assert.equal(prepared.kind, 'prepared')
+  assert.equal(prepared.prompt.includes('x'.repeat(120_000)), true)
+  const detail = await importer.detail({ projectKey: '-tmp-demo', sessionId })
+  assert.equal(detail.truncated, true)
+  assert.equal(detail.messages[0].text.length, 120_000)
+})

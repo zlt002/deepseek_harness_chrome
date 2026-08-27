@@ -7,7 +7,7 @@ async function adapter() {
   const background = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const end = background.indexOf('\nconst NATIVE_HOST_NAME')
   assert.notEqual(end, -1, 'knowledge adapter source block must remain before background bootstrap')
-  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream, knowledgeConversationOwner, planKnowledgeContinuation, controlledVocabulary, knowledgeIdentity, filterCatalogByIdentity, pruneScope }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
+  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, normalizeScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream, knowledgeConversationOwner, planKnowledgeContinuation, controlledVocabulary, knowledgeIdentity, filterCatalogByIdentity, pruneScope }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
 }
@@ -21,11 +21,35 @@ test('SSE parser buffers split lines and a finished stream with done or [DONE] i
   const previousFetch = globalThis.fetch
   globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('data: {"delta":"hello"}\n\ndata: {"type":"done","citations":[{"page_id":"p1","page_title":"Page"}],"session_id":"upstream"}\n\ndata: [DONE]\n\n')); controller.close() } }), { status: 200 })
   try {
-    const value = await executeKnowledgeQuery('knowledge', 'question', { domainId: 'domain', systemIds: ['system'], repositoryIds: [] }, undefined, new AbortController().signal)
+    const value = await executeKnowledgeQuery('knowledge', 'question', { domainSystems: { domain: ['system'] }, repositoryIds: [] }, undefined, new AbortController().signal)
     assert.equal(value.result.answer, 'hello')
     assert.deepEqual(value.result.sources, [{ id: 'p1', title: 'Page' }])
     assert.equal(value.sessionId, 'upstream')
   } finally { globalThis.fetch = previousFetch }
+})
+
+test('knowledge retrieval keeps same-named systems paired with their own categories', async () => {
+  const { executeKnowledgeQuery } = await adapter()
+  const previousFetch = globalThis.fetch
+  const bodies = []
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(String(init.body)))
+    return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('data: {"delta":"ok"}\n\ndata: [DONE]\n\n')); controller.close() } }), { status: 200 })
+  }
+  try {
+    await executeKnowledgeQuery('knowledge', 'question', { domainSystems: { order: ['common', 'oms'], warehouse: ['common', 'wms'] }, repositoryIds: [] }, undefined, new AbortController().signal)
+    assert.deepEqual(bodies[0].domain_system_config, {
+      order: { self: false, systems: ['common', 'oms'] },
+      warehouse: { self: false, systems: ['common', 'wms'] },
+    })
+  } finally { globalThis.fetch = previousFetch }
+})
+
+test('normalizes saved V1 single-category scopes into paired selections', async () => {
+  const { validScope, normalizeScope } = await adapter()
+  const savedV1 = { domainId: 'order', systemIds: ['common', 'oms'], repositoryIds: ['repo'] }
+  assert.equal(validScope(savedV1), true)
+  assert.deepEqual(normalizeScope(savedV1), { domainSystems: { order: ['common', 'oms'] }, repositoryIds: ['repo'] })
 })
 
 test('SSE answer assembly deduplicates cumulative snapshots and excludes reasoning events', async () => {
@@ -51,7 +75,7 @@ test('visual progress reports connected before the first answer delta', async ()
   }), { status: 200 })
   const progress = []
   try {
-    await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
+    await executeKnowledgeQuery('code', '问题', { domainSystems: {}, repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
     assert.deepEqual(progress[0], { chars: 0, content: '', eventType: 'connected' })
     assert.equal(progress.some(item => item.eventType === 'reasoning' && item.process === '远程检索正在分析问题…'), true)
     assert.equal(progress.at(-1)?.content, '事实')
@@ -69,7 +93,7 @@ test('visual progress excludes upstream reasoning and streams only answer deltas
   globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(events)); controller.close() } }), { status: 200 })
   const progress = []
   try {
-    const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
+    const value = await executeKnowledgeQuery('code', '问题', { domainSystems: {}, repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
     assert.equal(progress.find(item => item.eventType === 'reasoning')?.process, '远程检索正在分析问题…')
     assert.deepEqual(progress.filter(item => item.content !== '').map(item => item.content), ['最终事实'])
     assert.equal(value.result.answer, '最终事实')
@@ -99,7 +123,7 @@ test('visual progress streams AccrUI-style repository log events as process line
   globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(events)); controller.close() } }), { status: 200 })
   const progress = []
   try {
-    const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
+    const value = await executeKnowledgeQuery('code', '问题', { domainSystems: {}, repositoryIds: ['repo'] }, undefined, new AbortController().signal, item => progress.push(item))
     const processSnapshots = progress.filter(item => item.process).map(item => item.process)
     assert.equal(processSnapshots[0], '远程检索正在分析问题…')
     assert.match(processSnapshots.at(-1) ?? '', /H5_前端（前端） · 🔧 调用: mcp__repo-search__search_code_repos/)
@@ -128,12 +152,12 @@ test('remote retrieval prompt requests facts without agent execution narration',
 
 test('scope fingerprints isolate an upstream continuation when the user changes scope', async () => {
   const { scopeFingerprint } = await adapter()
-  assert.notEqual(scopeFingerprint({ domainId: 'one', systemIds: ['s'], repositoryIds: ['r'] }), scopeFingerprint({ domainId: 'two', systemIds: ['s'], repositoryIds: ['r'] }))
+  assert.notEqual(scopeFingerprint({ domainSystems: { one: ['s'] }, repositoryIds: ['r'] }), scopeFingerprint({ domainSystems: { two: ['s'] }, repositoryIds: ['r'] }))
 })
 
 test('the same parent conversation reuses one remote session across new local search children', async () => {
   const { knowledgeConversationOwner, planKnowledgeContinuation, scopeFingerprint } = await adapter()
-  const fingerprint = scopeFingerprint({ domainId: '', systemIds: [], repositoryIds: ['H5_前端'] })
+  const fingerprint = scopeFingerprint({ domainSystems: {}, repositoryIds: ['H5_前端'] })
   const firstOwner = knowledgeConversationOwner('child-1', 'parent-1')
   const secondOwner = knowledgeConversationOwner('child-2', 'parent-1')
   assert.equal(firstOwner, 'parent-1')
@@ -146,7 +170,7 @@ test('the same parent conversation reuses one remote session across new local se
   const knowledge = planKnowledgeContinuation({ [first.key]: { sessionId: 'remote-session-first', fingerprint } }, secondOwner, 'knowledge', fingerprint)
   assert.notEqual(knowledge.key, first.key)
   assert.equal(knowledge.priorSessionId, undefined)
-  const otherScope = planKnowledgeContinuation({ [first.key]: { sessionId: 'remote-session-first', fingerprint } }, secondOwner, 'code', scopeFingerprint({ domainId: '', systemIds: [], repositoryIds: ['其他仓库'] }))
+  const otherScope = planKnowledgeContinuation({ [first.key]: { sessionId: 'remote-session-first', fingerprint } }, secondOwner, 'code', scopeFingerprint({ domainSystems: {}, repositoryIds: ['其他仓库'] }))
   assert.notEqual(otherScope.key, first.key)
   assert.equal(otherScope.priorSessionId, undefined)
 })
@@ -167,7 +191,7 @@ test('a resumed remote query sends the prior session_id and asks the agent not t
     }), { status: 200 })
   }
   try {
-    const value = await executeKnowledgeQuery('code', '第一种方式详细看看', { domainId: '', systemIds: [], repositoryIds: ['H5_前端'] }, 'remote-session-first', new AbortController().signal)
+    const value = await executeKnowledgeQuery('code', '第一种方式详细看看', { domainSystems: {}, repositoryIds: ['H5_前端'] }, 'remote-session-first', new AbortController().signal)
     assert.equal(value.sessionId, 'remote-session-second')
     assert.equal(bodies[0].session_id, 'remote-session-first')
     assert.deepEqual(bodies[0].repo_keys, ['H5_前端'])
@@ -188,7 +212,7 @@ test('initial catalog preserves repository grouping and type metadata for the co
     throw new Error(`unexpected request: ${value}`)
   }
   try {
-    assert.equal(validScope({ domainId: '', systemIds: [], repositoryIds: ['repo'] }), true)
+    assert.equal(validScope({ domainSystems: {}, repositoryIds: ['repo'] }), true)
     assert.deepEqual(await loadKnowledgeCatalog(), {
       domains: [{ id: 'domain', name: '领域' }],
       systems: [{ id: 'system', name: '系统', domainId: 'domain' }],
@@ -276,9 +300,8 @@ test('ordinary members only see authorized domains, systems, and repositories', 
     repositories: [{ id: 'ops-repo', name: '运营仓库', domainId: 'OPS' }],
   })
   assert.deepEqual(filterCatalogByIdentity(catalog, superAdmin), catalog)
-  assert.deepEqual(pruneScope({ domainId: 'AI', systemIds: ['ai-test'], repositoryIds: ['ai-repo', 'ops-repo'] }, filterCatalogByIdentity(catalog, member)), {
-    domainId: '',
-    systemIds: [],
+  assert.deepEqual(pruneScope({ domainSystems: { AI: ['ai-test'] }, repositoryIds: ['ai-repo', 'ops-repo'] }, filterCatalogByIdentity(catalog, member)), {
+    domainSystems: {},
     repositoryIds: ['ops-repo'],
   })
 })
@@ -286,11 +309,11 @@ test('ordinary members only see authorized domains, systems, and repositories', 
 test('selected-source echo reports composer names without treating placeholders as selected', async () => {
   const { selectedSourceScopeEcho } = await adapter()
   assert.deepEqual(selectedSourceScopeEcho(
-    { scope: { domainId: '', systemIds: [], repositoryIds: ['r1'] }, enabled: true },
+    { scope: { domainSystems: {}, repositoryIds: ['r1'] }, enabled: true },
     { domains: [], systems: [], repositories: [{ id: 'r1', name: 'lcrm-frontend' }] },
   ), { enabled: true, codeSelected: true, knowledgeSelected: false, repositories: ['lcrm-frontend'], knowledge: [] })
   assert.deepEqual(selectedSourceScopeEcho(
-    { scope: { domainId: '', systemIds: [], repositoryIds: [] }, enabled: true },
+    { scope: { domainSystems: {}, repositoryIds: [] }, enabled: true },
     { domains: [], systems: [], repositories: [{ id: 'r1', name: 'lcrm-frontend' }] },
   ), { enabled: true, codeSelected: false, knowledgeSelected: false, repositories: [], knowledge: [] })
 })
@@ -298,7 +321,7 @@ test('selected-source echo reports composer names without treating placeholders 
 test('knowledge search rejects a code-only scope before requesting the platform', async () => {
   const { executeKnowledgeQuery } = await adapter()
   await assert.rejects(
-    executeKnowledgeQuery('knowledge', 'question', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal),
+    executeKnowledgeQuery('knowledge', 'question', { domainSystems: {}, repositoryIds: ['repo'] }, undefined, new AbortController().signal),
     { message: /没有选择知识范围/ },
   )
 })
@@ -322,7 +345,7 @@ test('an interrupted SSE stream with answer text is a partial Sourced Answer', a
     },
   }), { status: 200 })
   try {
-    const value = await executeKnowledgeQuery('knowledge', 'question', { domainId: 'domain', systemIds: ['system'], repositoryIds: [] }, undefined, new AbortController().signal)
+    const value = await executeKnowledgeQuery('knowledge', 'question', { domainSystems: { domain: ['system'] }, repositoryIds: [] }, undefined, new AbortController().signal)
     assert.equal(value.result.status, 'partial')
     assert.equal(value.result.answer, '已检索到订单接口')
   } finally { globalThis.fetch = previousFetch }
@@ -338,7 +361,7 @@ test('a finished stream that only emits [DONE] after answer text is complete', a
     },
   }), { status: 200 })
   try {
-    const value = await executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal)
+    const value = await executeKnowledgeQuery('code', '问题', { domainSystems: {}, repositoryIds: ['repo'] }, undefined, new AbortController().signal)
     assert.equal(value.result.status, 'complete')
     assert.equal(value.result.answer, '完整答案')
   } finally { globalThis.fetch = previousFetch }
@@ -354,7 +377,7 @@ test('an upstream error after answer text is a partial Sourced Answer', async ()
     },
   }), { status: 200 })
   try {
-    const value = await executeKnowledgeQuery('knowledge', 'question', { domainId: 'domain', systemIds: ['system'], repositoryIds: [] }, undefined, new AbortController().signal)
+    const value = await executeKnowledgeQuery('knowledge', 'question', { domainSystems: { domain: ['system'] }, repositoryIds: [] }, undefined, new AbortController().signal)
     assert.equal(value.result.status, 'partial')
     assert.equal(value.result.answer, '半段事实')
   } finally { globalThis.fetch = previousFetch }
@@ -366,7 +389,7 @@ test('empty incomplete SSE still fails closed', async () => {
   globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.close() } }), { status: 200 })
   try {
     await assert.rejects(
-      executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal),
+      executeKnowledgeQuery('code', '问题', { domainSystems: {}, repositoryIds: ['repo'] }, undefined, new AbortController().signal),
       { message: 'knowledge_platform_incomplete_sse' },
     )
   } finally { globalThis.fetch = previousFetch }
@@ -452,7 +475,7 @@ test('a mid-stream transport failure keeps process text and names the cause', as
   }), { status: 200 })
   try {
     await assert.rejects(
-      executeKnowledgeQuery('code', '问题', { domainId: '', systemIds: [], repositoryIds: ['repo'] }, undefined, new AbortController().signal),
+      executeKnowledgeQuery('code', '问题', { domainSystems: {}, repositoryIds: ['repo'] }, undefined, new AbortController().signal),
       (error) => {
         assert.match(String(error), /空闲超时|网络传输中断/)
         assert.match(String(error), /仓库精搜 开始/)

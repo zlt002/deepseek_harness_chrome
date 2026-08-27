@@ -20,7 +20,7 @@ export function AttachDocumentControl({ sessionId, intake }: ControlProps) {
         className={css.trigger}
         type="button"
         aria-label="附加文档"
-        title="附加 PPT / Excel / Word / PDF / MD / TXT"
+        title="附加 Office、PDF 或常见文本/代码/配置文件"
         data-document-intake-control
         onMouseDown={event => { event.preventDefault() }}
         onClick={() => { inputRef.current?.click() }}

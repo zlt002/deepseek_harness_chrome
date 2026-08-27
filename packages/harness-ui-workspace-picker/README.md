@@ -16,10 +16,15 @@ The Host half exposes one loopback, same-origin route at
 `/api/claude-code.import`. Project discovery reads directory entries and file
 metadata only. Session previews read at most 64 KiB per selected project's
 session in pages of at most 64 entries; the dialog reports the real loaded and
-total counts. Full JSONL parsing happens only after the user selects one session
-and confirms the explicit target Workspace. A selected source is limited to 8
-MiB, 20,000 lines, and 120,000 retained text characters. Tool inputs and tool
-results are not copied into the continuation prompt.
+total counts. Hovering a session date exposes an accessible, on-demand detail
+entry; it reads only that session and never changes the selected import source.
+Full JSONL parsing happens only after the user opens details or selects one
+session and confirms the explicit target Workspace. Selected JSONL is streamed
+without a file-byte ceiling. It still has JSONL safety bounds of 20,000 lines
+and 120,000 retained text characters; when the detail view reaches the text
+bound, it explicitly says that it is showing only the most recent content.
+Tool inputs and tool results are not copied into the detail view or continuation
+prompt.
 Known Claude-generated wrapper records such as `browser_context` and
 `system-reminder` are excluded from titles and migrated text while ordinary
 user text containing angle-bracket terms remains intact.

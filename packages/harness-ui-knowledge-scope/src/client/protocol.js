@@ -1,8 +1,8 @@
 function strings(value) { return Array.isArray(value) && value.every(item => typeof item === 'string') }
 
 function scope(value) {
-  return value !== null && typeof value === 'object' && typeof value.domainId === 'string'
-    && strings(value.systemIds) && strings(value.repositoryIds)
+  return value !== null && typeof value === 'object' && value.domainSystems !== null && typeof value.domainSystems === 'object'
+    && Object.entries(value.domainSystems).every(([domainId, systemIds]) => typeof domainId === 'string' && strings(systemIds)) && strings(value.repositoryIds)
 }
 
 function snapshot(value) {

@@ -95,7 +95,7 @@ const COMPANY_GATEWAY_TIMEOUT_MS = 15_000
 interface KnowledgeProxyConfig { url: string; token: string }
 let knowledgeProxyConfig: KnowledgeProxyConfig | undefined
 type KnowledgeKind = 'knowledge' | 'code'
-interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
+interface KnowledgeScope { domainSystems: Record<string, string[]>; repositoryIds: string[] }
 interface AccountAccessSnapshot {
   status: 'guest' | 'authenticated' | 'unavailable'
   displayName?: string
@@ -127,14 +127,9 @@ function migrateLegacyKnowledgeScope(value: unknown): { enabled: boolean; scope:
     .filter(([, raw]) => (raw as { self: boolean; systems: string[] }).self || (raw as { systems: string[] }).systems.length > 0)
     .sort(([left], [right]) => left.localeCompare(right)) as [string, { self: boolean; systems: string[] }][]
   const repositoryIds = unique((state.scope.repoKeys as string[] | undefined) ?? [])
-  if (selectedDomains.length > 1) return {
-    enabled: (state.enabled as boolean | undefined) ?? true,
-    scope: { domainId: '', systemIds: [], repositoryIds },
-    notice: '旧版会话包含多个知识领域，请重新确认知识范围；已保留代码库选择。',
-  }
   return {
     enabled: (state.enabled as boolean | undefined) ?? true,
-    scope: { domainId: selectedDomains[0]?.[0] ?? '', systemIds: unique(selectedDomains[0]?.[1].systems ?? []), repositoryIds },
+    scope: { domainSystems: Object.fromEntries(selectedDomains.map(([domainId, selection]) => [domainId, unique(selection.systems)])), repositoryIds },
   }
 }
 
@@ -188,12 +183,23 @@ function isOpenMarkdownReview(value: unknown): value is OpenMarkdownReview {
 }
 
 function validScope(value: unknown): value is KnowledgeScope {
-  return typeof value === 'object' && value !== null && ((value as KnowledgeScope).domainId === '' || validSessionIdentity((value as KnowledgeScope).domainId))
-    && Array.isArray((value as KnowledgeScope).systemIds) && (value as KnowledgeScope).systemIds.every(validSessionIdentity)
+  return typeof value === 'object' && value !== null
+    && (('domainSystems' in value && typeof (value as KnowledgeScope).domainSystems === 'object' && (value as KnowledgeScope).domainSystems !== null
+      && Object.entries((value as KnowledgeScope).domainSystems).every(([domainId, systemIds]) => validSessionIdentity(domainId) && Array.isArray(systemIds) && systemIds.every(validSessionIdentity)))
+      || ((value as { domainId?: unknown }).domainId === '' || validSessionIdentity((value as { domainId?: unknown }).domainId))
+        && Array.isArray((value as { systemIds?: unknown }).systemIds) && (value as { systemIds: unknown[] }).systemIds.every(validSessionIdentity))
     && Array.isArray((value as KnowledgeScope).repositoryIds) && (value as KnowledgeScope).repositoryIds.every(validSessionIdentity)
 }
-function normalizeScope(scope: KnowledgeScope): KnowledgeScope { return { domainId: scope.domainId, systemIds: [...new Set(scope.systemIds)], repositoryIds: [...new Set(scope.repositoryIds)] } }
-function scopeFingerprint(scope: KnowledgeScope): string { return JSON.stringify([scope.domainId, [...scope.systemIds].sort(), [...scope.repositoryIds].sort()]) }
+function normalizeScope(scope: KnowledgeScope | { domainId: string; systemIds: string[]; repositoryIds: string[] }): KnowledgeScope {
+  const domainSystems = 'domainSystems' in scope
+    ? Object.fromEntries(Object.entries(scope.domainSystems).flatMap(([domainId, systemIds]) => {
+      const selected = [...new Set(systemIds)]
+      return selected.length === 0 ? [] : [[domainId, selected]]
+    }))
+    : scope.domainId === '' || scope.systemIds.length === 0 ? {} : { [scope.domainId]: [...new Set(scope.systemIds)] }
+  return { domainSystems, repositoryIds: [...new Set(scope.repositoryIds)] }
+}
+function scopeFingerprint(scope: KnowledgeScope): string { return JSON.stringify([Object.entries(scope.domainSystems).map(([domainId, systemIds]) => [domainId, [...systemIds].sort()]).sort(([left], [right]) => String(left).localeCompare(String(right))), [...scope.repositoryIds].sort()]) }
 function knowledgeConversationOwner(harnessSessionId: string, harnessParentSessionId?: string): string {
   return harnessParentSessionId ?? harnessSessionId
 }
@@ -444,12 +450,15 @@ function filterCatalogByIdentity<T extends { domains: Array<{ id: string; name: 
 }
 function pruneScope(scope: KnowledgeScope, catalog: { domains: Array<{ id: string }>; systems: Array<{ id: string; domainId?: string }>; repositories: Array<{ id: string }> }): KnowledgeScope {
   const allowedDomains = new Set(catalog.domains.map((domain) => domain.id))
-  const domainId = allowedDomains.has(scope.domainId) ? scope.domainId : ''
-  const allowedSystems = new Set(catalog.systems.filter((system) => system.domainId === domainId).map((system) => system.id))
+  const domainSystems = Object.fromEntries(Object.entries(scope.domainSystems).flatMap(([domainId, systemIds]) => {
+    if (!allowedDomains.has(domainId)) return []
+    const allowed = new Set(catalog.systems.filter((system) => system.domainId === domainId).map((system) => system.id))
+    const selected = systemIds.filter((systemId) => allowed.has(systemId))
+    return selected.length === 0 ? [] : [[domainId, selected]]
+  }))
   const allowedRepositories = new Set(catalog.repositories.map((repository) => repository.id))
   return {
-    domainId,
-    systemIds: domainId === '' ? [] : scope.systemIds.filter((id) => allowedSystems.has(id)),
+    domainSystems,
     repositoryIds: scope.repositoryIds.filter((id) => allowedRepositories.has(id)),
   }
 }
@@ -571,14 +580,14 @@ function retrievalQuestion(kind: KnowledgeKind, question: string, resumed = fals
   return `${instruction}${language}若用户要原文摘录，一次只返回一个文件或一个函数的核心片段；不要并行检索多个文件，也不要把多个大文件全文塞进同一次答案。最终答案只保留事实和引用，不要把思考过程写进最终答案。检索计划、当前正在查的仓库或知识、工具选择和进度可通过独立过程事件流式返回。用户问题：${question}`
 }
 async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scope: KnowledgeScope, priorSessionId: string | undefined, signal: AbortSignal, onProgress?: (progress: { chars: number; content: string; eventType?: string; process?: string }) => void): Promise<{ result: { status: 'complete' | 'partial' | 'truncated'; answer: string; sources: Array<{ id: string; title: string }> }; sessionId?: string }> {
-  if (kind === 'knowledge' && scope.domainId === '') {
-    throw new Error('当前会话没有选择知识范围。请在输入框上方点「选择知识范围」，先选一个领域再勾选知识库，然后重试。不要用已选代码库代替知识库检索。')
+  if (kind === 'knowledge' && Object.keys(scope.domainSystems).length === 0) {
+    throw new Error('当前会话没有选择知识范围。请在输入框上方点「选择知识范围」，勾选至少一个知识库，然后重试。不要用已选代码库代替知识库检索。')
   }
   if (kind === 'code' && scope.repositoryIds.length === 0) {
     throw new Error('当前会话没有选择远程代码库。请在输入框上方点「选择代码库」并勾选仓库，然后重试。不要用本地工作区代替远程代码检索。')
   }
   const directedQuestion = retrievalQuestion(kind, question, priorSessionId !== undefined)
-  const body = kind === 'knowledge' ? { question: directedQuestion, domain_system_config: { [scope.domainId]: { self: false, systems: scope.systemIds } }, forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question: directedQuestion, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
+  const body = kind === 'knowledge' ? { question: directedQuestion, domain_system_config: Object.fromEntries(Object.entries(scope.domainSystems).map(([domainId, systems]) => [domainId, { self: false, systems }])), forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question: directedQuestion, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
   const emit = (eventType?: string, content = '', process = '') => onProgress?.({ chars: content.length, content, ...(eventType === undefined ? {} : { eventType }), ...(process === '' ? {} : { process }) })
   const response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(body), signal })
   if (!response.ok || response.body === null) throw new Error(`knowledge_platform_http_${response.status}`)
@@ -641,12 +650,10 @@ function selectedScopeNames(ids: string[], entries: Array<{ id: string; name: st
     return fallbackToId && id.trim().length > 0 ? [id] : []
   }).slice(0, 50)
 }
-function selectedSourceScopeEcho(record: { scope: KnowledgeScope; enabled: boolean }, catalog: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string }>; repositories: Array<{ id: string; name: string }> }): { enabled: boolean; codeSelected: boolean; knowledgeSelected: boolean; repositories: string[]; knowledge: string[] } {
+function selectedSourceScopeEcho(record: { scope: KnowledgeScope; enabled: boolean }, catalog: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string }> }): { enabled: boolean; codeSelected: boolean; knowledgeSelected: boolean; repositories: string[]; knowledge: string[] } {
   const repositories = selectedScopeNames(record.scope.repositoryIds, catalog.repositories, true)
-  const systems = selectedScopeNames(record.scope.systemIds, catalog.systems, true)
-  const domainName = catalog.domains.find((domain) => domain.id === record.scope.domainId)?.name
-    ?? (record.scope.domainId.trim().length > 0 ? record.scope.domainId : undefined)
-  const knowledge = systems.length > 0 ? systems : domainName === undefined ? [] : [domainName]
+  const systems = Object.entries(record.scope.domainSystems).flatMap(([domainId, systemIds]) => systemIds.flatMap((systemId) => selectedScopeNames([systemId], catalog.systems.filter((system) => system.domainId === domainId), true)))
+  const knowledge = systems
   return { enabled: record.enabled, codeSelected: repositories.length > 0, knowledgeSelected: knowledge.length > 0, repositories, knowledge }
 }
 
@@ -1374,7 +1381,7 @@ async function respondToSelectedSourceScope(port: chrome.runtime.Port, request: 
   try {
     await assertAccountAccessForProtectedSource()
     const record = await resolveKnowledgeScopeRecord(request)
-    const empty = { domainId: '', systemIds: [], repositoryIds: [] }
+    const empty = { domainSystems: {}, repositoryIds: [] }
     const preference = await knowledgeEnabledPreference()
     const enabled = record?.enabled ?? (preference.remember ? preference.enabled : true)
     let scope = record?.scope ?? empty
@@ -1416,7 +1423,7 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     if (record === undefined) throw new Error('当前会话还没有知识/代码范围记录。请先在输入框上方选择知识范围或代码库，再发起检索。')
     if (!record.enabled) throw new Error('知识查询开关已关闭。请打开输入框上方的知识查询开关后再试。')
     let scope = record.scope
-    try { scope = pruneScope(record.scope, await loadKnowledgeCatalog()) } catch { /* keep stored ids when the catalog is unavailable */ }
+    try { scope = pruneScope(record.scope, await loadKnowledgeCatalog()) } catch { /* catalog failure must not erase the exact stored domain-system pairs */ }
     const kind: KnowledgeKind = request.tool === 'knowledge_search' ? 'knowledge' : 'code'
     const fingerprint = scopeFingerprint(scope)
     const sessions = await knowledgeSessions()
@@ -5147,7 +5154,7 @@ export default defineBackground(() => {
         }
         if (request.scope !== undefined || typeof request.enabled === 'boolean' || typeof request.remember === 'boolean') {
           const existing = (await knowledgeScopes())[sessionId]?.scope
-          const nextScope = request.scope ?? existing ?? { domainId: '', systemIds: [], repositoryIds: [] }
+          const nextScope = request.scope ?? existing ?? { domainSystems: {}, repositoryIds: [] }
           if (!validScope(nextScope)) throw new Error('Invalid knowledge selection.')
           await saveKnowledgeScope(sessionId, nextScope, typeof request.enabled === 'boolean' ? request.enabled : undefined, typeof request.remember === 'boolean' ? request.remember : undefined)
         }

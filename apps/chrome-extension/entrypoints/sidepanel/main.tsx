@@ -23,7 +23,7 @@ interface RecentPrototypeStudio { projectId: string; referenceId: string; refere
 interface RecentPrototypeStudiosResponse { ok: boolean; projects?: RecentPrototypeStudio[]; error?: string }
 interface ActiveTab extends BrowserTargetTab {}
 interface ActiveTabResponse { ok: boolean; epoch?: string; sequence?: number; tab?: ActiveTab; error?: string }
-interface KnowledgeScope { domainId: string; systemIds: string[]; repositoryIds: string[] }
+interface KnowledgeScope { domainSystems: Record<string, string[]>; repositoryIds: string[] }
 type KnowledgeServiceState = 'checking' | 'ready' | 'unauthenticated' | 'unavailable'
 type KnowledgeScopeOptions = { enabled?: boolean; remember?: boolean; action?: 'login' | 'retry' }
 interface KnowledgeScopeResponse { ok: boolean; scope?: KnowledgeScope; enabled?: boolean; remember?: boolean; serviceState?: KnowledgeServiceState; catalog?: unknown; notice?: string; error?: string }
@@ -82,8 +82,8 @@ function isBrowserTargetCommand(value: unknown): value is BrowserTargetCommand {
 
 function isKnowledgeScope(value: unknown): value is KnowledgeScope {
   return typeof value === 'object' && value !== null
-    && typeof (value as KnowledgeScope).domainId === 'string'
-    && Array.isArray((value as KnowledgeScope).systemIds) && (value as KnowledgeScope).systemIds.every((item) => typeof item === 'string')
+    && typeof (value as KnowledgeScope).domainSystems === 'object' && (value as KnowledgeScope).domainSystems !== null
+    && Object.entries((value as KnowledgeScope).domainSystems).every(([domainId, systemIds]) => typeof domainId === 'string' && Array.isArray(systemIds) && systemIds.every((item) => typeof item === 'string'))
     && Array.isArray((value as KnowledgeScope).repositoryIds) && (value as KnowledgeScope).repositoryIds.every((item) => typeof item === 'string')
 }
 

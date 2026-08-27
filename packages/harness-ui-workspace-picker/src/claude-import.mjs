@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import path from 'node:path'
+import { createInterface } from 'node:readline'
 
 export const CLAUDE_IMPORT_PATH = '/api/claude-code.import'
 export const MAX_PROJECTS = 500
 export const MAX_SESSIONS = 2_000
-export const MAX_SOURCE_BYTES = 8 * 1024 * 1024
 export const MAX_SESSION_PAGE_SIZE = 64
 const MAX_PREVIEW_BYTES = 64 * 1024
 const MAX_LINES = 20_000
@@ -64,10 +65,17 @@ export class ClaudeImportDirectory {
     if (!forceCopy && registry[sourceKey] !== undefined) return { kind: 'existing', sourceKey, sessionId: registry[sourceKey].sessionId }
     const info = await stat(sourceFile)
     if (!info.isFile()) throw new Error('Claude Code 会话文件不存在')
-    if (info.size > MAX_SOURCE_BYTES) throw new Error(`Claude Code 会话超过 ${String(MAX_SOURCE_BYTES / 1024 / 1024)} MB 安全上限`)
-    const raw = await readFile(sourceFile, { encoding: 'utf8', signal })
-    const parsed = parseClaudeSession(raw)
+    const parsed = await parseClaudeSessionFile(sourceFile, signal)
     return { kind: 'prepared', sourceKey, title: parsed.title, prompt: continuationPrompt(parsed), sourceUpdatedAt: info.mtime.toISOString() }
+  }
+
+  async detail({ projectKey, sessionId, sourceRoot = this.root, signal }) {
+    const root = await this.canonicalRoot(sourceRoot)
+    const sourceFile = this.sessionFile(projectKey, sessionId, root)
+    const info = await stat(sourceFile)
+    if (!info.isFile()) throw new Error('Claude Code 会话文件不存在')
+    const parsed = await parseClaudeSessionFile(sourceFile, signal)
+    return { title: parsed.title, messages: parsed.messages, truncated: parsed.truncated, sourceUpdatedAt: info.mtime.toISOString() }
   }
 
   async commit({ sourceKey, sessionId, sourceRoot = this.root }) {
@@ -121,25 +129,62 @@ export class ClaudeImportDirectory {
 }
 
 export function parseClaudeSession(raw) {
-  const messages = []
-  let title
-  let sourceSessionId
+  const parser = createClaudeSessionParser()
   const lines = raw.split(/\r?\n/)
   if (lines.length > MAX_LINES) throw new Error(`Claude Code 会话超过 ${String(MAX_LINES)} 行安全上限`)
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]
-    if (line.trim() === '') continue
-    let record
-    try { record = JSON.parse(line) } catch (error) { throw new Error(`Claude Code JSONL 第 ${String(index + 1)} 行无效：${error instanceof Error ? error.message : String(error)}`) }
-    if (sourceSessionId === undefined && typeof record.sessionId === 'string') sourceSessionId = record.sessionId
-    if (record.type !== 'user' && record.type !== 'assistant') continue
-    const text = messageText(record)
-    if (text === '') continue
-    if (title === undefined && record.type === 'user') title = titlePreview(text).slice(0, 80)
-    messages.push({ role: record.type, text, timestamp: typeof record.timestamp === 'string' ? record.timestamp : undefined })
+  lines.forEach((line, index) => parser.push(line, index + 1))
+  return parser.finish()
+}
+
+async function parseClaudeSessionFile(file, signal) {
+  const stream = createReadStream(file, { encoding: 'utf8', signal })
+  const reader = createInterface({ input: stream, crlfDelay: Infinity })
+  const parser = createClaudeSessionParser()
+  let lineNumber = 0
+  try {
+    for await (const line of reader) {
+      lineNumber += 1
+      if (lineNumber > MAX_LINES) throw new Error(`Claude Code 会话超过 ${String(MAX_LINES)} 行安全上限`)
+      parser.push(line, lineNumber)
+    }
+    return parser.finish()
+  } finally {
+    reader.close()
+    stream.destroy()
   }
-  if (messages.length === 0) throw new Error('Claude Code 会话没有可迁移的用户或助手文本')
-  return { sourceSessionId, title: title ?? '从 Claude Code 导入', messages: boundedRecent(messages) }
+}
+
+function createClaudeSessionParser() {
+  const messages = []
+  let chars = 0
+  let truncated = false
+  let title
+  let sourceSessionId
+  return {
+    push(line, lineNumber) {
+      if (line.trim() === '') return
+      let record
+      try { record = JSON.parse(line) } catch (error) { throw new Error(`Claude Code JSONL 第 ${String(lineNumber)} 行无效：${error instanceof Error ? error.message : String(error)}`) }
+      if (sourceSessionId === undefined && typeof record.sessionId === 'string') sourceSessionId = record.sessionId
+      if (record.type !== 'user' && record.type !== 'assistant') return
+      const text = messageText(record)
+      if (text === '') return
+      if (title === undefined && record.type === 'user') title = titlePreview(text).slice(0, 80)
+      messages.push({ role: record.type, text, timestamp: typeof record.timestamp === 'string' ? record.timestamp : undefined })
+      chars += text.length
+      while (chars > MAX_TEXT_CHARS && messages.length > 1) { chars -= messages.shift().text.length; truncated = true }
+      if (chars > MAX_TEXT_CHARS) {
+        const message = messages[0]
+        message.text = message.text.slice(-MAX_TEXT_CHARS)
+        chars = message.text.length
+        truncated = true
+      }
+    },
+    finish() {
+      if (messages.length === 0) throw new Error('Claude Code 会话没有可迁移的用户或助手文本')
+      return { sourceSessionId, title: title ?? '从 Claude Code 导入', messages, truncated }
+    },
+  }
 }
 
 function continuationPrompt(parsed) {
@@ -188,19 +233,6 @@ function stripSyntheticPrefix(value, allowPartialWrapper) {
   return text
 }
 
-function boundedRecent(messages) {
-  const selected = []
-  let chars = 0
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (chars + message.text.length > MAX_TEXT_CHARS && selected.length > 0) break
-    const remaining = Math.max(0, MAX_TEXT_CHARS - chars)
-    selected.push({ ...message, text: message.text.slice(Math.max(0, message.text.length - remaining)) })
-    chars += Math.min(message.text.length, remaining)
-    if (chars >= MAX_TEXT_CHARS) break
-  }
-  return selected.reverse()
-}
 
 function previewTitle(raw) {
   for (const line of raw.split(/\r?\n/)) {

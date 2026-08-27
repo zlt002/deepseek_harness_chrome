@@ -3,42 +3,53 @@ import test from 'node:test'
 import { createScopeProtocol, knowledgeScopeBridgeConfig } from '../src/client/protocol.js'
 import { scopeLabels } from '../src/client/labels.js'
 import { selectKnowledgeDomain, selectKnowledgeSystem } from '../src/client/selection.js'
+import { migrateLegacyKnowledgeScope } from '../../../apps/chrome-extension/src/legacy-knowledge-scope.mjs'
 
 function store(initial) { return { value: initial, set(value) { this.value = value } } }
-const snapshot = { sessionId: 'session-1', enabled: true, serviceState: 'ready', notice: '旧版会话包含多个知识领域，请重新确认知识范围；已保留代码库选择。', scope: { domainId: 'd', systemIds: ['s1', 's2'], repositoryIds: ['r1', 'r2'] }, catalog: { domains: [{ id: 'd', name: '供应链' }], systems: [{ id: 's1', name: '订单知识库' }, { id: 's2', name: '结算知识库' }], repositories: [{ id: 'r1', name: 'OTP-后端-中台' }, { id: 'r2', name: 'OTP-前端-1' }] } }
+const snapshot = { sessionId: 'session-1', enabled: true, serviceState: 'ready', scope: { domainSystems: { d: ['s1'], d2: ['s2'] }, repositoryIds: ['r1', 'r2'] }, catalog: { domains: [{ id: 'd', name: '供应链' }, { id: 'd2', name: '仓储' }], systems: [{ id: 's1', name: '订单知识库', domainId: 'd' }, { id: 's2', name: '库存知识库', domainId: 'd2' }], repositories: [{ id: 'r1', name: 'OTP-后端-中台' }, { id: 'r2', name: 'OTP-前端-1' }] } }
 
 test('preserves all selected repository and knowledge names for wide composer layouts', () => {
-  assert.deepEqual(scopeLabels(snapshot.scope, snapshot.catalog), { repositories: 'OTP-后端-中台、OTP-前端-1', knowledge: '订单知识库、结算知识库' })
+  assert.deepEqual(scopeLabels(snapshot.scope, snapshot.catalog), { repositories: 'OTP-后端-中台、OTP-前端-1', knowledge: '订单知识库、库存知识库' })
 })
 
-test('checking a child system selects its parent domain without a prior parent click', () => {
-  const empty = { domainId: '', systemIds: [], repositoryIds: ['repo'] }
+test('checking knowledge systems preserves selections across categories', () => {
+  const empty = { domainSystems: {}, repositoryIds: ['repo'] }
   assert.deepEqual(selectKnowledgeSystem(empty, 'transport', 'tms', true), {
-    domainId: 'transport', systemIds: ['tms'], repositoryIds: ['repo'],
+    domainSystems: { transport: ['tms'] }, repositoryIds: ['repo'],
   })
-  assert.deepEqual(selectKnowledgeSystem({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'transport', 'oms', true), {
-    domainId: 'transport', systemIds: ['tms', 'oms'], repositoryIds: [],
+  assert.deepEqual(selectKnowledgeSystem({ domainSystems: { transport: ['tms'] }, repositoryIds: [] }, 'transport', 'oms', true), {
+    domainSystems: { transport: ['tms', 'oms'] }, repositoryIds: [],
   })
-  assert.deepEqual(selectKnowledgeSystem({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'warehouse', 'wms', true), {
-    domainId: 'warehouse', systemIds: ['wms'], repositoryIds: [],
+  assert.deepEqual(selectKnowledgeSystem({ domainSystems: { transport: ['tms'] }, repositoryIds: [] }, 'warehouse', 'wms', true), {
+    domainSystems: { transport: ['tms'], warehouse: ['wms'] }, repositoryIds: [],
   })
-  assert.deepEqual(selectKnowledgeSystem({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'transport', 'tms', false), {
-    domainId: '', systemIds: [], repositoryIds: [],
+  assert.deepEqual(selectKnowledgeSystem({ domainSystems: { transport: ['tms'] }, repositoryIds: [] }, 'transport', 'tms', false, ['tms']), {
+    domainSystems: {}, repositoryIds: [],
   })
 })
 
-test('checking a parent domain selects every child system and unchecking clears it', () => {
-  const empty = { domainId: '', systemIds: [], repositoryIds: [] }
+test('checking a category selects every child without clearing another category', () => {
+  const empty = { domainSystems: { warehouse: ['wms'] }, repositoryIds: [] }
   assert.deepEqual(selectKnowledgeDomain(empty, 'transport', ['tms', 'oms'], true), {
-    domainId: 'transport', systemIds: ['tms', 'oms'], repositoryIds: [],
+    domainSystems: { warehouse: ['wms'], transport: ['tms', 'oms'] }, repositoryIds: [],
   })
-  assert.deepEqual(selectKnowledgeDomain({ domainId: 'transport', systemIds: ['tms'], repositoryIds: [] }, 'transport', ['tms', 'oms'], false), {
-    domainId: '', systemIds: [], repositoryIds: [],
+  assert.deepEqual(selectKnowledgeDomain({ domainSystems: { warehouse: ['wms'], transport: ['tms'] }, repositoryIds: [] }, 'transport', ['tms', 'oms'], false), {
+    domainSystems: { warehouse: ['wms'] }, repositoryIds: [],
+  })
+})
+
+test('migrates saved and legacy multi-category selections without losing either category', () => {
+  assert.deepEqual(migrateLegacyKnowledgeScope({
+    enabled: true,
+    scope: { hasCommon: false, domains: { transport: { self: false, systems: ['tms'] }, warehouse: { self: false, systems: ['wms'] } }, repoKeys: ['repo'] },
+  }), {
+    enabled: true,
+    scope: { domainSystems: { transport: ['tms'], warehouse: ['wms'] }, repositoryIds: ['repo'] },
   })
 })
 
 test('keeps unselected composer buttons as empty labels so agents do not probe either side', () => {
-  assert.deepEqual(scopeLabels({ domainId: '', systemIds: [], repositoryIds: [] }, snapshot.catalog), {
+  assert.deepEqual(scopeLabels({ domainSystems: {}, repositoryIds: [] }, snapshot.catalog), {
     repositories: undefined,
     knowledge: undefined,
   })
@@ -48,7 +59,7 @@ test('keeps an already selected repository visible when a catalog refresh omits 
   assert.deepEqual(scopeLabels(
     { ...snapshot.scope, repositoryIds: ['r1', 'OTP-后端-中台'] },
     { ...snapshot.catalog, repositories: [{ id: 'r1', name: 'OTP-后端-中台' }] },
-  ), { repositories: 'OTP-后端-中台、OTP-后端-中台', knowledge: '订单知识库、结算知识库' })
+  ), { repositories: 'OTP-后端-中台、OTP-后端-中台', knowledge: '订单知识库、库存知识库' })
 })
 
 test('accepts only an exact parent, nonce, and increasing knowledge snapshot sequence', () => {

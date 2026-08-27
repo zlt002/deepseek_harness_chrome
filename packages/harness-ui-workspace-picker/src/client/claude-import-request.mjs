@@ -1,6 +1,6 @@
 const PATH = '/api/claude-code.import'
-const ACTION_LABELS = { projects: '读取 Claude 项目', sessions: '读取项目会话', prepare: '准备所选会话', commit: '记录导入结果' }
-const ACTION_TIMEOUTS = { projects: 5_000, sessions: 8_000, prepare: 15_000, commit: 8_000 }
+const ACTION_LABELS = { projects: '读取 Claude 项目', sessions: '读取项目会话', detail: '读取会话详情', prepare: '准备所选会话', commit: '记录导入结果' }
+const ACTION_TIMEOUTS = { projects: 5_000, sessions: 8_000, detail: 15_000, prepare: 15_000, commit: 8_000 }
 
 /** Shared request seam. Fetch injection keeps transport timeout behavior deterministic in tests. */
 export async function claudeImportRequest(body, signal, options = {}) {

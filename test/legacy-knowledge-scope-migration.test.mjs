@@ -17,11 +17,11 @@ test('migrates one legacy AccrUI session scope without deleting repository selec
     },
   }), {
     enabled: false,
-    scope: { domainId: 'order', systemIds: ['otp', 'oms'], repositoryIds: ['repo-b', 'repo-a'] },
+    scope: { domainSystems: { order: ['otp', 'oms'] }, repositoryIds: ['repo-b', 'repo-a'] },
   })
 })
 
-test('keeps code repositories but requires review instead of silently collapsing several legacy knowledge domains', () => {
+test('preserves all legacy knowledge categories with their own systems', () => {
   assert.deepEqual(migrateLegacyKnowledgeScope({
     hasCommon: true,
     repoKeys: ['repo-a'],
@@ -31,8 +31,7 @@ test('keeps code repositories but requires review instead of silently collapsing
     },
   }), {
     enabled: true,
-    scope: { domainId: '', systemIds: [], repositoryIds: ['repo-a'] },
-    notice: '旧版会话包含多个知识领域，请重新确认知识范围；已保留代码库选择。',
+    scope: { domainSystems: { first: ['one'], second: ['two'] }, repositoryIds: ['repo-a'] },
   })
 })
 

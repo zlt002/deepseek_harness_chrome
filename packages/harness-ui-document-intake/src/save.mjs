@@ -5,6 +5,8 @@ import {
   DOCUMENT_UPLOADS_DIR,
   documentBaseName,
   documentKindOf,
+  isSafeTextDocumentBytes,
+  isTextDocumentKind,
   skillForDocumentKind,
 } from './formats.mjs'
 
@@ -28,6 +30,9 @@ export async function saveSessionDocuments(cwd, uploads) {
     const name = documentBaseName(upload.name)
     const kind = documentKindOf(name, upload.mediaType ?? '')
     if (kind === undefined) throw new Error(`unsupported document: ${name}`)
+    if (isTextDocumentKind(kind) && !isSafeTextDocumentBytes(upload.bytes)) {
+      throw new Error(`text document is not valid UTF-8 text: ${name}`)
+    }
     const fileName = uniqueName(used, safeFileName(name))
     const absolute = join(dest, fileName)
     if (!absolute.startsWith(`${root}${sep}`) && absolute !== root) {

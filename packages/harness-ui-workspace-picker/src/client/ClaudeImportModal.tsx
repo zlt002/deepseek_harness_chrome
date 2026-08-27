@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button, IconCloseOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ClaudeProject, ClaudeSession } from './claude-import-api.ts'
+import type { ClaudeProject, ClaudeSession, ClaudeSessionDetail } from './claude-import-api.ts'
 import { claudeImportRequest } from './claude-import-api.ts'
 import css from './CompactWorkspacePicker.module.css'
 
@@ -26,10 +26,16 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
   const [phase, setPhase] = useState<'idle' | 'projects' | 'sessions' | 'preparing' | 'creating' | 'duplicate' | 'done' | 'error'>('idle')
   const [error, setError] = useState<string>()
   const [duplicateUnavailable, setDuplicateUnavailable] = useState(false)
+  const [detail, setDetail] = useState<ClaudeSessionDetail>()
+  const [detailPhase, setDetailPhase] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [detailError, setDetailError] = useState<string>()
   const abortRef = useRef<AbortController>()
+  const detailAbortRef = useRef<AbortController>()
   const irreversibleRef = useRef(false)
   const closeButton = useRef<HTMLButtonElement>(null)
+  const detailCloseButton = useRef<HTMLButtonElement>(null)
   const titleId = useId()
+  const detailTitleId = useId()
   const selected = sessions.find(session => session.sessionId === selectedSessionId)
   const visibleSessions = useMemo(() => {
     const normalized = query.trim().toLowerCase()
@@ -39,18 +45,19 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
   useEffect(() => {
     if (!open) return
     const abort = new AbortController(); abortRef.current = abort; irreversibleRef.current = false
-    setPhase('projects'); setError(undefined); setDuplicateUnavailable(false); setProjects([]); setSessions([]); setSessionsTotal(0); setProjectKey(undefined); setSelectedSessionId(undefined); setQuery(''); setSourceRoot('default'); setSourceDraft('')
+    setPhase('projects'); setError(undefined); setDuplicateUnavailable(false); setDetail(undefined); setProjects([]); setSessions([]); setSessionsTotal(0); setProjectKey(undefined); setSelectedSessionId(undefined); setQuery(''); setSourceRoot('default'); setSourceDraft('')
     void claudeImportRequest<{ sourceRoot: string; projects: ClaudeProject[] }>({ action: 'projects', sourceRoot: 'default' }, abort.signal).then(result => {
       setSourceRoot(result.sourceRoot); setSourceDraft(result.sourceRoot); setProjects(result.projects); setPhase('idle')
       if (result.projects[0] !== undefined) selectProject(result.projects[0].key, result.sourceRoot)
     }).catch(reason => { if (!abort.signal.aborted) fail(reason) })
-    return () => abort.abort()
+    return () => { abort.abort(); detailAbortRef.current?.abort() }
   }, [open])
 
   const selectProject = (key: string, explicitRoot = sourceRoot) => {
     abortRef.current?.abort()
     const abort = new AbortController(); abortRef.current = abort
-    setProjectKey(key); setSessions([]); setSessionsTotal(0); setSelectedSessionId(undefined); setPhase('sessions'); setError(undefined)
+    detailAbortRef.current?.abort()
+    setDetail(undefined); setProjectKey(key); setSessions([]); setSessionsTotal(0); setSelectedSessionId(undefined); setPhase('sessions'); setError(undefined)
     void (async () => {
       let offset = 0
       let collected: ClaudeSession[] = []
@@ -69,7 +76,8 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
   const loadSource = (requestedRoot: string) => {
     abortRef.current?.abort()
     const abort = new AbortController(); abortRef.current = abort
-    setPhase('projects'); setError(undefined); setProjects([]); setSessions([]); setSessionsTotal(0); setProjectKey(undefined); setSelectedSessionId(undefined)
+    detailAbortRef.current?.abort()
+    setDetail(undefined); setPhase('projects'); setError(undefined); setProjects([]); setSessions([]); setSessionsTotal(0); setProjectKey(undefined); setSelectedSessionId(undefined)
     void claudeImportRequest<{ sourceRoot: string; projects: ClaudeProject[] }>({ action: 'projects', sourceRoot: requestedRoot }, abort.signal).then(result => {
       setSourceRoot(result.sourceRoot); setSourceDraft(result.sourceRoot); setProjects(result.projects); setPhase('idle')
       if (result.projects[0] !== undefined) selectProject(result.projects[0].key, result.sourceRoot)
@@ -87,14 +95,28 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
     }).catch(reason => { irreversibleRef.current = false; if (!abort.signal.aborted) fail(reason) })
   }
   const close = () => { if (irreversibleRef.current) return; abortRef.current?.abort(); onClose() }
+  const closeDetail = () => { detailAbortRef.current?.abort(); setDetail(undefined); setDetailError(undefined) }
+  const openDetail = (session: ClaudeSession) => {
+    if (projectKey === undefined) return
+    detailAbortRef.current?.abort()
+    const abort = new AbortController(); detailAbortRef.current = abort
+    setDetail({ title: session.title, sourceUpdatedAt: session.updatedAt, truncated: false, messages: [] }); setDetailPhase('loading'); setDetailError(undefined)
+    void claudeImportRequest<ClaudeSessionDetail>({ action: 'detail', sourceRoot, projectKey, sessionId: session.sessionId }, abort.signal).then(result => {
+      if (!abort.signal.aborted) { setDetail(result); setDetailPhase('ready') }
+    }).catch(reason => {
+      if (!abort.signal.aborted) { setDetailPhase('error'); setDetailError(reason instanceof Error ? reason.message : String(reason)) }
+    })
+  }
 
   useEffect(() => {
     if (!open) return
     closeButton.current?.focus()
-    const closeEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
+    const closeEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') { if (detail !== undefined) closeDetail(); else close() } }
     document.addEventListener('keydown', closeEscape)
     return () => { document.removeEventListener('keydown', closeEscape) }
-  }, [open, onClose])
+  }, [open, onClose, detail])
+
+  useEffect(() => { if (detail !== undefined) detailCloseButton.current?.focus() }, [detail])
 
   if (!open) return null
   return createPortal(<div className={css.importOverlay} role="presentation" data-testid="claude-import-overlay">
@@ -125,7 +147,10 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
             <div className={css.importSearchBar}><input className={css.importSearch} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索会话" aria-label="搜索 Claude Code 会话" /></div>
             <div className={css.importSessionHeader} aria-hidden="true"><span>标题</span><span>日期</span></div>
             <div className={css.importScroll}>
-              {visibleSessions.map(session => <button key={session.sessionId} type="button" className={classes(css.importRow, css.importSessionRow, session.sessionId === selectedSessionId && css.importRowActive)} onClick={() => setSelectedSessionId(session.sessionId)}><span>{session.title}</span><small>{formatSessionDate(session.updatedAt).map(part => <span key={part}>{part}</span>)}</small></button>)}
+              {visibleSessions.map(session => <div key={session.sessionId} className={classes(css.importRow, css.importSessionRow, session.sessionId === selectedSessionId && css.importRowActive)}>
+                <button type="button" className={css.importSessionSelect} aria-pressed={session.sessionId === selectedSessionId} onClick={() => setSelectedSessionId(session.sessionId)}><span>{session.title}</span><small>{formatSessionDate(session.updatedAt).map(part => <span key={part}>{part}</span>)}</small></button>
+                <button type="button" className={css.importDetailButton} aria-label={`查看 ${session.title} 详情`} title="查看详情" onClick={() => openDetail(session)}>ⓘ</button>
+              </div>)}
               {phase !== 'sessions' && sessions.length === 0 && projectKey !== undefined && <div className={css.empty}>此项目没有可导入会话</div>}
             </div>
           </section>
@@ -147,6 +172,17 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
           ? <Button variant="primary" onClick={() => runImport(true)}>重新导入为副本</Button>
           : <Button variant="primary" disabled={controller === undefined || selected === undefined || workspace === undefined || phase === 'projects' || phase === 'sessions' || phase === 'preparing' || phase === 'creating'} onClick={() => runImport(false)}>导入并继续</Button>}
       </footer>
+      {detail !== undefined && <section className={css.importDetailOverlay} role="dialog" aria-modal="true" aria-labelledby={detailTitleId}>
+        <div className={css.importDetailPanel}>
+          <header className={css.importDetailHeader}><h3 id={detailTitleId}>会话详情：{detail.title}</h3><button ref={detailCloseButton} type="button" className={css.importClose} aria-label="关闭会话详情" onClick={closeDetail}><IconCloseOutline16 size={14} /></button></header>
+          <div className={css.importDetailContent} aria-live="polite">
+            {detailPhase === 'loading' && <div role="status">正在按需读取会话详情…</div>}
+            {detailPhase === 'error' && <div className={css.renameError} role="alert">{detailError}</div>}
+            {detailPhase === 'ready' && <>{detail.truncated && <div className={css.importDetailNotice} role="status">为控制迁移内容大小，仅显示最近 120,000 个字符。</div>}{detail.messages.map((message, index) => <article key={`${message.timestamp ?? index}-${message.role}`} className={classes(css.importDetailMessage, message.role === 'user' ? css.importDetailUser : css.importDetailAssistant)}><strong>{message.role === 'user' ? '用户' : '助手'}</strong>{message.timestamp !== undefined && <time>{formatSessionDate(message.timestamp).join(' ')}</time>}<pre>{message.text}</pre></article>)}</>}
+          </div>
+          <footer className={css.importDetailFooter}><Button variant="primary" onClick={closeDetail}>我已查看</Button></footer>
+        </div>
+      </section>}
     </section>
   </div>, document.body)
 }
