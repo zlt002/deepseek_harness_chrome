@@ -1,4 +1,5 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, rename, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -30,17 +31,32 @@ export async function prepareUpdate(options = {}) {
   return { ...verified, packagePath, extractRoot, packageUrl: source.packageUrl, ...(etag === undefined ? {} : { etag }) }
 }
 
-export async function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform } = {}) {
+export async function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform, handshakeTimeoutMs: requestedHandshakeTimeoutMs, writeFileImpl = writeFile, renameImpl = rename } = {}) {
   if (platform !== 'win32') throw new Error('在线更新仅支持 Windows Lite')
   if (!prepared?.extractRoot || !prepared?.version || !installRoot || !Number.isInteger(nativePid)) throw new Error('更新启动参数无效')
   const escapedRoot = String(installRoot).replaceAll("'", "''")
   const escapedScript = join(prepared.extractRoot, 'install.ps1').replaceAll("'", "''")
   const escapedVersion = String(prepared.version).replaceAll("'", "''")
+  const handshakeTimeoutMs = Number.isInteger(requestedHandshakeTimeoutMs) && requestedHandshakeTimeoutMs >= 1
+    ? requestedHandshakeTimeoutMs
+    : 10_000
+  const handoffRoot = await mkdtemp(join(prepared.extractRoot, '.accrui-release-update-handoff-'))
+  const updaterScriptPath = join(handoffRoot, 'updater.ps1')
+  const readyPath = join(handoffRoot, 'ready')
+  const goPath = join(handoffRoot, 'go')
+  const goPendingPath = `${goPath}.pending`
+  const cancelPath = join(handoffRoot, 'cancel')
+  const errorPath = join(handoffRoot, 'error')
+  const escapePowerShell = value => String(value).replaceAll("'", "''")
   const command = `$ErrorActionPreference = 'Stop'
 $installRoot = '${escapedRoot}'
 $targetVersion = '${escapedVersion}'
 $statusPath = Join-Path $installRoot '.accrui-update-status.json'
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+$readyPath = '${escapePowerShell(readyPath)}'
+$goPath = '${escapePowerShell(goPath)}'
+$cancelPath = '${escapePowerShell(cancelPath)}'
+$errorPath = '${escapePowerShell(errorPath)}'
 function Get-SafeUpdateError([object]$Cause) {
   $text = if ($null -eq $Cause) { '安装程序未返回错误详情。' } elseif ($Cause.Exception) { $Cause.Exception.Message } else { [string]$Cause }
   $safe = ([string]$text).Replace("\`r", ' ').Replace("\`n", ' ').Trim()
@@ -57,34 +73,94 @@ function Write-UpdateStatus([string]$State, [string]$ErrorText = '') {
 }
 try {
   Write-UpdateStatus 'pending'
+  [System.IO.File]::WriteAllText($readyPath, 'ready', [System.Text.UTF8Encoding]::new($false))
+  $handoffDeadline = [DateTime]::UtcNow.AddSeconds(30)
+  while (-not (Test-Path -LiteralPath $goPath -PathType Leaf) -and -not (Test-Path -LiteralPath $cancelPath -PathType Leaf) -and [DateTime]::UtcNow -lt $handoffDeadline) { Start-Sleep -Milliseconds 50 }
+  if (Test-Path -LiteralPath $cancelPath -PathType Leaf) { throw 'Native Host 未确认更新交接，安装已取消。' }
+  if (-not (Test-Path -LiteralPath $goPath -PathType Leaf)) { throw 'Native Host 未在时限内确认更新交接，安装已取消。' }
   $nativeDeadline = [DateTime]::UtcNow.AddSeconds(10)
   while ((Get-Process -Id ${nativePid} -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $nativeDeadline) { Start-Sleep -Milliseconds 200 }
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File '${escapedScript}' -InstallRoot $installRoot
   if ($LASTEXITCODE -ne 0) { throw "安装程序退出码：$LASTEXITCODE" }
   Write-UpdateStatus 'succeeded'
 } catch {
-  Write-UpdateStatus 'failed' (Get-SafeUpdateError $_)
+  $safeError = Get-SafeUpdateError $_
+  try { [System.IO.File]::WriteAllText($errorPath, $safeError, [System.Text.UTF8Encoding]::new($false)) } catch {}
+  Write-UpdateStatus 'failed' $safeError
   exit 1
 }`
+  await writeFileImpl(updaterScriptPath, Buffer.from(`\uFEFF${command}`, 'utf8'))
   return await new Promise((resolvePromise, rejectPromise) => {
     let child
+    let settled = false
+    let committing = false
+    let pollTimer
+    let timeout
     const settle = (callback, value) => {
+      if (settled) return
+      settled = true
+      clearInterval(pollTimer)
+      clearTimeout(timeout)
       child?.removeListener?.('spawn', onSpawn)
       child?.removeListener?.('error', onError)
+      child?.removeListener?.('exit', onExit)
       callback(value)
     }
-    const onError = error => settle(rejectPromise, error)
-    const onSpawn = () => {
+    const cancel = async error => {
+      if (settled) return
+      settled = true
+      clearInterval(pollTimer)
+      clearTimeout(timeout)
+      child?.removeListener?.('spawn', onSpawn)
+      child?.removeListener?.('error', onError)
+      child?.removeListener?.('exit', onExit)
       try {
-        child.unref()
-        settle(resolvePromise, true)
-      } catch (error) { settle(rejectPromise, error) }
+        await writeFileImpl(cancelPath, 'cancel', 'utf8')
+        rejectPromise(error)
+      } catch (cancelError) {
+        const primary = error instanceof Error ? error.message : String(error)
+        const secondary = cancelError instanceof Error ? cancelError.message : String(cancelError)
+        rejectPromise(new Error(`${primary}；取消标记写入失败：${secondary}`))
+      }
+    }
+    const onError = error => { void cancel(error) }
+    const onExit = () => {
+      let updaterError
+      try {
+        updaterError = readFileSync(errorPath, 'utf8').replace(/[\r\n]+/g, ' ').trim().slice(0, 2_048)
+      } catch {}
+      void cancel(new Error(updaterError || '更新启动器在就绪握手前退出。'))
+    }
+    const onReady = async () => {
+      if (settled || committing) return
+      committing = true
+      clearInterval(pollTimer)
+      clearTimeout(timeout)
+      try {
+        child?.unref?.()
+        await writeFileImpl(goPendingPath, 'go', 'utf8')
+        if (!settled) await renameImpl(goPendingPath, goPath)
+        if (!settled) settle(resolvePromise, true)
+      } catch (error) {
+        if (!settled) await cancel(error)
+      } finally {
+        committing = false
+      }
+    }
+    const pollReady = () => {
+      void access(readyPath).then(onReady).catch(() => {})
+    }
+    const onSpawn = () => {
+      pollReady()
+      pollTimer = setInterval(pollReady, 25)
+      timeout = setTimeout(() => { void cancel(new Error(`更新启动器未在 ${handshakeTimeoutMs}ms 内完成就绪握手。`)) }, handshakeTimeoutMs)
     }
     try {
-      child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', command], { detached: true, stdio: 'ignore' })
+      child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', updaterScriptPath], { detached: true, stdio: 'ignore' })
       if (!child?.once) throw new Error('更新启动器未返回子进程')
       child.once('spawn', onSpawn)
       child.once('error', onError)
+      child.once('exit', onExit)
     } catch (error) { settle(rejectPromise, error) }
   })
 }

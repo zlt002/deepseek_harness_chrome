@@ -82,6 +82,7 @@ test('Windows ZIP writer loads the compression assemblies required by its portab
 test('Windows acceptance exercises the detached online-update handoff and waits for its persisted result', async () => {
   const acceptance = await readFile(new URL('../release/windows-lite/acceptance-windows.ps1', import.meta.url), 'utf8')
   const helper = await readFile(new URL('../release/windows-lite/release-update-handoff-smoke.mjs', import.meta.url), 'utf8')
+  const updater = await readFile(new URL('../apps/native-server/src/release-update/index.mjs', import.meta.url), 'utf8')
   assert.match(acceptance, /function Invoke-ReleaseUpdateHandoff/)
   assert.match(acceptance, /release-update-handoff-smoke\.mjs/)
   assert.match(acceptance, /\.accrui-update-status\.json/)
@@ -104,6 +105,13 @@ test('Windows acceptance exercises the detached online-update handoff and waits 
   assert.match(helper, /launchPreparedUpdate/)
   assert.match(helper, /nativePid:\s*process\.pid/)
   assert.match(helper, /platform:\s*'win32'/)
+  assert.match(updater, /accrui-release-update-handoff-/)
+  assert.match(updater, /'-File', updaterScriptPath/)
+  assert.match(updater, /Write-UpdateStatus 'pending'/)
+  assert.match(updater, /WriteAllText\(\$readyPath, 'ready'/)
+  assert.match(updater, /Test-Path -LiteralPath \$goPath/)
+  assert.match(updater, /Test-Path -LiteralPath \$cancelPath/)
+  assert.doesNotMatch(updater, /'-Command', command/)
 })
 
 function decodeMessage(frame) {
