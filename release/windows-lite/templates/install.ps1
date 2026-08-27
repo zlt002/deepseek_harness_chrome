@@ -193,13 +193,18 @@ function Move-ManagedTree([string]$Source, [string]$Destination, [switch]$Explai
   }
 }
 
-function Copy-ExtensionTree([string]$SourceRoot, [string]$DestinationRoot) {
+function Copy-ExtensionTree([string]$SourceRoot, [string]$DestinationRoot, [switch]$ExplainLockedExtension) {
   $source = Join-Path $SourceRoot 'extension'
   if (-not (Test-Path -LiteralPath $source -PathType Container)) { return }
   $destination = Join-Path $DestinationRoot 'extension'
   if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction Stop }
   New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
-  Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force -ErrorAction Stop
+  try {
+    Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force -ErrorAction Stop
+  } catch {
+    if ($ExplainLockedExtension) { throw (New-ExtensionInUseError $source $_) }
+    throw
+  }
 }
 
 function Copy-ExtensionFileAtomically([System.IO.FileInfo]$Source, [string]$Destination) {
@@ -334,7 +339,7 @@ try {
   Suspend-NativeHostRegistration
   Stop-InstalledProductProcesses $installRoot
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
-  Copy-ExtensionTree $installRoot $previousRoot
+  Copy-ExtensionTree $installRoot $previousRoot -ExplainLockedExtension
   try {
     Move-ManagedTree $installRoot $previousRoot -Names $swappableManagedNames
     Move-ManagedTree $stagingRoot $installRoot -Names $swappableManagedNames
