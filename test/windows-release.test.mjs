@@ -76,6 +76,7 @@ test('Windows ZIP writer loads the compression assemblies required by its portab
   assert.match(source, /['"]Add-Type -AssemblyName System\.IO\.Compression\.FileSystem['"],/)
   assert.match(source, /ZipArchiveMode\]::Create/)
   assert.match(source, /Replace\(\[char\]92, \[char\]47\)/)
+  assert.match(source, /const manifestResourceArchiveEntries = normalizedArchiveEntries\(payloadZipPath, manifestResourceEntries\)/)
 })
 
 function decodeMessage(frame) {

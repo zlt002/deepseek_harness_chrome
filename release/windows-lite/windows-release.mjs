@@ -408,8 +408,10 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error))
     }
-    for (const resourceEntry of manifestExtensionResourceEntries(manifest)) {
-      if (!payloadEntries.includes(resourceEntry)) errors.push(`payload.zip is missing manifest-declared extension resource ${resourceEntry}`)
+    const manifestResourceEntries = manifestExtensionResourceEntries(manifest)
+    const manifestResourceArchiveEntries = normalizedArchiveEntries(payloadZipPath, manifestResourceEntries)
+    for (const resourceEntry of manifestResourceEntries) {
+      if (!manifestResourceArchiveEntries.includes(resourceEntry)) errors.push(`payload.zip is missing manifest-declared extension resource ${resourceEntry}`)
     }
   }
   if (payloadEntries.includes(registerNativeHostEntry)) {
