@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { FullscreenHarnessTabUrl, HarnessFrameSource, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from '../apps/chrome-extension/entrypoints/sidepanel/harness-frame.ts'
+import { FullscreenHarnessTabUrl, HarnessFrameSource, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget, PRODUCT_VERSION_QUERY_KEY } from '../apps/chrome-extension/entrypoints/sidepanel/harness-frame.ts'
 
 test('uses the native loopback URL as the Harness iframe source', () => {
   assert.equal(HarnessFrameSource('http://127.0.0.1:62070'), 'http://127.0.0.1:62070')
@@ -20,6 +20,17 @@ test('adds the Browser Target bridge marker only to loopback Harness URLs', () =
   assert.throws(() => HarnessFrameSource('http://127.0.0.1:62070/', {
     nonce: 'frame-nonce', parentOrigin: 'https://example.com', surface: 'sidepanel',
   }), /Chrome extension origin/)
+})
+
+test('passes the installed extension version to the loopback Harness UI', () => {
+  const frameUrl = HarnessFrameSource('http://127.0.0.1:62070/', {
+    nonce: 'frame-nonce', parentOrigin: 'chrome-extension://abcdefghijklmnop', surface: 'sidepanel', productVersion: '1.1.86',
+  })
+  assert.equal(new URL(frameUrl).searchParams.get(PRODUCT_VERSION_QUERY_KEY), '1.1.86')
+  const invalidVersionUrl = HarnessFrameSource('http://127.0.0.1:62070/', {
+    nonce: 'frame-nonce', parentOrigin: 'chrome-extension://abcdefghijklmnop', surface: 'sidepanel', productVersion: 'not-a-version',
+  })
+  assert.equal(new URL(invalidVersionUrl).searchParams.has(PRODUCT_VERSION_QUERY_KEY), false)
 })
 
 test('marks only the extension Tab as full-screen and projects that surface into the iframe bridge', () => {

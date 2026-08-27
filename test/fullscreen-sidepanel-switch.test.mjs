@@ -13,7 +13,8 @@ test('the extension shell shows an exclusive full-screen return control and dele
   assert.match(source, /get-sidepanel-handoff\/v1/)
   assert.match(source, /session-handoff-applied\/v1/)
   assert.match(source, /if \(!sidePanelHandoff\.ready\) return/)
-  assert.match(source, /HarnessFrameSource\(url, \{ nonce: frameNonce, parentOrigin: window\.location\.origin, surface, \.\.\.\(activeHarnessSessionId === undefined \? \{\} : \{ sessionId: activeHarnessSessionId \}\) \}\)/)
+  assert.match(source, /chrome\.runtime\.getManifest\(\)\.version/)
+  assert.match(source, /HarnessFrameSource\(url, \{ nonce: frameNonce, parentOrigin: window\.location\.origin, surface, productVersion, \.\.\.\(activeHarnessSessionId === undefined \? \{\} : \{ sessionId: activeHarnessSessionId \}\) \}\)/)
 })
 
 test('only the nonce-bound Harness iframe can request either surface handoff', async () => {

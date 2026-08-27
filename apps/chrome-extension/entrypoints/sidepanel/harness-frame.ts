@@ -7,6 +7,7 @@ export interface HarnessFrameBridge {
   parentOrigin: string
   surface: HarnessSurface
   sessionId?: string
+  productVersion?: string
 }
 
 /** The two extension-owned containers for one Harness Workspace. */
@@ -15,6 +16,11 @@ export type HarnessSurface = 'sidepanel' | 'fullscreen-tab'
 const SURFACE_QUERY_KEY = 'dshHarnessSurface'
 const SESSION_QUERY_KEY = 'dshHarnessSessionId'
 const HANDOFF_TAB_QUERY_KEY = 'dshHarnessHandoffTabId'
+export const PRODUCT_VERSION_QUERY_KEY = 'dshProductVersion'
+
+function validProductVersion(value: string | undefined): value is string {
+  return value !== undefined && /^\d+(?:\.\d+){0,3}$/.test(value)
+}
 
 /** Treat unmarked extension pages as the normal side panel for compatibility. */
 export function HarnessSurfaceFromLocation(location: Pick<Location, 'search'> = window.location): HarnessSurface {
@@ -89,5 +95,6 @@ export function HarnessFrameSource(nativeUrl: string, bridge?: HarnessFrameBridg
   source.searchParams.set('dshWorkspaceReviewNonce', bridge.nonce)
   source.searchParams.set('dshWorkspaceReviewParentOrigin', bridge.parentOrigin)
   if (bridge.sessionId !== undefined) source.searchParams.set(SESSION_QUERY_KEY, bridge.sessionId)
+  if (validProductVersion(bridge.productVersion)) source.searchParams.set(PRODUCT_VERSION_QUERY_KEY, bridge.productVersion)
   return source.toString()
 }

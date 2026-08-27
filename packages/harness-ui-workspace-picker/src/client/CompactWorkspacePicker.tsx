@@ -17,6 +17,16 @@ import { WORKSPACE_PICKER_DIRECTORY_ACTIONS_SLOT, WORKSPACE_PICKER_DIRECTORY_SLO
 import { workspacePickerMaxHeight } from './popover-geometry.ts'
 import { workspacePickerTabForKey, type WorkspacePickerPane } from './tab-navigation.ts'
 
+const PRODUCT_VERSION_QUERY_KEY = 'dshProductVersion'
+
+/** The extension shell reads chrome.runtime.getManifest() and supplies this to its loopback iframe. */
+export function productTitle(workspaceTitle: string, location: Pick<Location, 'search'> = window.location): string {
+  const productVersion = new URLSearchParams(location.search).get(PRODUCT_VERSION_QUERY_KEY)
+  return workspaceTitle === 'ACCRUI' && productVersion !== null && /^\d+(?:\.\d+){0,3}$/.test(productVersion)
+    ? `ACCRUI ${productVersion}`
+    : workspaceTitle
+}
+
 /** Avoid a runtime dependency for the small conditional class lists in this bundle. */
 function classes(...values: Array<string | false | null | undefined>): string {
   return values.filter((value): value is string => typeof value === 'string' && value.length > 0).join(' ')
@@ -379,7 +389,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
         onClick={() => { setSelectedWorkspaceId(defaultWorkspace?.id); setOpen(value => !value) }}
       >
         <span className={css.titles}>
-          <span className={css.workspaceTitle}>{owner.workspaceTitle}</span>
+          <span className={css.workspaceTitle}>{productTitle(owner.workspaceTitle)}</span>
           <span className={css.sessionTitle}>{owner.sessionTitle}</span>
         </span>
         <IconChevronDownOutline14 className={classes(css.chevron, open && css.chevronOpen)} />

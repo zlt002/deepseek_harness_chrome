@@ -382,11 +382,15 @@ function App(): React.JSX.Element {
   const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
   const handoffSessionId = useMemo(() => HarnessHandoffSessionFromLocation(), [])
   const handoffTabId = useMemo(() => HarnessHandoffTabFromLocation(), [])
+  // The loopback Harness UI is outside the extension origin. Pass the actual
+  // installed extension version across the already trusted iframe URL instead
+  // of hardcoding a release number in the product UI.
+  const productVersion = useMemo(() => chrome.runtime.getManifest().version, [])
   const hasLocationHandoff = surface === 'sidepanel' && handoffSessionId !== undefined && handoffTabId !== undefined
   const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number }>({ ready: surface === 'fullscreen-tab' || hasLocationHandoff, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }), ...(handoffTabId === undefined ? {} : { tabId: handoffTabId }) })
   const activeHarnessSessionId = sidePanelHandoff.sessionId
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
-  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, ...(activeHarnessSessionId === undefined ? {} : { sessionId: activeHarnessSessionId }) }), [activeHarnessSessionId, frameNonce, surface, url])
+  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, productVersion, ...(activeHarnessSessionId === undefined ? {} : { sessionId: activeHarnessSessionId }) }), [activeHarnessSessionId, frameNonce, productVersion, surface, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
 
   useEffect(() => { frameReadyRef.current = false; workspaceReviewBridgeReadyRef.current = false }, [frameNonce])
