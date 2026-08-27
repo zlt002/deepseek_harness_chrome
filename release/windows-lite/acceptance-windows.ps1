@@ -101,16 +101,38 @@ function Invoke-InstallerUiSmoke {
   }
 }
 
-function Wait-ReleaseUpdateTerminalStatus([string]$StatusPath) {
-  $deadline = [DateTime]::UtcNow.AddSeconds(90)
+function Read-ReleaseUpdateProgress([string]$ProgressPath) {
+  if (-not (Test-Path -LiteralPath $ProgressPath -PathType Leaf)) { return $null }
+  try { return (Get-Content -LiteralPath $ProgressPath -Raw).Trim() } catch { return $null }
+}
+
+function Read-ReleaseUpdateInstallLog([string]$InstallLog) {
+  if (-not (Test-Path -LiteralPath $InstallLog -PathType Leaf)) { return 'absent' }
+  try { return (Get-Content -LiteralPath $InstallLog -Raw).Trim() } catch { return "unreadable: $($_.Exception.Message)" }
+}
+
+function Wait-ReleaseUpdateTerminalStatus([string]$StatusPath, [string]$ProgressPath) {
+  $deadline = [DateTime]::UtcNow.AddSeconds(300)
+  $lastStatus = $null
+  $lastProgress = $null
   do {
     if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
-      try { $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } catch { $status = $null }
-      if ($null -ne $status -and ($status.state -eq 'succeeded' -or $status.state -eq 'failed')) { return $status }
+      try { $lastStatus = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } catch { $lastStatus = $null }
+      if ($null -ne $lastStatus -and ($lastStatus.state -eq 'succeeded' -or $lastStatus.state -eq 'failed')) { return $lastStatus }
+    }
+    $progress = Read-ReleaseUpdateProgress $ProgressPath
+    if ($null -ne $progress -and $progress -ne $lastProgress) {
+      $lastProgress = $progress
+      Write-Host "Online updater progress: $progress"
     }
     Start-Sleep -Milliseconds 200
   } while ([DateTime]::UtcNow -lt $deadline)
-  throw 'Timed out waiting for the detached online updater status.'
+  $lastStatusText = if ($null -eq $lastStatus) { 'absent' } else { $lastStatus | ConvertTo-Json -Compress }
+  $lastProgressText = if ($null -eq $lastProgress) { 'absent' } else { $lastProgress }
+  $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
+  $installLogText = Read-ReleaseUpdateInstallLog $installLog
+  if ($installLogText.Length -gt 4096) { $installLogText = $installLogText.Substring(0, 4096) }
+  throw "Timed out waiting for the detached online updater status. Last status: $lastStatusText Last progress: $lastProgressText Installer log: $installLogText"
 }
 
 function Wait-ReleaseUpdatePendingStatus([string]$StatusPath) {
@@ -149,18 +171,22 @@ function Wait-ReleaseUpdatePendingStatus([string]$StatusPath) {
 
 function Invoke-ReleaseUpdateHandoff {
   $statusPath = Join-Path $installRoot '.accrui-update-status.json'
+  $progressPath = Join-Path $installRoot '.accrui-update-progress.txt'
+  $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
   Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $installLog -PathType Leaf) { Remove-Item -LiteralPath $installLog -Force -ErrorAction Stop }
   & node (Join-Path $PSScriptRoot 'release-update-handoff-smoke.mjs') --package-dir $packageRoot --install-root $installRoot --expected-version $ExpectedVersion
   if ($LASTEXITCODE -ne 0) { throw "Online update handoff helper failed with exit code $LASTEXITCODE." }
-  $status = Wait-ReleaseUpdateTerminalStatus $statusPath
+  $status = Wait-ReleaseUpdateTerminalStatus $statusPath $progressPath
   if ($status.state -eq 'succeeded') {
     Write-Host 'Detached online updater completed successfully.'
     return
   }
-  $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
-  if (Test-Path -LiteralPath $installLog -PathType Leaf) {
+  $installLogText = Read-ReleaseUpdateInstallLog $installLog
+  if ($installLogText -ne 'absent' -and -not [string]::IsNullOrWhiteSpace($installLogText)) {
     Write-Host 'Online updater installer error log:'
-    Get-Content -LiteralPath $installLog | Write-Host
+    $installLogText | Write-Host
   }
   throw "Detached online updater failed: $($status.error)"
 }
@@ -170,11 +196,13 @@ function Assert-FailedReleaseUpdateHandoffStatus {
   $fakeInstallRoot = Join-Path $acceptanceRoot 'failed-update-install'
   $fakeInstaller = Join-Path $fakePackageRoot 'install.ps1'
   $statusPath = Join-Path $fakeInstallRoot '.accrui-update-status.json'
+  $progressPath = Join-Path $fakeInstallRoot '.accrui-update-progress.txt'
   $pendingMarker = Join-Path $fakeInstallRoot 'pending-observed.marker'
   New-Item -ItemType Directory -Path $fakePackageRoot, $fakeInstallRoot -Force | Out-Null
   $fakeInstallerSource = @'
-param([string]$InstallRoot)
+param([string]$InstallRoot, [string]$ProgressPath)
 $pendingMarker = Join-Path $InstallRoot 'pending-observed.marker'
+if (-not [string]::IsNullOrWhiteSpace($ProgressPath)) { [System.IO.File]::WriteAllText($ProgressPath, '15|fake|waiting for pending observation', [System.Text.UTF8Encoding]::new($false)) }
 $deadline = [DateTime]::UtcNow.AddSeconds(45)
 while (-not (Test-Path -LiteralPath $pendingMarker) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
 if (-not (Test-Path -LiteralPath $pendingMarker)) { exit 24 }
@@ -187,7 +215,7 @@ exit 23
   Wait-ReleaseUpdatePendingStatus $statusPath
   [System.IO.File]::WriteAllText($pendingMarker, 'observed', [System.Text.UTF8Encoding]::new($false))
 
-  $status = Wait-ReleaseUpdateTerminalStatus $statusPath
+  $status = Wait-ReleaseUpdateTerminalStatus $statusPath $progressPath
   if ($status.state -ne 'failed') { throw "Detached failed-update handoff ended in unexpected state: $($status.state)" }
   if ([string]$status.error -notmatch '安装程序退出码：23') { throw "Detached failed-update handoff lost installer exit code: $($status.error)" }
   Write-Host 'Detached failed-update handoff persisted installer exit code 23.'

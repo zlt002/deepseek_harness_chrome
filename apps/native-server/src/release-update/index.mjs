@@ -55,6 +55,7 @@ export async function launchPreparedUpdate(prepared, { installRoot, nativePid, s
 $installRoot = '${escapedRoot}'
 $targetVersion = '${escapedVersion}'
 $statusPath = Join-Path $installRoot '.accrui-update-status.json'
+$progressPath = Join-Path $installRoot '.accrui-update-progress.txt'
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
 $readyPath = '${escapePowerShell(readyPath)}'
 $goPath = '${escapePowerShell(goPath)}'
@@ -75,6 +76,7 @@ function Write-UpdateStatus([string]$State, [string]$ErrorText = '') {
   Move-Item -LiteralPath $temporary -Destination $statusPath -Force
 }
 try {
+  Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
   Write-UpdateStatus 'pending'
   [System.IO.File]::WriteAllText($readyPath, 'ready', [System.Text.UTF8Encoding]::new($false))
   $handoffDeadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -83,7 +85,7 @@ try {
   if (-not (Test-Path -LiteralPath $goPath -PathType Leaf)) { throw 'Native Host 未在时限内确认更新交接，安装已取消。' }
   $nativeDeadline = [DateTime]::UtcNow.AddSeconds(10)
   while ((Get-Process -Id ${nativePid} -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $nativeDeadline) { Start-Sleep -Milliseconds 200 }
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File '${escapedScript}' -InstallRoot $installRoot
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File '${escapedScript}' -InstallRoot $installRoot -ProgressPath $progressPath
   if ($LASTEXITCODE -ne 0) { throw "安装程序退出码：$LASTEXITCODE" }
   Write-UpdateStatus 'succeeded'
 } catch {
