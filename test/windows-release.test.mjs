@@ -304,15 +304,14 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.deepEqual(validation, { valid: true, errors: [], extensionId: ACCR_UI_EXTENSION_ID, version: '1.1.63' })
 })
 
-test('release validation rejects a payload whose manifest still references a deleted extension resource', async () => {
+test('release validation rejects a build whose manifest still references a deleted extension resource', async () => {
   const fixture = await createFixture()
-  const result = await buildWindowsRelease({ ...fixture, releaseDir: path.join(fixture.root, 'release'), version: '1.1.83' })
-  const payloadZip = path.join(result.packageDir, 'payload.zip')
-  execFileSync('zip', ['-d', payloadZip, 'extension/content-scripts/office-read.js'], { stdio: 'pipe' })
+  await rm(path.join(fixture.extensionDir, 'content-scripts/office-read.js'))
 
-  const validation = await validateWindowsRelease({ packageDir: result.packageDir, zipPath: result.zipPath })
-  assert.equal(validation.valid, false)
-  assert.ok(validation.errors.includes('payload.zip is missing manifest-declared extension resource extension/content-scripts/office-read.js'))
+  await assert.rejects(
+    buildWindowsRelease({ ...fixture, releaseDir: path.join(fixture.root, 'release'), version: '1.1.83' }),
+    /Windows release validation failed: payload\.zip is missing manifest-declared extension resource extension\/content-scripts\/office-read\.js/,
+  )
 })
 
 test('the in-place updater start script re-registers both native-host names through one Node-gated script', async () => {
