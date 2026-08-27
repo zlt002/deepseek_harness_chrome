@@ -1,5 +1,5 @@
 import { access, mkdtemp, rename, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { closeSync, openSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -47,6 +47,7 @@ export async function launchPreparedUpdate(prepared, { installRoot, nativePid, s
   const goPendingPath = `${goPath}.pending`
   const cancelPath = join(handoffRoot, 'cancel')
   const errorPath = join(handoffRoot, 'error')
+  const stderrPath = join(handoffRoot, 'stderr')
   const escapePowerShell = value => String(value).replaceAll("'", "''")
   const command = `$ErrorActionPreference = 'Stop'
 $installRoot = '${escapedRoot}'
@@ -96,6 +97,13 @@ try {
     let committing = false
     let pollTimer
     let timeout
+    let stderrFd
+    const closeStderr = () => {
+      if (stderrFd === undefined) return
+      const fd = stderrFd
+      stderrFd = undefined
+      try { closeSync(fd) } catch {}
+    }
     const settle = (callback, value) => {
       if (settled) return
       settled = true
@@ -125,10 +133,10 @@ try {
     }
     const onError = error => { void cancel(error) }
     const onExit = () => {
-      let updaterError
-      try {
-        updaterError = readFileSync(errorPath, 'utf8').replace(/[\r\n]+/g, ' ').trim().slice(0, 2_048)
-      } catch {}
+      const readHandoffError = path => {
+        try { return readFileSync(path, 'utf8').replace(/[\r\n]+/g, ' ').trim().slice(0, 2_048) } catch { return undefined }
+      }
+      const updaterError = readHandoffError(errorPath) || readHandoffError(stderrPath)
       void cancel(new Error(updaterError || '更新启动器在就绪握手前退出。'))
     }
     const onReady = async () => {
@@ -156,11 +164,19 @@ try {
       timeout = setTimeout(() => { void cancel(new Error(`更新启动器未在 ${handshakeTimeoutMs}ms 内完成就绪握手。`)) }, handshakeTimeoutMs)
     }
     try {
-      child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', updaterScriptPath], { detached: true, stdio: 'ignore' })
+      stderrFd = openSync(stderrPath, 'a')
+      try {
+        child = (spawnImpl ?? spawn)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', updaterScriptPath], { detached: true, stdio: ['ignore', 'ignore', stderrFd] })
+      } finally {
+        closeStderr()
+      }
       if (!child?.once) throw new Error('更新启动器未返回子进程')
       child.once('spawn', onSpawn)
       child.once('error', onError)
       child.once('exit', onExit)
-    } catch (error) { settle(rejectPromise, error) }
+    } catch (error) {
+      closeStderr()
+      settle(rejectPromise, error)
+    }
   })
 }

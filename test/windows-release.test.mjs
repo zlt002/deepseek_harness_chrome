@@ -111,6 +111,10 @@ test('Windows acceptance exercises the detached online-update handoff and waits 
   assert.match(updater, /WriteAllText\(\$readyPath, 'ready'/)
   assert.match(updater, /Test-Path -LiteralPath \$goPath/)
   assert.match(updater, /Test-Path -LiteralPath \$cancelPath/)
+  assert.match(updater, /stderrPath = join\(handoffRoot, 'stderr'\)/)
+  assert.match(updater, /openSync\(stderrPath, 'a'\)/)
+  assert.match(updater, /stdio: \['ignore', 'ignore', stderrFd\]/)
+  assert.match(updater, /readHandoffError\(errorPath\) \|\| readHandoffError\(stderrPath\)/)
   assert.doesNotMatch(updater, /'-Command', command/)
 })
 

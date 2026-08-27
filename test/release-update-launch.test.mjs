@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { writeSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -87,6 +88,38 @@ test('detached updater returns the persisted handoff error when its process exit
     child.emit('exit', 1)
     await assert.rejects(launched, /ACL denied writing ready marker/)
     await access(join(handoffRoot, 'cancel'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('detached updater returns captured PowerShell stderr when it exits before ready', async () => {
+  let invocation
+  let stderrFd
+  const child = new EventEmitter()
+  child.unref = () => { throw new Error('unref must not run before ready') }
+  const root = await mkdtemp(join(tmpdir(), 'release-update-launch-'))
+  try {
+    const launched = launchPreparedUpdate(
+      { version: '1.1.81', extractRoot: root },
+      {
+        installRoot: join(root, 'install-root'),
+        nativePid: 1234,
+        platform: 'win32',
+        spawnImpl: (...args) => {
+          invocation = args
+          stderrFd = args[2].stdio[2]
+          writeSync(stderrFd, "At updater.ps1:1 char:1\nParserError: Unexpected token '}' in expression.\n")
+          return child
+        },
+      },
+    )
+    invocation = await waitFor(() => invocation)
+    assert.equal(typeof stderrFd, 'number')
+    assert.throws(() => writeSync(stderrFd, 'must fail after parent closes its descriptor'), /EBADF|bad file descriptor/i)
+    child.emit('spawn')
+    child.emit('exit', 1)
+    await assert.rejects(launched, /ParserError: Unexpected token '}' in expression\./)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -317,6 +350,32 @@ test('detached updater reports a PowerShell spawn failure before the Native Host
     await waitFor(() => child.listenerCount('error') > 0 ? true : undefined)
     child.emit('error', failure)
     await rejection
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('detached updater closes the stderr capture descriptor when PowerShell spawn throws', async () => {
+  let stderrFd
+  const root = await mkdtemp(join(tmpdir(), 'release-update-launch-'))
+  try {
+    await assert.rejects(
+      launchPreparedUpdate(
+        { version: '1.1.81', extractRoot: root },
+        {
+          installRoot: join(root, 'install-root'),
+          nativePid: 1234,
+          platform: 'win32',
+          spawnImpl: (...args) => {
+            stderrFd = args[2].stdio[2]
+            throw new Error('powershell.exe is unavailable')
+          },
+        },
+      ),
+      /powershell\.exe is unavailable/,
+    )
+    assert.equal(typeof stderrFd, 'number')
+    assert.throws(() => writeSync(stderrFd, 'must fail after spawn throws'), /EBADF|bad file descriptor/i)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
