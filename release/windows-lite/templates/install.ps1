@@ -226,26 +226,27 @@ function Copy-ExtensionFileAtomically([System.IO.FileInfo]$Source, [string]$Dest
 }
 
 function Install-ExtensionTree([string]$Source, [string]$Destination) {
-  $manifestPath = Join-Path $Source 'manifest.json'
+  $sourceDirectory = Get-Item -LiteralPath $Source
+  $manifestPath = Join-Path $sourceDirectory.FullName 'manifest.json'
   if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "安装内容不完整：缺少 $manifestPath" }
+  $manifestFile = Get-Item -LiteralPath $manifestPath
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-  $sourcePrefix = ([System.IO.Path]::GetFullPath($Source)).TrimEnd('\\') + '\\'
-  $sourceFiles = @(Get-ChildItem -LiteralPath $Source -Recurse -File | Sort-Object FullName)
-  $manifestFile = @($sourceFiles | Where-Object { $_.FullName -eq $manifestPath })
-  if ($manifestFile.Count -ne 1) { throw "安装内容不完整：缺少 $manifestPath" }
-  $manifestFile = $manifestFile[0]
+  $destinationDirectory = Get-Item -LiteralPath $Destination
+  $sourcePrefix = $sourceDirectory.FullName.TrimEnd('\\') + '\\'
+  $destinationPrefix = $destinationDirectory.FullName.TrimEnd('\\') + '\\'
+  $sourceFiles = @(Get-ChildItem -LiteralPath $sourceDirectory.FullName -Recurse -File | Sort-Object FullName)
   $expected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
   foreach ($file in $sourceFiles) {
     $relativePath = $file.FullName.Substring($sourcePrefix.Length)
     [void]$expected.Add($relativePath)
-    if ($file.FullName -eq $manifestPath) { continue }
-    Copy-ExtensionFileAtomically $file (Join-Path $Destination $relativePath)
+    if ($relativePath -ieq 'manifest.json') { continue }
+    Copy-ExtensionFileAtomically $file (Join-Path $destinationDirectory.FullName $relativePath)
   }
   # Once all resources are in place, make the candidate manifest visible. Stale
   # files may survive an interruption, but they cannot break either manifest.
   Copy-ExtensionFileAtomically $manifestFile (Join-Path $Destination 'manifest.json')
-  foreach ($file in @(Get-ChildItem -LiteralPath $Destination -Recurse -File)) {
-    $relativePath = $file.FullName.Substring((([System.IO.Path]::GetFullPath($Destination)).TrimEnd('\\') + '\\').Length)
+  foreach ($file in @(Get-ChildItem -LiteralPath $destinationDirectory.FullName -Recurse -File)) {
+    $relativePath = $file.FullName.Substring($destinationPrefix.Length)
     if (-not $expected.Contains($relativePath)) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
   }
   foreach ($directory in @(Get-ChildItem -LiteralPath $Destination -Recurse -Directory | Sort-Object FullName -Descending)) {
