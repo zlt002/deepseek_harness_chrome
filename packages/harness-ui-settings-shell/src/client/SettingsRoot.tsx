@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import {
-  IconAgentPresetOutline16, IconCloseOutline16, IconDataOutline16, IconEllipsisOutline16,
-  IconPersonalizationOutline16, IconSettingsOutline16, IconSkillOutline16,
+  IconAgentPresetOutline16, IconCloseOutline16, IconDataOutline16, IconDownloadOutline16,
+  IconEllipsisOutline16, IconPersonalizationOutline16, IconSettingsOutline16, IconSkillOutline16,
+  IconUserOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsPresentationOwnerProps, SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
 import { productOnboardingSteps } from './onboarding.ts'
@@ -16,6 +17,8 @@ function navIcon(id: string) {
   if (id === 'agent-presets') return <IconAgentPresetOutline16 className={css.navIcon} size={16} />
   if (id === 'plugins') return <IconPersonalizationOutline16 className={css.navIcon} size={16} />
   if (id === 'accrui-skills') return <IconSkillOutline16 className={css.navIcon} size={16} />
+  if (id === 'accrui-account') return <IconUserOutline16 className={css.navIcon} size={16} />
+  if (id === 'accrui-release-update') return <IconDownloadOutline16 className={css.navIcon} size={16} />
   return <IconSettingsOutline16 className={css.navIcon} size={16} />
 }
 

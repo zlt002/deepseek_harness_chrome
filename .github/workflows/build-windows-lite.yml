@@ -9,7 +9,7 @@ on:
       version:
         description: AccrUI-compatible extension version
         required: true
-        default: 1.1.79
+        default: 1.1.80
       full_validation:
         description: Run full acceptance tests (~38 min added) for pre-release validation
         required: false
@@ -114,7 +114,7 @@ jobs:
         run: >-
           node release/windows-lite/windows-release.mjs
           --harness-runtime release/windows-lite/harness-static-win32-x64
-          --version "${{ inputs.version || '1.1.79' }}"
+          --version "${{ inputs.version || '1.1.80' }}"
 
       - name: Accept Windows install, Native Messaging, upgrade, and rollback
         # Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention.
@@ -125,7 +125,7 @@ jobs:
         run: >-
           ./release/windows-lite/acceptance-windows.ps1
           -PackageDir release/accr-ui-windows-lite-x64
-          -ExpectedVersion "${{ inputs.version || '1.1.79' }}"
+          -ExpectedVersion "${{ inputs.version || '1.1.80' }}"
 
       - name: Write checksum
         working-directory: deepseek_harness_chrome
@@ -140,8 +140,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.79' }}-candidate
-          RELEASE_VERSION: ${{ inputs.version || '1.1.79' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.80' }}-candidate
+          RELEASE_VERSION: ${{ inputs.version || '1.1.80' }}
         run: |
           $repo = '${{ github.repository }}'
           $zip = 'release/accr-ui-windows-lite-x64.zip'
