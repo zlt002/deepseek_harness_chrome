@@ -206,15 +206,17 @@ function Copy-ExtensionFileAtomically([System.IO.FileInfo]$Source, [string]$Dest
   $destinationDirectory = Split-Path -Parent $Destination
   New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
   $temporary = Join-Path $destinationDirectory ('.accrui-extension-' + [guid]::NewGuid().ToString('N') + '.tmp')
+  $replacementBackup = Join-Path $destinationDirectory ('.accrui-extension-backup-' + [guid]::NewGuid().ToString('N') + '.tmp')
   try {
     Copy-Item -LiteralPath $Source.FullName -Destination $temporary -Force -ErrorAction Stop
     if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-      [System.IO.File]::Replace($temporary, $Destination, $null)
+      [System.IO.File]::Replace($temporary, $Destination, $replacementBackup)
     } else {
       [System.IO.File]::Move($temporary, $Destination)
     }
   } finally {
     if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $replacementBackup -PathType Leaf) { Remove-Item -LiteralPath $replacementBackup -Force -ErrorAction SilentlyContinue }
   }
 }
 
