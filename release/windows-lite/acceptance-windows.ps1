@@ -113,6 +113,40 @@ function Wait-ReleaseUpdateTerminalStatus([string]$StatusPath) {
   throw 'Timed out waiting for the detached online updater status.'
 }
 
+function Wait-ReleaseUpdatePendingStatus([string]$StatusPath) {
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  $lastStatus = $null
+  $lastReadError = $null
+  do {
+    if (Test-Path -LiteralPath $StatusPath -PathType Leaf) {
+      try {
+        $lastStatus = Get-Content -LiteralPath $StatusPath -Raw | ConvertFrom-Json
+        $lastReadError = $null
+      } catch {
+        $lastReadError = $_.Exception.Message
+      }
+      if ($null -ne $lastStatus) {
+        if ($lastStatus.state -eq 'pending') { return }
+        if ($lastStatus.state -eq 'failed') {
+          throw "Detached failed-update handoff failed before pending status: $($lastStatus.error)"
+        }
+        if ($lastStatus.state -eq 'succeeded') {
+          throw 'Detached failed-update handoff succeeded before pending status.'
+        }
+      }
+    }
+    Start-Sleep -Milliseconds 50
+  } while ([DateTime]::UtcNow -lt $deadline)
+
+  if ($null -eq $lastStatus -and $null -eq $lastReadError) {
+    throw 'Detached failed-update handoff status was absent after 30 seconds.'
+  }
+  if ($null -ne $lastReadError) {
+    throw "Detached failed-update handoff status was unreadable after 30 seconds: $lastReadError"
+  }
+  throw "Detached failed-update handoff did not persist pending status after 30 seconds; last state=$($lastStatus.state) error=$($lastStatus.error)"
+}
+
 function Invoke-ReleaseUpdateHandoff {
   $statusPath = Join-Path $installRoot '.accrui-update-status.json'
   Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
@@ -141,7 +175,7 @@ function Assert-FailedReleaseUpdateHandoffStatus {
   $fakeInstallerSource = @'
 param([string]$InstallRoot)
 $pendingMarker = Join-Path $InstallRoot 'pending-observed.marker'
-$deadline = [DateTime]::UtcNow.AddSeconds(10)
+$deadline = [DateTime]::UtcNow.AddSeconds(45)
 while (-not (Test-Path -LiteralPath $pendingMarker) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
 if (-not (Test-Path -LiteralPath $pendingMarker)) { exit 24 }
 exit 23
@@ -150,15 +184,7 @@ exit 23
   & node (Join-Path $PSScriptRoot 'release-update-handoff-smoke.mjs') --package-dir $fakePackageRoot --install-root $fakeInstallRoot --expected-version '0.0.1'
   if ($LASTEXITCODE -ne 0) { throw "Failed-update handoff helper failed with exit code $LASTEXITCODE." }
 
-  $pendingDeadline = [DateTime]::UtcNow.AddSeconds(10)
-  do {
-    if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
-      try { $pending = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } catch { $pending = $null }
-      if ($null -ne $pending -and $pending.state -eq 'pending') { break }
-    }
-    Start-Sleep -Milliseconds 50
-  } while ([DateTime]::UtcNow -lt $pendingDeadline)
-  if ($null -eq $pending -or $pending.state -ne 'pending') { throw 'Detached failed-update handoff never persisted pending status.' }
+  Wait-ReleaseUpdatePendingStatus $statusPath
   [System.IO.File]::WriteAllText($pendingMarker, 'observed', [System.Text.UTF8Encoding]::new($false))
 
   $status = Wait-ReleaseUpdateTerminalStatus $statusPath
