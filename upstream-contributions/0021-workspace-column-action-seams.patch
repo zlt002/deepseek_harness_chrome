@@ -1,5 +1,5 @@
 diff --git a/packages/client/ui-workspace/src/client/contract/slots.ts b/packages/client/ui-workspace/src/client/contract/slots.ts
-index 26398ea..3465777 100644
+index 26398ea..1c71625 100644
 --- a/packages/client/ui-workspace/src/client/contract/slots.ts
 +++ b/packages/client/ui-workspace/src/client/contract/slots.ts
 @@ -58,6 +58,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -11,10 +11,16 @@ index 26398ea..3465777 100644
    }
  }
  
-@@ -78,6 +80,18 @@ export interface CompactWorkspacePickerWorkspace {
+@@ -78,6 +80,24 @@ export interface CompactWorkspacePickerWorkspace {
    sessions: readonly CompactWorkspacePickerSession[]
  }
  
++/** Host-authoritative loose sessions, already filtered and ordered for compact presentation. */
++export interface CompactWorkspacePickerUngrouped {
++  label: string
++  sessions: readonly CompactWorkspacePickerSession[]
++}
++
 +/** Stable Workspace facts shared with additive actions; no browser view state crosses the seam. */
 +export interface WorkspaceActionWorkspace {
 +  id: WorkspaceId
@@ -30,6 +36,15 @@ index 26398ea..3465777 100644
  /** Product renderers receive only data and actions, never private view state. */
  export interface CompactWorkspacePickerOwnerProps {
    openSession: (sessionId: SessionId) => void
+@@ -86,6 +106,8 @@ export interface CompactWorkspacePickerOwnerProps {
+   workspaceTitle: string
+   sessionTitle: string
+   workspaces: readonly CompactWorkspacePickerWorkspace[]
++  /** Present only when visible Sessions have no backing Workspace membership. */
++  ungrouped?: CompactWorkspacePickerUngrouped
+   labels: {
+     workspaces: string
+     sessions: string
 @@ -207,7 +221,11 @@ export type WorkspaceBrowserInjected = DirectoryPickingInjected & {
  /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */
  export type WorkspaceBrowserProps =
@@ -44,13 +59,14 @@ index 26398ea..3465777 100644
    & Omit<WorkspaceBrowserInjected, 'hooks'>
    & DirectoryPickingHooks
 diff --git a/packages/client/ui-workspace/src/client/index.ts b/packages/client/ui-workspace/src/client/index.ts
-index a625e0c..8cff2e4 100644
+index a625e0c..2054f45 100644
 --- a/packages/client/ui-workspace/src/client/index.ts
 +++ b/packages/client/ui-workspace/src/client/index.ts
 @@ -21,6 +21,7 @@ import { en, zh, type WorkspaceKey } from './locales.ts'
  export type {
    DirectoryFlowOwnerProps, DirectoryFlowSlotName, DirectoryPickingHooks, DirectoryPickingInjected,
-   CompactWorkspacePickerOwnerProps, CompactWorkspacePickerSession, CompactWorkspacePickerWorkspace,
+-  CompactWorkspacePickerOwnerProps, CompactWorkspacePickerSession, CompactWorkspacePickerWorkspace,
++  CompactWorkspacePickerOwnerProps, CompactWorkspacePickerSession, CompactWorkspacePickerUngrouped, CompactWorkspacePickerWorkspace,
 +  WorkspaceActionWorkspace, WorkspaceHeaderActionOwnerProps,
    WorkspaceBrowserInjected, WorkspaceBrowserProps, WorkspacePickerInjected, WorkspacePickerProps,
  } from './contract/slots.ts'
@@ -64,7 +80,7 @@ index a625e0c..8cff2e4 100644
        store: createWorkspaceViewStore(),
        inject: browserInjected,
 diff --git a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
-index aad024a..d037337 100644
+index aad024a..9829e66 100644
 --- a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
 +++ b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
 @@ -18,7 +18,10 @@ import {
@@ -79,6 +95,52 @@ index aad024a..d037337 100644
  import type { SessionNode, SessionOrderBy } from './tree.ts'
  import { deriveFlat, deriveGroups, deriveSearchResults, relativeTime, UNGROUPED_KEY } from './tree.ts'
  import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
+@@ -61,11 +64,12 @@ function CompactWorkspaceBrowser(props: WorkspaceBrowserProps) {
+   const {
+     useSessions, useWorkspaces, open, startSession, createWorkspace, useDirectoryFlow,
+     renameSession, forkSession, renameWorkspace, deleteWorkspace, openPath, archiveSession,
+-    renderSlot, renderSlotChain, t,
++    renderSlot, renderSlotChain, t, useStore,
+   } = props
+   const sessions = useSessions(state => state)
+   const workspaces = useWorkspaces(state => state.items)
+   const archivedSessionIds = useWorkspaces(state => state.archivedSessionIds)
++  const ungroupedOrder = useStore(state => state.sessionOrderByAccount[UNGROUPED_KEY])
+   const recentWorkspaceId = useWorkspaces(state => state.recentWorkspaceId)
+   const currentWorkspace = sessions.current === undefined
+     ? undefined
+@@ -100,6 +104,23 @@ function CompactWorkspaceBrowser(props: WorkspaceBrowserProps) {
+       }
+     })
+   }, [archivedSessionIds, now, sessions, t, workspaces])
++  const compactUngrouped = useMemo(() => {
++    const group = deriveGroups(sessions, workspaces, archivedSessionIds, {
++      expandedGroups: [UNGROUPED_KEY],
++      ...(ungroupedOrder === undefined ? {} : { ungroupedOrder }),
++    }).find(candidate => candidate.key === UNGROUPED_KEY)
++    if (group === undefined) return undefined
++    return {
++      label: t('group.ungrouped'),
++      sessions: group.sessions.map(session => ({
++        id: session.id,
++        title: session.title,
++        blank: session.blank,
++        state: compactState(session),
++        time: compactTime(session, now, t),
++      })),
++    }
++  }, [archivedSessionIds, now, sessions, t, ungroupedOrder, workspaces])
+   const directoryFlow = (
+     <WorkspacePickFlow
+       t={t}
+@@ -127,6 +148,7 @@ function CompactWorkspaceBrowser(props: WorkspaceBrowserProps) {
+     workspaceTitle: defaultWorkspace?.title ?? t('section.workspaces'),
+     sessionTitle: currentTitle,
+     workspaces: compactWorkspaces,
++    ...(compactUngrouped === undefined ? {} : { ungrouped: compactUngrouped }),
+     labels: {
+       workspaces: t('section.workspaces'), sessions: t('section.sessions'),
+       addWorkspace: t('workspace.add'), newSession: t('session.new'),
 @@ -334,7 +337,7 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
  
  type SessionTreeProps = Pick<

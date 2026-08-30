@@ -1,5 +1,7 @@
 export interface FullscreenHandoffResponse { ok: boolean; error?: string }
 
+export const FULLSCREEN_TAB_UNSUPPORTED_MESSAGE = '全屏模式需要 Chrome 141 或更高版本；当前 Chrome 仍可正常使用侧边栏。'
+
 export interface FullscreenTabApi {
   runtime: {
     sendMessage?: (message: unknown) => Promise<FullscreenHandoffResponse | undefined>
@@ -27,10 +29,9 @@ export async function openFullscreenTab(
   windowId: number,
   sessionId?: string,
 ): Promise<void> {
-  if (chromeApi.runtime.sendMessage === undefined) {
-    throw new Error('Chrome could not switch the Harness Workspace to a Tab.')
-  }
-  const response = await chromeApi.runtime.sendMessage({ type: 'switch-harness-surface/v1', surface: 'fullscreen-tab', windowId, ...(sessionId === undefined ? {} : { sessionId }) })
+  const sendMessage = chromeApi.runtime.sendMessage
+  if (sendMessage === undefined || chromeApi.sidePanel?.close === undefined) throw new Error(FULLSCREEN_TAB_UNSUPPORTED_MESSAGE)
+  const response = await sendMessage({ type: 'switch-harness-surface/v1', surface: 'fullscreen-tab', windowId, ...(sessionId === undefined ? {} : { sessionId }) })
   if (response?.ok !== true) throw new Error(response?.error ?? 'Chrome could not switch the Harness Workspace to a Tab.')
 }
 
@@ -45,17 +46,19 @@ export async function returnToSidePanel(
   tabId: number,
   sessionId?: string,
 ): Promise<void> {
-  if (chromeApi.runtime.sendMessage === undefined || chromeApi.sidePanel?.open === undefined || chromeApi.sidePanel.setOptions === undefined) {
+  const sendMessage = chromeApi.runtime.sendMessage
+  const sidePanel = chromeApi.sidePanel
+  if (sendMessage === undefined || sidePanel?.open === undefined || sidePanel.setOptions === undefined || sidePanel.close === undefined) {
     throw new Error('Chrome could not switch the Harness Workspace to the side panel.')
   }
-  const preparation = chromeApi.runtime.sendMessage({ type: 'prepare-sidepanel-handoff/v1', windowId, tabId, ...(sessionId === undefined ? {} : { sessionId }) })
+  const preparation = sendMessage({ type: 'prepare-sidepanel-handoff/v1', windowId, tabId, ...(sessionId === undefined ? {} : { sessionId }) })
 
   // Issue all calls in this user-activation task. The handoff identity travels
   // in the controlled local panel path, so the new Side Panel never races the
   // service worker's pending-handoff map.
-  const configure = chromeApi.sidePanel.setOptions({ path: sidePanelHandoffPath(tabId, sessionId) })
-  const close = chromeApi.sidePanel.close?.({ windowId })
-  const open = chromeApi.sidePanel.open({ windowId })
+  const configure = sidePanel.setOptions({ path: sidePanelHandoffPath(tabId, sessionId) })
+  const close = sidePanel.close({ windowId })
+  const open = sidePanel.open({ windowId })
 
   const response = await preparation
   if (response?.ok !== true) throw new Error(response?.error ?? 'Chrome could not switch the Harness Workspace to the side panel.')

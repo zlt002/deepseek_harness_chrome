@@ -4,6 +4,8 @@ import { createKnowledgeScopeBridge, knowledgeScopeBridgeConfig } from './bridge
 import { KnowledgeScopePanel, KnowledgeScopeStrip, type KnowledgeScopeInjected } from './KnowledgeScope.tsx'
 import { RemoteSearchToolRow } from './RemoteSearchToolRow.tsx'
 import { SelectedSourceScopeToolRow } from './SelectedSourceScopeToolRow.tsx'
+import { SourceScopeQuestion } from './SourceScopeQuestion.tsx'
+import { sourceScopeQuestion } from './source-scope-question.js'
 
 export const inject = ['slots']
 
@@ -24,6 +26,14 @@ export function apply(ctx: ClientContext): void {
   const progressInjected = () => ({ hooks: { searchProgress: bridge.progress } })
   ctx.slots.inject('conversation.composer.above', () => ctx.slots.register({ name: 'conversation.composer.above', id: 'accrui-knowledge-scope-strip', order: 20, inject: injected }, KnowledgeScopeStrip))
   ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({ name: 'conversation.input.overlay', id: 'accrui-knowledge-scope-panel', order: 20, inject: injected }, KnowledgeScopePanel))
+  ctx.slots.inject('conversation.composer', () => ctx.slots.register({
+    name: 'conversation.composer', priority: -1,
+    select: owner => {
+      const matched = owner.interactions.find(item => item.kind === 'question' && sourceScopeQuestion(item.payload.questions) !== undefined)
+      return matched ?? null
+    },
+    inject: injected,
+  }, SourceScopeQuestion))
   for (const key of ['search_selected_remote_code', 'mcp__chrome__code_search', 'search_selected_knowledge', 'mcp__chrome__knowledge_search']) {
     ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key, inject: progressInjected }, RemoteSearchToolRow))
   }
@@ -34,5 +44,6 @@ export function apply(ctx: ClientContext): void {
 }
 
 export { KnowledgeScopePanel, KnowledgeScopeStrip }
+export { SourceScopeQuestion } from './SourceScopeQuestion.tsx'
 export type { KnowledgeScopeInjected } from './KnowledgeScope.tsx'
 export type { Catalog, Scope, ScopeOptions, ScopeSnapshot } from './bridge.ts'

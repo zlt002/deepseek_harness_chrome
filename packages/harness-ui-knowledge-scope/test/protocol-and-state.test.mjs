@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createScopeProtocol, knowledgeScopeBridgeConfig } from '../src/client/protocol.js'
 import { scopeLabels } from '../src/client/labels.js'
-import { selectKnowledgeDomain, selectKnowledgeSystem } from '../src/client/selection.js'
+import { clearScopeSelection, selectKnowledgeDomain, selectKnowledgeSystem } from '../src/client/selection.js'
 import { migrateLegacyKnowledgeScope } from '../../../apps/chrome-extension/src/legacy-knowledge-scope.mjs'
 
 function store(initial) { return { value: initial, set(value) { this.value = value } } }
@@ -35,6 +35,20 @@ test('checking a category selects every child without clearing another category'
   })
   assert.deepEqual(selectKnowledgeDomain({ domainSystems: { warehouse: ['wms'], transport: ['tms'] }, repositoryIds: [] }, 'transport', ['tms', 'oms'], false), {
     domainSystems: { warehouse: ['wms'] }, repositoryIds: [],
+  })
+})
+
+test('clearing repositories leaves knowledge selections intact', () => {
+  assert.deepEqual(clearScopeSelection(snapshot.scope, 'repositories'), {
+    domainSystems: snapshot.scope.domainSystems,
+    repositoryIds: [],
+  })
+})
+
+test('clearing knowledge leaves repository selections intact', () => {
+  assert.deepEqual(clearScopeSelection(snapshot.scope, 'knowledge'), {
+    domainSystems: {},
+    repositoryIds: snapshot.scope.repositoryIds,
   })
 })
 

@@ -51,6 +51,11 @@ the official display formatting.
 “配置文件” and gives the action a shrinkable ellipsis width so narrow settings
 surfaces preserve the navigation icons first.
 
+`0021` adds column workspace actions and lets the compact workspace seat receive
+the upstream-filtered, upstream-ordered optional Ungrouped Session projection.
+The compact presentation can render and open those Sessions without duplicating
+archive, blank-session, or subagent visibility rules.
+
 `0022` makes assistant-message file links composable. It carries the owning
 session and workspace root to ordered link resolvers; a resolver may claim a
 destination, while unclaimed links retain the official safe-link fallback.

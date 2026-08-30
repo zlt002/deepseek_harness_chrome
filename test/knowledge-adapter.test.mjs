@@ -6,11 +6,112 @@ import ts from 'typescript'
 async function adapter() {
   const background = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const end = background.indexOf('\nconst NATIVE_HOST_NAME')
+  const scopeMutationStart = background.indexOf('\nlet knowledgeScopeMutation')
+  const scopeMutationEnd = background.indexOf('\n\nfunction isTeamDocParent', scopeMutationStart)
+  const scopeHelpersStart = background.indexOf('\nfunction targetStorage')
+  const scopeHelpersEnd = background.indexOf('\n\nasync function knowledgeSessions', scopeHelpersStart)
+  const accountSignedOutStart = background.indexOf('\nasync function accountLocallySignedOut')
+  const accountSignedOutEnd = background.indexOf('\n\nasync function setAccountLocallySignedOut', accountSignedOutStart)
+  const resolverStart = background.indexOf('\nasync function resolveKnowledgeScopeRecord')
+  const resolverEnd = background.indexOf('\n\nasync function respondToSelectedSourceScope', resolverStart)
   assert.notEqual(end, -1, 'knowledge adapter source block must remain before background bootstrap')
-  const source = `${background.slice(0, end)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, normalizeScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream, knowledgeConversationOwner, planKnowledgeContinuation, controlledVocabulary, knowledgeIdentity, filterCatalogByIdentity, pruneScope }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
+  assert.ok(scopeMutationStart > end && scopeMutationEnd > scopeMutationStart, 'scope mutation state must remain a narrow adapter seam')
+  assert.ok(scopeHelpersStart > end && scopeHelpersEnd > scopeHelpersStart, 'scope storage helpers must remain a narrow adapter seam')
+  assert.ok(accountSignedOutStart > scopeHelpersEnd && accountSignedOutEnd > accountSignedOutStart, 'account sign-out helper must remain a narrow adapter seam')
+  assert.ok(resolverStart > end && resolverEnd > resolverStart, 'scope resolver must remain a narrow adapter seam')
+  const source = `${background.slice(0, end)}${background.slice(scopeMutationStart, scopeMutationEnd)}${background.slice(scopeHelpersStart, scopeHelpersEnd)}${background.slice(accountSignedOutStart, accountSignedOutEnd)}${background.slice(resolverStart, resolverEnd)}\nexport { executeKnowledgeQuery, loadKnowledgeCatalog, scopeFingerprint, validScope, normalizeScope, mergeStreamText, isAnswerDelta, isProcessEvent, processEventText, appendProcess, retrievalQuestion, selectedSourceScopeEcho, sseEvents as consumeSseChunk, errorChain, isRetryableKnowledgeTransport, knowledgeFetch, describeKnowledgeTransportError, isKnowledgeStream, knowledgeConversationOwner, planKnowledgeContinuation, controlledVocabulary, knowledgeIdentity, filterCatalogByIdentity, pruneScope, saveKnowledgeScope, clearKnowledgeScopeStorage, resolveKnowledgeScopeRecord }\nexport function setKnowledgeProxyConfig(config) { knowledgeProxyConfig = config }\nexport function resetKnowledgeCatalogCache() { knowledgeCatalogCache = undefined }\n`
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
   return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
 }
+
+function storage(initial = {}) {
+  const values = { ...initial }
+  return {
+    get: async (keys) => {
+      if (keys === null || keys === undefined) return { ...values }
+      const names = Array.isArray(keys) ? keys : [keys]
+      return Object.fromEntries(names.flatMap(key => Object.hasOwn(values, key) ? [[key, values[key]]] : []))
+    },
+    set: async (next) => { Object.assign(values, next) },
+    remove: async (keys) => { for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key] },
+  }
+}
+
+test('a new session resolves the remembered source scope before its first selected-source read', async () => {
+  const priorChrome = globalThis.chrome
+  const remembered = { domainSystems: { logistics: ['csp'] }, repositoryIds: ['gls', 'ils'] }
+  globalThis.chrome = {
+    storage: {
+      session: storage(),
+      local: storage(),
+    },
+  }
+  try {
+    const { saveKnowledgeScope, resolveKnowledgeScopeRecord } = await adapter()
+    await saveKnowledgeScope('session-with-selection', remembered)
+    const record = await resolveKnowledgeScopeRecord({ harnessSessionId: 'new-session' })
+    assert.deepEqual(record, { scope: remembered, enabled: true }, 'the connector must see the same default scope the new-session UI shows')
+  } finally {
+    if (priorChrome === undefined) delete globalThis.chrome
+    else globalThis.chrome = priorChrome
+  }
+})
+
+test('a current session scope takes precedence over the remembered default', async () => {
+  const priorChrome = globalThis.chrome
+  const remembered = { domainSystems: { logistics: ['csp'] }, repositoryIds: ['gls'] }
+  const current = { domainSystems: {}, repositoryIds: ['tms'] }
+  globalThis.chrome = {
+    storage: {
+      session: storage({ harnessKnowledgeScopesV1: { 'new-session': { scope: current, enabled: false } } }),
+      local: storage({ harnessKnowledgeScopeDefaultV1: remembered }),
+    },
+  }
+  try {
+    const { resolveKnowledgeScopeRecord } = await adapter()
+    const record = await resolveKnowledgeScopeRecord({ harnessSessionId: 'new-session' })
+    assert.deepEqual(record, { scope: current, enabled: false })
+  } finally {
+    if (priorChrome === undefined) delete globalThis.chrome
+    else globalThis.chrome = priorChrome
+  }
+})
+
+test('logging out clears default and session scopes before another account can resolve a scope', async () => {
+  const priorChrome = globalThis.chrome
+  const saved = { domainSystems: { logistics: ['csp'] }, repositoryIds: ['gls'] }
+  globalThis.chrome = {
+    storage: {
+      session: storage(),
+      local: storage({ 'knowledge-query:scope:session:prior-legacy-session': { hasCommon: false, domains: {}, repoKeys: ['legacy'] } }),
+    },
+  }
+  try {
+    const { saveKnowledgeScope, clearKnowledgeScopeStorage, resolveKnowledgeScopeRecord } = await adapter()
+    await saveKnowledgeScope('prior-account-session', saved)
+    await clearKnowledgeScopeStorage()
+    assert.equal(await resolveKnowledgeScopeRecord({ harnessSessionId: 'next-account-session' }), undefined)
+  } finally {
+    if (priorChrome === undefined) delete globalThis.chrome
+    else globalThis.chrome = priorChrome
+  }
+})
+
+test('concurrent session saves preserve both scopes without cross-session fallback', async () => {
+  const priorChrome = globalThis.chrome
+  const first = { domainSystems: {}, repositoryIds: ['gls'] }
+  const second = { domainSystems: { logistics: ['csp'] }, repositoryIds: ['tms'] }
+  globalThis.chrome = { storage: { session: storage(), local: storage() } }
+  try {
+    const { saveKnowledgeScope, resolveKnowledgeScopeRecord } = await adapter()
+    await Promise.all([saveKnowledgeScope('session-one', first), saveKnowledgeScope('session-two', second)])
+    assert.deepEqual(await resolveKnowledgeScopeRecord({ harnessSessionId: 'session-one' }), { scope: first, enabled: true })
+    assert.deepEqual(await resolveKnowledgeScopeRecord({ harnessSessionId: 'session-two' }), { scope: second, enabled: true })
+  } finally {
+    if (priorChrome === undefined) delete globalThis.chrome
+    else globalThis.chrome = priorChrome
+  }
+})
 
 test('SSE parser buffers split lines and a finished stream with done or [DONE] is complete', async () => {
   const { consumeSseChunk, executeKnowledgeQuery } = await adapter()

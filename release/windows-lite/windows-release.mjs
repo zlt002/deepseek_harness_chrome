@@ -162,39 +162,60 @@ function nativeHostManifest(nativeHostName) {
 }
 
 function registerNativeHostPs1() {
-  return `param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
+  return `param(
+  [string]$InstallRoot = (Split-Path -Parent $PSScriptRoot),
+  [switch]$PrepareOnly,
+  [switch]$PublishOnly
+)
 $ErrorActionPreference = 'Stop'
+if ($PrepareOnly -and $PublishOnly) { throw 'Native Host 准备和发布不能同时执行。' }
 $runtimeDir = $PSScriptRoot
 $launcher = Join-Path $runtimeDir 'run_native_host.bat'
-$node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) { throw '未检测到 Node.js；Harness UI 需要 Node.js 22 或更高版本。' }
-$nodePath = [System.IO.Path]::GetFullPath($node.Source)
-if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw "Node.js 路径无效：$nodePath" }
-$nodeVersion = (& $nodePath --version).Trim()
-if ($nodeVersion -notmatch '^v?(?<major>\\d+)') { throw "无法读取 Node.js 版本：$nodeVersion" }
-if ([int]$Matches.major -lt 22) { throw "Node.js $nodeVersion 版本过低；Harness UI 需要 Node.js 22 或更高版本。" }
-if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "缺少 Native Host launcher：$launcher" }
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-$nodePathFile = Join-Path $runtimeDir 'node-path.txt'
-[System.IO.File]::WriteAllText($nodePathFile, $nodePath + [Environment]::NewLine, $utf8NoBom)
 $manifestDir = Join-Path $InstallRoot 'native-messaging'
-New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
 $registryRoots = @(
   'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts',
   'HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts'
 )
-foreach ($nativeHostName in @('${NATIVE_HOST_NAME}', '${LEGACY_NATIVE_HOST_NAME}')) {
-  $templatePath = Join-Path $runtimeDir ($nativeHostName + '.json')
-  if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) { throw "缺少 Native Host manifest 模板：$templatePath" }
-  $manifest = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json
-  if ($manifest.name -ne $nativeHostName) { throw "Native Host manifest 名称不匹配：$templatePath" }
-  $manifest.path = $launcher
-  $installedManifestPath = Join-Path $manifestDir ($nativeHostName + '.json')
-  [System.IO.File]::WriteAllText($installedManifestPath, ($manifest | ConvertTo-Json -Depth 4), $utf8NoBom)
-  foreach ($registryRoot in $registryRoots) {
-    $registryKey = Join-Path $registryRoot $nativeHostName
-    New-Item -Path $registryKey -Force | Out-Null
-    Set-Item -Path $registryKey -Value $installedManifestPath
+if (-not $PublishOnly) {
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $node) { throw '未检测到 Node.js；Harness UI 需要 Node.js 22 或更高版本。' }
+  $nodePath = [System.IO.Path]::GetFullPath($node.Source)
+  if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw "Node.js 路径无效：$nodePath" }
+  $nodeVersion = (& $nodePath --version).Trim()
+  if ($nodeVersion -notmatch '^v?(?<major>\\d+)') { throw "无法读取 Node.js 版本：$nodeVersion" }
+  if ([int]$Matches.major -lt 22) { throw "Node.js $nodeVersion 版本过低；Harness UI 需要 Node.js 22 或更高版本。" }
+  if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "缺少 Native Host launcher：$launcher" }
+  $nodePathFile = Join-Path $runtimeDir 'node-path.txt'
+  [System.IO.File]::WriteAllText($nodePathFile, $nodePath + [Environment]::NewLine, $utf8NoBom)
+  New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
+  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}', '${LEGACY_NATIVE_HOST_NAME}')) {
+    $templatePath = Join-Path $runtimeDir ($nativeHostName + '.json')
+    if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) { throw "缺少 Native Host manifest 模板：$templatePath" }
+    $manifest = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json
+    if ($manifest.name -ne $nativeHostName) { throw "Native Host manifest 名称不匹配：$templatePath" }
+    $manifest.path = $launcher
+    $installedManifestPath = Join-Path $manifestDir ($nativeHostName + '.json')
+    [System.IO.File]::WriteAllText($installedManifestPath, ($manifest | ConvertTo-Json -Depth 4), $utf8NoBom)
+  }
+}
+if (-not $PrepareOnly -and -not $PublishOnly) {
+  $smokeScript = Join-Path $runtimeDir 'native-message-smoke.mjs'
+  if (-not (Test-Path -LiteralPath $smokeScript -PathType Leaf)) { throw "缺少 Native Host 启动检查脚本：$smokeScript" }
+  & $nodePath $smokeScript --launcher $launcher
+  if ($LASTEXITCODE -ne 0) { throw 'Native Host 启动检查失败；尚未发布 Native Messaging 注册。' }
+}
+if (-not $PrepareOnly) {
+  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}', '${LEGACY_NATIVE_HOST_NAME}')) {
+    $installedManifestPath = Join-Path $manifestDir ($nativeHostName + '.json')
+    if (-not (Test-Path -LiteralPath $installedManifestPath -PathType Leaf)) { throw "缺少已准备的 Native Host manifest：$installedManifestPath" }
+    $manifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
+    if ($manifest.name -ne $nativeHostName -or $manifest.path -ne $launcher) { throw "已准备的 Native Host manifest 无效：$installedManifestPath" }
+    foreach ($registryRoot in $registryRoots) {
+      $registryKey = Join-Path $registryRoot $nativeHostName
+      New-Item -Path $registryKey -Force | Out-Null
+      Set-Item -Path $registryKey -Value $installedManifestPath
+    }
   }
 }
 `
@@ -372,6 +393,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   const manifestEntry = 'extension/manifest.json'
   const runtimeCliEntry = 'runtime/harness/apps/cli/lib/server.mjs'
   const nativeLauncherEntry = 'runtime/run_native_host.bat'
+  const nativeMessageSmokeEntry = 'runtime/native-message-smoke.mjs'
   const registerNativeHostEntry = 'runtime/register-native-host.ps1'
   const startEntry = 'runtime/start.vbs'
   const nativeManifestEntries = [
@@ -387,7 +409,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     'runtime/skills/pdf/SKILL.md',
     'runtime/native-server/product-office-skills.mjs',
   ]
-  const requiredPayloadEntries = [manifestEntry, runtimeCliEntry, nativeLauncherEntry, registerNativeHostEntry, startEntry, ...productSkillEntries, ...nativeManifestEntries]
+  const requiredPayloadEntries = [manifestEntry, runtimeCliEntry, nativeLauncherEntry, nativeMessageSmokeEntry, registerNativeHostEntry, startEntry, ...productSkillEntries, ...nativeManifestEntries]
   let payloadEntries = []
   if (existsSync(payloadZipPath)) {
     payloadEntries = normalizedArchiveEntries(payloadZipPath, requiredPayloadEntries)
@@ -422,6 +444,8 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts',
       'HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts',
       'Set-Item -Path $registryKey -Value $installedManifestPath',
+      '[switch]$PrepareOnly',
+      '[switch]$PublishOnly',
       '-lt 22',
       "$nodePathFile = Join-Path $runtimeDir 'node-path.txt'",
       '[System.Text.UTF8Encoding]::new($false)',
@@ -455,8 +479,8 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   const installerPath = path.join(packageDir, 'install.ps1')
   if (existsSync(installerPath)) {
     const installer = await readFile(installerPath, 'utf8')
-    if (!installer.includes('Register-ReleaseTree $installRoot') || !installer.includes('-lt 22')) {
-      errors.push('install.ps1 does not validate Node 22+ and register the installed release tree')
+    if (!installer.includes('Prepare-ReleaseTree $installRoot') || !installer.includes('Register-ReleaseTree $installRoot') || !installer.includes('Assert-NativeHostStartup') || !installer.includes('-lt 22')) {
+      errors.push('install.ps1 does not validate, start-check, and register the installed release tree')
     }
     for (const requiredText of [
       'function Suspend-NativeHostRegistration',
@@ -574,6 +598,7 @@ export async function buildWindowsRelease({
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
   await writeFile(path.join(runtimeDir, 'run_native_host.bat'), nativeHostBat(version), 'utf8')
+  await copyDereferenced(path.join(MODULE_DIR, 'native-message-smoke.mjs'), path.join(runtimeDir, 'native-message-smoke.mjs'))
   await writeFile(path.join(runtimeDir, 'dsh-plugin.bat'), pluginManagerBat(), 'utf8')
   await writeFile(path.join(runtimeDir, 'register-native-host.ps1'), utf8Bom(registerNativeHostPs1()))
   await writeFile(path.join(runtimeDir, 'start.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(startVbs(), 'utf16le')]))

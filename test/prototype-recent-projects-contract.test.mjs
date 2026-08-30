@@ -19,6 +19,8 @@ test('Side Panel exposes recent Prototype Studio projects through the trusted ba
   assert.match(styles, /\.recent-prototypes-popover\s*\{[^}]*top:\s*52px[^}]*right:\s*12px/s)
   assert.doesNotMatch(styles, /\.recent-prototypes-trigger/)
   assert.match(sidepanel, /最近原型/)
+  assert.match(sidepanel, /采集当前网页/)
+  assert.match(sidepanel, /command: 'capture-design-reference', tabId: activeTab\.tab\.tabId, sessionId: activeHarnessSessionId/)
   assert.match(sidepanel, /在当前对话继续/)
   assert.match(background, /request\.type === 'prototype-studio-recent\/v1'/)
   assert.match(background, /isSidePanelSender\(sender\)/)

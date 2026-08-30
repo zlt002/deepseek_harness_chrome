@@ -57,6 +57,7 @@ test('compact picker measures its popover and routes the selected workspace into
       { id: 'a-first', title: 'A 首条', blank: false, state: 'done', time: '刚刚' },
       { id: 'a-current', title: 'A 当前', blank: false, state: 'done', time: '刚刚' },
     ]
+    const openedSessionIds = []
     const owner = {
       currentSessionId: 'a-current', workspaceTitle: '工作区 A', sessionTitle: 'A 当前',
       workspaces: [
@@ -66,6 +67,10 @@ test('compact picker measures its popover and routes the selected workspace into
           { id: 'b-later', title: 'B 后续', blank: false, state: 'done', time: '刚刚' },
         ] },
       ],
+      ungrouped: {
+        label: '未分组',
+        sessions: [{ id: 'loose-session', title: '松散会话', blank: false, state: 'done', time: '刚刚' }],
+      },
       labels: {
         workspaces: '工作区', sessions: '会话', addWorkspace: '添加工作区', newSession: '新建会话', rename: '重命名',
         deleteWorkspace: '删除工作区', deletePending: '删除中', renameTitle: '重命名', sessionRenameTitle: '重命名会话',
@@ -74,7 +79,7 @@ test('compact picker measures its popover and routes the selected workspace into
       },
       workspaceActionsAria: name => name, sessionActionsAria: name => name, newSessionAria: name => name,
       createdLabel: () => '', deleteDesc: () => '', conflictNamed: () => '',
-      openSession: () => {}, startSession: () => {}, renameWorkspace: async () => {}, renameSession: async () => {},
+      openSession: id => { openedSessionIds.push(id) }, startSession: () => {}, renameWorkspace: async () => {}, renameSession: async () => {},
       forkSession: () => {}, deleteWorkspace: async () => {}, openPath: async () => {}, archiveSession: async () => {},
       directoryFlowAvailable: false, workspaceAddAnchor: { current: null }, requestWorkspaceAdd: () => {}, directoryFlow: null,
       renderSlot: (_name, props) => {
@@ -108,6 +113,15 @@ test('compact picker measures its popover and routes the selected workspace into
     assert.equal(slotCalls.at(-1).sessionId, 'b-first')
     assert.equal(slotCalls.at(-1).workspacePath, '/b')
     assert.equal(container.querySelector('[data-directory-session]').getAttribute('data-directory-session'), 'b-first')
+
+    const ungrouped = [...container.querySelectorAll('[role="button"]')].find(node => node.textContent.includes('未分组'))
+    assert.ok(ungrouped, 'the compact picker must expose the owner-projected ungrouped group')
+    await act(async () => { click(dom.window, ungrouped) })
+    assert.equal([...container.querySelectorAll('[role="button"]')].filter(node => node.textContent.includes('松散会话')).length, 1)
+    assert.equal([...container.querySelectorAll('[role="button"]')].some(node => node.textContent.includes('A 首条')), false)
+    const looseSession = [...container.querySelectorAll('[role="button"]')].find(node => node.textContent.includes('松散会话'))
+    await act(async () => { click(dom.window, looseSession) })
+    assert.deepEqual(openedSessionIds, ['loose-session'])
     await act(async () => { root.unmount() })
   } finally {
     dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect

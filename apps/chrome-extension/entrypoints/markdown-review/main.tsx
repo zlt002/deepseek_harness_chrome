@@ -23,10 +23,12 @@ import './style.css'
 
 type LocalAnnotation = MarkdownReviewAnnotation & VisualReviewAnnotation
 type PreparedWriteState = { preparation: PreparedWrite; content: string; idempotencyKey: string }
-type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'proposals' } | { kind: 'prepare'; content: string } | { kind: 'commit'; content: string; token: string }
+type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'session-action'; action: 'rewrite' | 'accept' } | { kind: 'proposals' } | { kind: 'prepare'; content: string } | { kind: 'commit'; content: string; token: string }
 
 const initialState: ReviewState = { status: 'initializing' }
 const SIDE_PANEL_STARTUP_RETRY_DELAYS_MS = [500, 1_000, 2_000, 3_000] as const
+const VERIFIED_SAVE_NOTICE = '已保存，并已按同一资源回读验证。'
+const VERIFIED_SAVE_NOTICE_DISMISS_MS = 5_000
 
 function requestId(): string { return crypto.randomUUID() }
 
@@ -71,6 +73,8 @@ function App(): React.JSX.Element {
   const [committing, setCommitting] = useState(false)
   const [externalUpdatePending, setExternalUpdatePending] = useState(false)
   const [saveNotice, setSaveNotice] = useState<string>()
+  const [verifiedSaveNoticeToken, setVerifiedSaveNoticeToken] = useState<string>()
+  const [sessionActionPending, setSessionActionPending] = useState<'rewrite' | 'accept'>()
   const portRef = useRef<chrome.runtime.Port | undefined>(undefined)
   const pendingRef = useRef(new Map<string, PendingRequest>())
   const deliveryTimeoutsRef = useRef(new Map<string, number>())
@@ -86,7 +90,16 @@ function App(): React.JSX.Element {
   const commitRef = useRef<CommitAttempt | undefined>(undefined)
   const sidePanelWindowIdRef = useRef<number | undefined>(undefined)
   const sidePanelStartupRetryRef = useRef<{ annotationId: string; retryIndex: number; timer?: number } | undefined>(undefined)
+  const verifiedSaveNoticeTokenRef = useRef<string | undefined>(undefined)
   const deliverAnnotationRef = useRef<(annotation: LocalAnnotation) => boolean>(() => false)
+
+  const showSaveNotice = useCallback((message: string | undefined) => {
+    if (message !== VERIFIED_SAVE_NOTICE) {
+      verifiedSaveNoticeTokenRef.current = undefined
+      setVerifiedSaveNoticeToken(undefined)
+    }
+    setSaveNotice(message)
+  }, [])
 
   /** Milkdown emits markdownUpdated after a debounce; persistence checks read it synchronously. */
   const syncEditorMarkdown = useCallback((): string => {
@@ -187,7 +200,7 @@ function App(): React.JSX.Element {
         if (message.reviewId === reviewId) {
           if (hasLocalReviewWork()) {
             setExternalUpdatePending(true)
-            setSaveNotice('外部文件已更新。本地草稿、批注或 AI 修改仍被保留；请明确选择是否放弃本地更改并重新读取。')
+            showSaveNotice('外部文件已更新。本地草稿、批注或 AI 修改仍被保留；请明确选择是否放弃本地更改并重新读取。')
           } else {
             loadSnapshot()
           }
@@ -206,7 +219,7 @@ function App(): React.JSX.Element {
         if (message.ok && message.snapshot !== undefined) {
           if (!expected.discardLocalWork && hasLocalReviewWork()) {
             setExternalUpdatePending(true)
-            setSaveNotice('外部文件已更新，但刚才出现了本地更改。为避免覆盖，本地内容已保留。')
+            showSaveNotice('外部文件已更新，但刚才出现了本地更改。为避免覆盖，本地内容已保留。')
             return
           }
           dispatch({ type: 'snapshot-loaded', snapshot: message.snapshot })
@@ -304,18 +317,29 @@ function App(): React.JSX.Element {
           if (error.reopenRequired) dispatch({ type: 'request-failed', error })
         }
       }
+      if (message.type === 'markdown-review-session-action-response' && expected.kind === 'session-action') {
+        setSessionActionPending(undefined)
+        if (message.ok && message.action === expected.action) {
+          setAiTarget({ id: message.targetSessionId!, title: message.targetSessionTitle! })
+          setProposalNotice(message.action === 'rewrite'
+            ? `已切换到“${message.targetSessionTitle}”，重写提示已加入输入框，请补充原因和问题后手动发送。`
+            : `已在“${message.targetSessionTitle}”采纳并继续当前 Skill。`)
+        } else {
+          setProposalNotice(`无法${expected.action === 'rewrite' ? '准备重写' : '采纳'}：${message.error?.message ?? '未知错误'}`)
+          if (message.error?.reopenRequired) dispatch({ type: 'request-failed', error: message.error })
+        }
+      }
       if (message.type === 'markdown-review-prepare-write-response' && expected.kind === 'prepare') {
         if (!message.ok || message.preparation === undefined) {
-          setSaveNotice(`无法准备保存：${message.error?.message ?? '未知错误'}`)
+          showSaveNotice(`无法准备保存：${message.error?.message ?? '未知错误'}`)
         } else if (message.preparation.status === 'conflict') {
           setPreparedWrite(undefined)
           preparedWriteRef.current = undefined
-          setSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
+          showSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
         } else {
           const nextPreparedWrite = { preparation: message.preparation, content: expected.content, idempotencyKey: requestId() }
           preparedWriteRef.current = nextPreparedWrite
           setPreparedWrite(nextPreparedWrite)
-          setSaveNotice('已核对文件版本。请确认后写入；确认只在一分钟内有效。')
         }
       }
       if (message.type === 'markdown-review-commit-write-response' && expected.kind === 'commit') {
@@ -325,10 +349,10 @@ function App(): React.JSX.Element {
         setPreparedWrite(undefined)
         preparedWriteRef.current = undefined
         if (!message.ok || message.result === undefined) {
-          setSaveNotice(`保存未完成：${message.error?.message ?? '未知错误'}`)
+          showSaveNotice(`保存未完成：${message.error?.message ?? '未知错误'}`)
         } else if (message.result.status === 'verified_write') {
           const prior = snapshotRef.current
-          if (prior === undefined) { setSaveNotice('保存已验证；请重新读取文件。'); return }
+          if (prior === undefined) { showSaveNotice('保存已验证；请重新读取文件。'); return }
           const next = { ...prior, resource: message.result.resource, content: expected.content }
           snapshotRef.current = next
           draftRef.current = expected.content
@@ -339,11 +363,13 @@ function App(): React.JSX.Element {
           setActiveDiff(undefined)
           annotationSelectionsRef.current.clear()
           setExternalUpdatePending(false)
-          setSaveNotice('已保存，并已按同一资源回读验证。')
+          const verifiedNoticeToken = requestId()
+          verifiedSaveNoticeTokenRef.current = verifiedNoticeToken
+          setVerifiedSaveNoticeToken(verifiedNoticeToken); showSaveNotice(VERIFIED_SAVE_NOTICE)
         } else if (message.result.status === 'conflict') {
-          setSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
+          showSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
         } else {
-          setSaveNotice(`写入状态不确定：${message.result.message} 请重新读取，不会自动重试。`)
+          showSaveNotice(`写入状态不确定：${message.result.message} 请重新读取，不会自动重试。`)
         }
       }
     }
@@ -359,6 +385,7 @@ function App(): React.JSX.Element {
       setCommitting(false)
       preparedWriteRef.current = undefined
       setPreparedWrite(undefined)
+      setSessionActionPending(undefined)
       failSendingAnnotations('与 Harness 会话的连接已断开')
       dispatch({ type: 'port-disconnected' })
     }
@@ -401,7 +428,26 @@ function App(): React.JSX.Element {
 
   const snapshot: MarkdownReviewSnapshot | undefined = state.snapshot
   const showRecoveryState = snapshot === undefined || state.status === 'reopen-required'
-  const activityNotice = saveNotice ?? proposalNotice
+  const activityNotice = preparedWrite === undefined && !externalUpdatePending ? saveNotice ?? proposalNotice : proposalNotice
+  const showExternalUpdateConfirmation = externalUpdatePending && preparedWrite === undefined
+  useEffect(() => {
+    const token = verifiedSaveNoticeToken
+    if (token === undefined || saveNotice !== VERIFIED_SAVE_NOTICE) return
+    const timeout = window.setTimeout(() => {
+      if (verifiedSaveNoticeTokenRef.current !== token) return
+      verifiedSaveNoticeTokenRef.current = undefined
+      setVerifiedSaveNoticeToken(undefined)
+      setSaveNotice(undefined)
+    }, VERIFIED_SAVE_NOTICE_DISMISS_MS)
+    return () => window.clearTimeout(timeout)
+  }, [saveNotice, verifiedSaveNoticeToken])
+  const dismissActivityNotice = () => {
+    if (preparedWrite === undefined && !externalUpdatePending && saveNotice !== undefined) {
+      showSaveNotice(undefined)
+      return
+    }
+    setProposalNotice(undefined)
+  }
   const dirty = snapshot !== undefined && draft !== snapshot.content
   const onMarkdownChange = useCallback((markdown: string) => {
     draftRef.current = markdown
@@ -441,6 +487,29 @@ function App(): React.JSX.Element {
     return true
   }, [failSendingAnnotations, post, reviewId])
   deliverAnnotationRef.current = deliverAnnotation
+
+  const runSessionAction = useCallback((action: 'rewrite' | 'accept') => {
+    const activeSnapshot = snapshotRef.current
+    if (activeSnapshot === undefined || reviewId === undefined || sessionActionPending !== undefined) return
+    const request = requestId()
+    pendingRef.current.set(request, { kind: 'session-action', action })
+    setSessionActionPending(action)
+    if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-session-action-request', requestId: request, reviewId, harnessSessionId: activeSnapshot.harnessSessionId, resourceId: activeSnapshot.resource.resourceId, displayPath: activeSnapshot.resource.displayPath, action })) {
+      pendingRef.current.delete(request)
+      setSessionActionPending(undefined)
+      dispatch({ type: 'port-disconnected' })
+      return
+    }
+    const timeout = window.setTimeout(() => {
+      deliveryTimeoutsRef.current.delete(request)
+      const expected = pendingRef.current.get(request)
+      if (expected?.kind !== 'session-action') return
+      pendingRef.current.delete(request)
+      setSessionActionPending(undefined)
+      setProposalNotice(`${action === 'rewrite' ? '重写准备' : '采纳'}未在 20 秒内确认，请重试。`)
+    }, MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS)
+    deliveryTimeoutsRef.current.set(request, timeout)
+  }, [post, reviewId, sessionActionPending])
 
   const submitAnnotation = useCallback((selection: VisualSelection, comment: string): boolean => {
     const activeSnapshot = snapshotRef.current
@@ -514,7 +583,7 @@ function App(): React.JSX.Element {
     const request = requestId()
     const content = syncEditorMarkdown()
     pendingRef.current.set(request, { kind: 'prepare', content })
-    setSaveNotice(undefined)
+    showSaveNotice(undefined)
     const expected = { resourceId: snapshot.resource.resourceId, revision: snapshot.resource.revision, fingerprint: snapshot.resource.fingerprint }
     if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-prepare-write-request', requestId: request, reviewId, expected, content })) {
       pendingRef.current.delete(request); dispatch({ type: 'port-disconnected' })
@@ -525,7 +594,7 @@ function App(): React.JSX.Element {
     if (snapshot === undefined || reviewId === undefined || currentPreparedWrite === undefined) return
     if (syncEditorMarkdown() !== currentPreparedWrite.content) {
       preparedWriteRef.current = undefined
-      setPreparedWrite(undefined); setSaveNotice('草稿在确认前已改变，请重新保存并确认。'); return
+      setPreparedWrite(undefined); showSaveNotice('草稿在确认前已改变，请重新保存并确认。'); return
     }
     const request = requestId()
     const attempt = beginCommit(commitRef.current, { token: request, idempotencyKey: currentPreparedWrite.idempotencyKey, content: currentPreparedWrite.content })
@@ -543,14 +612,14 @@ function App(): React.JSX.Element {
   const requestSnapshotReload = () => {
     if (hasLocalReviewWork()) {
       setExternalUpdatePending(true)
-      setSaveNotice('本地草稿、批注或 AI 修改仍被保留；请点击“放弃本地更改并重新读取”后再替换。')
+      showSaveNotice('本地草稿、批注或 AI 修改仍被保留；请点击“放弃本地更改并重新读取”后再替换。')
       return
     }
     loadSnapshot()
   }
   const discardLocalWorkAndReload = () => {
     if (commitRef.current !== undefined) {
-      setSaveNotice('正在确认写入结果，暂不能丢弃本地工作。')
+      showSaveNotice('正在确认写入结果，暂不能丢弃本地工作。')
       return
     }
     setExternalUpdatePending(false)
@@ -565,15 +634,29 @@ function App(): React.JSX.Element {
         {aiTarget !== undefined && <span className="session-status" title={`当前 AI 会话 ${aiTarget.id}`}>AI：{aiTarget.title}</span>}
         <span className={dirty ? 'status draft' : 'status'}>{dirty ? '本地草稿未保存' : '已与文件同步'}</span>
         {snapshot?.truncated === true && <span className="status truncated" title="文件快照已截断，不能安全保存或发送完整文档">内容已截断</span>}
-        <span className="history-actions" role="group" aria-label="编辑历史"><button type="button" className="secondary" title="撤销（Ctrl+Z）" aria-label="撤销（Ctrl+Z）" onClick={() => { if (editorRef.current?.undo() === true) syncEditorMarkdown() }}>撤销</button><button type="button" className="secondary" title="重做（Ctrl+Y）" aria-label="重做（Ctrl+Y）" onClick={() => { if (editorRef.current?.redo() === true) syncEditorMarkdown() }}>重做</button></span>
+        <span className="history-actions" role="group" aria-label="编辑历史"><button type="button" className="secondary icon-button" title="撤销（Ctrl+Z）" aria-label="撤销（Ctrl+Z）" onClick={() => { if (editorRef.current?.undo() === true) syncEditorMarkdown() }}>↶</button><button type="button" className="secondary icon-button" title="重做（Ctrl+Y）" aria-label="重做（Ctrl+Y）" onClick={() => { if (editorRef.current?.redo() === true) syncEditorMarkdown() }}>↷</button></span>
+        <button type="button" className="secondary review-session-action" onClick={() => runSessionAction('rewrite')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中准备重写提示">↺ 重写</button>
+        <button type="button" className="secondary review-session-action" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中采纳并继续 Skill">✓ 采纳</button>
         {dirty && snapshot?.truncated !== true && <button type="button" onClick={prepareSave} disabled={preparedWrite !== undefined || committing || state.status === 'reopen-required'}>保存草稿</button>}
-        <button className="secondary" type="button" onClick={requestSnapshotReload} disabled={state.status === 'loading' || state.status === 'reopen-required'}>重新读取</button>
+        <button className="secondary icon-button" type="button" title="重新读取" aria-label="重新读取" onClick={requestSnapshotReload} disabled={state.status === 'loading' || state.status === 'reopen-required'}>↻</button>
       </div>
     </header>
     {state.error !== undefined && !showRecoveryState && <section className="notice" role="alert">{state.error.message}{state.status !== 'reopen-required' && <><br /><button className="secondary" type="button" onClick={state.error.code === 'sidepanel_unavailable' ? () => { void openSidePanelAndRetry() } : requestSnapshotReload}>{state.error.code === 'sidepanel_unavailable' ? '打开侧边栏后重试' : '重试'}</button></>}</section>}
-    {activityNotice !== undefined && <section className="proposal-notice" role="status">{activityNotice}{sidePanelRecoveryAnnotation !== undefined && <button className="secondary" type="button" onClick={() => { void openSidePanelAndRetry() }}>打开侧边栏并重试</button>}</section>}
-    {externalUpdatePending && <section className="save-confirm" role="alert"><span>外部文件已更新。本地草稿、批注和 AI 修改尚未被覆盖。</span><button type="button" onClick={discardLocalWorkAndReload} disabled={committing}>放弃本地更改并重新读取</button></section>}
-    {preparedWrite !== undefined && <section className="save-confirm" role="alert"><span>将把当前草稿写入已核对的文件版本。</span><button type="button" onClick={() => { preparedWriteRef.current = undefined; setPreparedWrite(undefined) }} className="secondary" disabled={committing}>取消</button><button type="button" onClick={commitSave} disabled={committing}>{committing ? '正在确认写入…' : '确认写入'}</button></section>}
+    {activityNotice !== undefined && <section className="proposal-notice" role="status"><span className="proposal-notice-message">{activityNotice}</span>{sidePanelRecoveryAnnotation !== undefined && <button className="secondary" type="button" onClick={() => { void openSidePanelAndRetry() }}>打开侧边栏并重试</button>}<button className="proposal-notice-close" type="button" aria-label="关闭提示" title="关闭提示" onClick={dismissActivityNotice}>×</button></section>}
+    {showExternalUpdateConfirmation && <div className="confirmation-dialog-backdrop">
+      <section className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="external-update-confirmation-title">
+        <h2 id="external-update-confirmation-title">文件已在外部更新</h2>
+        <p>本地草稿、批注和 AI 修改仍被保留。是否放弃这些本地更改并重新读取文件？</p>
+        <footer><button type="button" className="secondary" onClick={() => { setExternalUpdatePending(false); showSaveNotice(undefined) }} disabled={committing}>保留本地内容</button><button type="button" onClick={discardLocalWorkAndReload} disabled={committing}>放弃本地更改并重新读取</button></footer>
+      </section>
+    </div>}
+    {preparedWrite !== undefined && <div className="confirmation-dialog-backdrop">
+      <section className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="write-confirmation-title">
+        <h2 id="write-confirmation-title">确认写入草稿</h2>
+        <p>将把当前草稿写入已核对的文件版本。确认只在一分钟内有效。</p>
+        <footer><button type="button" onClick={() => { preparedWriteRef.current = undefined; setPreparedWrite(undefined); showSaveNotice(undefined) }} className="secondary" disabled={committing}>取消</button><button type="button" onClick={commitSave} disabled={committing}>{committing ? '正在确认写入…' : '确认写入'}</button></footer>
+      </section>
+    </div>}
     {showRecoveryState ? <section className={`review-recovery${snapshot === undefined && state.error === undefined ? ' is-loading' : ''}`} role={state.error === undefined ? undefined : 'alert'}>
       <strong>{state.status === 'reopen-required' ? '需要重新打开文档' : snapshot === undefined && state.error === undefined ? '正在读取文档' : '暂时无法显示文档'}</strong>
       <span>{state.error?.message ?? '正在确认文件快照，请稍候…'}</span>

@@ -115,6 +115,18 @@ export interface DeliverRequest {
   annotation: MarkdownReviewAnnotation
 }
 
+/** A bounded request to act in the session that opened this Review Tab. */
+export interface SessionActionRequest {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-session-action-request'
+  requestId: string
+  reviewId: string
+  harnessSessionId: string
+  resourceId: string
+  displayPath: string
+  action: 'rewrite' | 'accept'
+}
+
 export interface ProposalsRequest {
   v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
   type: 'markdown-review-proposals-request'
@@ -142,7 +154,7 @@ export interface CommitWriteRequest {
   content: string
 }
 
-export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest | ProposalsRequest | PrepareWriteRequest | CommitWriteRequest
+export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest | SessionActionRequest | ProposalsRequest | PrepareWriteRequest | CommitWriteRequest
 
 export interface SnapshotResponse {
   v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
@@ -162,6 +174,18 @@ export interface DeliverResponse {
   targetSessionId?: string
   targetSessionTitle?: string
   status?: 'queued' | 'processing'
+  error?: MarkdownReviewError
+}
+
+export interface SessionActionResponse {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-session-action-response'
+  requestId: string
+  ok: boolean
+  action?: 'rewrite' | 'accept'
+  targetSessionId?: string
+  targetSessionTitle?: string
+  status?: 'draft_ready' | 'queued' | 'processing'
   error?: MarkdownReviewError
 }
 
@@ -239,7 +263,7 @@ export interface TargetUpdatedNotification {
   reviewId: string
 }
 
-export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | ProposalsResponse | PrepareWriteResponse | CommitWriteResponse | TargetUpdatedNotification
+export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | SessionActionResponse | ProposalsResponse | PrepareWriteResponse | CommitWriteResponse | TargetUpdatedNotification
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -344,6 +368,8 @@ export function isMarkdownReviewPortRequest(value: unknown): value is MarkdownRe
   if (value.type === 'markdown-review-commit-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'approval', 'idempotencyKey', 'content'].includes(key))
     && isMarkdownReviewId(value.approval) && isMarkdownReviewId(value.idempotencyKey)
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
+  if (value.type === 'markdown-review-session-action-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'action'].includes(key))
+    && isMarkdownReviewId(value.harnessSessionId) && isMarkdownReviewId(value.resourceId) && boundedText(value.displayPath, MAX_PATH_LENGTH) && (value.action === 'rewrite' || value.action === 'accept')
   return value.type === 'markdown-review-deliver-request'
     && Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'deliveryId', 'annotation'].includes(key))
     && isMarkdownReviewId(value.harnessSessionId)
@@ -424,6 +450,13 @@ export function isMarkdownReviewPortResponse(value: unknown): value is MarkdownR
       && (value.ok
         ? isMarkdownReviewId(value.deliveryId) && isMarkdownReviewId(value.targetSessionId) && boundedText(value.targetSessionTitle, MAX_PATH_LENGTH) && (value.status === 'queued' || value.status === 'processing') && value.error === undefined
         : isMarkdownReviewError(value.error) && value.deliveryId === undefined && value.targetSessionId === undefined && value.targetSessionTitle === undefined && value.status === undefined)
+  }
+  if (value.type === 'markdown-review-session-action-response') {
+    return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'action', 'targetSessionId', 'targetSessionTitle', 'status', 'error'].includes(key))
+      && (value.ok
+        ? (value.action === 'rewrite' || value.action === 'accept') && isMarkdownReviewId(value.targetSessionId) && boundedText(value.targetSessionTitle, MAX_PATH_LENGTH)
+          && (value.action === 'rewrite' ? value.status === 'draft_ready' : value.status === 'queued' || value.status === 'processing') && value.error === undefined
+        : isMarkdownReviewError(value.error) && value.action === undefined && value.targetSessionId === undefined && value.targetSessionTitle === undefined && value.status === undefined)
   }
   if (value.type === 'markdown-review-proposals-response') {
     return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'reviewId', 'proposals', 'error'].includes(key))

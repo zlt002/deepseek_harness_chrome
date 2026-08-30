@@ -25,9 +25,32 @@ export interface VisualMarkdownFeedback extends MarkdownFeedbackBase {
   from: number
   to: number
   blocks: Array<{ kind: string; text: string }>
+  table?: VisualMarkdownTableContext
+}
+
+export interface VisualMarkdownTableContext {
+  from: number
+  to: number
+  rowCount: number
+  columnCount: number
+  selectedRowStart: number
+  selectedRowEnd: number
+  selectedColumnStart: number
+  selectedColumnEnd: number
+  isWholeTable: boolean
+  header: string[]
+  rows: string[][]
 }
 
 export type WorkspaceMarkdownFeedback = SourceMarkdownFeedback | VisualMarkdownFeedback
+
+export interface WorkspaceMarkdownReviewAction {
+  action: 'rewrite' | 'accept'
+  reviewId: string
+  harnessSessionId: string
+  resourceId: string
+  displayPath: string
+}
 
 export type MarkdownFeedbackValidation =
   | { ok: true; feedback: WorkspaceMarkdownFeedback }
@@ -36,6 +59,8 @@ export type MarkdownFeedbackValidation =
 const baseKeys = ['id', 'selectionId', 'harnessSessionId', 'reviewId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'anchorKind', 'quote', 'comment']
 const sourceKeys = [...baseKeys, 'startUtf16', 'endUtf16', 'prefix', 'suffix']
 const visualKeys = [...baseKeys, 'editorRevision', 'from', 'to', 'blocks']
+const visualTableKeys = [...visualKeys, 'table']
+const tableKeys = ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable', 'header', 'rows']
 
 function boundedString(value: unknown, maximum: number, allowEmpty = false): value is string {
   return typeof value === 'string' && value.length <= maximum && (allowEmpty || value.trim() !== '')
@@ -44,6 +69,21 @@ function boundedString(value: unknown, maximum: number, allowEmpty = false): val
 function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const actual = Object.keys(value)
   return actual.length === keys.length && actual.every(key => keys.includes(key))
+}
+
+function visualTable(value: unknown): value is VisualMarkdownTableContext {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const table = value as Record<string, unknown>
+  if (!hasExactKeys(table, tableKeys)) return false
+  const integer = (key: string) => Number.isSafeInteger(table[key])
+  if (!['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd'].every(integer)) return false
+  const { from, to, rowCount, columnCount, selectedRowStart, selectedRowEnd, selectedColumnStart, selectedColumnEnd } = table as Record<string, number>
+  if (from < 0 || to <= from || rowCount < 1 || columnCount < 1
+    || selectedRowStart < 0 || selectedRowEnd < selectedRowStart || selectedRowEnd >= rowCount
+    || selectedColumnStart < 0 || selectedColumnEnd < selectedColumnStart || selectedColumnEnd >= columnCount
+    || typeof table.isWholeTable !== 'boolean') return false
+  const row = (value: unknown) => Array.isArray(value) && value.length === columnCount && value.every(cell => boundedString(cell, 2_000, true))
+  return row(table.header) && Array.isArray(table.rows) && table.rows.length + 1 === rowCount && table.rows.every(row)
 }
 
 function invalid(message: string): MarkdownFeedbackValidation {
@@ -56,7 +96,7 @@ export function validateWorkspaceMarkdownFeedback(value: unknown): MarkdownFeedb
   const kind = item.anchorKind
   if (kind !== 'source' && kind !== 'visual') return invalid('anchorKind must be "source" or "visual".')
 
-  const expectedKeys = kind === 'source' ? sourceKeys : visualKeys
+  const expectedKeys = kind === 'source' ? sourceKeys : Object.prototype.hasOwnProperty.call(item, 'table') ? visualTableKeys : visualKeys
   if (!hasExactKeys(item, expectedKeys)) return invalid(`unexpected, missing, or mixed ${kind} anchor fields.`)
 
   const identifiers = ['id', 'selectionId', 'harnessSessionId', 'reviewId', 'resourceId', 'revision', 'fingerprint']
@@ -81,9 +121,22 @@ export function validateWorkspaceMarkdownFeedback(value: unknown): MarkdownFeedb
     const entry = block as Record<string, unknown>
     return hasExactKeys(entry, ['kind', 'text']) && boundedString(entry.kind, 32) && boundedString(entry.text, 2_000, true)
   })) return invalid('each visual block must have only a non-empty kind (at most 32 chars) and text (at most 2000 chars).')
+  if (Object.prototype.hasOwnProperty.call(item, 'table') && !visualTable(item.table)) return invalid('visual table context must contain only valid table fields.')
   return { ok: true, feedback: item as unknown as VisualMarkdownFeedback }
 }
 
 export function isWorkspaceMarkdownFeedback(value: unknown): value is WorkspaceMarkdownFeedback {
   return validateWorkspaceMarkdownFeedback(value).ok
+}
+
+/** Session actions carry only the review identity, never its document body or capability. */
+export function validateWorkspaceMarkdownReviewAction(value: unknown): { ok: true; action: WorkspaceMarkdownReviewAction } | { ok: false; error: string } {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'Invalid Markdown review action: action must be an object.' }
+  const item = value as Record<string, unknown>
+  const keys = ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath']
+  if (!hasExactKeys(item, keys) || (item.action !== 'rewrite' && item.action !== 'accept')) return { ok: false, error: 'Invalid Markdown review action: unexpected, missing, or mixed fields.' }
+  if (!['reviewId', 'harnessSessionId', 'resourceId'].every(key => boundedString(item[key], 160)) || !boundedString(item.displayPath, 2_048)) {
+    return { ok: false, error: 'Invalid Markdown review action: identity fields are invalid.' }
+  }
+  return { ok: true, action: item as unknown as WorkspaceMarkdownReviewAction }
 }

@@ -18,3 +18,10 @@ export function selectKnowledgeDomain(scope, domainId, systemIds, checked) {
   else delete domainSystems[domainId]
   return { ...scope, domainSystems }
 }
+
+/** Clear one chooser side while preserving selections on the other side. */
+export function clearScopeSelection(scope, side) {
+  return side === 'knowledge'
+    ? { ...scope, domainSystems: {} }
+    : { ...scope, repositoryIds: [] }
+}

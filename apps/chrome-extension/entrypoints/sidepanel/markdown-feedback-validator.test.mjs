@@ -10,7 +10,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText
 const module = { exports: {} }
 vm.runInNewContext(compiled, { module, exports: module.exports })
-const { validateWorkspaceMarkdownFeedback } = module.exports
+const { validateWorkspaceMarkdownFeedback, validateWorkspaceMarkdownReviewAction } = module.exports
 
 const base = {
   id: 'annotation-1', selectionId: 'annotation-1', harnessSessionId: 'session-1', reviewId: 'review-1',
@@ -19,14 +19,25 @@ const base = {
 }
 const sourceFeedback = { ...base, anchorKind: 'source', startUtf16: 4, endUtf16: 22, prefix: 'before', suffix: 'after' }
 const visualFeedback = { ...base, anchorKind: 'visual', editorRevision: 3, from: 4, to: 22, blocks: [{ kind: 'paragraph', text: 'selected paragraph' }, { kind: 'table_cell', text: 'context' }] }
+const visualTableFeedback = {
+  ...visualFeedback,
+  table: {
+    from: 3, to: 25, rowCount: 2, columnCount: 2,
+    selectedRowStart: 1, selectedRowEnd: 1, selectedColumnStart: 0, selectedColumnEnd: 1,
+    isWholeTable: false, header: ['Name', 'Value'], rows: [['Customer', 'Example']],
+  },
+}
 
-test('Markdown feedback accepts exact source and visual anchor variants', () => {
+test('Markdown feedback accepts exact source and visual anchor variants, including table context', () => {
   const sourceResult = validateWorkspaceMarkdownFeedback(sourceFeedback)
   const visualResult = validateWorkspaceMarkdownFeedback(visualFeedback)
+  const visualTableResult = validateWorkspaceMarkdownFeedback(visualTableFeedback)
   assert.equal(sourceResult.ok, true)
   assert.equal(visualResult.ok, true)
+  assert.equal(visualTableResult.ok, true)
   if (sourceResult.ok) assert.equal(sourceResult.feedback.anchorKind, 'source')
   if (visualResult.ok) assert.equal(visualResult.feedback.anchorKind, 'visual')
+  if (visualTableResult.ok) assert.equal(visualTableResult.feedback.anchorKind, 'visual')
 })
 
 test('Markdown feedback rejects mixed fields, missing fields, and unknown keys', () => {
@@ -39,6 +50,10 @@ test('Markdown feedback rejects mixed fields, missing fields, and unknown keys',
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.error, /Invalid Markdown review feedback: unexpected, missing, or mixed/)
   }
+
+  const invalidTable = validateWorkspaceMarkdownFeedback({ ...visualTableFeedback, table: { ...visualTableFeedback.table, unexpected: true } })
+  assert.equal(invalidTable.ok, false)
+  if (!invalidTable.ok) assert.match(invalidTable.error, /visual table context/)
 })
 
 test('Markdown feedback rejects invalid ranges and bounded visual block data with a specific error', () => {
@@ -49,11 +64,19 @@ test('Markdown feedback rejects invalid ranges and bounded visual block data wit
     { ...visualFeedback, blocks: [{ kind: 'paragraph', text: 'ok', extra: 'reject' }] },
     { ...visualFeedback, blocks: [{ kind: 'x'.repeat(33), text: '' }] },
     { ...visualFeedback, blocks: [{ kind: 'paragraph', text: 'x'.repeat(2_001) }] },
+    { ...visualTableFeedback, table: { ...visualTableFeedback.table, rows: [['Customer']] } },
   ]) assert.equal(validateWorkspaceMarkdownFeedback(malformed).ok, false)
 
   const range = validateWorkspaceMarkdownFeedback({ ...visualFeedback, from: 22, to: 22 })
   assert.equal(range.ok, false)
   if (!range.ok) assert.match(range.error, /visual positions and editorRevision/)
+})
+
+test('review actions reject mixed or extra resource fields', () => {
+  const action = { action: 'rewrite', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md' }
+  assert.equal(validateWorkspaceMarkdownReviewAction(action).ok, true)
+  assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, fingerprint: 'must-not-forward' }).ok, false)
+  assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, action: 'send' }).ok, false)
 })
 
 test('side panel returns the bounded Harness delivery error instead of replacing it', async () => {

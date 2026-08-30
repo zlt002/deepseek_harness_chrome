@@ -3,7 +3,7 @@ import type { ChatFileMentions, IConversation } from '@deepseek-ai/dsh-client-ui
 import type { ToolFileLinkProvider } from '@deepseek-ai/dsh-client-ui-tool/client'
 import { createElement, useSyncExternalStore } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { feedbackMessage, rehydrateMessage, requestOpenReview, respondFeedback, respondRehydrate, type MarkdownReviewFeedback, type WorkspaceReviewFeedbackDelivery, workspaceReviewBridgeConfig } from './bridge.ts'
+import { feedbackMessage, rehydrateMessage, requestOpenReview, respondFeedback, respondRehydrate, respondSessionAction, sessionActionMessage, type MarkdownReviewFeedback, type WorkspaceReviewFeedbackDelivery, type WorkspaceReviewSessionAction, type WorkspaceReviewSessionActionDelivery, workspaceReviewBridgeConfig } from './bridge.ts'
 import { openWorkspaceMarkdown, rehydrateWorkspaceMarkdown } from './api.ts'
 import { createWorkspaceReviewHeaderAction } from './WorkspaceReviewAction.tsx'
 import { WorkspaceReviewDirectoryActions } from './WorkspaceReviewDirectoryActions.tsx'
@@ -18,16 +18,24 @@ interface ReviewFeedback {
   submitWorkspaceMarkdown(sessionId: string, feedback: MarkdownReviewFeedback): Promise<void>
 }
 
-function currentWorkspaceReviewTarget(ctx: ClientContext, feedback: MarkdownReviewFeedback): WorkspaceReviewFeedbackDelivery {
+function boundWorkspaceReviewTarget(ctx: ClientContext, harnessSessionId: string): WorkspaceReviewFeedbackDelivery {
   const sessions = ctx.sessions.list.getSnapshot()
-  const currentSessionId = sessions.current
-  if (currentSessionId === undefined) throw new Error('请先在侧边栏选择一个 Harness 会话，再发送给 AI。')
-  const current = sessions.byId[currentSessionId]
-  const document = sessions.byId[feedback.harnessSessionId as SessionId]
-  if (current === undefined || document === undefined || !sameWorkspaceCwd(current.cwd, document.cwd)) {
-    throw new Error('当前会话不属于此文档所在工作区。请在同一工作区选择会话后重试。')
-  }
-  return { targetSessionId: String(currentSessionId), targetSessionTitle: current.displayTitle, status: current.running ? 'queued' : 'processing' }
+  const target = sessions.byId[harnessSessionId as SessionId]
+  if (target === undefined) throw new Error('此 Markdown 绑定的 Harness 会话当前不可用；请重新打开文档后重试。')
+  return { targetSessionId: harnessSessionId, targetSessionTitle: target.displayTitle, status: target.running ? 'queued' : 'processing' }
+}
+
+function rewriteDraft(action: WorkspaceReviewSessionAction): string {
+  return [
+    `请基于当前会话中的 PRD 重新整理文档：${action.displayPath}。先不要开始执行，等待我补充下面的信息后再重写。`,
+    '重写原因：[请补充]',
+    '存在问题：[请补充]',
+    '期望调整：[请补充]',
+  ].join('\n')
+}
+
+function acceptPrompt(action: WorkspaceReviewSessionAction): string {
+  return `我已采纳当前审阅的 PRD（${action.displayPath}）。请按当前 Skill 的下一步继续；如涉及远程文档写入，仍须先预览目标和变更、取得确认、写入后回读验证。`
 }
 
 interface ProducedFileFact {
@@ -110,13 +118,46 @@ export function apply(ctx: ClientContext): void {
       const feedback = feedbackMessage(event, window.parent, bridge)
       if (feedback !== undefined) {
         let target: WorkspaceReviewFeedbackDelivery
-        try { target = currentWorkspaceReviewTarget(ctx, feedback) } catch (error) {
+        try {
+          target = boundWorkspaceReviewTarget(ctx, feedback.harnessSessionId)
+          ctx.sessions.open(feedback.harnessSessionId as SessionId)
+        } catch (error) {
           respondFeedback(window.parent, bridge, feedback.id, false, error instanceof Error ? error.message : String(error))
           return
         }
         void reviewFeedback.submitWorkspaceMarkdown(target.targetSessionId, feedback)
           .then(() => respondFeedback(window.parent, bridge, feedback.id, true, undefined, target))
           .catch(error => respondFeedback(window.parent, bridge, feedback.id, false, error instanceof Error ? error.message : String(error)))
+        return
+      }
+      const actionRequest = sessionActionMessage(event, window.parent, bridge)
+      if (actionRequest !== undefined) {
+        const { requestId, action } = actionRequest
+        let target: WorkspaceReviewFeedbackDelivery
+        try {
+          target = boundWorkspaceReviewTarget(ctx, action.harnessSessionId)
+          ctx.sessions.open(action.harnessSessionId as SessionId)
+          const binding = ctx.sessions.binding(action.harnessSessionId as SessionId)
+          const conversation = ctx.get('conversation') as IConversation | undefined
+          if (binding === undefined || conversation === undefined) throw new Error('绑定的 Harness 对话当前不可用；请重试。')
+          if (action.action === 'rewrite') {
+            const input = conversation.input.for(binding.ctx)
+            const existing = input.state.getSnapshot().draft
+            const addition = rewriteDraft(action)
+            input.setDraft(existing.trim() === '' ? addition : `${existing}\n\n---\n\n${addition}`)
+            const delivery: WorkspaceReviewSessionActionDelivery = { action: 'rewrite', targetSessionId: target.targetSessionId, targetSessionTitle: target.targetSessionTitle, status: 'draft_ready' }
+            respondSessionAction(window.parent, bridge, requestId, true, undefined, delivery)
+            return
+          }
+          const scoped = ctx.sessions.scope(action.harnessSessionId as SessionId)
+          const scopedConversation = scoped?.get('conversation') as IConversation | undefined
+          if (scopedConversation === undefined) throw new Error('绑定的 Harness 对话当前不可用；请重试。')
+          void scopedConversation.send(acceptPrompt(action))
+            .then(() => respondSessionAction(window.parent, bridge, requestId, true, undefined, { action: 'accept', targetSessionId: target.targetSessionId, targetSessionTitle: target.targetSessionTitle, status: target.status }))
+            .catch(error => respondSessionAction(window.parent, bridge, requestId, false, error instanceof Error ? error.message : String(error)))
+        } catch (error) {
+          respondSessionAction(window.parent, bridge, requestId, false, error instanceof Error ? error.message : String(error))
+        }
         return
       }
       const request = rehydrateMessage(event, window.parent, bridge)
@@ -164,4 +205,4 @@ export function apply(ctx: ClientContext): void {
 export { WorkspaceReviewHeaderAction } from './WorkspaceReviewAction.tsx'
 export { WorkspaceReviewTree } from './WorkspaceReviewTree.tsx'
 export { sameWorkspaceCwd, selectReadyWorkspaceDirectorySession, workspacePathForDirectory } from './directory-session.ts'
-export { workspaceReviewBridgeConfig, requestOpenReview, rehydrateMessage, respondFeedback, respondRehydrate } from './bridge.ts'
+export { workspaceReviewBridgeConfig, requestOpenReview, rehydrateMessage, respondFeedback, respondRehydrate, sessionActionMessage, respondSessionAction } from './bridge.ts'

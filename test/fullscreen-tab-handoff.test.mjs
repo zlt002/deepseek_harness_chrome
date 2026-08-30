@@ -24,6 +24,7 @@ test('a full-screen Tab opens the Side Panel synchronously in its click context 
   const requests = []
   await openFullscreenTab({
     runtime: { sendMessage: async (request) => { requests.push(request); return { ok: true } } },
+    sidePanel: { close: async () => {} },
   }, 7, 'session-current')
 
   assert.deepEqual(requests, [{ type: 'switch-harness-surface/v1', surface: 'fullscreen-tab', windowId: 7, sessionId: 'session-current' }])

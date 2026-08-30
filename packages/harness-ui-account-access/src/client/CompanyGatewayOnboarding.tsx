@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
@@ -9,10 +9,13 @@ import {
   COMPANY_GATEWAY_KEY_PORTAL_URL,
   companyGatewayApiKeyFailure,
   companyGatewayBaseUrl,
+  companyGatewayModelsFromNamespaces,
   companyGatewayModelsForSelection,
   companyGatewayProtocolFromNamespaces,
+  mergeCompanyGatewayModels,
   saveCompanyGateway,
 } from './company-gateway.ts'
+import { CompanyGatewayModelCatalog } from './CompanyGatewayModelCatalog.tsx'
 import { hasUsableModelProvider, type OnboardingNamespace, type OnboardingProvider } from './onboarding.ts'
 import type { CompanyGatewayMetadata, CompanyGatewayModel, CompanyGatewayProbeSnapshot, CompanyGatewayProtocol } from './types.ts'
 import css from './AccountAccessSection.module.css'
@@ -47,6 +50,7 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
   const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol }>()
   const [gateway, setGateway] = useState<CompanyGatewayMetadata>()
   const [loadedKey, setLoadedKey] = useState<string>()
+  const [savedGatewayModels, setSavedGatewayModels] = useState<CompanyGatewayModel[]>([])
   const [protocol, setProtocol] = useState<CompanyGatewayProtocol>('openai-completions')
   const [selectedModel, setSelectedModel] = useState<string>()
   const [saving, setSaving] = useState(false)
@@ -76,6 +80,7 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
         if (!credentialsResponse.result.ok) throw new Error(credentialsResponse.result.error.message)
         if (!active) return
         setProtocol(companyGatewayProtocolFromNamespaces(namespaces) ?? 'openai-completions')
+        setSavedGatewayModels(companyGatewayModelsFromNamespaces(namespaces) ?? [])
         setReadiness(hasUsableModelProvider(providers, namespaces, credentialsResponse.result.value.credentials) ? 'ready' : 'needed')
       } catch {
         if (active) setReadiness('unavailable')
@@ -100,12 +105,13 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
   const probing = request !== undefined
   useEffect(() => {
     if (probe?.status === 'ready' && probe.requestId === request?.id) {
-      setGateway(probe.gateway)
+      const models = mergeCompanyGatewayModels(savedGatewayModels, probe.gateway.models)
+      setGateway({ ...probe.gateway, models })
       setLoadedKey(request.key)
       setRequest(undefined)
-      setSelectedModel(current => current !== undefined && probe.gateway.models.some(model => model.id === current) ? current : probe.gateway.models[0]?.id)
+      setSelectedModel(current => current !== undefined && models.some(model => model.id === current) ? current : models[0]?.id)
     }
-  }, [probe, request])
+  }, [probe, request, savedGatewayModels])
   useEffect(() => {
     if (probe?.status === 'error' && probe.requestId === request?.id) {
       setFailure(probe.error)
@@ -164,12 +170,17 @@ export function CompanyGatewayOnboarding(props: Props): ReactNode {
         <button type="button" className={css.gatewaySecondaryButton} disabled={saving} onClick={() => window.open(COMPANY_GATEWAY_KEY_PORTAL_URL, '_blank', 'noreferrer')}>打开密钥门户</button>
       </div>
       {gateway === undefined ? null : <>
-        <label className={css.gatewayField}>
-          <span>模型目录（已加载 {gateway.models.length} 个模型）</span>
-          <select value={selectedModel} disabled={saving} onChange={event => { setSelectedModel(event.target.value); setFailure(undefined) }}>
-            {gateway.models.map(model => <option key={model.id} value={model.id}>{typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id}</option>)}
-          </select>
-        </label>
+        <CompanyGatewayModelCatalog
+          models={gateway.models}
+          selectedModel={selectedModel}
+          disabled={saving}
+          onSelectedModelChange={model => { setSelectedModel(model); setFailure(undefined) }}
+          onChange={models => {
+            setGateway(current => current === undefined ? current : { ...current, models })
+            setSelectedModel(current => current !== undefined && models.some(model => model.id === current) ? current : models[0]?.id)
+            setFailure(undefined)
+          }}
+        />
         <p className={css.notice}>保存后通过 Harness 的模型选择服务设为当前会话和后续会话的初始模型。</p>
       </>}
       {failure === undefined ? null : <p className={css.error} role="alert">{failure}</p>}

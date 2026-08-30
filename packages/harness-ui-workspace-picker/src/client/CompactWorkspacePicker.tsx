@@ -137,6 +137,34 @@ function WorkspaceRow({
   )
 }
 
+/** The Host supplies this already-filtered loose-session projection; this renderer never recreates it. */
+function UngroupedRow({
+  ungrouped, selected, onSelect,
+}: {
+  ungrouped: NonNullable<CompactWorkspacePickerOwnerProps['ungrouped']>
+  selected: boolean
+  onSelect: () => void
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={classes(css.row, selected && css.rowActive)}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onSelect()
+        }
+      }}
+    >
+      <IconFolderClose16 className={css.folder} size={15} />
+      <span>{ungrouped.label}</span>
+      <span className={css.count}>{ungrouped.sessions.length}</span>
+    </div>
+  )
+}
+
 /** Session row: hovering swaps its relative time for a vertical actions menu. */
 function SessionRow({
   session, selected, owner, menuOpen, onMenuOpenChange, onRename, onArchive, onOpen,
@@ -214,7 +242,17 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
   const [directoryRefreshGeneration, setDirectoryRefreshGeneration] = useState(0)
   const [activePane, setActivePane] = useState<WorkspacePickerPane>('sessions')
   const [popoverMaxHeight, setPopoverMaxHeight] = useState<number>()
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(owner.workspaces[0]?.id)
+  const ungrouped = owner.ungrouped?.sessions.length === 0 ? undefined : owner.ungrouped
+  const currentWorkspace = useMemo(
+    () => owner.workspaces.find(workspace => workspace.sessions.some(session => session.id === owner.currentSessionId)),
+    [owner.currentSessionId, owner.workspaces],
+  )
+  const defaultWorkspace = currentWorkspace ?? owner.workspaces[0]
+  const defaultSelectionId = currentWorkspace?.id
+    ?? (ungrouped?.sessions.some(session => session.id === owner.currentSessionId) === true
+      ? null
+      : defaultWorkspace?.id ?? (ungrouped === undefined ? undefined : null))
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null | undefined>(defaultSelectionId)
   const [menuWorkspaceId, setMenuWorkspaceId] = useState<string | undefined>()
   const [menuSessionId, setMenuSessionId] = useState<string | undefined>()
   const [renameTarget, setRenameTarget] = useState<CompactWorkspacePickerWorkspace | null>(null)
@@ -239,12 +277,11 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
   const directoryTabId = `${tabsId}-directory-tab`
   const sessionsPanelId = `${tabsId}-sessions-panel`
   const directoryPanelId = `${tabsId}-directory-panel`
-  const defaultWorkspace = useMemo(
-    () => owner.workspaces.find(workspace => workspace.sessions.some(session => session.id === owner.currentSessionId))
-      ?? owner.workspaces[0],
-    [owner.currentSessionId, owner.workspaces],
-  )
-  const selectedWorkspace = owner.workspaces.find(workspace => workspace.id === selectedWorkspaceId) ?? defaultWorkspace
+  const selectedUngrouped = selectedWorkspaceId === null ? ungrouped : undefined
+  const selectedWorkspace = selectedUngrouped === undefined
+    ? owner.workspaces.find(workspace => workspace.id === selectedWorkspaceId) ?? defaultWorkspace
+    : undefined
+  const selectedSessions = selectedWorkspace?.sessions ?? selectedUngrouped?.sessions ?? []
   const selectedDirectorySession = selectedWorkspace === undefined
     ? undefined
     : selectWorkspaceDirectorySession(selectedWorkspace.sessions, owner.currentSessionId)
@@ -256,12 +293,12 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
 
   useEffect(() => {
     if (!open) {
-      setSelectedWorkspaceId(defaultWorkspace?.id)
+      setSelectedWorkspaceId(defaultSelectionId)
       setActivePane('sessions')
       setMenuWorkspaceId(undefined)
       setMenuSessionId(undefined)
     }
-  }, [defaultWorkspace?.id, open])
+  }, [defaultSelectionId, open])
   useLayoutEffect(() => {
     if (!open) return
     const updateMaxHeight = (): void => {
@@ -386,7 +423,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
         type="button"
         className={css.trigger}
         aria-expanded={open}
-        onClick={() => { setSelectedWorkspaceId(defaultWorkspace?.id); setOpen(value => !value) }}
+        onClick={() => { setSelectedWorkspaceId(defaultSelectionId); setOpen(value => !value) }}
       >
         <span className={css.titles}>
           <span className={css.workspaceTitle}>{productTitle(owner.workspaceTitle)}</span>
@@ -437,7 +474,13 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
                   setOpen(false)
                 }}
               />
-            ))}</div>
+            ))}{ungrouped !== undefined && (
+              <UngroupedRow
+                ungrouped={ungrouped}
+                selected={selectedUngrouped !== undefined}
+                onSelect={() => { setSelectedWorkspaceId(null); setMenuSessionId(undefined) }}
+              />
+            )}</div>
           </section>
           <section className={classes(css.pane, css.sessionsPane)}>
             <div className={css.paneHeader}>
@@ -461,7 +504,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
                 refreshDirectory: () => { setDirectoryRefreshGeneration(value => value + 1) },
               })}
             </div>
-            <div id={sessionsPanelId} className={css.list} role="tabpanel" aria-labelledby={sessionsTabId} hidden={activePane !== 'sessions'}>{selectedWorkspace?.sessions.map(session => (
+            <div id={sessionsPanelId} className={css.list} role="tabpanel" aria-labelledby={sessionsTabId} hidden={activePane !== 'sessions'}>{selectedSessions.map(session => (
               <SessionRow
                 key={session.id}
                 session={session}
@@ -479,7 +522,7 @@ export function CompactWorkspacePicker(owner: CompactWorkspacePickerOwnerProps &
                 }}
                 onOpen={() => { owner.openSession(session.id); setOpen(false) }}
               />
-            ))}{(selectedWorkspace?.sessions.length ?? 0) === 0 && <div className={css.empty}>{owner.labels.newSession}</div>}</div>
+            ))}{selectedSessions.length === 0 && <div className={css.empty}>{owner.labels.newSession}</div>}</div>
             <div id={directoryPanelId} className={css.directoryPanel} role="tabpanel" aria-labelledby={directoryTabId} hidden={activePane !== 'directory'}>
               {activePane === 'directory' && (selectedWorkspace === undefined ? <div className={css.empty}>请先选择工作区。</div> : owner.renderSlot(WORKSPACE_PICKER_DIRECTORY_SLOT, {
                   workspaceId: String(selectedWorkspace.id),

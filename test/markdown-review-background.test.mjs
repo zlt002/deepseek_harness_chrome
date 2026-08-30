@@ -39,6 +39,7 @@ async function loadBackground() {
       onConnect: { addListener: listener => { connectListener = listener } },
       sendMessage: async message => {
         if (message.type === 'markdown-review-feedback-forward/v1') { forwarded.push(message); return { ok: true, status: 'queued', targetSessionId: 'session-2', targetSessionTitle: '当前会话' } }
+        if (message.type === 'markdown-review-session-action-forward/v1') { forwarded.push(message); return { ok: true, action: message.action, status: message.action === 'rewrite' ? 'draft_ready' : 'processing', targetSessionId: 'session-1', targetSessionTitle: 'PRD 会话' } }
         if (message.type === 'markdown-review-rehydrate-forward/v1') { rehydrates.push(message); return { ok: true, review: { ...openReview, capability: 'fresh-capability' } } }
       },
       connectNative: () => ({
@@ -155,6 +156,20 @@ test('forwards a bounded dirty visual selection with structure rather than fake 
   } finally { background.cleanup() }
 })
 
+test('forwards rewrite and accept only to the review-bound session', async () => {
+  const background = await loadBackground()
+  try {
+    await background.open(openReview); background.connect()
+    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'rewrite-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', action: 'rewrite' })
+    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'accept-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', action: 'accept' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.deepEqual(background.responses.find(message => message.requestId === 'rewrite-1').status, 'draft_ready')
+    assert.deepEqual(background.responses.find(message => message.requestId === 'accept-1').status, 'processing')
+    const actions = background.forwarded.filter(message => message.type === 'markdown-review-session-action-forward/v1')
+    assert.deepEqual(actions.map(message => [message.action, message.review.harnessSessionId, message.review.resourceId]), [['rewrite', 'session-1', 'resource-1'], ['accept', 'session-1', 'resource-1']])
+  } finally { background.cleanup() }
+})
+
 test('rehydrates one expired capability then retries the original request once', async () => {
   const background = await loadBackground()
   const originalFetch = globalThis.fetch
@@ -172,6 +187,36 @@ test('rehydrates one expired capability then retries the original request once',
     assert.equal(response?.ok, true, JSON.stringify(response))
     assert.equal(background.rehydrates.length, 1)
     assert.equal(snapshots, 2)
+  } finally {
+    globalThis.fetch = originalFetch
+    background.cleanup()
+  }
+})
+
+test('rehydrates one invalid capability then retries prepare-write with the fresh capability', async () => {
+  const background = await loadBackground()
+  const originalFetch = globalThis.fetch
+  let prepareWrites = 0
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.fetch = async (url, init) => {
+      if (new URL(String(url)).pathname.endsWith('/prepare-write') && ++prepareWrites === 1) {
+        assert.equal(init.headers.authorization, `Bearer ${openReview.capability}`)
+        return new Response(JSON.stringify({ error: 'review capability is invalid' }), { status: 401, headers: { 'content-type': 'application/json' } })
+      }
+      if (new URL(String(url)).pathname.endsWith('/prepare-write')) assert.equal(init.headers.authorization, 'Bearer fresh-capability')
+      return originalFetch(url, init)
+    }
+    background.portMessage({
+      v: 1, type: 'markdown-review-prepare-write-request', requestId: 'invalid-prepare', reviewId: 'review-1',
+      expected: { resourceId: 'resource-1', revision: 'rev-1', fingerprint: 'fingerprint-1' }, content: '# Better',
+    })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'invalid-prepare') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.responses.find(message => message.requestId === 'invalid-prepare')
+    assert.equal(response?.ok, true, JSON.stringify(response))
+    assert.equal(response?.preparation?.status, 'prepared')
+    assert.equal(background.rehydrates.length, 1)
+    assert.equal(prepareWrites, 2)
   } finally {
     globalThis.fetch = originalFetch
     background.cleanup()

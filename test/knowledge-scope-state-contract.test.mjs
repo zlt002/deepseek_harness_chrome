@@ -15,7 +15,10 @@ test('knowledge scope state follows the AccrUI session and remember precedence',
   assert.match(background, /knowledgeSessionStorage\(\)\?\.get\(KNOWLEDGE_SESSION_STORAGE_KEY\)/)
   assert.match(background, /knowledgeSessionStorage\(\)\?\.set\(\{ \[KNOWLEDGE_SESSION_STORAGE_KEY\]: sessions \}\)/)
   assert.match(background, /chrome\.storage\.local\.set\(\{ \[KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY\]/)
-  assert.match(background, /scopes\[request\.harnessSessionId\] \?\? \(request\.harnessParentSessionId === undefined \? undefined : scopes\[request\.harnessParentSessionId\]\)/)
+  assert.match(background, /function mutateKnowledgeScopes/)
+  assert.match(background, /const current = scopes\[request\.harnessSessionId\]/)
+  assert.match(background, /const inherited = request\.harnessParentSessionId === undefined \? undefined : scopes\[request\.harnessParentSessionId\]/)
+  assert.match(background, /await clearKnowledgeScopeStorage\(\)/)
   assert.match(background, /if \(!record\.enabled\) throw new Error\('知识查询开关已关闭/)
   assert.match(background, /function selectedSourceScopeEcho/)
   assert.match(background, /tool: 'selected_source_scope'/)
@@ -86,4 +89,11 @@ test('the extension waits for the nonce-bound Harness frame readiness signal bef
   assert.match(sidepanel, /value\.type === 'browser-target-ready\/v1'[\s\S]*frameReadyRef\.current = true[\s\S]*sendBrowserTargetSnapshot\(\)[\s\S]*replaySearchProgress\(\)/)
   assert.match(sidepanel, /if \(frameOrigin === undefined \|\| !frameReadyRef\.current\) return/)
   assert.doesNotMatch(sidepanel, /onLoad=\{\(\) => \{ sendBrowserTargetSnapshot\(\); replaySearchProgress\(\) \}\}/)
+})
+
+test('reconnecting Harness accepts the remounted knowledge scope command sequence again', async () => {
+  const sidepanel = await source('apps/chrome-extension/entrypoints/sidepanel/main.tsx')
+
+  assert.match(sidepanel, /const connect = useCallback\(async \(\) => \{[\s\S]*knowledgeCommandSequenceRef\.current = 0[\s\S]*knowledgeRequestSequenceBySessionRef\.current\.clear\(\)[\s\S]*setStatus\('starting'\)[\s\S]*requestHarness\(\)/)
+  assert.match(sidepanel, /value\.type === 'knowledge-scope-command\/v1'[\s\S]*value\.sequence <= knowledgeCommandSequenceRef\.current[\s\S]*knowledgeCommandSequenceRef\.current = value\.sequence/)
 })

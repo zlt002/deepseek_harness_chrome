@@ -21,6 +21,7 @@ export const PRODUCT_PLUGINS = Object.freeze([
   { directory: 'harness-skill-settings', packageName: '@accrui/harness-skill-settings', client: true, typecheck: true, injectionOrder: 15 },
   { directory: 'harness-ui-file-url-paste', packageName: '@accrui/harness-ui-file-url-paste', client: true, typecheck: true, injectionOrder: 16 },
   { directory: 'harness-ui-html-workbench', packageName: '@accrui/harness-ui-html-workbench', client: true, typecheck: true, injectionOrder: 17 },
+  { directory: 'harness-ui-football-agent', packageName: '@accrui/harness-ui-football-agent', client: true, typecheck: true, injectionOrder: 18 },
   { directory: 'harness-runtime', packageName: '@accrui/harness-runtime-mcp-scopes', client: false, typecheck: false },
   { directory: 'harness-tracking', packageName: '@accrui/harness-tracking', client: false, typecheck: false },
   { directory: 'harness-default-workspace', packageName: '@accrui/harness-default-workspace', client: false, typecheck: false },

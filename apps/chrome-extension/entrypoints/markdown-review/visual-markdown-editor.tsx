@@ -201,7 +201,7 @@ export interface VisualMarkdownEditorProps {
   onReady?: () => void
 }
 
-type FloatingSelection = VisualSelection & { top: number; left: number }
+type FloatingSelection = VisualSelection & { top: number; left: number; menuMaxWidth: number }
 
 const AI_SELECTION_QUICK_ACTIONS = [
   { id: 'polish', label: '润色', instruction: '润色所选内容：提升表达清晰度与专业性，保持原意、事实和现有 Markdown 结构。' },
@@ -225,10 +225,15 @@ function floatingSelectionFor(view: EditorView, selection: Selection, editorRevi
   // `head` is the end where the user's pointer/caret actually stopped. Using
   // `to` makes a reverse drag place the action at the opposite end of the range.
   const anchor = view.coordsAtPos(selection.head)
+  const shell = view.dom.closest<HTMLElement>('.visual-editor-shell')
+  const shellBounds = shell?.getBoundingClientRect()
+  if (shellBounds === undefined) return undefined
+  const menuMaxWidth = Math.min(520, Math.max(0, shellBounds.width - 16))
   return {
     ...visualSelection,
     top: Math.min(window.innerHeight - 44, anchor.bottom + 8),
-    left: Math.min(window.innerWidth - 120, Math.max(8, anchor.left)),
+    left: Math.max(shellBounds.left + 8, Math.min(anchor.left, shellBounds.right - menuMaxWidth - 8)),
+    menuMaxWidth,
   }
 }
 
@@ -506,7 +511,7 @@ export const VisualMarkdownEditor = forwardRef<VisualMarkdownEditorHandle, Visua
   return <div className="visual-editor-shell">
     <div ref={rootRef} className="visual-markdown-editor" aria-label="可视化 Markdown 编辑器" onClick={showAnnotationStatus} />
     {floatingSelection !== undefined && selectionLimit !== undefined && <div className="selection-limit-notice" role="alert" style={{ top: floatingSelection.top, left: Math.max(8, Math.min(floatingSelection.left, window.innerWidth - 300)) }}>{selectionLimit}</div>}
-    {floatingSelection !== undefined && selectionLimit === undefined && !composerOpen && <div className="selection-action-menu" role="toolbar" aria-label="AI 修改选中内容" style={{ top: floatingSelection.top, left: floatingSelection.left }} onPointerDown={preserveSelection} onMouseDown={preserveSelection}>
+    {floatingSelection !== undefined && selectionLimit === undefined && !composerOpen && <div className="selection-action-menu" role="toolbar" aria-label="AI 修改选中内容" style={{ top: floatingSelection.top, left: floatingSelection.left, maxWidth: floatingSelection.menuMaxWidth }} onPointerDown={preserveSelection} onMouseDown={preserveSelection}>
       {AI_SELECTION_QUICK_ACTIONS.map((action) => <button key={action.id} className="selection-quick-action" type="button" title={action.instruction} onClick={() => submitQuickAction(action.instruction)} disabled={!canAnnotate}>{action.label}</button>)}
       <button className="selection-action is-comment" type="button" aria-label="添加自定义批注" onClick={() => setComposerOpen(true)} disabled={!canAnnotate}>批注…</button>
     </div>}

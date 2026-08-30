@@ -8,6 +8,7 @@ export interface HarnessFrameBridge {
   surface: HarnessSurface
   sessionId?: string
   productVersion?: string
+  fullscreenTabSupported?: boolean
 }
 
 /** The two extension-owned containers for one Harness Workspace. */
@@ -16,6 +17,7 @@ export type HarnessSurface = 'sidepanel' | 'fullscreen-tab'
 const SURFACE_QUERY_KEY = 'dshHarnessSurface'
 const SESSION_QUERY_KEY = 'dshHarnessSessionId'
 const HANDOFF_TAB_QUERY_KEY = 'dshHarnessHandoffTabId'
+const FULLSCREEN_TAB_SUPPORTED_QUERY_KEY = 'dshBrowserTargetFullscreenTabSupported'
 export const PRODUCT_VERSION_QUERY_KEY = 'dshProductVersion'
 
 function validProductVersion(value: string | undefined): value is string {
@@ -90,6 +92,7 @@ export function HarnessFrameSource(nativeUrl: string, bridge?: HarnessFrameBridg
   source.searchParams.set('dshBrowserTargetNonce', bridge.nonce)
   source.searchParams.set('dshBrowserTargetParentOrigin', bridge.parentOrigin)
   source.searchParams.set('dshBrowserTargetSurface', bridge.surface)
+  if (bridge.fullscreenTabSupported !== undefined) source.searchParams.set(FULLSCREEN_TAB_SUPPORTED_QUERY_KEY, String(bridge.fullscreenTabSupported))
   // Workspace review shares the already verified iframe boundary, but keeps a
   // distinct protocol namespace from Browser Target commands.
   source.searchParams.set('dshWorkspaceReviewNonce', bridge.nonce)

@@ -5,7 +5,7 @@ import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { Catalog, Scope, ScopeOptions, ScopeSnapshot } from './bridge.ts'
 import { scopePanelCeiling, scopePanelMaxHeightPx } from './panel-geometry.js'
-import { selectKnowledgeDomain, selectKnowledgeSystem } from './selection.js'
+import { clearScopeSelection, selectKnowledgeDomain, selectKnowledgeSystem } from './selection.js'
 import { shouldShowKnowledgeScope } from './session-visibility.js'
 import { acknowledgeScopeSwitch, optimisticScopeSwitch, shownScopeSwitch } from './scope-switch-state.js'
 import css from './KnowledgeScope.module.css'
@@ -151,11 +151,14 @@ function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, sectio
   const snapshotScopeKey = `${Object.entries(scope.domainSystems).map(([domainId, systemIds]) => `${domainId}:${systemIds.join(',')}`).join('|')}|${scope.repositoryIds.join(',')}`
   useEffect(() => { setDraftScope(scope) }, [snapshot?.sessionId, snapshotScopeKey])
   const update = (next: Scope) => { setDraftScope(next); request(id, next) }
+  const selectedCount = section === 'knowledge'
+    ? Object.values(draftScope.domainSystems).flat().length
+    : draftScope.repositoryIds.length
   const [expandedSystems, setExpandedSystems] = useState<Set<string>>(() => new Set())
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(() => new Set())
   const groups = useMemo(() => repositoryGroups(catalog), [catalog])
   return <div ref={panelRef} className={css.panel} role="dialog" aria-label={section === 'knowledge' ? '知识范围' : '代码库范围'} style={maxHeight === undefined ? undefined : { maxHeight }}>
-    <div className={css.panelHeader}><strong>{section === 'knowledge' ? '知识范围' : '选择代码库'}</strong><span>{section === 'knowledge' ? `${Object.values(draftScope.domainSystems).flat().length} 项已选` : `${draftScope.repositoryIds.length} 个已选`}</span></div>
+    <div className={css.panelHeader}><strong>{section === 'knowledge' ? '知识范围' : '选择代码库'}</strong><span className={css.selectionSummary}>{selectedCount}{section === 'knowledge' ? ' 项已选' : ' 个已选'}<button className={css.clearButton} type="button" disabled={selectedCount === 0} aria-label={`清空${section === 'knowledge' ? '知识范围' : '代码库'}选择`} onClick={() => update(clearScopeSelection(draftScope, section))}>清空</button></span></div>
     {section === 'knowledge' ? <div className={css.section} aria-label="知识库范围">
       <p className={css.sectionHint}>勾选需要查询的知识库系统；选中子项会自动选中所属领域。</p>
       {catalog.domains.length === 0 ? <p className={css.sectionHint}>当前账号暂无可用领域和系统。</p> : null}

@@ -1,0 +1,32 @@
+{
+  "name": "@accrui/harness-ui-football-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Football match context and deep-analysis entry for the AccrUI Harness client",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-football-agent",
+    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-football-agent",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  }
+}

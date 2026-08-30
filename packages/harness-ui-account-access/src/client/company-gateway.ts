@@ -1,5 +1,5 @@
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
-import type { CompanyGatewayModel, CompanyGatewayProtocol } from './types.ts'
+import type { CompanyGatewayMetadata, CompanyGatewayModel, CompanyGatewayProtocol } from './types.ts'
 
 export const COMPANY_GATEWAY_PROVIDER = 'annto-company-gateway'
 export const COMPANY_GATEWAY_CREDENTIAL_REF = 'ANNTO_COMPANY_GATEWAY_API_KEY'
@@ -29,16 +29,68 @@ export function companyGatewayProtocolFromNamespaces(value: unknown): CompanyGat
   return protocol === 'anthropic-messages' || protocol === 'openai-completions' ? protocol : undefined
 }
 
+/** Read the saved company model rows without exposing any credential fields. */
+export function companyGatewayModelsFromNamespaces(value: unknown): CompanyGatewayModel[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const namespace = value.find(item => item !== null && typeof item === 'object'
+    && (item as { ns?: unknown }).ns === 'llm-pi-ai') as { value?: unknown } | undefined
+  const root = namespace?.value
+  if (root === null || typeof root !== 'object') return undefined
+  const providers = (root as { providers?: unknown }).providers
+  if (providers === null || typeof providers !== 'object') return undefined
+  const profile = (providers as Record<string, unknown>)[COMPANY_GATEWAY_PROVIDER]
+  if (profile === null || typeof profile !== 'object') return undefined
+  const models = (profile as { models?: unknown }).models
+  if (!Array.isArray(models)) return undefined
+  const restored = models.flatMap((model): CompanyGatewayModel[] => {
+    if (model === null || typeof model !== 'object' || Array.isArray(model)) return []
+    const row = model as Record<string, unknown>
+    if (typeof row.id !== 'string' || row.id.trim().length === 0 || row.id.length > 160) return []
+    return [{
+      ...row,
+      id: row.id,
+      ...(Array.isArray(row.input) ? { input: [...row.input] } : {}),
+    }]
+  })
+  return restored.length === models.length ? restored : undefined
+}
+
+const CAPACITY_PATTERN = /^(\d+(?:\.\d+)?)([km])?$/i
+const CAPACITY_SCALE = { k: 1_000, m: 1_000_000 } as const
+
+/** Parse a token capacity written as a plain count, K, or M. */
+export function parseCompanyGatewayCapacity(text: string): number | undefined {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return undefined
+  const match = CAPACITY_PATTERN.exec(trimmed)
+  if (match === null) return Number.NaN
+  const suffix = match[2]?.toLowerCase()
+  const scale = suffix === 'k' || suffix === 'm' ? CAPACITY_SCALE[suffix] : 1
+  const scaled = Number(match[1]) * scale
+  const rounded = Math.round(scaled)
+  return Math.abs(scaled - rounded) < 1e-6 ? rounded : scaled
+}
+
+/** Keep saved capacities readable while preserving exact token counts. */
+export function formatCompanyGatewayCapacity(value: number): string {
+  if (!Number.isInteger(value) || value <= 0) return String(value)
+  if (value % CAPACITY_SCALE.m === 0) return `${String(value / CAPACITY_SCALE.m)}M`
+  if (value % CAPACITY_SCALE.k === 0) return `${String(value / CAPACITY_SCALE.k)}K`
+  return String(value)
+}
+
 function profileModel(model: CompanyGatewayModel) {
   const { id, name, ...fields } = model
   const modelId = id.trim()
   const displayName = typeof name === 'string' ? name.trim() : ''
+  const contextWindow = model.contextWindow
+  const maxTokens = model.maxTokens
   return {
     ...fields,
     id: modelId,
     ...(displayName.length === 0 ? {} : { name: displayName }),
-    ...(typeof model.contextWindow === 'number' ? {} : { contextWindow: 200_000 }),
-    ...(typeof model.maxTokens === 'number' ? {} : { maxTokens: 64_000 }),
+    ...(typeof contextWindow === 'number' ? {} : { contextWindow: 200_000 }),
+    ...(typeof maxTokens === 'number' ? {} : { maxTokens: 64_000 }),
   }
 }
 
@@ -59,6 +111,14 @@ export function companyGatewayModelDraftFailure(models: readonly CompanyGatewayM
   const ids = models.map(model => model.id.trim())
   if (ids.some(id => id.length === 0)) return '模型 ID 不能为空。'
   if (new Set(ids).size !== ids.length) return '模型 ID 不能重复。'
+  for (const [index, model] of models.entries()) {
+    for (const [key, label] of [['contextWindow', '上下文窗口'], ['maxTokens', '最大输出 token']] as const) {
+      const value = model[key]
+      if (value !== undefined && (typeof value !== 'number' || !Number.isInteger(value) || value <= 0)) {
+        return `第 ${index + 1} 个模型的${label}必须是正整数。`
+      }
+    }
+  }
   return undefined
 }
 
@@ -73,6 +133,35 @@ export function companyGatewayModelsForSelection(
 ): CompanyGatewayModel[] {
   const selected = selectedModelId === undefined ? undefined : models.find(model => model.id === selectedModelId)
   return selected === undefined ? [...models] : [selected, ...models.filter(model => model !== selected)]
+}
+
+/** Merge a fresh gateway catalog with saved edits, dropping retired model ids. */
+export function mergeCompanyGatewayModels(
+  saved: readonly CompanyGatewayModel[],
+  latest: readonly CompanyGatewayModel[],
+): CompanyGatewayModel[] {
+  const savedById = new Map(saved.map(model => [model.id.trim(), model]))
+  return latest.map(model => {
+    const previous = savedById.get(model.id.trim())
+    return previous === undefined
+      ? { ...model }
+      : { ...model, ...previous, id: model.id }
+  })
+}
+
+/** Use the saved provider profile when reopening the editor, retaining live quota metadata when available. */
+export function companyGatewayMetadataForEditing(
+  savedModels: readonly CompanyGatewayModel[],
+  gateway: CompanyGatewayMetadata | undefined,
+): CompanyGatewayMetadata | undefined {
+  if (savedModels.length === 0) return gateway
+  const models = savedModels.map(model => ({
+    ...model,
+    ...(Array.isArray(model.input) ? { input: [...model.input] } : {}),
+  }))
+  return gateway === undefined
+    ? { models, quota: { usagePercent: null, nextResetTime: null, resetCycle: 'unlimited' }, checkedAt: '' }
+    : { ...gateway, models }
 }
 
 export function companyGatewayApiKeyFailure(value: string): string | undefined {

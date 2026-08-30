@@ -232,7 +232,7 @@ new file mode 100644
 index 0000000000..d76433b6ef
 --- /dev/null
 +++ b/packages/client/ui-primitives/src/ComposerOverlay.tsx
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,82 @@
 +/** One card-wide upward panel at a time for composer controls. */
 +import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 +import type { ReactNode } from 'react'
@@ -242,6 +242,7 @@ index 0000000000..d76433b6ef
 +interface ComposerOverlayApi {
 +  register(id: string, render: OverlayRender): () => void
 +  toggle(id: string): void
++  show(id: string): void
 +  close(id?: string): void
 +  refresh(id: string): void
 +}
@@ -266,6 +267,7 @@ index 0000000000..d76433b6ef
 +  const api = useMemo<ComposerOverlayApi>(() => ({
 +    register,
 +    toggle: (id) => { setActive(current => current === id ? null : id) },
++    show: (id) => { setActive(id) },
 +    close: (id) => { setActive(current => id === undefined || current === id ? null : current) },
 +    refresh: () => { setRevision(value => value + 1) },
 +  }), [register])
@@ -304,6 +306,7 @@ index 0000000000..d76433b6ef
 +    available: api !== null,
 +    open: active === id,
 +    toggle: () => { api?.toggle(id) },
++    show: () => { api?.show(id) },
 +    close: () => { api?.close(id) },
 +  }
 +}

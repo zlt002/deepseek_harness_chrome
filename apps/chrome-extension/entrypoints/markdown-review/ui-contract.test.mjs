@@ -26,7 +26,7 @@ test('review workspace uses one visual Milkdown canvas rather than source and pr
 
 test('review chrome stays compact and replaces empty error canvases with recovery state', () => {
   assert.match(main, /showRecoveryState/)
-  assert.match(main, /const activityNotice = saveNotice \?\? proposalNotice/)
+  assert.match(main, /const activityNotice =/)
   assert.match(main, /activityNotice !== undefined/)
   assert.match(main, /setAiTarget\(undefined\)/)
   assert.match(main, /setSidePanelRecoveryAnnotation\(undefined\)/)
@@ -36,6 +36,22 @@ test('review chrome stays compact and replaces empty error canvases with recover
   assert.match(style, /\.review-main\s*\{[\s\S]*padding: 0;/)
   assert.match(style, /\.review-recovery\s*\{/)
   assert.match(main, /title="在排版后的正文中直接编辑；标题、段落、列表、表格、代码块和跨块选区都可作为 AI 上下文。HTML 保留为安全文本；Mermaid 仅在本地安全渲染。"/)
+})
+
+test('review actions use icon history controls and route rewrite or accept through the bound session', () => {
+  assert.match(main, /aria-label="撤销（Ctrl\+Z）"/)
+  assert.match(main, /aria-label="重做（Ctrl\+Y）"/)
+  assert.match(main, /aria-label="重新读取"/)
+  assert.match(main, />↶<\/button>/)
+  assert.match(main, />↷<\/button>/)
+  assert.match(main, />↻<\/button>/)
+  assert.match(main, /↺ 重写/)
+  assert.match(main, /✓ 采纳/)
+  assert.match(main, /markdown-review-session-action-request/)
+  assert.match(main, /harnessSessionId: activeSnapshot\.harnessSessionId/)
+  assert.match(main, /expected\?\.kind !== 'session-action'/)
+  assert.match(main, /MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS/)
+  assert.match(style, /\.review-header-actions \.icon-button/)
 })
 
 test('visual surface states the safe HTML downgrade and local Mermaid preview', () => {
@@ -120,6 +136,35 @@ test('external updates preserve local review work and a write confirmation canno
   assert.match(main, /正在确认写入/)
 })
 
+test('write and external-update confirmations use accessible dialogs instead of top notices', () => {
+  assert.match(main, /const activityNotice = preparedWrite === undefined && !externalUpdatePending \? saveNotice \?\? proposalNotice : proposalNotice/)
+  assert.match(main, /preparedWrite !== undefined && <div className="confirmation-dialog-backdrop">/)
+  assert.match(main, /role="dialog" aria-modal="true" aria-labelledby="write-confirmation-title"/)
+  assert.match(main, /id="write-confirmation-title">确认写入草稿/)
+  assert.match(main, /将把当前草稿写入已核对的文件版本。/)
+  assert.match(main, /const showExternalUpdateConfirmation = externalUpdatePending && preparedWrite === undefined/)
+  assert.match(main, /showExternalUpdateConfirmation && <div className="confirmation-dialog-backdrop">/)
+  assert.match(main, /role="dialog" aria-modal="true" aria-labelledby="external-update-confirmation-title"/)
+  assert.match(main, /保留本地内容/)
+  assert.match(main, /放弃本地更改并重新读取/)
+  assert.doesNotMatch(main, /preparedWrite !== undefined && <section className="save-confirm"/)
+  assert.doesNotMatch(main, /externalUpdatePending && <section className="save-confirm"/)
+  assert.match(style, /\.confirmation-dialog-backdrop\s*\{[\s\S]*position: fixed;/)
+  assert.match(style, /\.confirmation-dialog\s*\{[\s\S]*max-width: min\(420px, calc\(100vw - 32px\)\)/)
+})
+
+test('verified-save notices dismiss after five seconds, while all activity notices can be closed manually', () => {
+  assert.match(main, /const VERIFIED_SAVE_NOTICE = '已保存，并已按同一资源回读验证。'/)
+  assert.match(main, /const VERIFIED_SAVE_NOTICE_DISMISS_MS = 5_000/)
+  assert.match(main, /setVerifiedSaveNoticeToken\(verifiedNoticeToken\); showSaveNotice\(VERIFIED_SAVE_NOTICE\)/)
+  assert.match(main, /window\.setTimeout\(\(\) => \{[\s\S]*verifiedSaveNoticeTokenRef\.current !== token[\s\S]*setSaveNotice\(undefined\)[\s\S]*\}, VERIFIED_SAVE_NOTICE_DISMISS_MS\)/)
+  assert.match(main, /activityNotice !== undefined && <section className="proposal-notice" role="status">[\s\S]*aria-label="关闭提示"/)
+  assert.match(main, /const dismissActivityNotice = \(\) => \{[\s\S]*preparedWrite === undefined && !externalUpdatePending && saveNotice !== undefined[\s\S]*showSaveNotice\(undefined\)[\s\S]*return[\s\S]*setProposalNotice\(undefined\)/)
+  assert.match(main, /sidePanelRecoveryAnnotation !== undefined && <button[\s\S]*打开侧边栏并重试/)
+  assert.match(style, /\.proposal-notice-message\s*\{[\s\S]*flex: 1/)
+  assert.match(style, /\.proposal-notice-close\s*\{[\s\S]*width: 28px/)
+})
+
 test('selection review is contextual inside the document instead of a fixed right panel', () => {
   assert.doesNotMatch(main, /annotation-panel|setReviewPanelOpen/)
   assert.doesNotMatch(style, /\.annotation-panel/)
@@ -136,6 +181,16 @@ test('selection review is contextual inside the document instead of a fixed righ
   assert.match(style, /\.selection-action-menu/)
   assert.match(style, /\.selection-action/)
   assert.match(style, /\.annotation-composer/)
+})
+
+test('selection actions stay inside the review shell near its right edge', () => {
+  assert.match(editor, /const shellBounds = shell\?\.getBoundingClientRect\(\)/)
+  assert.match(editor, /const menuMaxWidth = Math\.min\(520, Math\.max\(0, shellBounds\.width - 16\)\)/)
+  assert.match(editor, /left: Math\.max\(shellBounds\.left \+ 8, Math\.min\(anchor\.left, shellBounds\.right - menuMaxWidth - 8\)\)/)
+  assert.match(editor, /style=\{\{ top: floatingSelection\.top, left: floatingSelection\.left, maxWidth: floatingSelection\.menuMaxWidth \}\}/)
+  assert.match(style, /\.selection-action-menu\s*\{[\s\S]*flex-wrap: wrap;/)
+  assert.doesNotMatch(style, /\.selection-action-menu\s*\{[\s\S]*overflow-x: auto;/)
+  assert.match(editor, /aria-label="添加自定义批注"/)
 })
 
 test('saved annotations stay highlighted in the document and expose their delivery state', () => {

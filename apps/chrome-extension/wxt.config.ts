@@ -112,9 +112,10 @@ export default defineConfig({
   manifest: {
     name: 'ACCRUI',
     description: 'Use ACCRUI from a Chrome side panel.',
-    // `chrome.sidePanel.close()` keeps the full-screen Tab and side panel
-    // mutually exclusive without globally disabling the extension surface.
-    minimum_chrome_version: '141',
+    // Chrome 116 introduced the Side Panel API used by the normal workspace.
+    // The optional full-screen handoff remains gated at runtime on
+    // `chrome.sidePanel.close()`, which Chrome added in 141.
+    minimum_chrome_version: '116',
     permissions: ['sidePanel', 'nativeMessaging', 'storage', 'tabs', 'webNavigation', 'scripting', 'cookies'],
     host_permissions: [
       'http://127.0.0.1/*',

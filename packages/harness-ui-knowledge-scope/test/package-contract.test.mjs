@@ -29,6 +29,25 @@ test('declares an out-of-tree scope plugin against public composer contracts onl
   assert.doesNotMatch(client, /deepseek-harness\/packages\/.*\/src/)
 })
 
+test('routes the compact pmd-prd Ask card through the public question and explicit overlay seams', async () => {
+  const [manifest, client, card, seam] = await Promise.all([
+    source('package.json'),
+    source('src/client/index.ts'),
+    source('src/client/SourceScopeQuestion.tsx'),
+    readFile(new URL('../../../upstream-contributions/0009-composer-overlay-and-preset-presentation.patch', import.meta.url), 'utf8'),
+  ])
+  assert.match(manifest, /@deepseek-ai\/dsh-client-runtime/)
+  assert.match(client, /name: 'conversation\.composer', priority: -1/)
+  assert.match(client, /sourceScopeQuestion\(item\.payload\.questions\)/)
+  assert.match(card, /repositoryOverlay\.show\(\)/)
+  assert.doesNotMatch(card, /repositoryOverlay\.toggle\(\)/)
+  assert.doesNotMatch(card, /dsh-client-ui-user-questions/)
+  assert.match(card, /hasSelectedSources\(scope\)/)
+  assert.match(card, /SKIP_REMOTE_SOURCES_OPTION/)
+  assert.match(seam, /show\(id: string\): void/)
+  assert.match(seam, /show: \(\) => \{ api\?\.show\(id\) \}/)
+})
+
 test('composer takeover must leave the scope strip outside the hidden input card', async () => {
   const [readme, seam] = await Promise.all([
     source('README.md'),

@@ -49,12 +49,41 @@ export interface VisualMarkdownReviewFeedback extends MarkdownReviewFeedbackBase
   readonly from: number
   readonly to: number
   readonly blocks: ReadonlyArray<{ readonly kind: string; readonly text: string }>
+  readonly table?: VisualMarkdownReviewTableContext
+}
+export interface VisualMarkdownReviewTableContext {
+  readonly from: number
+  readonly to: number
+  readonly rowCount: number
+  readonly columnCount: number
+  readonly selectedRowStart: number
+  readonly selectedRowEnd: number
+  readonly selectedColumnStart: number
+  readonly selectedColumnEnd: number
+  readonly isWholeTable: boolean
+  readonly header: readonly string[]
+  readonly rows: readonly (readonly string[])[]
 }
 export type MarkdownReviewFeedback = SourceMarkdownReviewFeedback | VisualMarkdownReviewFeedback
 export interface WorkspaceReviewFeedbackDelivery {
   readonly targetSessionId: string
   readonly targetSessionTitle: string
   readonly status: 'queued' | 'processing'
+}
+
+export interface WorkspaceReviewSessionAction {
+  readonly action: 'rewrite' | 'accept'
+  readonly reviewId: string
+  readonly harnessSessionId: string
+  readonly resourceId: string
+  readonly displayPath: string
+}
+
+export interface WorkspaceReviewSessionActionDelivery {
+  readonly action: 'rewrite' | 'accept'
+  readonly targetSessionId: string
+  readonly targetSessionTitle: string
+  readonly status: 'draft_ready' | 'queued' | 'processing'
 }
 
 export function feedbackMessage(event: MessageEvent, parent: Window, config: WorkspaceReviewBridgeConfig): MarkdownReviewFeedback | undefined {
@@ -74,6 +103,23 @@ export function respondFeedback(parent: Window, config: WorkspaceReviewBridgeCon
     deliveryId,
     accepted,
     ...(accepted && delivery !== undefined ? { targetSessionId: delivery.targetSessionId, targetSessionTitle: delivery.targetSessionTitle, status: delivery.status } : {}),
+    ...(accepted || message === '' ? {} : { error: message }),
+  }, config.parentOrigin)
+}
+
+export function sessionActionMessage(event: MessageEvent, parent: Window, config: WorkspaceReviewBridgeConfig): { requestId: string; action: WorkspaceReviewSessionAction } | undefined {
+  const value: unknown = event.data
+  if (event.source !== parent || event.origin !== config.parentOrigin || value === null || typeof value !== 'object') return undefined
+  const data = value as Record<string, unknown>
+  if (data.type !== 'markdown-review-session-action/v1' || data.nonce !== config.nonce || !boundedId(data.requestId) || !sessionAction(data.action)) return undefined
+  return { requestId: data.requestId, action: data.action }
+}
+
+export function respondSessionAction(parent: Window, config: WorkspaceReviewBridgeConfig, requestId: string, accepted: boolean, error?: unknown, delivery?: WorkspaceReviewSessionActionDelivery): void {
+  const message = typeof error === 'string' ? error.trim().slice(0, 4_000) : ''
+  parent.postMessage({
+    type: 'markdown-review-session-action-accepted/v1', nonce: config.nonce, requestId, accepted,
+    ...(accepted && delivery !== undefined ? { action: delivery.action, targetSessionId: delivery.targetSessionId, targetSessionTitle: delivery.targetSessionTitle, status: delivery.status } : {}),
     ...(accepted || message === '' ? {} : { error: message }),
   }, config.parentOrigin)
 }
@@ -111,7 +157,7 @@ function feedback(value: unknown): value is MarkdownReviewFeedback {
       && (item.startUtf16 as number) >= 0 && (item.endUtf16 as number) > (item.startUtf16 as number)
   }
   return item.anchorKind === 'visual'
-    && Object.keys(item).every(key => ['id', 'selectionId', 'harnessSessionId', 'reviewId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'anchorKind', 'quote', 'editorRevision', 'from', 'to', 'blocks', 'comment'].includes(key))
+    && Object.keys(item).every(key => ['id', 'selectionId', 'harnessSessionId', 'reviewId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'anchorKind', 'quote', 'editorRevision', 'from', 'to', 'blocks', 'comment', 'table'].includes(key))
     && Number.isSafeInteger(item.editorRevision) && (item.editorRevision as number) >= 0
     && Number.isSafeInteger(item.from) && Number.isSafeInteger(item.to) && (item.from as number) >= 0 && (item.to as number) > (item.from as number)
     && Array.isArray(item.blocks) && item.blocks.length <= 24 && item.blocks.every(block => {
@@ -121,4 +167,34 @@ function feedback(value: unknown): value is MarkdownReviewFeedback {
         && typeof entry.kind === 'string' && entry.kind.length > 0 && entry.kind.length <= 32
         && typeof entry.text === 'string' && entry.text.length <= 2_000
     })
+    && (!Object.prototype.hasOwnProperty.call(item, 'table') || visualTable(item.table))
+}
+
+function boundedId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 160
+}
+
+function sessionAction(value: unknown): value is WorkspaceReviewSessionAction {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const item = value as Record<string, unknown>
+  return Object.keys(item).length === 5 && Object.keys(item).every(key => ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath'].includes(key))
+    && (item.action === 'rewrite' || item.action === 'accept')
+    && ['reviewId', 'harnessSessionId', 'resourceId'].every(key => boundedId(item[key]))
+    && typeof item.displayPath === 'string' && item.displayPath.trim() !== '' && item.displayPath.length <= 2_048
+}
+
+function visualTable(value: unknown): value is VisualMarkdownReviewTableContext {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const table = value as Record<string, unknown>
+  const keys = ['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd', 'isWholeTable', 'header', 'rows']
+  if (Object.keys(table).length !== keys.length || !Object.keys(table).every(key => keys.includes(key))) return false
+  const integer = (key: string) => Number.isSafeInteger(table[key])
+  if (!['from', 'to', 'rowCount', 'columnCount', 'selectedRowStart', 'selectedRowEnd', 'selectedColumnStart', 'selectedColumnEnd'].every(integer)) return false
+  const { from, to, rowCount, columnCount, selectedRowStart, selectedRowEnd, selectedColumnStart, selectedColumnEnd } = table as Record<string, number>
+  if (from < 0 || to <= from || rowCount < 1 || columnCount < 1
+    || selectedRowStart < 0 || selectedRowEnd < selectedRowStart || selectedRowEnd >= rowCount
+    || selectedColumnStart < 0 || selectedColumnEnd < selectedColumnStart || selectedColumnEnd >= columnCount
+    || typeof table.isWholeTable !== 'boolean') return false
+  const row = (value: unknown) => Array.isArray(value) && value.length === columnCount && value.every(cell => typeof cell === 'string' && cell.length <= 2_000)
+  return row(table.header) && Array.isArray(table.rows) && table.rows.length + 1 === rowCount && table.rows.every(row)
 }

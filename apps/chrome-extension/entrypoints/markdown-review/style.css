@@ -211,8 +211,7 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
 }
 
 .notice,
-.proposal-notice,
-.save-confirm {
+.proposal-notice {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -229,9 +228,45 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
 .notice { align-items: flex-start; flex-wrap: wrap; border-color: var(--review-danger-border); color: var(--review-danger); background: var(--review-danger-soft); }
 .notice button { margin-top: 2px; }
 .proposal-notice { border-color: color-mix(in srgb, var(--review-accent) 30%, var(--review-border)); color: var(--review-text-secondary); background: color-mix(in srgb, var(--review-accent) 8%, var(--review-surface)); }
-.save-confirm { border-color: color-mix(in srgb, var(--review-warn) 34%, var(--review-border)); color: var(--review-text-secondary); background: color-mix(in srgb, var(--review-warn) 8%, var(--review-surface)); }
-.save-confirm span { min-width: 0; flex: 1; }
-.save-confirm button { flex: none; border-radius: 14px; }
+.proposal-notice-message { min-width: 0; flex: 1; }
+.proposal-notice-close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+}
+.proposal-notice-close:hover { background: color-mix(in srgb, var(--review-text) 8%, transparent); }
+
+.confirmation-dialog-backdrop {
+  position: fixed;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  inset: 0;
+  padding: 16px;
+  background: color-mix(in srgb, var(--review-text) 24%, transparent);
+}
+
+.confirmation-dialog {
+  width: min(420px, 100%);
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--review-warn) 34%, var(--review-border));
+  border-radius: 14px;
+  color: var(--review-text);
+  background: var(--review-surface-raised);
+  box-shadow: 0 18px 48px color-mix(in srgb, var(--review-text) 22%, transparent);
+}
+
+.confirmation-dialog h2 { margin: 0; font-size: 17px; line-height: 24px; }
+.confirmation-dialog p { margin: 10px 0 0; color: var(--review-text-secondary); font-size: 14px; line-height: 21px; }
+.confirmation-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
 .review-main {
   display: grid;
@@ -254,6 +289,8 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
 
 .history-actions { display: inline-flex; flex: none; gap: 4px; }
 .history-actions button { min-height: 28px; padding: 4px 9px; border-radius: 14px; font-size: 12px; }
+.review-header-actions .icon-button { width: 28px; min-height: 28px; padding: 0; border-radius: 50%; font-size: 16px; line-height: 1; }
+.review-session-action { min-height: 28px; padding: 4px 9px; font-size: 12px; }
 .truncated { flex: none; color: var(--review-warn); font-size: 11px; line-height: 18px; white-space: nowrap; }
 
 .document-canvas { display: flex; min-height: 0; flex: 1; overflow: hidden; }
@@ -480,16 +517,14 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
   position: fixed;
   z-index: 40;
   display: flex;
-  max-width: min(520px, calc(100vw - 16px));
-  overflow-x: auto;
+  flex-wrap: wrap;
+  max-width: 520px;
   border: 1px solid var(--review-border-strong);
   border-radius: 15px;
   background: var(--dsw-alias-button-floating-fill, var(--review-surface-raised));
   box-shadow: var(--review-shadow-2);
   scrollbar-width: none;
 }
-
-.selection-action-menu::-webkit-scrollbar { display: none; }
 
 .selection-action,
 .selection-quick-action {
@@ -685,7 +720,7 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
   .visual-markdown-editor .milkdown .ProseMirror { font-size: 14px; }
   .visual-markdown-editor .milkdown .ProseMirror h1 { font-size: 28px; }
   .visual-markdown-editor .milkdown .ProseMirror h2 { font-size: 22px; }
-  .save-confirm { align-items: flex-start; flex-wrap: wrap; }
+  .confirmation-dialog footer { align-items: flex-start; flex-wrap: wrap; }
 }
 
 @media (prefers-reduced-motion: reduce) {

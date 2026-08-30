@@ -131,6 +131,7 @@ const KNOWLEDGE_CATALOG_CACHE_TTL_MS = 5 * 60_000
 const KNOWLEDGE_TRANSPORT_RETRY_LIMIT = 2
 const KNOWLEDGE_TRANSPORT_RETRY_DELAY_MS = 250
 const KNOWLEDGE_SCOPE_STORAGE_KEY = 'harnessKnowledgeScopesV1'
+const KNOWLEDGE_SCOPE_DEFAULT_STORAGE_KEY = 'harnessKnowledgeScopeDefaultV1'
 const KNOWLEDGE_SESSION_STORAGE_KEY = 'harnessKnowledgeSessionsV1'
 const KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY = 'harnessKnowledgeEnabledPreferenceV1'
 const KNOWLEDGE_LOGIN_URL = 'https://wb-uat.annto.com/'
@@ -973,6 +974,7 @@ interface KnowledgeSessionRecord { sessionId: string; fingerprint: string }
 interface SearchProgressSnapshot { type: 'search-progress/v1'; requestId: string; harnessSessionId: string; harnessParentSessionId?: string; tool: 'knowledge_search' | 'code_search'; question: string; phase: 'querying' | 'streaming' | 'done' | 'error'; chars: number; content: string; eventType?: string; process?: string }
 const activeKnowledgeQueries = new Map<string, AbortController>()
 const searchProgressSnapshots = new Map<string, SearchProgressSnapshot>()
+let knowledgeScopeMutation: Promise<void> = Promise.resolve()
 
 function isTeamDocParent(value: unknown): value is TeamDocParent {
   if (!value || typeof value !== 'object') return false
@@ -1116,7 +1118,6 @@ async function knowledgeScopes(): Promise<Record<string, KnowledgeScopeRecord>> 
       ? [[sessionId, { scope: normalizeScope((value as KnowledgeScopeRecord).scope), enabled: typeof (value as KnowledgeScopeRecord).enabled === 'boolean' ? (value as KnowledgeScopeRecord).enabled : true, ...(typeof (value as KnowledgeScopeRecord).notice === 'string' ? { notice: (value as KnowledgeScopeRecord).notice } : {}) }]] : [],
   ))
   const legacyValues = await chrome.storage.local.get(null)
-  let changed = false
   for (const [key, value] of Object.entries(legacyValues)) {
     const prefix = legacyKnowledgeScopeKey('')
     if (!key.startsWith(prefix)) continue
@@ -1125,10 +1126,32 @@ async function knowledgeScopes(): Promise<Record<string, KnowledgeScopeRecord>> 
     const migrated = migrateLegacyKnowledgeScope(value)
     if (migrated === undefined) continue
     scopes[sessionId] = { scope: normalizeScope(migrated.scope), enabled: migrated.enabled, ...(migrated.notice === undefined ? {} : { notice: migrated.notice }) }
-    changed = true
   }
-  if (changed) await targetStorage()?.set({ [KNOWLEDGE_SCOPE_STORAGE_KEY]: scopes })
   return scopes
+}
+
+function enqueueKnowledgeScopeMutation<T>(work: () => Promise<T>): Promise<T> {
+  const mutation = knowledgeScopeMutation.then(work)
+  knowledgeScopeMutation = mutation.then(() => undefined, () => undefined)
+  return mutation
+}
+
+function mutateKnowledgeScopes<T>(work: (scopes: Record<string, KnowledgeScopeRecord>) => Promise<T>): Promise<T> {
+  return enqueueKnowledgeScopeMutation(async () => {
+    const scopes = await knowledgeScopes()
+    const value = await work(scopes)
+    await targetStorage()?.set({ [KNOWLEDGE_SCOPE_STORAGE_KEY]: scopes })
+    return value
+  })
+}
+
+function clearKnowledgeScopeStorage(): Promise<void> {
+  return enqueueKnowledgeScopeMutation(async () => {
+    const localValues = await chrome.storage.local.get(null)
+    const legacyScopeKeys = Object.keys(localValues).filter(key => key.startsWith(legacyKnowledgeScopeKey('')))
+    await chrome.storage.session?.remove(KNOWLEDGE_SCOPE_STORAGE_KEY)
+    await chrome.storage.local.remove([KNOWLEDGE_SCOPE_STORAGE_KEY, KNOWLEDGE_SCOPE_DEFAULT_STORAGE_KEY, ...legacyScopeKeys])
+  })
 }
 
 async function knowledgeEnabledPreference(): Promise<KnowledgeEnabledPreference> {
@@ -1142,16 +1165,24 @@ async function knowledgeEnabledPreference(): Promise<KnowledgeEnabledPreference>
   return migrated
 }
 
+async function knowledgeDefaultScope(): Promise<KnowledgeScope | undefined> {
+  const values = await chrome.storage.local.get(KNOWLEDGE_SCOPE_DEFAULT_STORAGE_KEY)
+  const candidate = values?.[KNOWLEDGE_SCOPE_DEFAULT_STORAGE_KEY]
+  return validScope(candidate) ? normalizeScope(candidate) : undefined
+}
+
 async function saveKnowledgeScope(sessionId: string, scope: KnowledgeScope, enabled?: boolean, remember?: boolean): Promise<KnowledgeScopeRecord> {
-  const scopes = await knowledgeScopes()
-  const previous = scopes[sessionId]
-  const preference = await knowledgeEnabledPreference()
-  const nextEnabled = enabled ?? previous?.enabled ?? (preference.remember ? preference.enabled : true)
-  scopes[sessionId] = { scope: normalizeScope(scope), enabled: nextEnabled }
-  await targetStorage()?.set({ [KNOWLEDGE_SCOPE_STORAGE_KEY]: scopes })
-  if (remember !== undefined) await chrome.storage.local.set({ [KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY]: { remember, enabled: nextEnabled } })
-  else if (preference.remember && enabled !== undefined) await chrome.storage.local.set({ [KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY]: { remember: true, enabled: nextEnabled } })
-  return scopes[sessionId]
+  return mutateKnowledgeScopes(async (scopes) => {
+    if (await accountLocallySignedOut()) throw new Error('knowledge_login_required')
+    const previous = scopes[sessionId]
+    const preference = await knowledgeEnabledPreference()
+    const nextEnabled = enabled ?? previous?.enabled ?? (preference.remember ? preference.enabled : true)
+    scopes[sessionId] = { scope: normalizeScope(scope), enabled: nextEnabled }
+    await chrome.storage.local.set({ [KNOWLEDGE_SCOPE_DEFAULT_STORAGE_KEY]: scopes[sessionId].scope })
+    if (remember !== undefined) await chrome.storage.local.set({ [KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY]: { remember, enabled: nextEnabled } })
+    else if (preference.remember && enabled !== undefined) await chrome.storage.local.set({ [KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY]: { remember: true, enabled: nextEnabled } })
+    return scopes[sessionId]
+  })
 }
 
 async function knowledgeSessions(): Promise<Record<string, KnowledgeSessionRecord>> {
@@ -1427,13 +1458,23 @@ async function locallySignOutAccount(): Promise<AccountAccessSnapshot> {
   await setAccountLocallySignedOut(true)
   knowledgeCatalogCache = undefined
   for (const controller of activeKnowledgeQueries.values()) controller.abort()
+  await clearKnowledgeScopeStorage()
   await knowledgeSessionStorage()?.remove(KNOWLEDGE_SESSION_STORAGE_KEY)
   return accountAccessSnapshot()
 }
 
 async function resolveKnowledgeScopeRecord(request: KnowledgeQueryRequest | SelectedSourceScopeRequest): Promise<KnowledgeScopeRecord | undefined> {
-  const scopes = await knowledgeScopes()
-  return scopes[request.harnessSessionId] ?? (request.harnessParentSessionId === undefined ? undefined : scopes[request.harnessParentSessionId])
+  return mutateKnowledgeScopes(async (scopes) => {
+    const current = scopes[request.harnessSessionId]
+    if (current !== undefined) return current
+    const inherited = request.harnessParentSessionId === undefined ? undefined : scopes[request.harnessParentSessionId]
+    const defaultScope = inherited?.scope ?? await knowledgeDefaultScope()
+    if (defaultScope === undefined) return undefined
+    const preference = await knowledgeEnabledPreference()
+    const record = inherited ?? { scope: defaultScope, enabled: preference.remember ? preference.enabled : true }
+    scopes[request.harnessSessionId] = record
+    return record
+  })
 }
 
 async function respondToSelectedSourceScope(port: chrome.runtime.Port, request: SelectedSourceScopeRequest): Promise<void> {
@@ -4776,10 +4817,10 @@ async function recoverMarkdownReview(reviewIdValue: string, tabId: number): Prom
   return record
 }
 
-/** A capability expiry is safe to retry once: Host authorization fails before every read or Verified Write. */
+/** An expired or invalid capability is safe to retry once: Host authorization fails before every read or Verified Write. */
 function expiredWorkspaceReviewCapability(error: unknown): boolean {
   const message = asError(error)
-  return /(?:review\s+)?capability\s+(?:is\s+)?expired|authorization\s+(?:is\s+)?expired/i.test(message)
+  return /(?:review\s+)?capability\s+(?:is\s+)?(?:expired|invalid)|authorization\s+(?:is\s+)?(?:expired|invalid)/i.test(message)
 }
 
 async function rehydrateMarkdownReview(record: MarkdownReviewRecord): Promise<void> {
@@ -5009,6 +5050,13 @@ function missingSidePanelReceiver(error: unknown): boolean {
 
 interface MarkdownReviewDelivery { readonly deliveryId: string; readonly targetSessionId: string; readonly targetSessionTitle: string; readonly status: 'queued' | 'processing' }
 
+interface MarkdownReviewSessionActionDelivery {
+  readonly action: 'rewrite' | 'accept'
+  readonly targetSessionId: string
+  readonly targetSessionTitle: string
+  readonly status: 'draft_ready' | 'queued' | 'processing'
+}
+
 function markdownReviewDelivery(value: unknown, deliveryId: string): MarkdownReviewDelivery | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   const item = value as Record<string, unknown>
@@ -5057,6 +5105,41 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Deli
   return delivery
 }
 
+function markdownReviewSessionActionDelivery(value: unknown, action: 'rewrite' | 'accept'): MarkdownReviewSessionActionDelivery | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  const expectedStatus = action === 'rewrite'
+    ? item.status === 'draft_ready'
+    : item.status === 'queued' || item.status === 'processing'
+  return item.ok === true && item.action === action && expectedStatus
+    && reviewId(item.targetSessionId) && boundedReviewText(item.targetSessionTitle, 2_048)
+    ? { action, targetSessionId: item.targetSessionId, targetSessionTitle: item.targetSessionTitle, status: item.status as MarkdownReviewSessionActionDelivery['status'] }
+    : undefined
+}
+
+async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, request: { harnessSessionId: string; resourceId: string; displayPath: string; action: 'rewrite' | 'accept' }): Promise<MarkdownReviewSessionActionDelivery> {
+  if (request.harnessSessionId !== record.harnessSessionId || request.resourceId !== record.resourceId || request.displayPath !== record.displayPath) throw new Error('Markdown review action does not match its bound Harness session and resource.')
+  let response: unknown
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: 'markdown-review-session-action-forward/v1',
+      action: request.action,
+      review: {
+        reviewId: record.reviewId,
+        harnessSessionId: record.harnessSessionId,
+        resourceId: record.resourceId,
+        displayPath: record.displayPath,
+      },
+    })
+  } catch (error) {
+    if (missingSidePanelReceiver(error)) throw new Error(SIDE_PANEL_UNAVAILABLE_MESSAGE)
+    throw error
+  }
+  const delivery = markdownReviewSessionActionDelivery(response, request.action)
+  if (delivery === undefined) throw new Error((response as { error?: unknown } | undefined)?.error as string ?? SIDE_PANEL_UNAVAILABLE_MESSAGE)
+  return delivery
+}
+
 export default defineBackground(() => {
   const sidePanel = chrome.sidePanel
   chrome.runtime.onConnect?.addListener((port) => {
@@ -5094,6 +5177,11 @@ export default defineBackground(() => {
         if (message.type === 'markdown-review-commit-write-request') {
           const result = await retryExpiredWorkspaceReviewCapability(record, () => commitMarkdownWrite(record, message))
           port.postMessage({ v: 1, type: 'markdown-review-commit-write-response', requestId: message.requestId, ok: true, result })
+          return
+        }
+        if (message.type === 'markdown-review-session-action-request') {
+          const action = await deliverMarkdownReviewSessionAction(record, message)
+          port.postMessage({ v: 1, type: 'markdown-review-session-action-response', requestId: message.requestId, ok: true, ...action })
           return
         }
         const delivery = await retryExpiredWorkspaceReviewCapability(record, () => deliverMarkdownReview(record, message))
@@ -5199,7 +5287,11 @@ export default defineBackground(() => {
       }
       const windowId = request.windowId as number
       if (request.surface === 'fullscreen-tab') {
-        if (chrome.tabs?.create === undefined || chrome.sidePanel?.close === undefined) {
+        if (chrome.sidePanel?.close === undefined) {
+          sendResponse({ ok: false, error: '全屏模式需要 Chrome 141 或更高版本；当前 Chrome 仍可正常使用侧边栏。' })
+          return false
+        }
+        if (chrome.tabs?.create === undefined) {
           sendResponse({ ok: false, error: 'Chrome could not switch the Harness Workspace to a Tab.' })
           return false
         }
@@ -5366,12 +5458,12 @@ export default defineBackground(() => {
           await chrome.tabs.create({ url: KNOWLEDGE_LOGIN_URL, active: true })
         }
         if (request.scope !== undefined || typeof request.enabled === 'boolean' || typeof request.remember === 'boolean') {
-          const existing = (await knowledgeScopes())[sessionId]?.scope
+          const existing = (await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest))?.scope
           const nextScope = request.scope ?? existing ?? { domainSystems: {}, repositoryIds: [] }
           if (!validScope(nextScope)) throw new Error('Invalid knowledge selection.')
           await saveKnowledgeScope(sessionId, nextScope, typeof request.enabled === 'boolean' ? request.enabled : undefined, typeof request.remember === 'boolean' ? request.remember : undefined)
         }
-        const record = (await knowledgeScopes())[sessionId]
+        const record = await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest)
         const preference = await knowledgeEnabledPreference()
         const savedScope = record?.scope
         try {
@@ -5383,7 +5475,7 @@ export default defineBackground(() => {
           sendResponse({ ok: false, scope: savedScope, enabled: record?.enabled, remember: preference.remember, notice: record?.notice, serviceState: knowledgeServiceState(error), error: text })
         }
       })().catch(async (error: unknown) => {
-        const record = (await knowledgeScopes())[sessionId]
+        const record = await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest)
         const preference = await knowledgeEnabledPreference()
         sendResponse({
           ok: false,

@@ -110,19 +110,25 @@
 .customizedBody { display: flex; flex-direction: column; gap: 12px; padding-top: 12px; }
 .gatewayUtilityActions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.modelCatalog { display: flex; max-height: 320px; flex-direction: column; gap: 8px; min-width: 0; overflow-y: auto; padding-right: 2px; --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); }
+.modelCatalog { display: flex; max-height: 420px; flex-direction: column; gap: 8px; min-width: 0; overflow-y: auto; padding-right: 2px; --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); }
 .modelCatalogHeading { display: flex; flex-direction: column; gap: 2px; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l2); }
 .modelCatalogHeading strong { color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; font-weight: 500; }
 .modelCatalogHeading span { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
 .modelCatalogEntry { border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 6px; }
-.modelCatalogRow { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.modelCatalogRow { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
 .modelDetailsButton { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 6px; color: var(--dsw-alias-label-tertiary); background: transparent; cursor: pointer; }
 .modelDetailsButton:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
 .modelDetailsButton:disabled { cursor: default; opacity: .4; }
-.modelAdvanced { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 8px 4px 2px; }
+.modelRemoveButton:hover:not(:disabled) { color: var(--dsw-alias-state-error-primary); background: var(--dsw-alias-interactive-bg-hover-danger); }
+.modelAdvanced { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; gap: 8px; padding: 8px 4px 2px; }
+.modelField { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.modelFieldLabel { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
 .modelCheck { display: flex; align-items: center; gap: 8px; min-height: 32px; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; cursor: pointer; }
 .modelCheck input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--dsw-alias-button-primary-fill); cursor: pointer; }
 .modelCheck input:disabled { cursor: default; }
+.addModelButton { align-self: flex-start; box-sizing: border-box; height: 28px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; }
+.addModelButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.addModelButton:disabled { opacity: .4; cursor: default; }
 .gatewayEditorActions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .onboardingModal { width: min(520px, calc(100vw - 32px)); }
@@ -163,6 +169,7 @@
   .modelCatalogRow { grid-template-columns: minmax(0, 1fr) auto; }
   .modelCatalogRow .modelInput:nth-child(2) { grid-column: 1; }
   .modelDetailsButton { grid-column: 2; grid-row: 1 / span 2; }
+  .modelAdvanced { grid-template-columns: minmax(0, 1fr); }
   .gatewayEditorActions .gatewayCancelButton, .gatewayEditorActions .gatewaySaveButton { flex: 1 1 0; }
 }
 

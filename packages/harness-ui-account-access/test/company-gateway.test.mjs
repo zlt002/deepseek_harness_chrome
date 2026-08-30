@@ -27,6 +27,7 @@ const onboardingModule = await import(`data:text/javascript;base64,${Buffer.from
 
 const onboardingViewSource = await readFile(new URL('../src/client/CompanyGatewayOnboarding.tsx', import.meta.url), 'utf8')
 const accountAccessViewSource = await readFile(new URL('../src/client/AccountAccessSection.tsx', import.meta.url), 'utf8')
+const modelCatalogSource = await readFile(new URL('../src/client/CompanyGatewayModelCatalog.tsx', import.meta.url), 'utf8')
 
 const gateway = {
   models: [{ id: 'model-a', name: 'Model A' }],
@@ -81,6 +82,17 @@ test('both company gateway entry points expose the fixed address, model selectio
   }
 })
 
+test('both company gateway entry points use an editable multi-model catalog with per-row capacities and image input', () => {
+  for (const view of [onboardingViewSource, accountAccessViewSource]) {
+    assert.match(view, /CompanyGatewayModelCatalog/)
+    assert.doesNotMatch(view, /<select value=\{selectedModel\}/)
+  }
+  assert.match(modelCatalogSource, /contextWindow/)
+  assert.match(modelCatalogSource, /maxTokens/)
+  assert.match(modelCatalogSource, /支持多模态图片/)
+  assert.match(modelCatalogSource, /onSelectedModelChange/)
+})
+
 test('company gateway restores the saved protocol from the settings namespace', () => {
   assert.equal(gatewayModule.companyGatewayProtocolFromNamespaces([
     { ns: 'llm-pi-ai', value: { providers: { 'annto-company-gateway': { api: 'openai-completions' } } } },
@@ -88,6 +100,50 @@ test('company gateway restores the saved protocol from the settings namespace', 
   assert.equal(gatewayModule.companyGatewayProtocolFromNamespaces([
     { ns: 'llm-pi-ai', value: { providers: { 'annto-company-gateway': { api: 'unsupported' } } } },
   ]), undefined)
+})
+
+test('company gateway restores editable model fields and merges them onto the refreshed catalog', () => {
+  const saved = gatewayModule.companyGatewayModelsFromNamespaces([
+    { ns: 'llm-pi-ai', value: { providers: { 'annto-company-gateway': { models: [
+      { id: 'vision-model', name: '视觉模型', contextWindow: 131072, maxTokens: 98304, input: ['text', 'image'], customFlag: true },
+    ] } } } },
+  ])
+  assert.deepEqual(saved, [{ id: 'vision-model', name: '视觉模型', contextWindow: 131072, maxTokens: 98304, input: ['text', 'image'], customFlag: true }])
+  assert.deepEqual(gatewayModule.mergeCompanyGatewayModels(saved, [
+    { id: 'vision-model', name: 'Gateway name' },
+    { id: 'new-model', name: 'New model' },
+  ]), [
+    { id: 'vision-model', name: '视觉模型', contextWindow: 131072, maxTokens: 98304, input: ['text', 'image'], customFlag: true },
+    { id: 'new-model', name: 'New model' },
+  ])
+})
+
+test('saved company gateway models can reopen for editing without requiring a new key', async () => {
+  const savedModels = [{ id: 'renamed-vision', name: '视觉模型', contextWindow: 131072, maxTokens: 98304, input: ['text', 'image'] }]
+  const restored = gatewayModule.companyGatewayMetadataForEditing(savedModels, {
+    models: [{ id: 'old-id', name: 'Old name' }],
+    quota: { usagePercent: 12, nextResetTime: null, resetCycle: 'monthly' },
+    checkedAt: '2026-08-20T00:00:00.000Z',
+  })
+  assert.deepEqual(restored?.models, savedModels)
+
+  const calls = []
+  const api = {
+    settings: { mutate: async payload => { calls.push(['settings', payload]); return ok } },
+    credentials: { set: async payload => { calls.push(['credential', payload]); return ok } },
+  }
+  assert.equal(await gatewayModule.saveCompanyGateway(api, savedModels, undefined, 'openai-completions'), undefined)
+  assert.deepEqual(calls.map(([kind]) => kind), ['settings'])
+})
+
+test('the restored catalog change path updates the draft that save consumes', () => {
+  const onChangeStart = accountAccessViewSource.indexOf('onChange={models => {')
+  assert.notEqual(onChangeStart, -1)
+  const onChangeSource = accountAccessViewSource.slice(onChangeStart, onChangeStart + 700)
+  assert.match(onChangeSource, /probedGateway !== undefined/)
+  assert.match(onChangeSource, /setRestoredGateway\(current => current === undefined \? current : \{ \.\.\.current, models \}\)/)
+  assert.match(accountAccessViewSource, /const models = companyGatewayModelsForSelection\(gateway\.models, selectedModel\)/)
+  assert.match(accountAccessViewSource, /saveCompanyGateway\(api, models, key\.length === 0 \? undefined : key, protocol\)/)
 })
 
 test('saveCompanyGateway does not select a default model when credential persistence fails', async () => {

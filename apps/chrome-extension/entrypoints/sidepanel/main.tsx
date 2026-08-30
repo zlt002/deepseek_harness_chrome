@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom/client'
 import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessHandoffTabFromLocation, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from './harness-frame'
 import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
 import { MARKDOWN_AI_ACK_TIMEOUT_MS } from '../markdown-review/delivery-timeouts'
-import { validateWorkspaceMarkdownFeedback, type WorkspaceMarkdownFeedback } from './markdown-feedback-validator'
+import { validateWorkspaceMarkdownFeedback, validateWorkspaceMarkdownReviewAction, type WorkspaceMarkdownFeedback, type WorkspaceMarkdownReviewAction } from './markdown-feedback-validator'
 import './style.css'
 
 type HarnessStatus = 'starting' | 'ready' | 'error'
@@ -373,6 +373,7 @@ function App(): React.JSX.Element {
   const searchProgressSequenceRef = useRef(0)
   const reviewRehydrateRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
   const reviewFeedbackRef = useRef(new Map<string, { feedback: WorkspaceMarkdownFeedback; sendResponse: (response?: unknown) => void; timeout: number }>())
+  const reviewActionRef = useRef(new Map<string, { action: WorkspaceMarkdownReviewAction; sendResponse: (response?: unknown) => void; timeout: number }>())
   const prototypePromptRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
@@ -388,9 +389,13 @@ function App(): React.JSX.Element {
   const productVersion = useMemo(() => chrome.runtime.getManifest().version, [])
   const hasLocationHandoff = surface === 'sidepanel' && handoffSessionId !== undefined && handoffTabId !== undefined
   const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number }>({ ready: surface === 'fullscreen-tab' || hasLocationHandoff, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }), ...(handoffTabId === undefined ? {} : { tabId: handoffTabId }) })
-  const activeHarnessSessionId = sidePanelHandoff.sessionId
+  // A handoff session restores an iframe once. The observed session is only
+  // for side-panel actions; feeding it back into frameSrc would reload the
+  // iframe every time the Harness session list reports its current value.
+  const [observedHarnessSessionId, setObservedHarnessSessionId] = useState<string | undefined>(handoffSessionId)
+  const activeHarnessSessionId = observedHarnessSessionId
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
-  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, productVersion, ...(activeHarnessSessionId === undefined ? {} : { sessionId: activeHarnessSessionId }) }), [activeHarnessSessionId, frameNonce, productVersion, surface, url])
+  const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, productVersion, fullscreenTabSupported: chrome.sidePanel?.close !== undefined, ...(sidePanelHandoff.sessionId === undefined ? {} : { sessionId: sidePanelHandoff.sessionId }) }), [frameNonce, productVersion, sidePanelHandoff.sessionId, surface, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
 
   useEffect(() => { frameReadyRef.current = false; workspaceReviewBridgeReadyRef.current = false }, [frameNonce])
@@ -412,6 +417,10 @@ function App(): React.JSX.Element {
   useEffect(() => { availableTabsRef.current = availableTabs }, [availableTabs])
 
   const connect = useCallback(async () => {
+    // Reconnecting unmounts and recreates the Harness iframe, whose command
+    // sequence starts again at 1 even if the reused URL keeps the same nonce.
+    knowledgeCommandSequenceRef.current = 0
+    knowledgeRequestSequenceBySessionRef.current.clear()
     setStatus('starting'); setError(undefined)
     const response = await requestHarness()
     if (response.ok && response.url !== undefined) { setUrl(response.url); setStatus('ready'); return }
@@ -439,8 +448,13 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!sidePanelHandoff.ready) return
-    void connect(); void loadTargetSettings(); void loadRecentPrototypes()
-  }, [connect, loadRecentPrototypes, loadTargetSettings, sidePanelHandoff.ready])
+    void connect(); void loadTargetSettings()
+  }, [connect, loadTargetSettings, sidePanelHandoff.ready])
+
+  useEffect(() => {
+    if (!sidePanelHandoff.ready) return
+    void loadRecentPrototypes()
+  }, [loadRecentPrototypes, sidePanelHandoff.ready])
 
   const replaySearchProgress = useCallback(() => {
     if (frameOrigin === undefined || !frameReadyRef.current) return
@@ -463,6 +477,14 @@ function App(): React.JSX.Element {
     }
   }, [frameNonce, frameOrigin])
 
+  const forwardPendingMarkdownReviewActions = useCallback(() => {
+    const target = frameRef.current?.contentWindow
+    if (!workspaceReviewBridgeReadyRef.current || frameOrigin === undefined || target === null || target === undefined) return
+    for (const [requestId, pending] of reviewActionRef.current) {
+      target.postMessage({ type: 'markdown-review-session-action/v1', nonce: frameNonce, requestId, action: pending.action }, frameOrigin)
+    }
+  }, [frameNonce, frameOrigin])
+
   useEffect(() => {
     const accept = (epoch: unknown, sequence: unknown, tab: unknown): void => {
       if (typeof epoch !== 'string' || epoch.length === 0 || typeof sequence !== 'number' || !Number.isInteger(sequence) || !isActiveTab(tab)) return
@@ -472,7 +494,7 @@ function App(): React.JSX.Element {
     void requestActiveTab().then((response) => { if (response.ok) accept(response.epoch, response.sequence, response.tab) })
     const onMessage = (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void): boolean | void => {
       if (!message || typeof message !== 'object') return
-      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; tabId?: unknown; current?: unknown; total?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown; feedback?: unknown; review?: unknown; payload?: unknown }
+      const value = message as { type?: unknown; epoch?: unknown; sequence?: unknown; tab?: unknown; tabId?: unknown; current?: unknown; total?: unknown; url?: unknown; error?: unknown; requestId?: unknown; harnessSessionId?: unknown; harnessParentSessionId?: unknown; tool?: unknown; question?: unknown; phase?: unknown; chars?: unknown; content?: unknown; eventType?: unknown; process?: unknown; feedback?: unknown; review?: unknown; action?: unknown; payload?: unknown }
       if (value.type === 'prototype-studio-brief-suggestion-forward/v1') {
         const target = frameRef.current?.contentWindow
         if (!isBriefSuggestionPayload(value.payload) || frameOrigin === undefined || target === null || target === undefined) { sendResponse({ ok: false, error: 'The bound Harness Workspace is not available.' }); return false }
@@ -537,6 +559,27 @@ function App(): React.JSX.Element {
         }, MARKDOWN_AI_ACK_TIMEOUT_MS)
         reviewFeedbackRef.current.set(deliveryId, { feedback: validation.feedback, sendResponse, timeout })
         forwardPendingMarkdownReviewFeedback()
+        return true
+      }
+      if (value.type === 'markdown-review-session-action-forward/v1') {
+        const target = frameRef.current?.contentWindow
+        const validation = validateWorkspaceMarkdownReviewAction({
+          ...(typeof value.review === 'object' && value.review !== null ? value.review as object : {}),
+          action: value.action,
+        })
+        if (!validation.ok || frameOrigin === undefined || target === null || target === undefined) {
+          sendResponse({ ok: false, error: validation.ok ? '侧边栏未打开或尚未准备好。请打开侧边栏后重试。' : validation.error })
+          return false
+        }
+        const requestId = crypto.randomUUID()
+        const timeout = window.setTimeout(() => {
+          const pending = reviewActionRef.current.get(requestId)
+          if (pending === undefined) return
+          reviewActionRef.current.delete(requestId)
+          pending.sendResponse({ ok: false, error: 'Harness 未在 15 秒内确认审阅动作。请重试。' })
+        }, MARKDOWN_AI_ACK_TIMEOUT_MS)
+        reviewActionRef.current.set(requestId, { action: validation.action, sendResponse, timeout })
+        forwardPendingMarkdownReviewActions()
         return true
       }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
@@ -741,6 +784,8 @@ function App(): React.JSX.Element {
     reviewRehydrateRef.current.clear()
     for (const pending of reviewFeedbackRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed before accepting Markdown feedback.' }) }
     reviewFeedbackRef.current.clear()
+    for (const pending of reviewActionRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: '侧边栏在确认审阅动作前已关闭。' }) }
+    reviewActionRef.current.clear()
     for (const pending of prototypePromptRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed before accepting the prototype request.' }) }
     prototypePromptRef.current.clear()
   }, [])
@@ -776,9 +821,22 @@ function App(): React.JSX.Element {
           : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness rejected the Markdown annotation.' })
         return
       }
+      if (value.type === 'markdown-review-session-action-accepted/v1' && boundedString(value.requestId, 160)) {
+        const pending = reviewActionRef.current.get(value.requestId)
+        if (pending === undefined) return
+        reviewActionRef.current.delete(value.requestId)
+        window.clearTimeout(pending.timeout)
+        const accepted = value.accepted === true && value.action === pending.action.action && boundedString(value.targetSessionId, 160) && boundedString(value.targetSessionTitle, 2_048)
+          && (value.status === 'draft_ready' || value.status === 'queued' || value.status === 'processing')
+        pending.sendResponse(accepted
+          ? { ok: true, action: value.action, targetSessionId: value.targetSessionId, targetSessionTitle: value.targetSessionTitle, status: value.status }
+          : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness 未接受审阅动作。' })
+        return
+      }
       if (value.type === 'workspace-review-bridge-ready/v1') {
         workspaceReviewBridgeReadyRef.current = true
         forwardPendingMarkdownReviewFeedback()
+        forwardPendingMarkdownReviewActions()
         return
       }
       if (value.type === 'markdown-review-rehydrate-response/v1' && boundedString(value.requestId, 160)) {
@@ -815,8 +873,8 @@ function App(): React.JSX.Element {
         return
       }
       const selectedSessionId = value.sessionId
-      if (value.type === 'harness-session-selected/v1' && isHarnessSessionIdentity(selectedSessionId)) { setSidePanelHandoff((previous) => ({ ...previous, sessionId: selectedSessionId })); return }
-      if (value.type === 'session-handoff-applied/v1' && value.sessionId === activeHarnessSessionId && surface === 'sidepanel' && sidePanelHandoff.tabId !== undefined) {
+      if (value.type === 'harness-session-selected/v1' && (selectedSessionId === undefined || isHarnessSessionIdentity(selectedSessionId))) { setObservedHarnessSessionId(selectedSessionId); return }
+      if (value.type === 'session-handoff-applied/v1' && value.sessionId === sidePanelHandoff.sessionId && surface === 'sidepanel' && sidePanelHandoff.tabId !== undefined) {
         void currentBrowserWindowId().then((windowId) => {
           if (windowId !== undefined) chrome.runtime.sendMessage({ type: 'session-handoff-applied/v1', windowId, tabId: sidePanelHandoff.tabId, sessionId: value.sessionId })
         })
@@ -869,25 +927,17 @@ function App(): React.JSX.Element {
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (
-      <section className="harness-frame-shell">
+      <section className={`harness-frame-shell${surface === 'fullscreen-tab' ? ' harness-frame-shell-fullscreen' : ''}`}>
         <iframe ref={frameRef} className="harness-frame" src={frameSrc} title="ACCRUI Web UI" allow="clipboard-read; clipboard-write" />
         {recentPrototypesOpen && <section className="recent-prototypes-popover" aria-label="最近原型">
             <header><div><b>最近原型</b><small>关闭原型页后，也能从这里继续。</small></div><div className="recent-prototypes-header-actions"><button type="button" className="recent-prototypes-refresh" aria-label="刷新最近原型" onClick={() => void loadRecentPrototypes()}>↻</button><button type="button" className="recent-prototypes-close" aria-label="关闭最近原型" onClick={() => setRecentPrototypesOpen(false)}>关闭</button></div></header>
+            <section className="recent-prototype-create" aria-label="新建原型"><button type="button" disabled={activeTab?.tab === undefined || activeHarnessSessionId === undefined || capturingDesignReferenceTabId !== undefined} onClick={() => { if (activeTab?.tab === undefined || activeHarnessSessionId === undefined) return; void handleFrameCommand({ command: 'capture-design-reference', tabId: activeTab.tab.tabId, sessionId: activeHarnessSessionId }) }}>{capturingDesignReferenceTabId !== undefined ? '正在采集当前网页…' : '采集当前网页'}</button><small>{activeTab?.tab === undefined ? '请先打开要参考的网页。' : activeHarnessSessionId === undefined ? '请先打开一个 AI 对话。' : `当前网页：${activeTab.tab.title || activeTab.tab.url}`}</small></section>
             {recentPrototypeError !== undefined ? <p className="recent-prototypes-error">{recentPrototypeError}</p> : recentPrototypes.length === 0 ? <p className="recent-prototypes-empty">还没有保存过原型。先在对话中选择网页并提取设计规范。</p> : <ul>{recentPrototypes.map(project => <li key={project.projectId}><div className="recent-prototype-card">
               <button className="recent-prototype-open" type="button" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); setRecentPrototypeError(undefined); void openRecentPrototypeStudio(project.projectId).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法打开最近原型。'); else setRecentPrototypesOpen(false) }).finally(() => setOpeningRecentProjectId(undefined)) }}><span><b>{project.projectName ?? project.referenceTitle ?? '未命名原型'}</b><small>{project.revisionCount === undefined ? '历史项目' : project.revisionCount === 0 ? '尚未生成版本' : `共 ${project.revisionCount} 个版本`} · {new Date(project.updatedAt).toLocaleString()}</small></span><em>{openingRecentProjectId === project.projectId ? '处理中…' : '打开'}</em></button>
               {editingRecentProjectId === project.projectId ? <div className="recent-prototype-edit"><input aria-label="原型名称" maxLength={80} value={recentProjectNameDraft} onChange={event => setRecentProjectNameDraft(event.target.value)} autoFocus /><button type="button" disabled={recentProjectNameDraft.trim() === '' || openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); void manageRecentPrototypeStudio({ type: 'prototype-studio-rename/v1', projectId: project.projectId, projectName: recentProjectNameDraft.trim() }).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法重命名原型。'); else { setEditingRecentProjectId(undefined); void loadRecentPrototypes() } }).finally(() => setOpeningRecentProjectId(undefined)) }}>保存</button><button type="button" onClick={() => setEditingRecentProjectId(undefined)}>取消</button></div> : deletingRecentProjectId === project.projectId ? <div className="recent-prototype-delete-confirm"><span>确认永久删除这个原型和全部版本？</span><button type="button" className="danger" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); void manageRecentPrototypeStudio({ type: 'prototype-studio-delete/v1', projectId: project.projectId, confirmationProjectId: project.projectId }).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法删除原型。'); else { setDeletingRecentProjectId(undefined); void loadRecentPrototypes() } }).finally(() => setOpeningRecentProjectId(undefined)) }}>确认删除</button><button type="button" onClick={() => setDeletingRecentProjectId(undefined)}>取消</button></div> : <div className="recent-prototype-actions">{activeHarnessSessionId !== undefined && project.boundToCurrentSession === false && <button type="button" disabled={openingRecentProjectId === project.projectId} onClick={() => { setOpeningRecentProjectId(project.projectId); setRecentPrototypeError(undefined); void continueRecentPrototypeStudio(project.projectId, activeHarnessSessionId).then(response => { if (!response.ok) setRecentPrototypeError(response.error ?? '无法在当前对话继续。'); else setRecentPrototypesOpen(false) }).finally(() => setOpeningRecentProjectId(undefined)) }}>在当前对话继续</button>}<button type="button" onClick={() => { setEditingRecentProjectId(project.projectId); setRecentProjectNameDraft(project.projectName ?? project.referenceTitle ?? '未命名原型'); setDeletingRecentProjectId(undefined) }}>重命名</button><button type="button" onClick={() => { setDeletingRecentProjectId(project.projectId); setEditingRecentProjectId(undefined) }}>删除</button></div>}
             </div></li>)}</ul>}
             <footer>“在当前对话继续”会由你明确确认后，把项目交给现在打开的 AI 对话；历史版本不会丢失。</footer>
           </section>}
-        {surface === 'fullscreen-tab' && <button
-          className="fullscreen-collapse"
-          type="button"
-          aria-label="收起全屏"
-          title="收起全屏"
-          onClick={() => { void returnToSidePanel(activeHarnessSessionId).catch((error: unknown) => console.error('[deepseek-harness] Failed to return to the side panel:', error)) }}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M21 16v5h-5M3 3l6 6M21 3l-6 6M3 21l6-6M21 21l-6-6" /></svg>
-        </button>}
       </section>
     ) : (
       <section className="status-card" aria-live="polite">
