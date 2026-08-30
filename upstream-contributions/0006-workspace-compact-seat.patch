@@ -184,7 +184,7 @@ index 8027a3623a..7570f55dec 100644
 +    'sidebar.workspaces.compact': { kind: 'chain'; scope: 'root'; owner: CompactWorkspacePickerOwnerProps }
    }
  }
- 
+
 +export interface CompactWorkspacePickerSession {
 +  id: SessionId
 +  title: string
@@ -273,7 +273,7 @@ index 6b14243ecf..e6cd84af54 100644
 --- a/packages/client/ui-workspace/src/client/index.ts
 +++ b/packages/client/ui-workspace/src/client/index.ts
 @@ -20,6 +20,7 @@ import { en, zh, type WorkspaceKey } from './locales.ts'
- 
+
  export type {
    DirectoryFlowOwnerProps, DirectoryFlowSlotName, DirectoryPickingHooks, DirectoryPickingInjected,
 +  CompactWorkspacePickerOwnerProps, CompactWorkspacePickerSession, CompactWorkspacePickerWorkspace,
@@ -348,7 +348,7 @@ index 016af313f8..c9e4f2a001 100644
 +    insertSessionBefore, openPath, open, clear, search, renameSession, binding, fork,
    }
  }
- 
+
 @@ -105,6 +106,8 @@ describe('ui-workspace apply', () => {
      expect(b.fork).toHaveBeenCalledWith({ sessionId: 'session', increaseTitle: true })
      await browser.renameWorkspace('ws' as never, 'renamed')
@@ -378,7 +378,7 @@ index fbe42fc279..0e2b600431 100644
    }
 @@ -95,6 +97,23 @@ function rerender(b: ReturnType<typeof mount>, overrides: Partial<WorkspaceBrows
  }
- 
+
  describe('WorkspaceBrowser', () => {
 +  it('renders the compact seat and keeps the official browser as its fallback', () => {
 +    const renderSlotChain = vi.fn((_name: string, _owner: unknown, opts?: { fallback?: unknown }) => opts?.fallback ?? null)

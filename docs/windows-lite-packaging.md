@@ -8,15 +8,18 @@ runtime，也不要把完整 `node_modules` 放进安装包。
 
 ## 最终产物
 
-工作流成功后，会在草稿 GitHub Release 中生成：
+同时完成 `full_validation=true`、真实 Windows Chrome/Edge 侧边栏 UAT，并在再次运行时明确开启 `publish_public=true` 后，工作流才会在不可覆盖的公开版本 Release 中生成：
 
 - `accr-ui-windows-lite-x64.zip`
 - `accr-ui-windows-lite-x64.zip.sha256`
 
-同一版本重复构建会覆盖同一草稿 Release 的旧文件。Release tag 为：
+客户端固定读取公开 `windows-lite-current` Release 中的
+`accr-ui-windows-lite-update.json`。该 manifest 带版本、公开版本 Release URL、SHA256 和不可变的包 URL；它只在完整 Windows 验收通过后覆盖更新。
+
+每次公开发布必须使用高于已发布 Windows Lite 版本的三段式版本；重复版本会被 CI 拒绝。版本 Release tag 为：
 
 ```text
-windows-lite-v<版本号>-candidate
+windows-lite-v<版本号>
 ```
 
 ZIP 内部主要结构：
@@ -39,12 +42,12 @@ accr-ui-windows-lite-x64/
 `run_native_host.bat` 必须设置 `DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills`，
 这样即使用户电脑已有 `%USERPROFILE%\.claude\skills` 同名目录，也走产品合同。
 四个 Office skill 由独立 provider 以 rank 1 发布，项目根和用户端同名 skill 不能覆盖它们。
-用户后来安装的插件保存在 `%APPDATA%\accr-ui-harness\profile`，升级主程序不会删除。
+用户后来安装的插件保存在安装目录的 `profile`（`<InstallRoot>\profile`）；升级主程序不会删除。
 
 ## 方式一：日常快速出包
 
-适合开发联调或快速给测试人员一个新包。它会生成 ZIP 和 SHA256 并上传草稿
-Release，但不会执行完整安装、升级和回滚验收。
+适合开发联调或快速给测试人员一个新包。它只生成 ZIP、SHA256 并上传草稿候选
+Release；即使开启完整自动验收，只要未开启 `publish_public` 仍不会生成更新 manifest，也不会成为客户端默认更新源。
 
 在 GitHub 仓库页面操作：
 
@@ -52,7 +55,7 @@ Release，但不会执行完整安装、升级和回滚验收。
 2. 选择 **Build Windows Lite**。
 3. 点击 **Run workflow**。
 4. 选择需要打包的分支。
-5. 填写三段式版本号，例如 `1.1.85`。
+5. 填写三段式版本号，例如 `1.1.88`。
 6. 保持 `full_validation` 关闭并运行。
 
 也可以使用 GitHub CLI：
@@ -60,8 +63,9 @@ Release，但不会执行完整安装、升级和回滚验收。
 ```sh
 gh workflow run build-windows-lite.yml \
   --ref codex/windows-lite-1.1.63 \
-  -f version=1.1.85 \
-  -f full_validation=false
+  -f version=1.1.88 \
+  -f full_validation=false \
+  -f publish_public=false
 ```
 
 查看最新运行：
@@ -72,7 +76,7 @@ gh run watch <RUN_ID> --interval 10 --exit-status
 ```
 
 推送到 `codex/windows-lite-*` 分支也会自动出包，但自动推送使用工作流中的默认
-版本。目前默认值是 `1.1.85`。发布新版本时应手动传入 `version`，或者同步修改
+版本。目前默认值是 `1.1.88`。发布新版本时应手动传入 `version`，或者同步修改
 [build-windows-lite.yml](../.github/workflows/build-windows-lite.yml) 中的默认版本，避免
 包内容和预期版本不一致。
 
@@ -83,7 +87,7 @@ gh run watch <RUN_ID> --interval 10 --exit-status
 ```sh
 gh workflow run build-windows-lite.yml \
   --ref codex/windows-lite-1.1.63 \
-  -f version=1.1.85 \
+  -f version=1.1.88 \
   -f full_validation=true
 ```
 
@@ -93,7 +97,7 @@ gh workflow run build-windows-lite.yml \
 - 包含 `install-ui.ps1` 可视化安装壳，支持 Node.js 22+ 和 Chrome/Edge 检测、选择目录、覆盖确认与进度显示。
 - Chrome、Edge 的 Native Messaging 注册正确。
 - Native Host 能完成 `ping/pong` 并正常停止。
-- Harness Web 能启动并激活全部 10 个产品 UI 插件。
+- Harness Web 能启动并激活产品插件唯一清单中的全部 UI 插件。
 - 安装树里存在 `runtime/skills/pmd-prd/SKILL.md` 以及 `pptx` / `xlsx` / `docx` / `pdf`，且 launcher 指向该产品 skill 根。
 - Windows 目录选择器能加载 Koffi 并进入 `showing` 状态。
 - 从旧版本升级后，工作区、日志和用户数据仍然存在。
@@ -106,6 +110,31 @@ gh workflow run build-windows-lite.yml \
 
 自动化通过后，仍需在真实 Windows Chrome/Edge 中做一次侧边栏视觉和交互确认。
 构建成功不能代替真实界面的 Parity Gate。
+
+UAT 已完成后，先从草稿候选 Release 取得其精确提交和 ZIP SHA256。两项都必须来自
+同一个 `windows-lite-v<版本号>-candidate`，不能使用本机重新组装包的 SHA：
+
+```sh
+gh release view windows-lite-v1.1.88-candidate \
+  --json targetCommitish,assets
+gh release download windows-lite-v1.1.88-candidate \
+  --pattern accr-ui-windows-lite-x64.zip --dir /tmp/accr-ui-candidate
+shasum -a 256 /tmp/accr-ui-candidate/accr-ui-windows-lite-x64.zip
+```
+
+UAT 已完成后，才以相同版本、同一提交和上一步得到的 SHA 重新运行下列命令公开发布。
+`publish_public=true` 会被拒绝，除非同时保留 `full_validation=true`，并传入
+`uat_candidate_commit` 与 `uat_candidate_sha256`：
+
+```sh
+gh workflow run build-windows-lite.yml \
+  --ref codex/windows-lite-1.1.63 \
+  -f version=1.1.88 \
+  -f full_validation=true \
+  -f publish_public=true \
+  -f uat_candidate_commit=<candidate-targetCommitish> \
+  -f uat_candidate_sha256=<candidate-zip-sha256>
+```
 
 ## 打包前本地检查
 
@@ -131,7 +160,7 @@ pnpm build
 ```sh
 node release/windows-lite/windows-release.mjs \
   --harness-runtime release/windows-lite/harness-static-win32-x64 \
-  --version 1.1.85
+  --version 1.1.88
 ```
 
 没有 Windows x64 runtime 时，不要在 macOS 上跑
@@ -153,12 +182,13 @@ unzip -p release/accr-ui-windows-lite-x64/payload.zip runtime/run_native_host.ba
 checkout + pnpm install
 → 验证干净的 Harness upstream
 → 恢复 Windows release-ready 缓存
-→ 缓存未命中时物化 Harness、构建 10 个产品插件和 Windows runtime
+→ 缓存未命中时物化 Harness、构建产品插件唯一清单中的全部 UI 插件和 Windows runtime
 → 构建扩展
 → 组装 AccrUI 兼容 ZIP
-→ 可选完整 Windows 验收
+→ `publish_public=false` 时可选验收本地候选包
 → 写 SHA256
-→ 覆盖上传草稿 Release
+→ `publish_public=false` 时上传草稿候选 Release
+→ 真实 Windows Chrome/Edge UAT 完成后，手动重跑并传入候选 commit/SHA；先下载并核对该候选 ZIP，再验收该 ZIP，才晋级不可变公开版本 Release，并更新稳定 manifest 通道
 ```
 
 Windows 静态 runtime 由
@@ -185,14 +215,14 @@ Windows 静态 runtime 由
 1. GitHub Actions 运行整体为绿色。
 2. `Build AccrUI-compatible Windows package` 成功。
 3. `Write checksum` 成功。
-4. `Upload Windows package to draft release` 成功。
-5. Release 中 ZIP 和 `.sha256` 的更新时间对应当前提交。
+4. 先完成真实 Windows Chrome/Edge 侧边栏 UAT；随后以 `full_validation=true`、`publish_public=true`、`uat_candidate_commit` 和 `uat_candidate_sha256` 重跑，`Accept exact downloaded UAT candidate` 与 `Promote exact UAT candidate to published release` 成功。
+5. 不可变版本 Release 中 ZIP、`.sha256` 的更新时间对应当前提交；`windows-lite-current` 中的 `accr-ui-windows-lite-update.json` 指向该版本。
 6. 正式交付时，`full_validation=true` 的验收也为绿色。
 
 查看 Release：
 
 ```sh
-gh release view windows-lite-v1.1.85-candidate \
+gh release view windows-lite-v1.1.88 \
   --json tagName,isDraft,targetCommitish,assets,url
 ```
 

@@ -126,9 +126,8 @@ launchPreparedUpdate()
 
 实现要求：
 
-- 正式源使用公开/已发布 Release 元数据；草稿 GitHub Release 需要登录凭据，不能作为
-  普通用户自动更新源。
-- CI 同时发布 ZIP、SHA256 和机器可读的版本元数据。
+- 正式源固定读取公开 `windows-lite-current` Release 的版本 manifest；manifest 指向不可覆盖的公开版本 Release。草稿 GitHub Release 需要登录凭据，不能作为普通用户自动更新源。
+- CI 只在完整 Windows 自动验收和真实 Chrome/Edge UAT 均确认后，才发布 ZIP、SHA256 和机器可读的版本元数据。公开 dispatch 必须传草稿候选的 `uat_candidate_commit` 和 `uat_candidate_sha256`；CI 下载并核对该候选 ZIP 后验收和晋级，绝不以当次重建包替代候选。
 - 下载后必须校验 SHA256、固定扩展 ID、版本递增和包结构。
 - 更新必须复用 `install.ps1 -InstallRoot <当前目录>`，不能另写一套覆盖逻辑。
 - 更新启动后先让 Native Host 正常退出，再替换可能被 Windows 锁定的原生文件。
@@ -143,7 +142,7 @@ launchPreparedUpdate()
 | 环境检测、路径选择、覆盖确认、进度和日志 | 已迁入 |
 | 自定义目录下的安装、升级和回滚 | 已接入现有核心 |
 | Windows CI 无界面安装兼容 | 已保留 |
-| 远程发布源和包校验模块 | 已接入 GitLab raw、ZIP 防穿越、扩展身份、三段式版本和 SHA256 计算；正式发布仍缺独立 SHA256/版本元数据 |
+| 远程发布源和包校验模块 | 已接入稳定公开 manifest 通道、不可覆盖版本 Release、强制 SHA256、ZIP 防穿越、扩展身份和三段式版本校验；缺少 manifest SHA256 或包版本不匹配时拒绝更新 |
 | Harness 设置页中的检查/更新入口 | 已接入 Windows Lite 设置页；下载、校验、正常退出 Native Host 后复用 `install.ps1` |
 | 真实 Windows 更新中断、失败回滚和重连验收 | 待完成 |
 

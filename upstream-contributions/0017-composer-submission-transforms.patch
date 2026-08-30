@@ -18,7 +18,8 @@ index 9714831..86a436e 100644
 +  const submissionTransforms = new ComposerSubmissionTransforms()
 +  ctx.provide('composerSubmissionTransforms', submissionTransforms)
 +  const inputHub = new InputHub(ctx, t, submissionTransforms)
- 
+-
++
    // The composer-block registry: a plugin that knows a session cannot send —
    // ui-model-selection, when no adapter serves the session's route — raises a block
 @@ -326,7 +329,12 @@ export function apply(ctx: Context): void {
@@ -56,7 +57,8 @@ index f700218..c34fe10 100644
 +  type ComposerSubmissionTransform,
 +} from './input/submission-transforms.ts'
  export { ConversationViewState } from './view-state.ts'
- 
+-
++
  export type {
 @@ -46,5 +51,7 @@ declare module '@deepseek-ai/cordis' {
      conversationViewState: import('./view-state.ts').ConversationViewState
@@ -74,8 +76,9 @@ index 54e0920..51c4fdb 100644
  import type { InputSubmitMode } from '../contract/composer-submission.ts'
  import type { PopupDismissFace } from './facade.ts'
  import { SessionInputShell } from './facade.ts'
-+import { ComposerSubmissionTransforms } from './submission-transforms.ts'
- 
++import { ComposerSubmissionTransforms, type ComposerSubmissionPreparation } from './submission-transforms.ts'
+-
++
  /** Structural command face for per-session popup resolution. */
  interface CommandFace {
 @@ -44,6 +45,7 @@ export class InputHub implements SessionInputResolver {
@@ -84,7 +87,8 @@ index 54e0920..51c4fdb 100644
      private readonly t: TranslateNS<'conversation'>,
 +    private readonly submissionTransforms = new ComposerSubmissionTransforms(),
    ) {}
- 
+-
++
    /**
 @@ -80,6 +82,7 @@ export class InputHub implements SessionInputResolver {
        inputTriggers: () => this.controller(actx),
@@ -94,27 +98,55 @@ index 54e0920..51c4fdb 100644
        defaultSink: (text, imageIds, mode) => { this.sink(session, text, imageIds, mode) },
        steerQueue: () => { void this.steerQueue(session, shell) },
      })
-@@ -154,9 +157,12 @@ export class InputHub implements SessionInputResolver {
+@@ -154,15 +157,36 @@ export class InputHub implements SessionInputResolver {
    ): void {
 -    if (text === '' && imageIds.length === 0) return
-     const shell = this.shells.get(session.sessionId)
-+    const prepared = this.submissionTransforms.prepare(session.sessionId, text)
-+    if (prepared.text === '' && imageIds.length === 0) return
-     // Commit, not an editable clear: undo must not resurrect sent content.
-     shell?.commitSend(imageIds)
+-    const shell = this.shells.get(session.sessionId)
+-    // Commit, not an editable clear: undo must not resurrect sent content.
+-    shell?.commitSend(imageIds)
 -    void this.conversation().sendSession(session, text, imageIds, mode).catch(() => {
-+    void this.conversation().sendSession(session, prepared.text, imageIds, mode).then(() => {
++    void this.submit(session, text, imageIds, mode)
++  }
++
++  private async submit(
++    session: SessionFace,
++    text: string,
++    imageIds: readonly DraftAttachmentId[],
++    mode: InputSubmitMode,
++  ): Promise<void> {
++    const shell = this.shells.get(session.sessionId)
++    let prepared: ComposerSubmissionPreparation
++    try {
++      prepared = await this.submissionTransforms.prepare(session.sessionId, text)
++    } catch (error) {
++      // A preparation failure leaves the draft and attachments untouched.
++      shell?.notify('error', error instanceof Error ? error.message : String(error))
++      return
++    }
++    if (prepared.text === '' && imageIds.length === 0) return
++    // Commit only after every preparation guard has acknowledged its state.
++    shell?.commitSend(imageIds)
++    try {
++      await this.conversation().sendSession(session, prepared.text, imageIds, mode)
 +      prepared.accept?.()
-+    }).catch(() => {
++    } catch {
++      prepared.reject?.()
        if (this.shells.get(session.sessionId) === shell) {
          shell?.restoreImages(imageIds)
          if (shell?.snapshot.draft === '') shell.setDraft(text)
+         return
+       }
+       const conversation = this.rootCtx.get('conversation') as ConversationAttachmentFace | undefined
+       for (const id of imageIds) conversation?.releaseDraftImage(id)
+-    })
++    }
+   }
 diff --git a/packages/client/ui-conversation/src/client/input/submission-transforms.ts b/packages/client/ui-conversation/src/client/input/submission-transforms.ts
 new file mode 100644
 index 0000000..7f19b2e
 --- /dev/null
 +++ b/packages/client/ui-conversation/src/client/input/submission-transforms.ts
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,101 @@
 +import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 +import type { ObservableSnapshot, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 +
@@ -123,7 +155,7 @@ index 0000000..7f19b2e
 +  /** Stable registry key; duplicate keys are rejected. */
 +  readonly id: string
 +  /** Return the text that should enter the ordinary conversation send path. */
-+  prepare(sessionId: SessionId, text: string): ComposerSubmissionPreparation
++  prepare(sessionId: SessionId, text: string): ComposerSubmissionPreparation | Promise<ComposerSubmissionPreparation>
 +  /** A live session-scoped signal that this transform can turn an empty draft into a non-empty submission. */
 +  readonly emptySubmission?: (sessionId: SessionId) => ObservableSnapshot<boolean>
 +}
@@ -133,6 +165,8 @@ index 0000000..7f19b2e
 +  readonly text: string
 +  /** Runs only after the host has accepted the transformed prompt. */
 +  readonly accept?: () => void
++  /** Runs when the host rejects the transformed prompt after preparation. */
++  readonly reject?: () => void
 +}
 +
 +/** Registry for independently owned prompt enrichments at the composer boundary. */
@@ -187,17 +221,26 @@ index 0000000..7f19b2e
 +    }
 +  }
 +
-+  prepare(sessionId: SessionId, text: string): ComposerSubmissionPreparation {
++  async prepare(sessionId: SessionId, text: string): Promise<ComposerSubmissionPreparation> {
 +    let current = text
 +    const accepted: (() => void)[] = []
++    const rejected: (() => void)[] = []
 +    for (const transform of this.transforms.values()) {
-+      const next = transform.prepare(sessionId, current)
++      let next: ComposerSubmissionPreparation
++      try {
++        next = await transform.prepare(sessionId, current)
++      } catch (error) {
++        for (const reject of rejected.toReversed()) reject()
++        throw error
++      }
 +      current = next.text
 +      if (next.accept !== undefined) accepted.push(next.accept)
++      if (next.reject !== undefined) rejected.push(next.reject)
 +    }
 +    return {
 +      text: current,
 +      ...(accepted.length === 0 ? {} : { accept: () => { for (const acknowledge of accepted) acknowledge() } }),
++      ...(rejected.length === 0 ? {} : { reject: () => { for (const reject of rejected) reject() } }),
 +    }
 +  }
 +
@@ -210,22 +253,38 @@ new file mode 100644
 index 0000000..88a2025
 --- /dev/null
 +++ b/packages/client/ui-conversation/tests/submission-transforms.client.spec.ts
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,57 @@
 +import { describe, expect, it } from 'vitest'
 +import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 +import { ComposerSubmissionTransforms } from '../src/client/input/submission-transforms.ts'
 +
 +describe('ComposerSubmissionTransforms', () => {
-+  it('composes transforms in registration order and acknowledges only after acceptance', () => {
++  it('awaits transforms in registration order and acknowledges only after acceptance', async () => {
 +    const transforms = new ComposerSubmissionTransforms()
 +    const accepted: string[] = []
 +    transforms.register({ id: 'first', prepare: (_session, text) => ({ text: `${text} A`, accept: () => { accepted.push('first') } }) })
 +    transforms.register({ id: 'second', prepare: (_session, text) => ({ text: `${text} B`, accept: () => { accepted.push('second') } }) })
-+    const prepared = transforms.prepare('session-1' as never, 'prompt')
++    const prepared = await transforms.prepare('session-1' as never, 'prompt')
 +    expect(prepared.text).toBe('prompt A B')
 +    expect(accepted).toEqual([])
 +    prepared.accept?.()
 +    expect(accepted).toEqual(['first', 'second'])
++  })
++
++  it('does not resolve preparation until an async guard has acknowledged', async () => {
++    const transforms = new ComposerSubmissionTransforms()
++    let release: (() => void) | undefined
++    transforms.register({ id: 'guard', prepare: async (_session, text) => {
++      await new Promise<void>(resolve => { release = resolve })
++      return { text: `${text} guarded` }
++    } })
++    const preparation = transforms.prepare('session-1' as never, 'prompt')
++    let settled = false
++    void preparation.then(() => { settled = true })
++    await Promise.resolve()
++    expect(settled).toBe(false)
++    release?.()
++    await expect(preparation).resolves.toMatchObject({ text: 'prompt guarded' })
 +  })
 +
 +  it('rejects duplicate transform identities', () => {

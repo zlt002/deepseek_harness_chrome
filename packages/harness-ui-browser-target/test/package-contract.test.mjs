@@ -54,12 +54,34 @@ test('declares every client context service it reads', async () => {
   const inject = [...declared.matchAll(/['"]([^'"]+)['"]/g)].map(match => match[1])
   const directServices = [...client.matchAll(/\bctx\.([A-Za-z_$][\w$]*)/g)]
     .map(match => match[1])
-    .filter(name => !['effect', 'get'].includes(name))
+    .filter(name => !['effect', 'get', 'on'].includes(name))
   const getServices = [...client.matchAll(/\bctx\.get\(['"]([^'"]+)['"]\)/g)].map(match => match[1])
   for (const service of new Set([...directServices, ...getServices])) {
     assert.ok(inject.includes(service), `ctx.${service} is read but missing from export const inject`)
   }
   assert.match(manifest, /"inject"\s*:/)
+})
+
+test('awaits the follow-mode lock acknowledgement, preserves accepted locks across surface disposal, then reconciles every idle session', async () => {
+  const [client, runLock] = await Promise.all([source('src/client/index.ts'), source('src/client/session-run-lock.ts')])
+  assert.match(client, /'composerSubmissionTransforms'/)
+  assert.match(client, /id: 'browser-target-run-lock'/)
+  assert.match(client, /prepare: async/)
+  assert.match(client, /targetSnapshot\?\.settings\.mode === 'follow-active-tab' && targetSnapshot\.activeTab !== undefined/)
+  assert.match(client, /type: 'browser-target-lock\/v1'/)
+  assert.match(client, /browser-target-lock-ack\/v1/)
+  assert.match(client, /submissionId/)
+  assert.match(client, /pendingLockAcks/)
+  assert.match(client, /new BrowserTargetSessionRunLock\(lock\.submissionId\)/)
+  assert.match(runLock, /accepted = false/)
+  assert.match(runLock, /observedRunning = false/)
+  assert.match(runLock, /this\.accepted && this\.observedRunning && !snapshot\.running && snapshot\.queue\.length === 0/)
+  assert.match(client, /if \(!lock\.state\.accepted\) postUnlock\(sessionId, lock\.state\.submissionId\)/)
+  assert.match(client, /const sessionIds = ctx\.sessions\.list\.getSnapshot\(\)\.ids/)
+  assert.match(client, /sessionSubscriptions\.set\(id, session\.subscribe\(onSnapshot\)\)/)
+  assert.match(client, /browser-target-reconcile\/v1/)
+  assert.match(client, /type: 'browser-target-unlock\/v1'/)
+  assert.match(client, /Browser Target locking was cancelled because the Harness surface closed/)
 })
 
 test('Browser Target DOM and surface geometry match the e327 reference', async () => {
@@ -70,6 +92,7 @@ test('Browser Target DOM and surface geometry match the e327 reference', async (
 
   assert.equal(control.match(/data-browser-target-control data-composer-overlay-trigger/g)?.length, 2)
   assert.match(control, /role="radiogroup" aria-label="工作目标模式"/)
+  assert.match(control, /发送后，本次运行会固定发送瞬间的 Browser Target；运行结束后恢复跟随。/)
   assert.match(control, /command: 'toggle-pinned-tab'/)
   assert.match(control, /command: 'set-primary'/)
   assert.match(styles, /\.trigger\s*\{[^}]*position:\s*relative[^}]*width:\s*28px[^}]*border:\s*1px solid[^}]*border-radius:\s*50%/s)

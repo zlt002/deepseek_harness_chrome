@@ -91,7 +91,15 @@ test('account, gateway, and onboarding styles use the settings design tokens', a
   assert.match(css, /\.heading \{[^}]*align-items: center;/)
   assert.match(css, /\.accountName \{ font-size: 14px; line-height: 22px; font-weight: 500; \}/)
   assert.match(css, /\.modelCatalog \{[^}]*overflow-y: auto;[^}]*--dsh-scrollbar-thumb: var\(--dsw-alias-scrollbar-bg-l2\);/)
-  assert.match(css, /\.modelAdvanced \{[^}]*display: grid;[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\);/)
+  // Match the custom-provider catalog: ID and display name stay in one compact
+  // row, while the two numeric capacities remain in the disclosure and the
+  // image capability does not become a competing third field.
+  assert.match(css, /\.modelCatalogRow \{[^}]*display: grid;[^}]*grid-template-columns: minmax\(0, 1\.4fr\) minmax\(0, 1fr\) auto auto;/)
+  assert.match(css, /\.modelAdvanced \{[^}]*display: grid;[^}]*grid-template-columns: repeat\(auto-fit, minmax\(160px, 1fr\)\);/)
+  assert.match(css, /\.modelCheck \{[^}]*grid-column: 1 \/ -1;/)
+  assert.match(css, /@media \(max-width: 480px\)[\s\S]*?\.modelCatalogRow \{ grid-template-columns: minmax\(0, 1\.4fr\) minmax\(0, 1fr\) auto auto; \}/)
+  assert.doesNotMatch(css, /@media \(max-width: 480px\)[\s\S]*?\.modelCatalogRow \.modelInput:nth-child\(2\) \{ grid-column: 1; \}/)
+  assert.doesNotMatch(css, /@media \(max-width: 480px\)[\s\S]*?\.modelDetailsButton \{ grid-column: 2; grid-row: 1 \/ span 2; \}/)
   assert.match(css, /@media \(max-width: 480px\)[\s\S]*?\.modelAdvanced \{ grid-template-columns: minmax\(0, 1fr\); \}/)
   assert.match(css, /:focus-visible[^}]*box-shadow: 0 0 0 2px var\(--dsw-alias-border-l3\)/)
 })

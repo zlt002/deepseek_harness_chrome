@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile, chmod } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { ACCRUI_CONNECTOR_STATE_DIRECTORY } from './product-runtime-identity.mjs'
 
 const ITEM_STATUSES = ['pending', 'creating', 'created', 'failed']
 
 export function resolveTeamKnowledgeBatchStatePath(environment = process.env) {
-  const root = environment.DSH_CONNECTOR_STATE_DIR
-    || join(homedir(), 'Library', 'Application Support', 'DeepSeek Harness Chrome', 'connector-state')
+  const root = environment.ACCRUI_CONNECTOR_STATE_DIR
+    || join(environment.HOME ?? '', 'Library', 'Application Support', 'accr-ui-harness', ACCRUI_CONNECTOR_STATE_DIRECTORY)
   return join(root, 'team-knowledge-batch-records.json')
 }
 

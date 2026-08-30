@@ -4,7 +4,7 @@ index f7350076c2..fee155524f 100644
 +++ b/packages/client/ui-agent-preset/src/client/AgentPresetSeat.tsx
 @@ -13,8 +13,9 @@
   */
- 
+
  import { useEffect, useState } from 'react'
 +import type { ReactNode } from 'react'
  import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
@@ -16,7 +16,7 @@ index f7350076c2..fee155524f 100644
 @@ -22,6 +23,26 @@ import type { AgentPresetSeatState } from './seat-store.ts'
  import { presetDisplayText } from './locales.ts'
  import css from './AgentPresetSeat.module.css'
- 
+
 +export interface AgentPresetPresentationOption { id: string; name: string; description: string }
 +/** Presentation-only currency; loading/staging/session adoption stays with AgentPresetSeat. */
 +export interface AgentPresetPresentationOwnerProps {
@@ -47,7 +47,7 @@ index f7350076c2..fee155524f 100644
 +  & PropsRenderSlots<'agent-preset.presentation'>
    & PropsLocale<'settings.agentPreset'>
    & InjectFace<AgentPresetSeatInjected>
- 
+
 +/** The upstream presentation remains the exact fallback when no product renderer is registered. */
 +function OfficialAgentPresetPresentation({ owner }: { owner: AgentPresetPresentationOwnerProps }) {
 +  const [open, setOpen] = useState(false)
@@ -81,13 +81,13 @@ index f7350076c2..fee155524f 100644
 +export function AgentPresetSeat({ load, select, introduced, useAgentPresetSeat, renderSlotChain, t }: AgentPresetSeatProps) {
    const state = useAgentPresetSeat(snapshot => snapshot)
 -  const [open, setOpen] = useState(false)
- 
+
    useEffect(() => {
      void load()
 @@ -125,46 +167,13 @@ export function AgentPresetSeat({ load, select, introduced, useAgentPresetSeat,
      )
      : label
- 
+
 -  return (
 -    <Menu
 -      open={open}
@@ -145,7 +145,7 @@ index f327479660..0b258a65da 100644
 --- a/packages/client/ui-agent-preset/src/client/index.ts
 +++ b/packages/client/ui-agent-preset/src/client/index.ts
 @@ -36,7 +36,7 @@ import { AGENT_PRESET_SETTINGS_NS, AgentPresetSettingsController } from './setti
- 
+
  export type { AgentPresetLabelInjected, AgentPresetLabelProps } from './AgentPresetLabel.tsx'
  export type { AgentPresetRowInjected, AgentPresetRowProps } from './AgentPresetRow.tsx'
 -export type { AgentPresetSeatInjected, AgentPresetSeatProps } from './AgentPresetSeat.tsx'
@@ -178,7 +178,7 @@ index 0c29175a60..e82cb0696f 100644
 @@ -209,6 +212,19 @@ describe('the new-session chip', () => {
      expect(screen.getByRole('button').getAttribute('title')).toBe(en.seatHint)
    })
- 
+
 +  it('offers the presentation seam while keeping the official menu as its fallback', () => {
 +    const actions = renderSeat()
 +
@@ -194,13 +194,13 @@ index 0c29175a60..e82cb0696f 100644
 +
    it('offers each preset with what it is for', () => {
      renderSeat()
- 
+
 diff --git a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
 index 90e3be7d97..b87799b48a 100644
 --- a/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
 +++ b/packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx
 @@ -4,6 +4,7 @@
- 
+
  import { useCallback, useEffect, useRef, useState } from 'react'
  import clsx from 'clsx'
 +import { ComposerOverlayProvider, ComposerOverlaySurface } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -209,7 +209,7 @@ index 90e3be7d97..b87799b48a 100644
  import { HeroGlow, HeroShell, WorkspaceChip, workspaceLabel } from './EmptyHero.tsx'
 @@ -158,14 +159,17 @@ export function ConversationRoot({
    })
- 
+
    const composerBar = (
 -    <div className={clsx(css.composerStack, hero && css.composerHero)}>
 +    <ComposerOverlayProvider>
@@ -225,7 +225,7 @@ index 90e3be7d97..b87799b48a 100644
 +      </div>
 +    </ComposerOverlayProvider>
    )
- 
+
    const phase = settling ? 'settling' : hero ? 'hero' : 'active'
 diff --git a/packages/client/ui-primitives/src/ComposerOverlay.tsx b/packages/client/ui-primitives/src/ComposerOverlay.tsx
 new file mode 100644

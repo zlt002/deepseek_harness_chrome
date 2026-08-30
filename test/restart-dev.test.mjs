@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { devServerCommand, extensionIdsFromManifest, extensionIdsFromManifests, harnessBuildSteps, isGracefulProcessTermination, processTree } from '../scripts/restart-dev.mjs'
+import { ACCRUI_CONNECTOR_TMP_PREFIX } from '../apps/native-server/src/product-runtime-identity.mjs'
 
 test('fast refresh reuses its completed plugin and asset build when starting WXT', () => {
   assert.deepEqual(devServerCommand(true), { command: 'pnpm', args: ['--dir', 'apps/chrome-extension', 'run', 'dev'] })
@@ -53,13 +54,17 @@ test('deduplicates extension ids collected from Chrome and Edge manifests', () =
 
 test('selects only the installed Native Host and its descendants', () => {
   const processes = [
-    { pid: 10, ppid: 1, command: 'node /Application Support/DeepSeekHarness/native-server/bin.mjs' },
+    { pid: 10, ppid: 1, command: 'node /Application Support/accr-ui-harness/native-server/bin.mjs' },
     { pid: 11, ppid: 10, command: 'node deepseek-harness/apps/cli/lib/bin.js' },
     { pid: 12, ppid: 11, command: 'helper' },
     { pid: 20, ppid: 1, command: 'node unrelated-server.mjs' },
   ]
   assert.deepEqual(
-    processTree(processes, '/Application Support/DeepSeekHarness/native-server/bin.mjs').map(({ pid }) => pid),
+    processTree(processes, '/Application Support/accr-ui-harness/native-server/bin.mjs').map(({ pid }) => pid),
     [11, 12, 10],
   )
+})
+
+test('uses an AccrUI-only connector marker for orphan cleanup', () => {
+  assert.equal(ACCRUI_CONNECTOR_TMP_PREFIX, 'accrui-harness-connector-')
 })

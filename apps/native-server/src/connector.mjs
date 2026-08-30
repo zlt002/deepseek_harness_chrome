@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
@@ -113,7 +115,52 @@ function validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowser
 function validHtmlWorkbenchPreviewArguments(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && validEdits(value.edits) }
 function validHtmlWorkbenchCommitArguments(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && typeof value.challenge === 'string' && value.challenge.length > 0 && value.challenge.length <= 256 }
 function validHtmlWorkbenchDomFingerprint(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value) }
-
+function validHtmlWorkbenchStylesheetFingerprints(value) {
+  return Array.isArray(value) && value.length <= 20 && value.every(item => item && typeof item === 'object' && !Array.isArray(item)
+    && Object.keys(item).length === 2 && typeof item.url === 'string' && item.url.startsWith('file:') && /^[a-f0-9]{64}$/i.test(item.fingerprint))
+}
+function cssPropertyName(name) { return name.replace(/-([a-z])/g, (_, character) => character.toUpperCase()) }
+function cssDeclarationMultiset(content) {
+  const declarations = new Map()
+  for (const block of content.matchAll(/\{([^}]*)\}/g)) {
+    for (const declaration of block[1].matchAll(/(?:^|;)\s*([a-zA-Z][a-zA-Z0-9-]*)\s*:\s*([^;{}]+?)\s*(?=;|$)/g)) {
+      const property = cssPropertyName(declaration[1])
+      const values = declarations.get(property) ?? []
+      values.push(declaration[2].replace(/\s+/g, ' ').trim())
+      declarations.set(property, values)
+    }
+  }
+  for (const values of declarations.values()) values.sort()
+  return declarations
+}
+function editedComputedProperties(edits, anchorStates) {
+  const available = new Set(Array.isArray(anchorStates) ? anchorStates.flatMap(item => item?.computedStyle && typeof item.computedStyle === 'object' ? Object.keys(item.computedStyle) : []) : [])
+  const properties = new Set()
+  for (const edit of edits) {
+    if (!edit.path.toLowerCase().endsWith('.css')) continue
+    const before = cssDeclarationMultiset(edit.before)
+    const after = cssDeclarationMultiset(edit.content)
+    for (const property of new Set([...before.keys(), ...after.keys()])) {
+      if (available.has(property) && JSON.stringify(before.get(property) ?? []) !== JSON.stringify(after.get(property) ?? [])) properties.add(property)
+    }
+  }
+  return [...properties].sort()
+}
+function sameHtmlWorkbenchStylesheetFingerprints(actual, expected) {
+  return validHtmlWorkbenchStylesheetFingerprints(actual) && actual.length === expected.length
+    && actual.every((item, index) => item.url === expected[index].url && item.fingerprint === expected[index].fingerprint)
+}
+function validHtmlWorkbenchAnchorStates(value, expectedSelectors, expectedProperties = []) {
+  return Array.isArray(value) && value.length === expectedSelectors.length && value.every((item, index) => item && typeof item === 'object' && !Array.isArray(item)
+    && Object.keys(item).length === 2 && item.selector === expectedSelectors[index]
+    && item.computedStyle && typeof item.computedStyle === 'object' && !Array.isArray(item.computedStyle)
+    && Object.keys(item.computedStyle).length > 0 && Object.values(item.computedStyle).every(field => typeof field === 'string')
+    && expectedProperties.every(field => typeof item.computedStyle[field] === 'string'))
+}
+function sameHtmlWorkbenchAnchorStates(actual, expected, properties) {
+  return Array.isArray(actual) && Array.isArray(expected) && actual.length === expected.length && actual.every((item, index) => item.selector === expected[index].selector
+    && properties.every(field => item.computedStyle[field] === expected[index].computedStyle[field]))
+}
 function validOfficeDocumentIdentity(value) {
   if (value === null) return true
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -1296,7 +1343,7 @@ async function readJson(request) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, officeRequestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, officeRequestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, reportPrdEvent?: (event: object) => Promise<unknown> | unknown, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
@@ -1305,6 +1352,7 @@ export class BrowserConnector {
     this.knowledgeRequestTimeoutMs = options.knowledgeRequestTimeoutMs ?? KNOWLEDGE_REQUEST_TIMEOUT_MS
     this.knowledgeCatalogTimeoutMs = options.knowledgeCatalogTimeoutMs ?? KNOWLEDGE_CATALOG_TIMEOUT_MS
     this.onToolsListed = options.onToolsListed
+    this.reportPrdEvent = options.reportPrdEvent ?? (() => undefined)
     // Undici's default bodyTimeout is 300s. A repo-search SSE often stays
     // quiet while the upstream Explore agents run, which looks like "fetch
     // failed" at ~5 minutes. AccrUI uses Chrome fetch and has no such cut.
@@ -2135,8 +2183,12 @@ export class BrowserConnector {
       try {
         const inspected = await send('read'); if (!validHtmlWorkbenchDomFingerprint(inspected.result.domFingerprint)) throw new Error('Extension peer did not return a valid local HTML DOM state fingerprint.')
         const preview = await previewEdits(browserTarget.url, args.edits, inspected.result.selections)
+        const cssEdit = preview.edits.some(edit => edit.path.toLowerCase().endsWith('.css'))
+        const anchorSelectors = Array.isArray(inspected.result.selections) ? inspected.result.selections.map(anchor => anchor?.selector).filter(selector => typeof selector === 'string' && selector.length > 0 && selector.length <= 2_000) : []
+        if (cssEdit && (!validHtmlWorkbenchAnchorStates(inspected.result.anchorStates, anchorSelectors) || anchorSelectors.length === 0)) throw new Error('HTML Workbench CSS edits require at least one selected DOM anchor with computed-style preflight evidence.')
+        const computedProperties = cssEdit ? editedComputedProperties(preview.edits, inspected.result.anchorStates) : []
         const challenge = randomBytes(32).toString('base64url')
-        this.htmlWorkbenchChallenges.set(challenge, { runId, generation: this.generation, browserTarget, domFingerprint: inspected.result.domFingerprint, url: preview.snapshot.url, edits: preview.edits, editFingerprint: preview.editFingerprint, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        this.htmlWorkbenchChallenges.set(challenge, { runId, generation: this.generation, browserTarget, domFingerprint: inspected.result.domFingerprint, url: preview.snapshot.url, edits: preview.edits, editFingerprint: preview.editFingerprint, anchorStates: cssEdit ? inspected.result.anchorStates : [], computedProperties, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
         const result = { runId, browserTarget, resource: { kind: 'local_html', url: preview.snapshot.url, fingerprint: preview.snapshot.fingerprint }, diff: preview.diff, challenge, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS }
         this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
       } catch (error) { this.#toolError(response, message.id, error instanceof Error ? error.message : 'HTML Workbench preview failed') }
@@ -2149,6 +2201,9 @@ export class BrowserConnector {
     try {
       const preflight = await send('preflight')
       if (!validHtmlWorkbenchDomFingerprint(preflight.result.domFingerprint) || preflight.result.domFingerprint !== grant.domFingerprint) throw new Error('fingerprint_mismatch: The Browser Target page changed before the approved write; no file was written.')
+      const cssEdit = grant.edits.some(edit => edit.path.toLowerCase().endsWith('.css'))
+      const expectedAnchorSelectors = grant.anchorStates.map(item => item.selector)
+      if (cssEdit && (!validHtmlWorkbenchAnchorStates(preflight.result.anchorStates, expectedAnchorSelectors, grant.computedProperties) || expectedAnchorSelectors.length === 0 || !sameHtmlWorkbenchAnchorStates(preflight.result.anchorStates, grant.anchorStates, grant.computedProperties))) throw new Error('fingerprint_mismatch: Selected DOM anchor computed styles changed before the approved CSS write; no file was written.')
       for (const edit of grant.edits) {
         const current = await readWorkspace(grant.url); const file = edit.absolute === current.htmlPath ? current.html : current.stylesheets.find(item => edit.absolute.endsWith(item.path))?.content
         if (file === undefined || htmlFingerprint(file) !== edit.beforeFingerprint) throw new Error('fingerprint_mismatch: A local HTML/CSS file changed before the approved write; no file was written.')
@@ -2158,8 +2213,11 @@ export class BrowserConnector {
       const persisted = await Promise.all(grant.edits.map(async edit => ({ edit, content: await readFile(edit.absolute, 'utf8') })))
       if (persisted.some(item => item.content !== item.edit.content)) throw new Error('readback_mismatch: A persisted local HTML/CSS file does not exactly match the approved content.')
       const expectedSourceFingerprint = htmlFingerprint(disk.html)
-      const readback = await send('refresh_readback', { expectedSourceFingerprint })
-      if (readback.result.verified !== true || readback.result.url !== disk.url || readback.result.sourceFingerprint !== expectedSourceFingerprint) throw new Error(`readback_mismatch: ${String(readback.result.error ?? 'same-target page did not load the exact committed HTML source')}`)
+      const expectedStylesheets = disk.stylesheets.map(item => ({ url: pathToFileURL(resolve(disk.root, item.path)).href, fingerprint: htmlFingerprint(item.content) }))
+      const readback = await send('refresh_readback', { expectedSourceFingerprint, expectedStylesheets, expectedAnchorSelectors })
+      if (readback.result.verified !== true || readback.result.url !== disk.url || readback.result.sourceFingerprint !== expectedSourceFingerprint
+        || !sameHtmlWorkbenchStylesheetFingerprints(readback.result.stylesheetFingerprints, expectedStylesheets)
+        || !validHtmlWorkbenchAnchorStates(readback.result.anchorStates, expectedAnchorSelectors, grant.computedProperties)) throw new Error(`readback_mismatch: ${String(readback.result.error ?? 'same-target page did not load the exact committed HTML/CSS source and selected DOM state')}`)
       const result = { status: 'verified_write', runId, browserTarget: readback.browserTarget, resource: { kind: 'local_html', url: disk.url, fingerprint: disk.fingerprint }, files: persisted.map(item => ({ path: item.edit.path, fingerprint: htmlFingerprint(item.content) })), pageReadback: readback.result }
       this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result } })
     } catch (error) { this.#toolError(response, message.id, `uncertain: ${error instanceof Error ? error.message : String(error)}`) } finally { release?.(); if (this.htmlWorkbenchWriteLocks.get(key) === queued) this.htmlWorkbenchWriteLocks.delete(key) }
@@ -2311,6 +2369,7 @@ export class BrowserConnector {
       return
     }
     const currentBinding = this.runTargets.current(); const runId = currentBinding?.runId; const target = currentBinding?.browserTarget
+    const identity = harnessIdentity(message)
     if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
     const existingBatch = await this.teamKnowledgeBatchStore.load(args.batchId)
     const lease = existingBatch && existingBatch.status !== 'completed' ? 'reuse' : 'acquire'
@@ -2388,6 +2447,15 @@ export class BrowserConnector {
             if (itemResult.status === 'verified_write' && !validVerifiedTeamKnowledgeBatchItem(itemResult, document)) throw new Error('Extension peer verified the wrong Team Knowledge batch item')
             await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
             await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: itemResult.status === 'verified_write' ? 'created' : 'failed', catalogId: itemResult.item?.catalogId ?? null, stages: itemResult.stages, error: itemResult.status === 'verified_write' ? null : itemResult.error })
+            if (args.batchId.startsWith('pmd:') && itemResult.status === 'verified_write') {
+              void Promise.resolve(this.reportPrdEvent({
+                eventId: `document:${hash(args.batchId).slice(0, 48)}:${String(item.index)}:${itemResult.item.catalogId}`,
+                eventType: 'document_published', outcome: 'succeeded', occurredAt: new Date().toISOString(),
+                ...(identity === undefined ? {} : { sessionId: identity.parentSessionId ?? identity.sessionId }),
+                runId, batchId: args.batchId, itemIndex: item.index,
+                documentName: itemResult.item.name, documentCatalogId: itemResult.item.catalogId, documentUrl: itemResult.item.url,
+              })).catch(() => {})
+            }
             if (itemResult.status === 'partial_delivery' && itemResult.failedAt === 'confirmation') break
           } catch (error) {
             await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: 'failed', error: error instanceof Error ? error.message : 'Team Knowledge batch item creation failed' })

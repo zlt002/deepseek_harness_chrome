@@ -6,6 +6,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
 import type { SearchProgress } from './bridge.ts'
+import { friendlySearchError } from './error-message.js'
 import css from './RemoteSearchToolRow.module.css'
 
 interface RemoteSearchToolInjected {
@@ -23,17 +24,6 @@ function latestLine(text: string): string {
   const visible = text.trimEnd()
   const newline = visible.lastIndexOf('\n')
   return newline === -1 ? visible : visible.slice(newline + 1)
-}
-
-function friendlySearchError(text: string): string {
-  if (text.includes('knowledge_scope_requires_domain') || text.includes('没有选择知识范围')) return '还没选择知识范围，请先点「选择知识范围」'
-  if (text.includes('knowledge_scope_requires_repository') || text.includes('没有选择远程代码库')) return '还没选择代码库，请先点「选择代码库」'
-  if (text.includes('knowledge_query_disabled') || text.includes('知识查询开关已关闭')) return '知识查询开关已关闭'
-  if (text.includes('knowledge_scope_missing') || text.includes('还没有知识/代码范围记录')) return '当前会话还没有选择远程范围'
-  if (text.includes('knowledge_login_required')) return '知识库登录已失效，请重新登录'
-  if (text.includes('空闲超时') || text.includes('UND_ERR_BODY_TIMEOUT')) return '远程检索流因空闲超时中断，请重试一次'
-  if (text.includes('网络传输中断') || text.includes('fetch failed') || text.includes('Failed to fetch')) return '远程检索流中断，请重试一次'
-  return text.replace(/^Error:\s*/u, '')
 }
 
 function waitingSummary(kind: 'code_search' | 'knowledge_search', eventType: string | undefined, seconds: number, process?: string): string {

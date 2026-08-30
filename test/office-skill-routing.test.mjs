@@ -51,6 +51,6 @@ test('PPTX skill routes online presentations through model-facing tools and loca
   assert.match(source, /Show the preview to the user and wait for explicit confirmation|展示给用户并等待明确确认/)
   assert.match(source, /presentation_write_commit\(\{ challenge \}\)/)
   assert.match(source, /same-target structured readback/)
-  assert.match(source, /local `\.pptx`\/`\.potx`|本地 `\.pptx`/) 
+  assert.match(source, /local `\.pptx`\/`\.potx`|本地 `\.pptx`/)
   assert.match(source, /OOXML.*pptxgenjs|OOXML\/pptxgenjs/)
 })

@@ -18,7 +18,7 @@ diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/clie
 @@ -76,6 +76,20 @@
    subscribe: () => () => {},
  }
- 
+
 +const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 +const IMAGE_NAME_PATTERN = /\.(?:png|jpe?g|webp|gif)$/i
 +
@@ -64,7 +64,7 @@ diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/pack
 +++ b/packages/client/ui-conversation/src/client/contract/slots.ts
 @@ -285,6 +285,21 @@
  }
- 
+
  /**
 + * Optional paste/drop remainder for files the official image rail will not
 + * admit. The composer calls this synchronously from addImages and keeps the

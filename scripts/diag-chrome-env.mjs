@@ -1,6 +1,10 @@
 // 用接近 Chrome 启动 native host 的精简环境启动 launcher，发 start，看能否复现 "host exited"
 import { spawn } from 'node:child_process'
-const launcher = '/Users/zhanglt21/Desktop/accrnew/deepseek_harness_chrome/native-host/com.deepseek.harness.chrome'
+import { ACCRUI_INSTALL_DIRECTORY, ACCRUI_NATIVE_HOST_NAME } from '../apps/native-server/src/product-runtime-identity.mjs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+const launcher = process.env.ACCRUI_NATIVE_LAUNCHER?.trim()
+  || join(homedir(), 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY, ACCRUI_NATIVE_HOST_NAME)
 const chromeLikeEnv = {
   HOME: process.env.HOME,
   PATH: '/usr/bin:/bin:/usr/sbin:/sbin',

@@ -109,8 +109,12 @@ test('scope pickers use the shared upward overlay and preserve the accepted e327
   assert.match(sidepanel, /knowledgeRequestSequenceBySessionRef\.current\.set\(value\.sessionId, value\.sequence\)/)
 })
 
-test('background preserves a saved V1 domain and serializes selected systems by category for retrieval', async () => {
-  const background = await readFile(new URL('../../../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+test('background preserves a saved V1 domain and delegates retrieval serialization to the transport seam', async () => {
+  const [background, transport] = await Promise.all([
+    readFile(new URL('../../../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../../../apps/chrome-extension/entrypoints/background/knowledge-transport.ts', import.meta.url), 'utf8'),
+  ])
   assert.match(background, /scope\.domainId === '' \|\| scope\.systemIds\.length === 0 \? \{\} : \{ \[scope\.domainId\]: \[\.\.\.new Set\(scope\.systemIds\)\] \}/)
-  assert.match(background, /Object\.entries\(scope\.domainSystems\)\.map\(\(\[domainId, systems\]\) => \[domainId, \{ self: false, systems \}\]\)/)
+  assert.match(background, /knowledgeTransport\.query\(\{ kind, question: request\.question\.trim\(\), scope/)
+  assert.match(transport, /domain_system_config: Object\.fromEntries\(Object\.entries\(scope\.domainSystems\)\.map\(\(\[domainId, systems\]\) => \[domainId, \{ self: false, systems \}\]\)\)/)
 })

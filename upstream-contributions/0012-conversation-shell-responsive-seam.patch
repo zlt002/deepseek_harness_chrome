@@ -14,7 +14,7 @@ index 0db8080..585261a 100644
  import { ComposerBlockRegistry } from './input/blocks.ts'
 @@ -129,7 +130,10 @@ export function apply(ctx: Context): void {
    const t = ctx.locale.bind(NS)
- 
+
    // Apply-time construction keeps store identity bound to this fiber.
 -  const chatStore = createChatStore()
 +  const conversationViewState = new ConversationViewState()
@@ -47,7 +47,7 @@ index 0db8080..585261a 100644
 +      }
 +    },
    }, ConversationSessionHeader)
- 
+
    // The default composer body: its own single slot inside the composer
 diff --git a/packages/client/ui-conversation/src/client/chat/ChatView.tsx b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
 index 58e63b3..dea9d46 100644
@@ -111,7 +111,7 @@ index 7e4d7b9..19009f3 100644
 @@ -567,6 +569,15 @@ export interface ComposerChainProps {
    session: ConversationSnapshot | undefined
  }
- 
+
 +/** Product-safe presentation owner: official code retains session/input state. */
 +export interface ConversationPresentationOwnerProps {
 +  phase: 'settling' | 'hero' | 'active'
@@ -141,7 +141,7 @@ index 0574aa8..52797b4 100644
  export type { IConversation } from './service.ts'
  export type { DraftAttachmentId } from './input/contract.ts'
 +export { ConversationViewState } from './view-state.ts'
- 
+
  export type {
    CallId, ChatStoreState, SelectionTarget, ViewTab,
 @@ -32,7 +33,7 @@ export type {
@@ -167,7 +167,7 @@ index b6b6246..7505b12 100644
 +++ b/packages/client/ui-conversation/src/client/skeleton/ContextMeter.tsx
 @@ -5,13 +5,15 @@
   * capacity. */
- 
+
  import { useEffect, useRef, useState } from 'react'
 +import type { ReactNode } from 'react'
  import type { UseProjection } from '@deepseek-ai/dsh-client-runtime/client'
@@ -179,11 +179,11 @@ index b6b6246..7505b12 100644
  import { contextOccupancy, formatTokens } from '../chat/StatsLine.tsx'
  import css from './ContextMeter.module.css'
 +import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
- 
+
  /** Ring geometry: 14px viewBox, 2px stroke. */
  const RADIUS = 5.5
 @@ -33,17 +35,46 @@ const ROWS = [
- 
+
  export interface ContextMeterProps {
    useProjection: UseProjection
 +  /** Session statistics formerly rendered as the standalone footer band. */
@@ -191,7 +191,7 @@ index b6b6246..7505b12 100644
    /** The owning bar's locale seat, passed down as a plain prop. */
    t: ComposerBarProps['t']
  }
- 
+
 -export function ContextMeter({ useProjection, t }: ContextMeterProps) {
 +function ContextPanel({ reading, headBefore, headAfter, context, segments, breakdown, stats, t }: {
 +  reading: string
@@ -227,7 +227,7 @@ index b6b6246..7505b12 100644
    const context = contextOccupancy(pressure)
    const available = context !== null
 +  const hosted = useComposerOverlay('context-usage')
- 
+
    // A model switch can temporarily remove capacity while this component stays
    // mounted. Close the now-unavailable panel instead of preserving stale UI.
 @@ -87,17 +118,21 @@ export function ContextMeter({ useProjection, t }: ContextMeterProps) {
@@ -236,7 +236,7 @@ index b6b6246..7505b12 100644
    const segments = parts.filter(part => part.width > 0)
 +  const panel = <ContextPanel reading={reading} headBefore={headBefore} headAfter={headAfter} context={context} segments={segments} breakdown={breakdown} stats={stats} t={t} />
 +  const panelOpen = hosted.available ? hosted.open : open
- 
+
    return (
      <span ref={rootRef} className={css.root}>
 -      <Tooltip label={t('context.aria', { percent: reading })} side="top" delayMs={200} disabled={open}>
@@ -306,7 +306,7 @@ index 2463165..72382ff 100644
 @@ -2,20 +2,33 @@
  // chain, AND the composer bar (session-maybe slot) stay mounted across
  // no-session/session transitions — the bar renders inert via owner props.
- 
+
 -import { useCallback, useEffect, useRef, useState } from 'react'
 +import { useCallback, useRef } from 'react'
  import clsx from 'clsx'
@@ -317,10 +317,10 @@ index 2463165..72382ff 100644
 +import type { ConversationPresentationOwnerProps, ConversationSlotProps, InputZone } from '../contract/slots.ts'
 +import { HeroGlow, HeroShell, workspaceLabel } from './EmptyHero.tsx'
  import css from './ConversationRoot.module.css'
- 
+
  /** Full props composed from the slot contract. */
  export type ConversationRootProps = ConversationSlotProps
- 
+
 +/** Stock fallback; product plugins may replace only the composition. */
 +export function DefaultConversationPresentation({
 +  phase, renderHeader, renderHero, renderSession, renderComposer,
@@ -345,7 +345,7 @@ index 2463165..72382ff 100644
 @@ -29,22 +42,17 @@ export function ConversationRoot({
    // send; its reason is already localized by whoever raised it.
    const composerBlock = useComposerBlock(block => block)
- 
+
 -  const [pickerOpen, setPickerOpen] = useState(false)
 -  const [pendingWorkspaceId, setPendingWorkspaceId] = useState<WorkspaceId | undefined>()
 -  const pickerAnchor = useRef<HTMLButtonElement>(null)
@@ -431,7 +431,7 @@ index 2463165..72382ff 100644
 -    </div>
 -  )
 +          : workspaceLabel(cwd))
- 
+
    // The placeholder chip ("Choose workspace") and the Workspace-trigger input travel
    // together: no workspace picked yet (cold start, no session at all), or a
 @@ -140,8 +107,6 @@ export function ConversationRoot({
@@ -474,7 +474,7 @@ index 2463165..72382ff 100644
 @@ -178,23 +141,23 @@ export function ConversationRoot({
      { fallback: composerBar, overlay: true },
    )
- 
+
 -  // Sticky wraps the whole chain output (fallback + elected overlay), not
 -  // only `.composerStack`: overlay:true renders those as siblings, and sticky
 -  // on the fallback alone would leave Question/Approval panels at the content
@@ -487,7 +487,7 @@ index 2463165..72382ff 100644
        {composer}
      </div>
    )
- 
+
 -  return (
 -    <div className={css.root} data-phase={phase}>
 -      {renderSlot('conversation.session.header', {})}
@@ -542,7 +542,7 @@ index 9585677..0e0158e 100644
      ? null
 -    : <PermissionSelect key={sessionId} value={permissions} locked={locked} command={command} t={t} />
 +    : <PermissionSelect key={sessionId} value={permissions} locked={locked} command={command} compact={variant === 'hero'} t={t} />
- 
+
    // Mirror-layer decorations: a visible backdrop with transparent text. The
    // claim token highlights through behind the textarea glyphs; each U+FFFC
 @@ -674,7 +674,6 @@ export function InputBar({
@@ -592,9 +592,9 @@ index 5230f59..cfc4108 100644
  import type { ComposerBarProps } from '../contract/slots.ts'
  import css from './PermissionSelect.module.css'
 +import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
- 
+
  const FULL_ACCESS = 'danger-full-access'
- 
+
 @@ -65,11 +66,13 @@ export interface PermissionSelectProps {
    value: PermissionSelectValue | undefined
    locked: boolean
@@ -604,7 +604,7 @@ index 5230f59..cfc4108 100644
    /** The owning bar's locale seat, passed down as a plain prop. */
    t: ComposerBarProps['t']
  }
- 
+
 -export function PermissionSelect({ value, locked, command, t }: PermissionSelectProps) {
 +export function PermissionSelect({ value, locked, command, compact = false, t }: PermissionSelectProps) {
    const [pick, setPick] = useState<string | null>(null)
@@ -625,7 +625,7 @@ index 5230f59..cfc4108 100644
 +  const current = value?.options.find(option => option.value === currentValue)
    const busy = pick !== null || confirmation !== null
 +  const currentLabel = current === undefined ? displayName(currentValue) : optionLabel(current)
- 
+
 -  const items: MenuEntry[] = value.options
 +  const items: MenuEntry[] = value?.options
      .filter(o => o.value !== 'custom')
@@ -638,7 +638,7 @@ index 5230f59..cfc4108 100644
    const submit = (id: string): void => {
      setPick(id)
 @@ -103,8 +108,11 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
- 
+
    const choose = (id: string): void => {
 +    const permissions = value
 +    if (permissions === undefined) return
@@ -653,7 +653,7 @@ index 5230f59..cfc4108 100644
 @@ -125,9 +133,24 @@ export function PermissionSelect({ value, locked, command, t }: PermissionSelect
      submit(id)
    }
- 
+
 +  const panel = value === undefined ? undefined : (
 +    <div className={css.panel} role="menu" aria-label={t('input.accessMode', { name: currentLabel })}>
 +      {items.map(item => 'type' in item ? null : (
@@ -745,7 +745,7 @@ index 5a4913f..415ffe6 100644
 +import { defineStore, type EngineStoreHandle, type SessionId } from '@deepseek-ai/dsh-client-runtime/client'
  import type { CallId, ChatStoreState, SelectionTarget } from './contract/views.ts'
 +import type { ConversationViewState } from './view-state.ts'
- 
+
  /** Declared action shape used to give the exported factory a stable return type. */
  type ChatActions = {
 @@ -17,8 +18,8 @@ type ChatActions = {
@@ -783,7 +783,7 @@ index e53001d..186ca89 100644
  import type { ModelSelectInjected } from './slots.ts'
 +import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
  import css from './ModelSelect.module.css'
- 
+
  /** Which pane the dropdown shows: the two-row root or one drilled-in list. */
 @@ -63,6 +64,11 @@ export function ModelSelect(
    const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -794,12 +794,12 @@ index e53001d..186ca89 100644
 +  // card (not the tiny trigger) for the full-width panel geometry.
 +  const overlay = useComposerOverlay('model-selection', <span />)
 +  const menuOpen = overlay.available ? overlay.open : open
- 
+
    const choices = useMemo(() => state.groups.flatMap(group =>
      group.models.map(model => ({
 @@ -116,24 +122,26 @@ export function ModelSelect(
    }, [available, load])
- 
+
    useEffect(() => {
 -    if (!open) return
 +    if (overlay.available || !open) return
@@ -810,9 +810,9 @@ index e53001d..186ca89 100644
      return () => { document.removeEventListener('mousedown', closeOutside) }
 -  }, [open])
 +  }, [open, overlay.available])
- 
+
    if (!available) return null
- 
+
    const show = (): void => {
      setPane('root')
 -    setOpen(true)
@@ -820,7 +820,7 @@ index e53001d..186ca89 100644
 +    else setOpen(true)
      reload()
    }
- 
+
    const close = (restoreFocus = false): void => {
      setOpen(false)
 +    overlay.close()
@@ -829,7 +829,7 @@ index e53001d..186ca89 100644
    }
 @@ -147,14 +155,14 @@ export function ModelSelect(
    }
- 
+
    const onRootKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
 -    if (event.key === 'Escape' && open) {
 +    if (event.key === 'Escape' && menuOpen) {
@@ -846,7 +846,7 @@ index e53001d..186ca89 100644
        moveFocus(event.key === 'ArrowDown' ? 1 : -1)
 @@ -217,19 +225,20 @@ export function ModelSelect(
    }
- 
+
    return (
 -    <div ref={rootRef} className={css.root} onKeyDown={onRootKeyDown} onBlur={onBlur}>
 +    <div ref={rootRef} className={clsx(css.root, overlay.available && css.rootOverlay)} onKeyDown={onRootKeyDown} onBlur={overlay.available ? undefined : onBlur}>
@@ -876,7 +876,7 @@ index e53001d..186ca89 100644
 -        <IconChevronDownOutline14 className={clsx(css.chevron, open && css.chevronOpen)} />
 +        <IconChevronDownOutline14 className={clsx(css.chevron, menuOpen && css.chevronOpen)} />
        </button>
- 
+
 -      {open && (
 +      {menuOpen && (
          <div

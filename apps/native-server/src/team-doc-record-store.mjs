@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile, chmod } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { ACCRUI_CONNECTOR_STATE_DIRECTORY } from './product-runtime-identity.mjs'
 
 const DOCUMENT_BODY_KEYS = /^(body|content|text|markdown|observedBody)$/i
 
@@ -14,8 +14,8 @@ function bodyFreeClone(value) {
 }
 
 export function resolveTeamDocStatePath(environment = process.env) {
-  const root = environment.DSH_CONNECTOR_STATE_DIR
-    || join(homedir(), 'Library', 'Application Support', 'DeepSeek Harness Chrome', 'connector-state')
+  const root = environment.ACCRUI_CONNECTOR_STATE_DIR
+    || join(environment.HOME ?? '', 'Library', 'Application Support', 'accr-ui-harness', ACCRUI_CONNECTOR_STATE_DIRECTORY)
   return join(root, 'team-doc-delivery-records.json')
 }
 

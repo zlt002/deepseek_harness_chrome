@@ -1,0 +1,7 @@
+{"type":"ai-title","aiTitle":"Claude 导入真实验收会话"}
+{"type":"user","sessionId":"claude-import-e2e-20260831","cwd":"/tmp/claude-import-source","timestamp":"2026-08-31T01:00:00.000Z","message":{"content":"请检查示例文件并说明结果。"}}
+{"type":"assistant","sessionId":"claude-import-e2e-20260831","timestamp":"2026-08-31T01:00:05.000Z","message":{"model":"claude-sonnet-test","content":[{"type":"thinking","thinking":"先读取示例文件。"},{"type":"text","text":"我先检查文件内容。"},{"type":"tool_use","id":"tool-read-e2e","name":"Read","input":{"file_path":"/tmp/claude-import-source/example.txt"}}]}}
+{"type":"user","sessionId":"claude-import-e2e-20260831","timestamp":"2026-08-31T01:00:06.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"tool-read-e2e","content":"示例文件内容：导入成功。"}]}}
+{"type":"assistant","sessionId":"claude-import-e2e-20260831","timestamp":"2026-08-31T01:00:08.000Z","message":{"model":"claude-sonnet-test","content":[{"type":"text","text":"文件内容表明导入成功。"}]}}
+{"type":"user","sessionId":"claude-import-e2e-20260831","timestamp":"2026-08-31T01:01:00.000Z","message":{"content":"请给出一句总结。"}}
+{"type":"assistant","sessionId":"claude-import-e2e-20260831","timestamp":"2026-08-31T01:01:02.000Z","message":{"model":"claude-haiku-test","content":[{"type":"text","text":"总结：这是一条可继续对话的原生历史。"}]}}

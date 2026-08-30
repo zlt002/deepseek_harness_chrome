@@ -23,8 +23,9 @@ session and confirms the explicit target Workspace. Selected JSONL is streamed
 without a file-byte ceiling. It still has JSONL safety bounds of 20,000 lines
 and 120,000 retained text characters; when the detail view reaches the text
 bound, it explicitly says that it is showing only the most recent content.
-Tool inputs and tool results are not copied into the detail view or continuation
-prompt.
+Tool inputs and tool results are not expanded in the detail message list; the
+detail summary reports their counts and migration limits, while their redacted,
+bounded forms are written into the native history.
 Known Claude-generated wrapper records such as `browser_context` and
 `system-reminder` are excluded from titles and migrated text while ordinary
 user text containing angle-bracket terms remains intact.
@@ -35,26 +36,65 @@ the real directory path before scanning; project and session paths remain
 bounded beneath that canonical root. The canonical source root is part of the
 duplicate identity, so a backup tree cannot collide with the default tree.
 
-The Client creates or reuses a normal blank session through the public
-Workspace runtime, sends the converted context through `session.prompt`,
-records the stable source key after Host admission, renames the session, and
-opens it. It never writes Harness session logs directly. A repeated source key
-opens the previous imported session when it is still available, or offers an
-explicit import-as-copy action.
+The Host imports a selected transcript as a balanced native Harness seed through
+the public Session Store and Session Persistence APIs. Every source
+record keeps its own timestamp; user/assistant text, safe thinking, tool calls,
+and tool results become real Harness history. The Host applies the selected
+Workspace path as `SessionHeader.cwd`, records the user's default agent preset,
+marks the converted prefix with `SessionHeader.seedLength`, creates and appends
+the validated cold session, and attaches it to that exact Workspace. It does
+not create or dispose a temporary live Agent. Therefore
+import itself never calls `session.prompt` and never starts a model request;
+the Client refreshes the public session list before opening the cold session,
+and continuing uses the normal Harness session lifecycle.
 
-Discovery and selected-file preparation are cancellable. Once normal session
-creation starts, the dialog disables cancellation and states that the admitted
-prompt cannot be rolled back. Registry mutations are serialized in the Host
-and use unique atomic-replacement temporary files, so concurrent tabs retain
-both records.
+The Claude conversion is an independent, small adaptation of the algorithmic
+approach in `Nwflower/dsh-chat-import` at commit
+`73ea0122b533e43adb17e5b18f52025751826b99` (MIT). No third-party package or
+runtime code is included. It accepts string or text-array users, assistant
+text/thinking/tool_use, and out-of-order parallel tool_result blocks keyed by
+`tool_use_id`. A missing result becomes an explicit unknown-outcome error, never
+a success. Synthetic/meta wrappers are excluded. Images, attachments,
+permissions, and subagents are intentionally not migrated and the detail pane
+states that limitation.
+
+Tool arguments/results are recursively serialized only after token/API-key/
+password/authorization/cookie redaction and a 4,000-character-per-block bound. Detail
+reports unsupported source blocks and the UI labels truncation. This is a
+history projection, not a recovery of Claude Code process state.
+
+Registry records are serialized and atomically replaced with mode `0600`. They
+store source size/hash/mtime, imported source-event count, and Harness next seq.
+An unchanged source opens the prior session. A strictly append-only source may
+append only when the previous Harness session is dormant and has exactly the
+recorded next seq; source shrink/rewrite, a live session, or local Harness
+continuation returns a conflict and offers the existing explicit copy route.
+The append uses public session persistence rather than `.dsh` files so source
+timestamps remain intact.
+
+Discovery and selected-file preparation are cancellable. Once native session
+creation starts, the dialog disables cancellation because persistence cannot
+be rolled back through the public API. The full prepare/persist/attach/commit
+operation is serialized in the Host, and registry writes use unique
+atomic-replacement temporary files, so concurrent tabs cannot create two
+sessions for the same first import and unrelated records are retained.
+
+Before the first persistence write, the Host stores a recoverable pending
+record with the final session id and expected event cursor. If persistence,
+Workspace attachment, the final registry replacement, or the HTTP connection
+fails part-way through, the next import reuses that session id and completes
+only the missing stage. An incremental retry likewise checks the pre/post
+cursor before appending, so it cannot append the same Claude suffix twice. A
+genuinely partial or divergent persistence log is never guessed or rewritten;
+the UI instead requires an explicit import-as-copy.
 
 Every Client request has an action-specific deadline (15 seconds for selected
-session preparation; shorter bounds for indexing). A deadline reports the
-exact failed action instead of leaving the dialog pending forever. Caller
-cancellation is composed with that deadline. The Host aborts selected-file
-reads when the HTTP request is abandoned. The public Client surface currently
-has no reliable connection-generation reset hook for this global dialog, so
-the request deadline remains the generation-change safety net.
+session preparation, 120 seconds for the non-cancellable native write, and
+shorter bounds for indexing). A deadline reports the exact failed action
+instead of leaving the dialog pending forever. Caller cancellation is composed
+with that deadline. The Host aborts selected-file reads when the HTTP request
+is abandoned; if the connection is lost after persistence begins, the pending
+record provides the reconnect recovery path.
 
 The compact Workspace seat is a chain slot: its selector result arrives as the
 framework `matched` prop, while owner props are supplied separately. Controller
@@ -72,7 +112,5 @@ horizontal overflow without collapsing the session list.
 
 ## Known limitations and deferred work
 
-- Importing is a new user turn and therefore starts a model response; it is not
-  a byte-for-byte replay of Claude Code's internal event state.
-- Running tools, approvals, subagents, caches, and non-text blocks are not
-  resumable across runtimes.
+- It does not restore running tools, approvals, subagents, caches, local files,
+  images, or attachments from Claude Code.

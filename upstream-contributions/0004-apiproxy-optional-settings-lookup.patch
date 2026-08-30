@@ -17,7 +17,7 @@ diff --git a/packages/host/apiproxy/tests/api-proxy-config.spec.ts b/packages/ho
 +++ b/packages/host/apiproxy/tests/api-proxy-config.spec.ts
 @@ -235,6 +235,28 @@ function forwardedSettings(ns: string): HostFrame {
  }
- 
+
  describe('settings domain', () => {
 +  it('reads the optional settings provider from a plugin context without requiring injection', async () => {
 +    const ctx = await harness()

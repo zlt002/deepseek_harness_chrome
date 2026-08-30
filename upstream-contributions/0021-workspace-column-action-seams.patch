@@ -10,11 +10,11 @@ index 26398ea..1c71625 100644
 +    'sidebar.workspaces.header.action': { kind: 'list'; scope: 'root'; owner: WorkspaceHeaderActionOwnerProps }
    }
  }
- 
+
 @@ -78,6 +80,24 @@ export interface CompactWorkspacePickerWorkspace {
    sessions: readonly CompactWorkspacePickerSession[]
  }
- 
+
 +/** Host-authoritative loose sessions, already filtered and ordered for compact presentation. */
 +export interface CompactWorkspacePickerUngrouped {
 +  label: string
@@ -142,7 +142,7 @@ index aad024a..9829e66 100644
        workspaces: t('section.workspaces'), sessions: t('section.sessions'),
        addWorkspace: t('workspace.add'), newSession: t('session.new'),
 @@ -334,7 +337,7 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
- 
+
  type SessionTreeProps = Pick<
    WorkspaceBrowserProps,
 -  'useSessions' | 'startSession' | 'open' | 'forkSession'
@@ -151,7 +151,7 @@ index aad024a..9829e66 100644
  > & {
    workspaces: readonly WorkspaceView[]
 @@ -366,7 +369,7 @@ type SessionTreeProps = Pick<
- 
+
  /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
  function SessionTree({
 -  useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,

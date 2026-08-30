@@ -4,12 +4,13 @@ import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ACCRUI_INSTALL_DIRECTORY, ACCRUI_NATIVE_HOST_NAME } from '../apps/native-server/src/product-runtime-identity.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const launcher = process.env.DSH_NATIVE_LAUNCHER?.trim()
   || (process.platform === 'darwin'
-    ? resolve(homedir(), 'Library/Application Support/DeepSeekHarness/com.deepseek.harness.chrome')
-    : resolve(here, '..', 'native-host', 'com.deepseek.harness.chrome'))
+    ? resolve(homedir(), 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY, ACCRUI_NATIVE_HOST_NAME)
+    : resolve(here, '..', 'native-host', ACCRUI_NATIVE_HOST_NAME))
 
 const host = spawn(launcher, [], { stdio: ['pipe', 'pipe', 'pipe'] })
 host.on('error', (e) => { console.log('SPAWN ERROR:', e.message); process.exit(1) })

@@ -13,7 +13,7 @@ type HarnessStatus = 'starting' | 'ready' | 'error'
 type BrowserTargetMode = 'follow-active-tab' | 'pinned-tabs' | 'none'
 
 interface HarnessResponse { ok: boolean; url?: string; error?: string }
-interface SidePanelHandoffResponse { ok: boolean; sessionId?: string; tabId?: number; error?: string }
+interface SidePanelHandoffResponse { ok: boolean; sessionId?: string; tabId?: number; nonce?: string; error?: string }
 interface BrowserTarget { browser: 'chrome'; windowId: number; tabId: number; url: string }
 interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: string }
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
@@ -68,6 +68,14 @@ function isActiveTab(value: unknown): value is ActiveTab {
     && typeof (value as ActiveTab).title === 'string'
     && typeof (value as ActiveTab).url === 'string'
     && (typeof (value as ActiveTab).favIconUrl === 'string' || (value as ActiveTab).favIconUrl === undefined)
+}
+
+function isBrowserTarget(value: unknown): value is BrowserTarget {
+  return typeof value === 'object' && value !== null
+    && (value as BrowserTarget).browser === 'chrome'
+    && Number.isInteger((value as BrowserTarget).windowId)
+    && Number.isInteger((value as BrowserTarget).tabId)
+    && typeof (value as BrowserTarget).url === 'string'
 }
 
 function isBrowserTargetCommand(value: unknown): value is BrowserTargetCommand {
@@ -383,12 +391,13 @@ function App(): React.JSX.Element {
   const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
   const handoffSessionId = useMemo(() => HarnessHandoffSessionFromLocation(), [])
   const handoffTabId = useMemo(() => HarnessHandoffTabFromLocation(), [])
+  const handoffNonce = useMemo(() => new URLSearchParams(window.location.search).get('dshHarnessHandoffNonce') ?? undefined, [])
   // The loopback Harness UI is outside the extension origin. Pass the actual
   // installed extension version across the already trusted iframe URL instead
   // of hardcoding a release number in the product UI.
   const productVersion = useMemo(() => chrome.runtime.getManifest().version, [])
   const hasLocationHandoff = surface === 'sidepanel' && handoffSessionId !== undefined && handoffTabId !== undefined
-  const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number }>({ ready: surface === 'fullscreen-tab' || hasLocationHandoff, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }), ...(handoffTabId === undefined ? {} : { tabId: handoffTabId }) })
+  const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number; nonce?: string }>({ ready: surface === 'fullscreen-tab' || hasLocationHandoff, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }), ...(handoffTabId === undefined ? {} : { tabId: handoffTabId }), ...(handoffNonce === undefined ? {} : { nonce: handoffNonce }) })
   // A handoff session restores an iframe once. The observed session is only
   // for side-panel actions; feeding it back into frameSrc would reload the
   // iframe every time the Harness session list reports its current value.
@@ -409,6 +418,7 @@ function App(): React.JSX.Element {
         ready: true,
         ...(response.ok && isHarnessSessionIdentity(response.sessionId) ? { sessionId: response.sessionId } : {}),
         ...(response.ok && Number.isInteger(response.tabId) ? { tabId: response.tabId } : {}),
+        ...(response.ok && isHarnessSessionIdentity(response.nonce) ? { nonce: response.nonce } : {}),
       }))
     })
   }, [hasLocationHandoff, surface])
@@ -795,7 +805,7 @@ function App(): React.JSX.Element {
   useLayoutEffect(() => {
     const onFrameMessage = (event: MessageEvent<unknown>): void => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
-      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; targetSessionId?: unknown; targetSessionTitle?: unknown; status?: unknown; apiKey?: unknown; protocol?: unknown }
+      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; targetSessionId?: unknown; targetSessionTitle?: unknown; status?: unknown; apiKey?: unknown; protocol?: unknown }
       if (value.nonce !== frameNonce) return
       if (value.type === 'prototype-studio-prompt-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = prototypePromptRef.current.get(value.deliveryId)
@@ -874,9 +884,32 @@ function App(): React.JSX.Element {
       }
       const selectedSessionId = value.sessionId
       if (value.type === 'harness-session-selected/v1' && (selectedSessionId === undefined || isHarnessSessionIdentity(selectedSessionId))) { setObservedHarnessSessionId(selectedSessionId); return }
+      if (value.type === 'browser-target-lock/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId) && isBrowserTarget(value.browserTarget)) {
+        void chrome.runtime.sendMessage({ type: 'lock-browser-target/v1', sessionId: value.sessionId, submissionId: value.submissionId, browserTarget: value.browserTarget })
+          .then((response: { ok?: unknown; locked?: unknown; error?: unknown } | undefined) => {
+            frameRef.current?.contentWindow?.postMessage({
+              type: 'browser-target-lock-ack/v1', nonce: frameNonce, sessionId: value.sessionId, submissionId: value.submissionId,
+              ok: response?.ok === true, locked: response?.locked === true,
+              ...(typeof response?.error === 'string' ? { error: response.error } : {}),
+            }, frameOrigin)
+          })
+          .catch((error: unknown) => frameRef.current?.contentWindow?.postMessage({
+            type: 'browser-target-lock-ack/v1', nonce: frameNonce, sessionId: value.sessionId, submissionId: value.submissionId, ok: false, locked: false,
+            error: error instanceof Error ? error.message : String(error),
+          }, frameOrigin))
+        return
+      }
+      if (value.type === 'browser-target-unlock/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId)) {
+        void chrome.runtime.sendMessage({ type: 'unlock-browser-target/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
+        return
+      }
+      if (value.type === 'browser-target-reconcile/v1' && isHarnessSessionIdentity(value.sessionId)) {
+        void chrome.runtime.sendMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: value.sessionId }).catch(() => {})
+        return
+      }
       if (value.type === 'session-handoff-applied/v1' && value.sessionId === sidePanelHandoff.sessionId && surface === 'sidepanel' && sidePanelHandoff.tabId !== undefined) {
         void currentBrowserWindowId().then((windowId) => {
-          if (windowId !== undefined) chrome.runtime.sendMessage({ type: 'session-handoff-applied/v1', windowId, tabId: sidePanelHandoff.tabId, sessionId: value.sessionId })
+          if (windowId !== undefined && sidePanelHandoff.nonce !== undefined) chrome.runtime.sendMessage({ type: 'session-handoff-applied/v1', windowId, tabId: sidePanelHandoff.tabId, sessionId: value.sessionId, nonce: sidePanelHandoff.nonce })
         })
         return
       }

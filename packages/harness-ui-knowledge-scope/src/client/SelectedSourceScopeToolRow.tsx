@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { DisclosureRow, IconSearchOutline16, MarkdownText, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+import { friendlySearchError } from './error-message.js'
 import css from './SelectedSourceScopeToolRow.module.css'
 
 function resultText(block: ToolCallViewProps['block']): string {
@@ -22,10 +23,11 @@ export function SelectedSourceScopeToolRow({ block, inspect }: ToolCallViewProps
   useEffect(() => {
     if (failed) setExpanded(true)
   }, [failed])
+  const displayText = failed ? friendlySearchError(text) : text
   const summary = text === ''
     ? running ? '正在读取已选范围…' : failed ? '读取范围失败' : '已读取范围'
-    : firstLine(text)
-  const expandable = text !== ''
+    : firstLine(displayText)
+  const expandable = displayText !== ''
 
   return (
     <div className={css.root} data-state={running ? 'running' : failed ? 'error' : 'ok'}>
@@ -40,7 +42,7 @@ export function SelectedSourceScopeToolRow({ block, inspect }: ToolCallViewProps
         onToggle={() => { setExpanded(value => !value) }}
         collapsedContent={<span className={css.summary} title={summary}>{summary}</span>}
       >
-        <div className={css.body}><MarkdownText text={text} streaming={running} /></div>
+        <div className={css.body}><MarkdownText text={displayText} streaming={running} /></div>
       </DisclosureRow>
       {expanded && inspect !== undefined && <button className={css.inspect} type="button" onClick={inspect}>查看详情</button>}
     </div>

@@ -6,11 +6,16 @@ import { connect } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import {
+  ACCRUI_CONNECTOR_TMP_PREFIX,
+  ACCRUI_INSTALL_DIRECTORY,
+  nativeHostManifestFilename,
+} from '../apps/native-server/src/product-runtime-identity.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
-const explicitHarnessRoot = process.env.DSH_ROOT?.trim()
-const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim()
+const explicitHarnessRoot = process.env.ACCRUI_HARNESS_ROOT?.trim()
+const explicitHarnessCli = process.env.ACCRUI_HARNESS_CLI_PATH?.trim()
 const harnessRoot = explicitHarnessRoot
   ? resolve(explicitHarnessRoot)
   : explicitHarnessCli
@@ -65,7 +70,7 @@ export function harnessBuildSteps({ skipHarnessBuild, webDistExists }) {
 // are orphaned (ppid becomes 1) and escape a pure process-tree walk, so match
 // the connector marker directly. Sessions started outside the native host
 // (for example a manual `dsh web`) never carry this marker and are never hit.
-const HARNESS_CONNECTOR_MARKER = 'deepseek-harness-connector-'
+const HARNESS_CONNECTOR_MARKER = ACCRUI_CONNECTOR_TMP_PREFIX
 
 function run(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
@@ -136,10 +141,10 @@ function startDevServer(skipExtensionPrebuild = false) {
 
 export async function installedPaths() {
   if (platform() !== 'darwin') throw new Error('dev:restart currently supports the macOS Chrome/Edge development setup.')
-  const installRoot = join(homedir(), 'Library/Application Support/DeepSeekHarness')
+  const installRoot = join(homedir(), 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY)
   const manifestPaths = [
-    join(homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
-    join(homedir(), 'Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.deepseek.harness.chrome.json'),
+    join(homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts', nativeHostManifestFilename()),
+    join(homedir(), 'Library/Application Support/Microsoft Edge/NativeMessagingHosts', nativeHostManifestFilename()),
   ].filter(existsSync)
   if (manifestPaths.length === 0) throw new Error('Native Host is not registered yet. Run pnpm run register-native-host once with the extension id.')
   const extensionIds = extensionIdsFromManifests(await Promise.all(manifestPaths.map(async (manifestPath) => JSON.parse(await readFile(manifestPath, 'utf8')))))
@@ -176,7 +181,7 @@ export async function main(args = process.argv.slice(2)) {
   const { installRoot, extensionIds } = await installedPaths()
 
   if (!explicitHarnessRoot && !explicitHarnessCli && !existsSync(join(generatedHarnessRoot, '.harness-product.json'))) {
-    throw new Error(`Generated product Harness is missing: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set DSH_ROOT/DSH_CLI_PATH explicitly for a different Harness checkout.`)
+    throw new Error(`Generated product Harness is missing: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set ACCRUI_HARNESS_ROOT/ACCRUI_HARNESS_CLI_PATH for this product runtime.`)
   }
 
   if (!skipHarnessBuild) {
@@ -197,7 +202,7 @@ export async function main(args = process.argv.slice(2)) {
     env: {
       ...process.env,
       DEEPSEEK_HARNESS_EXTENSION_ID: extensionIds.join(','),
-      DSH_ROOT: process.env.DSH_ROOT?.trim() || harnessRoot,
+      ACCRUI_HARNESS_ROOT: harnessRoot,
     },
   })
 

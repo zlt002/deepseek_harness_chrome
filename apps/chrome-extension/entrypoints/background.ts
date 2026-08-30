@@ -1,64 +1,23 @@
-// Kept self-contained because focused background adapters evaluate this source
-// as a data URL and production WXT bundles it as a single service worker.
-// Keep this browser-side copy in lockstep with the wire contract. A relative
-// import from the Native Server cannot be resolved from a data URL.
-const CONNECTOR_REQUEST = 'connector_request'
-const CONNECTOR_RESPONSE = 'connector_response'
-const CONNECTOR_CANCEL = 'connector_cancel'
-
-interface BrowserTarget {
-  browser: 'chrome'
-  windowId: number
-  tabId: number
-  url: string
-}
-
-interface ConnectorCorrelation {
-  requestId: string
-  runId: string
-  generation: string
-}
-
-interface UnavailableBrowserTarget {
-  browserTarget: BrowserTarget
-  reason: 'closed_or_changed'
-}
-
-function isBrowserTarget(value: unknown): value is BrowserTarget {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const target = value as Partial<BrowserTarget>
-  return Object.keys(value as object).length === 4 && target.browser === 'chrome'
-    && Number.isInteger(target.windowId) && target.windowId! >= 0
-    && Number.isInteger(target.tabId) && target.tabId! >= 0
-    && typeof target.url === 'string' && target.url.length > 0
-}
-
-function sameBrowserTarget(left: unknown, right: unknown): boolean {
-  return isBrowserTarget(left) && isBrowserTarget(right)
-    && left.browser === right.browser && left.windowId === right.windowId
-    && left.tabId === right.tabId && left.url === right.url
-}
-
-function isUnavailableBrowserTarget(value: unknown): value is UnavailableBrowserTarget {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value as object).length === 2
-    && (value as Partial<UnavailableBrowserTarget>).reason === 'closed_or_changed'
-    && isBrowserTarget((value as Partial<UnavailableBrowserTarget>).browserTarget)
-}
-
-function sameBrowserTargetList(left: unknown, right: unknown): boolean {
-  return Array.isArray(left) && Array.isArray(right) && left.length === right.length
-    && left.every((target, index) => sameBrowserTarget(target, right[index]))
-}
-
-function sameUnavailableBrowserTargetList(left: unknown, right: unknown): boolean {
-  return Array.isArray(left) && Array.isArray(right) && left.length === right.length
-    && left.every((item, index) => isUnavailableBrowserTarget(item)
-      && isUnavailableBrowserTarget(right[index]) && item.reason === right[index].reason
-      && sameBrowserTarget(item.browserTarget, right[index].browserTarget))
-}
 import { sameRuntimeReleaseIdentity, validRuntimeIdentitySummary } from '../../native-server/src/runtime-identity-contract.mjs'
 import type { RuntimeIdentitySummary } from '../../native-server/src/runtime-identity-contract.mjs'
+import { ACCRUI_NATIVE_HOST_NAME } from '../../native-server/src/product-runtime-identity.mjs'
+import {
+  CONNECTOR_CANCEL,
+  CONNECTOR_REQUEST,
+  CONNECTOR_RESPONSE,
+  sameBrowserTarget,
+  sameBrowserTargetList,
+  sameUnavailableBrowserTargetList,
+  validBrowserTarget,
+  validUnavailableBrowserTarget,
+} from '../../native-server/src/connector-protocol.mjs'
+import type {
+  BrowserTarget,
+  ConnectorCorrelation,
+  UnavailableBrowserTarget,
+} from '../../native-server/src/connector-protocol.mjs'
+import { createKnowledgeTransport } from './background/knowledge-transport'
+import type { KnowledgeKind, KnowledgeScope } from './background/knowledge-transport'
 import {
   samePinnedTab,
   settingsFromUnknown,
@@ -78,15 +37,27 @@ import {
   isReadWorkTabRequest,
 } from './background/office-request-contract'
 
-type HtmlWorkbenchRequest = ConnectorCorrelation & { type: 'connector_request'; browserTarget: BrowserTarget; tool: 'html_workbench'; action: 'read' | 'preflight' | 'refresh_readback'; expectedSourceFingerprint?: string }
+type HtmlWorkbenchStylesheetFingerprint = { url: string; fingerprint: string }
+type HtmlWorkbenchRequest = ConnectorCorrelation & { type: 'connector_request'; browserTarget: BrowserTarget; tool: 'html_workbench'; action: 'read' | 'preflight' | 'refresh_readback'; expectedSourceFingerprint?: string; expectedStylesheets?: HtmlWorkbenchStylesheetFingerprint[]; expectedAnchorSelectors?: string[] }
 type HtmlWorkbenchPicker = { nonce: string; sessionId: string; url: string; anchors: unknown[] }
 const htmlWorkbenchPickers = new Map<number, HtmlWorkbenchPicker>()
+function validHtmlWorkbenchStylesheetFingerprints(value: unknown): value is HtmlWorkbenchStylesheetFingerprint[] {
+  return Array.isArray(value) && value.length <= 20 && value.every(item => Boolean(item) && typeof item === 'object' && !Array.isArray(item)
+    && Object.keys(item).length === 2 && typeof (item as Record<string, unknown>).url === 'string' && String((item as Record<string, unknown>).url).startsWith('file:')
+    && typeof (item as Record<string, unknown>).fingerprint === 'string' && /^[a-f0-9]{64}$/i.test(String((item as Record<string, unknown>).fingerprint)))
+}
+function validHtmlWorkbenchAnchorSelectors(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 12 && value.every(selector => typeof selector === 'string' && selector.length > 0 && selector.length <= 2_000)
+}
 function isHtmlWorkbenchRequest(value: unknown): value is HtmlWorkbenchRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const item = value as Record<string, unknown>
-  return item.type === 'connector_request' && item.tool === 'html_workbench' && typeof item.requestId === 'string' && typeof item.runId === 'string' && typeof item.generation === 'string' && isBrowserTarget(item.browserTarget)
+  return item.type === 'connector_request' && item.tool === 'html_workbench' && typeof item.requestId === 'string' && typeof item.runId === 'string' && typeof item.generation === 'string' && validBrowserTarget(item.browserTarget)
     && (item.action === 'read' || item.action === 'preflight' || item.action === 'refresh_readback')
     && (item.expectedSourceFingerprint === undefined || (typeof item.expectedSourceFingerprint === 'string' && /^[a-f0-9]{64}$/i.test(item.expectedSourceFingerprint)))
+    && (item.expectedStylesheets === undefined || validHtmlWorkbenchStylesheetFingerprints(item.expectedStylesheets))
+    && (item.expectedAnchorSelectors === undefined || validHtmlWorkbenchAnchorSelectors(item.expectedAnchorSelectors))
+    && (item.action !== 'refresh_readback' || (typeof item.expectedSourceFingerprint === 'string' && validHtmlWorkbenchStylesheetFingerprints(item.expectedStylesheets) && validHtmlWorkbenchAnchorSelectors(item.expectedAnchorSelectors)))
 }
 function validHtmlWorkbenchAnchor(value: unknown): boolean { return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && typeof (value as Record<string, unknown>).selector === 'string' && String((value as Record<string, unknown>).selector).length > 0 && String((value as Record<string, unknown>).selector).length <= 2_000 && Array.isArray((value as Record<string, unknown>).structurePath) && ((value as Record<string, unknown>).structurePath as unknown[]).length > 0 && ((value as Record<string, unknown>).structurePath as unknown[]).length <= 64 && ((value as Record<string, unknown>).structurePath as unknown[]).every(part => typeof part === 'string' && part.length <= 256) && typeof (value as Record<string, unknown>).fingerprint === 'string' && /^[a-f0-9]{64}$/i.test(String((value as Record<string, unknown>).fingerprint)) && typeof (value as Record<string, unknown>).text === 'string' && String((value as Record<string, unknown>).text).length <= 4_000 && typeof (value as Record<string, unknown>).outerHTML === 'string' && String((value as Record<string, unknown>).outerHTML).length <= 16_000 }
 import { MARKDOWN_REVIEW_PORT, isMarkdownReviewPortRequest } from './markdown-review/protocol'
@@ -147,10 +118,13 @@ const COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS = 15_000
 const COMPANY_GATEWAY_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-anthropic/v1`
 const COMPANY_GATEWAY_METADATA_STORAGE_KEY = 'harnessCompanyGatewayMetadataV1'
 const COMPANY_GATEWAY_TIMEOUT_MS = 15_000
-interface KnowledgeProxyConfig { url: string; token: string }
-let knowledgeProxyConfig: KnowledgeProxyConfig | undefined
-type KnowledgeKind = 'knowledge' | 'code'
-interface KnowledgeScope { domainSystems: Record<string, string[]>; repositoryIds: string[] }
+const knowledgeTransport = createKnowledgeTransport({
+  baseUrl: KNOWLEDGE_BASE_URL,
+  fetch: (input, init) => fetch(input, init),
+  cookies: async () => typeof chrome === 'undefined' || chrome.cookies?.getAll === undefined
+    ? []
+    : chrome.cookies.getAll({ url: `${KNOWLEDGE_API_ORIGIN}/` }),
+})
 interface AccountAccessSnapshot {
   status: 'guest' | 'authenticated' | 'unavailable'
   displayName?: string
@@ -190,7 +164,31 @@ function migrateLegacyKnowledgeScope(value: unknown): { enabled: boolean; scope:
 
 function validSessionIdentity(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value) }
 const SIDE_PANEL_HANDOFF_TTL_MS = 60_000
-const pendingSidePanelHandoffs = new Map<number, { sessionId: string; tabId: number; expiresAt: number }>()
+const SIDE_PANEL_HANDOFF_STORAGE_KEY = 'harnessSidePanelHandoffsV1'
+type SidePanelHandoff = { sessionId: string; tabId: number; nonce: string; expiresAt: number }
+const pendingSidePanelHandoffs = new Map<number, SidePanelHandoff>()
+function validHandoffNonce(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{32,160}$/.test(value) }
+async function readPersistedSidePanelHandoff(windowId: number): Promise<SidePanelHandoff | undefined> {
+  const storage = chrome.storage?.session
+  if (storage?.get === undefined) return undefined
+  const raw = (await storage.get(SIDE_PANEL_HANDOFF_STORAGE_KEY))[SIDE_PANEL_HANDOFF_STORAGE_KEY]
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const value = (raw as Record<string, unknown>)[String(windowId)]
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  return validSessionIdentity(item.sessionId) && Number.isInteger(item.tabId) && (item.tabId as number) >= 0 && validHandoffNonce(item.nonce) && typeof item.expiresAt === 'number'
+    ? { sessionId: item.sessionId, tabId: item.tabId as number, nonce: item.nonce, expiresAt: item.expiresAt }
+    : undefined
+}
+async function persistSidePanelHandoff(windowId: number, handoff: SidePanelHandoff | undefined): Promise<void> {
+  const storage = chrome.storage?.session
+  if (storage?.get === undefined || storage.set === undefined) return
+  const values = (await storage.get(SIDE_PANEL_HANDOFF_STORAGE_KEY))[SIDE_PANEL_HANDOFF_STORAGE_KEY]
+  const records = values && typeof values === 'object' && !Array.isArray(values) ? { ...(values as Record<string, unknown>) } : {}
+  if (handoff === undefined) delete records[String(windowId)]
+  else records[String(windowId)] = handoff
+  await storage.set({ [SIDE_PANEL_HANDOFF_STORAGE_KEY]: records })
+}
 const WORKSPACE_REVIEW_SNAPSHOT_PATH = '/api/workspace-review/snapshot'
 const WORKSPACE_REVIEW_SELECTION_PATH = '/api/workspace-review/selection'
 const WORKSPACE_REVIEW_PROPOSALS_PATH = '/api/workspace-review/proposals'
@@ -269,243 +267,6 @@ function planKnowledgeContinuation(sessions: Record<string, { sessionId: string;
   const priorSessionId = sessions[key]?.sessionId
   return priorSessionId === undefined || priorSessionId.trim() === '' ? { key } : { key, priorSessionId }
 }
-function payloadArray(value: unknown): unknown[] { return Array.isArray(value) ? value : Array.isArray((value as { data?: unknown } | undefined)?.data) ? (value as { data: unknown[] }).data : [] }
-function field(value: unknown, key: string): string | undefined { const item = value as Record<string, unknown> | undefined; return typeof item?.[key] === 'string' && item[key].trim().length > 0 ? item[key].trim() : undefined }
-function unwrapKnowledgeData(value: unknown): unknown {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
-  const record = value as Record<string, unknown>
-  return record.data ?? record.result ?? value
-}
-function isKnowledgeRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-function stringishField(value: unknown, keys: string[]): string | undefined {
-  if (!isKnowledgeRecord(value)) return undefined
-  for (const key of keys) {
-    const candidate = value[key]
-    if (typeof candidate === 'string' && candidate.trim().length > 0) return candidate.trim()
-    if (typeof candidate === 'number' && Number.isFinite(candidate)) return String(candidate)
-  }
-  return undefined
-}
-function stringishList(value: unknown, keys: string[]): string[] {
-  if (!isKnowledgeRecord(value)) return []
-  for (const key of keys) {
-    const candidate = value[key]
-    if (!Array.isArray(candidate)) continue
-    return [...new Set(candidate.flatMap((item) => typeof item === 'string' && item.trim().length > 0 ? [item.trim()] : typeof item === 'number' && Number.isFinite(item) ? [String(item)] : []))]
-  }
-  return []
-}
-type KnowledgeRoleLevel = 'super_admin' | 'domain_admin' | 'member'
-interface KnowledgeIdentity { roleLevel: KnowledgeRoleLevel; domainIds: string[] }
-function knowledgeIdentity(value: unknown): KnowledgeIdentity {
-  const data = unwrapKnowledgeData(value)
-  const record = isKnowledgeRecord(data) ? data : {}
-  const user = isKnowledgeRecord(record.user) ? record.user : record
-  const rawRole = stringishField(user, ['roleLevel', 'role_level'])
-  const roleLevel: KnowledgeRoleLevel = rawRole === 'super_admin' || rawRole === 'domain_admin' || rawRole === 'member' ? rawRole : 'member'
-  return { roleLevel, domainIds: stringishList(user, ['domainIds', 'domain_ids']) }
-}
-function authorizedDomainIds(identity: KnowledgeIdentity, domains: Array<{ id: string }>): Set<string> {
-  if (identity.roleLevel === 'super_admin') return new Set(domains.map((domain) => domain.id))
-  return new Set(identity.domainIds)
-}
-function validKnowledgeProxyConfig(url: unknown, token: unknown): url is string {
-  if (typeof url !== 'string' || typeof token !== 'string' || token.length < 32) return false
-  try { const parsed = new URL(url); return parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.port !== '' && parsed.pathname === '/knowledge-proxy' } catch { return false }
-}
-function errorChain(value: unknown): string {
-  const path = new Set<unknown>()
-  const render = (current: unknown): string => {
-    if (path.has(current)) return '<circular cause>'
-    path.add(current)
-    try {
-      if (!(current instanceof Error)) {
-        if (typeof current === 'object' && current !== null) {
-          const record = current as { message?: unknown; code?: unknown }
-          const message = typeof record.message === 'string' ? record.message : undefined
-          const code = typeof record.code === 'string' ? record.code : undefined
-          if (message && code && !message.includes(code)) return `${message}: ${code}`
-          if (message) return message
-          if (code) return code
-          try { return JSON.stringify(current) } catch { return Object.prototype.toString.call(current) }
-        }
-        return String(current)
-      }
-      const code = typeof (current as Error & { code?: unknown }).code === 'string' ? (current as Error & { code: string }).code : undefined
-      let text = current.message || current.name
-      if (code && !text.includes(code)) text = `${text}: ${code}`
-      if (current.cause !== undefined) {
-        const cause = render(current.cause)
-        if (cause && cause !== text && !text.includes(cause)) text = `${text}: ${cause}`
-      }
-      return text
-    } finally { path.delete(current) }
-  }
-  return render(value)
-}
-function knowledgeTransportCode(value: unknown): string | undefined {
-  let current: unknown = value
-  for (let depth = 0; depth < 6 && current; depth += 1) {
-    if (typeof current === 'object' && current !== null && typeof (current as { code?: unknown }).code === 'string') {
-      const code = (current as { code: string }).code
-      if (code.length > 0) return code
-    }
-    current = typeof current === 'object' && current !== null ? (current as { cause?: unknown }).cause : undefined
-  }
-  return undefined
-}
-function isRetryableKnowledgeTransport(error: unknown): boolean {
-  const code = knowledgeTransportCode(error)
-  if (code !== undefined && /^(ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT)$/.test(code)) return true
-  return /fetch failed|Failed to fetch|NetworkError|socket hang up|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|other side closed/i.test(errorChain(error))
-}
-function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)) }
-function isKnowledgeStream(input: string): boolean {
-  return /\/api\/rag\/(?:retrieval|repo-search)(?:\?|$)/.test(input)
-}
-function describeKnowledgeTransportError(error: unknown, process = ''): string {
-  const detail = errorChain(error)
-  const timeout = /UND_ERR_BODY_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|body timeout|headers timeout/i.test(detail)
-  const transport = timeout || /fetch failed|Failed to fetch|NetworkError|socket hang up|ECONNRESET|other side closed/i.test(detail)
-  const reason = timeout
-    ? '远程检索流因传输层空闲超时中断（常见于仓库精搜超过约 5 分钟仍未结束）。'
-    : transport
-      ? '远程检索流在返回最终答案前因网络传输中断。'
-      : '远程检索流在返回最终答案前中断。'
-  const hint = process.trim() === '' ? '' : `\n已收到的远程检索过程：\n${process.trim().slice(-3_000)}`
-  return `${reason}${detail}${hint}`
-}
-function proxyFailureText(status: number, text: string): boolean {
-  return status === 502 && /Knowledge proxy failed|fetch failed|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|UND_ERR_/i.test(text)
-}
-async function knowledgeCookieHeader(): Promise<string> {
-  if (typeof chrome === 'undefined' || chrome.cookies?.getAll === undefined) return ''
-  const now = Date.now() / 1000
-  const cookies = await chrome.cookies.getAll({ url: `${KNOWLEDGE_API_ORIGIN}/` })
-  return cookies.filter((cookie) => cookie.expirationDate === undefined || cookie.expirationDate > now)
-    .sort((left, right) => (right.path?.length ?? 0) - (left.path?.length ?? 0))
-    .map((cookie) => `${cookie.name}=${cookie.value}`).join('; ')
-}
-async function fetchWithRetry(input: string, init: RequestInit = {}): Promise<Response> {
-  let lastError: unknown
-  for (let attempt = 0; attempt <= KNOWLEDGE_TRANSPORT_RETRY_LIMIT; attempt += 1) {
-    try { return await fetch(input, init) } catch (error) {
-      lastError = error
-      if (init.signal?.aborted || !isRetryableKnowledgeTransport(error) || attempt === KNOWLEDGE_TRANSPORT_RETRY_LIMIT) {
-        throw new Error(errorChain(error), { cause: error instanceof Error ? error : undefined })
-      }
-      await delay(KNOWLEDGE_TRANSPORT_RETRY_DELAY_MS * (attempt + 1))
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(errorChain(lastError))
-}
-async function knowledgeFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const stream = isKnowledgeStream(input)
-  const chromeInit: RequestInit = { ...init, credentials: init.credentials ?? 'include' }
-  // Long repo-search SSE stays quiet while upstream Explore agents run.
-  // Chrome fetch has no undici 300s bodyTimeout; AccrUI uses this path.
-  if (stream) {
-    try { return await fetchWithRetry(input, chromeInit) } catch (error) {
-      if (init.signal?.aborted || knowledgeProxyConfig === undefined) throw error
-    }
-  }
-  const proxy = knowledgeProxyConfig
-  if (proxy === undefined) return fetchWithRetry(input, chromeInit)
-  const target = new URL(input)
-  if (target.origin !== new URL(KNOWLEDGE_BASE_URL).origin || !target.pathname.startsWith('/api-sse-kd/api/')) throw new Error('knowledge_proxy_target_rejected')
-  const headers = new Headers(init.headers); headers.delete('cookie'); headers.delete('authorization')
-  const cookie = await knowledgeCookieHeader()
-  const proxyInit: RequestInit = {
-    method: 'POST',
-    headers: { authorization: `Bearer ${proxy.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ path: `${target.pathname}${target.search}`, method: init.method ?? 'GET', headers: [...headers], ...(typeof init.body === 'string' ? { body: init.body } : {}), cookie }),
-    signal: init.signal,
-  }
-  try {
-    const response = await fetchWithRetry(proxy.url, proxyInit)
-    if (response.ok) return response
-    const preview = await response.clone().text()
-    if (proxyFailureText(response.status, preview)) return fetchWithRetry(input, chromeInit)
-    return response
-  } catch (error) {
-    if (init.signal?.aborted) throw error
-    if (!isRetryableKnowledgeTransport(error) && !/Knowledge proxy failed|fetch failed|Failed to fetch/i.test(errorChain(error))) throw error
-    return fetchWithRetry(input, chromeInit)
-  }
-}
-async function knowledgeJson(path: string): Promise<unknown> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), KNOWLEDGE_CATALOG_TIMEOUT_MS)
-  let response: Response
-  try {
-    response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}${path}`, { credentials: 'include', signal: controller.signal })
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error('knowledge_catalog_timeout')
-    throw new Error(errorChain(error), { cause: error instanceof Error ? error : undefined })
-  } finally {
-    clearTimeout(timeout)
-  }
-  const text = await response.text()
-  const payload = (() => { try { return JSON.parse(text) as unknown } catch { return undefined } })()
-  const finalUrl = response.headers.get('x-knowledge-final-url') ?? response.url
-  const finalHost = (() => { try { return new URL(finalUrl).hostname } catch { return '' } })()
-  const contentType = response.headers.get('content-type') ?? ''
-  const message = typeof payload === 'object' && payload !== null
-    ? [field(payload, 'error'), field(payload, 'message'), field(payload, 'msg')].filter(Boolean).join(' ')
-    : text.slice(0, 1_000)
-  const loginHtml = /text\/html/i.test(contentType) && /<form|password|登录|signin/i.test(text.slice(0, 8_000))
-  if (response.status === 401 || response.status === 403 || finalHost === 'signinuat.annto.com' || loginHtml || /未登录|请先登录|登录失效|unauthenticated|unauthorized/i.test(message)) {
-    throw new Error('knowledge_login_required')
-  }
-  if (!response.ok) throw new Error(`knowledge_platform_http_${response.status}`)
-  if (payload === undefined) throw new Error('knowledge_platform_invalid_json')
-  return payload
-}
-async function assertKnowledgeAuthenticated(): Promise<unknown> { return knowledgeJson('/api/auth/me') }
-function knowledgeServiceState(error: unknown): 'unauthenticated' | 'unavailable' {
-  return error instanceof Error && error.message === 'knowledge_login_required' ? 'unauthenticated' : 'unavailable'
-}
-function controlledVocabulary(value: unknown): { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }> } | undefined {
-  const data = unwrapKnowledgeData(value)
-  const rawDomains = Array.isArray(data)
-    ? data
-    : payloadArray((data as { domains?: unknown; items?: unknown; vocabulary?: unknown } | undefined)?.domains ?? (data as { items?: unknown } | undefined)?.items ?? (data as { vocabulary?: unknown } | undefined)?.vocabulary)
-  const domains: Array<{ id: string; name: string }> = []
-  const systems: Array<{ id: string; name: string; domainId?: string }> = []
-  const seenDomains = new Set<string>()
-  const seenSystems = new Set<string>()
-  for (const item of rawDomains) {
-    const id = stringishField(item, ['id', 'value', 'code', 'domainId', 'domain_id'])
-    if (id === undefined || seenDomains.has(id)) continue
-    seenDomains.add(id)
-    domains.push({ id, name: stringishField(item, ['name', 'label', 'title', 'domainName', 'domain_name']) ?? id })
-    const children = payloadArray((item as { systems?: unknown; children?: unknown; items?: unknown }).systems ?? (item as { children?: unknown }).children ?? (item as { items?: unknown }).items)
-    for (const child of children) {
-      const systemId = stringishField(child, ['id', 'value', 'code', 'systemId', 'system_id'])
-      if (systemId === undefined || seenSystems.has(`${id}\u0000${systemId}`)) continue
-      seenSystems.add(`${id}\u0000${systemId}`)
-      systems.push({ id: systemId, name: stringishField(child, ['name', 'label', 'title', 'systemName', 'system_name']) ?? systemId, domainId: id })
-    }
-  }
-  const rawSystems = isKnowledgeRecord(data) && Array.isArray(data.systems) ? data.systems : []
-  for (const item of rawSystems) {
-    const systemId = stringishField(item, ['id', 'value', 'code', 'systemId', 'system_id'])
-    const domainId = stringishField(item, ['domain', 'domainId', 'domain_id'])
-    if (systemId === undefined || domainId === undefined || !seenDomains.has(domainId) || seenSystems.has(`${domainId}\u0000${systemId}`)) continue
-    seenSystems.add(`${domainId}\u0000${systemId}`)
-    systems.push({ id: systemId, name: stringishField(item, ['name', 'label', 'title', 'systemName', 'system_name']) ?? systemId, domainId })
-  }
-  return domains.length > 0 ? { domains, systems } : undefined
-}
-function filterCatalogByIdentity<T extends { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> }>(catalog: T, identity: KnowledgeIdentity): T {
-  const allowed = authorizedDomainIds(identity, catalog.domains)
-  const domains = catalog.domains.filter((domain) => allowed.has(domain.id))
-  const systems = catalog.systems.filter((system) => system.domainId !== undefined && allowed.has(system.domainId))
-  const repositories = catalog.repositories.filter((repository) => repository.domainId !== undefined && allowed.has(repository.domainId))
-  return { ...catalog, domains, systems, repositories }
-}
 function pruneScope(scope: KnowledgeScope, catalog: { domains: Array<{ id: string }>; systems: Array<{ id: string; domainId?: string }>; repositories: Array<{ id: string }> }): KnowledgeScope {
   const allowedDomains = new Set(catalog.domains.map((domain) => domain.id))
   const domainSystems = Object.fromEntries(Object.entries(scope.domainSystems).flatMap(([domainId, systemIds]) => {
@@ -515,190 +276,7 @@ function pruneScope(scope: KnowledgeScope, catalog: { domains: Array<{ id: strin
     return selected.length === 0 ? [] : [[domainId, selected]]
   }))
   const allowedRepositories = new Set(catalog.repositories.map((repository) => repository.id))
-  return {
-    domainSystems,
-    repositoryIds: scope.repositoryIds.filter((id) => allowedRepositories.has(id)),
-  }
-}
-let knowledgeCatalogCache: { at: number; value: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> } } | undefined
-async function loadKnowledgeCatalog(_domainId?: string): Promise<{ domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string; domainId?: string }>; repositories: Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> }> {
-  if (knowledgeCatalogCache !== undefined && Date.now() - knowledgeCatalogCache.at < KNOWLEDGE_CATALOG_CACHE_TTL_MS) return knowledgeCatalogCache.value
-  const identityPayload = await assertKnowledgeAuthenticated()
-  const identity = knowledgeIdentity(identityPayload)
-  const [vocabularyResult, reposResult] = await Promise.allSettled([
-    knowledgeJson('/api/tags/controlled-vocabulary'),
-    knowledgeJson('/api/repos'),
-  ])
-  for (const result of [vocabularyResult, reposResult]) {
-    if (result.status === 'rejected' && knowledgeServiceState(result.reason) === 'unauthenticated') throw result.reason
-  }
-  const vocabulary = vocabularyResult.status === 'fulfilled' ? controlledVocabulary(vocabularyResult.value) : undefined
-  let rawDomains: unknown
-  let domainsError: unknown
-  if (vocabulary === undefined) {
-    try { rawDomains = await knowledgeJson('/api/domains') } catch (error) {
-      if (knowledgeServiceState(error) === 'unauthenticated') throw error
-      domainsError = error
-    }
-  }
-  if (vocabulary === undefined && rawDomains === undefined && reposResult.status === 'rejected') throw domainsError ?? reposResult.reason
-  const domains = vocabulary?.domains ?? payloadArray(rawDomains).flatMap((item): Array<{ id: string; name: string }> => {
-    const id = stringishField(item, ['id', 'value', 'code', 'domainId', 'domain_id'])
-    if (id === undefined) return []
-    return [{ id, name: stringishField(item, ['name', 'label', 'title', 'domainName', 'domain_name']) ?? id }]
-  })
-  const repositoriesFrom = (value: unknown) => payloadArray(value).flatMap((item): Array<{ id: string; name: string; domainId?: string; systemId?: string; type?: string }> => {
-    const id = stringishField(item, ['id', 'key', 'repoKey', 'repo_key'])
-    if (id === undefined) return []
-    const itemDomainId = stringishField(item, ['domain', 'domainId', 'domain_id'])
-    const systemId = stringishField(item, ['system_key', 'systemKey', 'systemId', 'system_id'])
-    const type = stringishField(item, ['repo_type', 'repoType', 'type'])
-    return [{ id, name: stringishField(item, ['name', 'repoName', 'repo_name']) ?? id, ...(itemDomainId === undefined ? {} : { domainId: itemDomainId }), ...(systemId === undefined ? {} : { systemId }), ...(type === undefined ? {} : { type }) }]
-  })
-  const repositories = reposResult.status === 'fulfilled' ? repositoriesFrom(reposResult.value) : []
-  const rawSystems = vocabulary === undefined || (vocabulary.systems.length === 0 && vocabulary.domains.length > 0)
-    ? await knowledgeJson('/api/domains/systems').catch(() => undefined)
-    : undefined
-  const systems = (vocabulary?.systems.length ? vocabulary.systems : payloadArray(rawSystems).flatMap((item): Array<{ id: string; name: string; domainId?: string }> => {
-    const id = stringishField(item, ['id', 'value', 'code', 'systemId', 'system_id'])
-    if (id === undefined) return []
-    const itemDomain = stringishField(item, ['domain', 'domainId', 'domain_id'])
-    return [{ id, name: stringishField(item, ['name', 'label', 'title', 'systemName', 'system_name']) ?? id, ...(itemDomain === undefined ? {} : { domainId: itemDomain }) }]
-  }))
-  const value = filterCatalogByIdentity({ domains, systems, repositories }, identity)
-  knowledgeCatalogCache = { at: Date.now(), value }
-  return value
-}
-function sseEvents(buffer: string, chunk: string): { events: string[]; remainder: string } { const parts = `${buffer}${chunk}`.replace(/\r\n/g, '\n').split('\n\n'); const remainder = parts.pop() ?? ''; return { events: parts.map((part) => part.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')).filter(Boolean), remainder } }
-const PROCESS_TEXT_LIMIT = 32_000
-const PROCESS_LINE_LIMIT = 400
-function mergeStreamText(current: string, incoming: string): string {
-  if (incoming.startsWith(current)) return incoming.slice(0, 16_000)
-  if (current.endsWith(incoming)) return current
-  const limit = Math.min(current.length, incoming.length)
-  let overlap = limit
-  while (overlap > 0 && current.slice(-overlap) !== incoming.slice(0, overlap)) overlap -= 1
-  return `${current}${incoming.slice(overlap)}`.slice(0, 16_000)
-}
-function isProcessEvent(payload: Record<string, unknown>): boolean {
-  return payload.type === 'reasoning' || payload.type === 'thinking' || payload.type === 'thought' || payload.type === 'agent_thought'
-    || payload.type === 'tool' || payload.type === 'tool_call' || payload.type === 'search' || payload.type === 'status' || payload.type === 'progress'
-    || payload.type === 'log' || payload.type === 'step'
-}
-function isAnswerDelta(payload: Record<string, unknown>): boolean {
-  return !isProcessEvent(payload) && payload.type !== 'done' && payload.type !== 'citations' && payload.type !== 'error'
-}
-function compactProcessText(value: string): string {
-  const normalized = value.slice(0, PROCESS_LINE_LIMIT * 4).replace(/\s+/g, ' ').replace(/(?:[A-Za-z]:[\\/]|\/)(?:[^"'()\s,:]+[\\/]){3,}[^"'()\s,:]+/g, (path) => {
-    const parts = path.split(/[\\/]/).filter(Boolean)
-    return `…/${parts.slice(-4).join('/')}`
-  }).trim()
-  return normalized.length <= PROCESS_LINE_LIMIT ? normalized : `${normalized.slice(0, PROCESS_LINE_LIMIT - 1)}…`
-}
-function processEventText(payload: Record<string, unknown>): string | undefined {
-  if (payload.type === 'reasoning' || payload.type === 'thinking' || payload.type === 'thought' || payload.type === 'agent_thought') {
-    return '远程检索正在分析问题…'
-  }
-  if (payload.type === 'step') {
-    const step = typeof payload.step === 'string' ? payload.step : 'retrieval'
-    const status = typeof payload.status === 'string' ? payload.status : 'running'
-    return `步骤：${step}（${status}）`
-  }
-  const source = typeof payload.source === 'string' ? payload.source.trim() : ''
-  for (const candidate of [payload.message, payload.delta, payload.content, payload.text, payload.status, payload.detail]) {
-    if (typeof candidate === 'string' && candidate.trim().length > 0) {
-      const text = compactProcessText(candidate)
-      return source === '' ? text : `${compactProcessText(source).slice(0, 80)} · ${text}`
-    }
-  }
-  return undefined
-}
-function appendProcess(current: string, incoming: string): string {
-  const line = incoming.trim()
-  if (line === '') return current
-  if (current === '') return line.slice(0, PROCESS_TEXT_LIMIT)
-  const newline = current.lastIndexOf('\n')
-  const last = newline === -1 ? current : current.slice(newline + 1)
-  if (line === last) return current
-  if (line.startsWith(last) || last.startsWith(line)) {
-    const next = line.length >= last.length ? line : last
-    return `${newline === -1 ? '' : current.slice(0, newline + 1)}${next}`.slice(0, PROCESS_TEXT_LIMIT)
-  }
-  return `${current}\n${line}`.slice(0, PROCESS_TEXT_LIMIT)
-}
-function retrievalQuestion(kind: KnowledgeKind, question: string, resumed = false): string {
-  const instruction = resumed
-    ? '这是同一远程检索会话的追问。请在已有上下文上继续回答，不要无必要地从头扫描仓库或知识库。'
-    : kind === 'code'
-      ? '请直接返回从所选远程代码仓库检索到的事实、文件路径和代码依据。'
-      : '请直接返回从所选知识范围检索到的事实和引用依据。'
-  const language = /[\u3400-\u9fff]/u.test(question)
-    ? '所有面向用户的流式内容和最终答案都必须使用简体中文；工具名、代码标识符和文件路径可保留原文。即使转述后的问题包含英文，也不要用英文叙述。'
-    : 'Use the same language as the user question for all user-visible streaming content and the final answer.'
-  return `${instruction}${language}若用户要原文摘录，一次只返回一个文件或一个函数的核心片段；不要并行检索多个文件，也不要把多个大文件全文塞进同一次答案。最终答案只保留事实和引用，不要把思考过程写进最终答案。检索计划、当前正在查的仓库或知识、工具选择和进度可通过独立过程事件流式返回。用户问题：${question}`
-}
-async function executeKnowledgeQuery(kind: KnowledgeKind, question: string, scope: KnowledgeScope, priorSessionId: string | undefined, signal: AbortSignal, onProgress?: (progress: { chars: number; content: string; eventType?: string; process?: string }) => void): Promise<{ result: { status: 'complete' | 'partial' | 'truncated'; answer: string; sources: Array<{ id: string; title: string }> }; sessionId?: string }> {
-  if (kind === 'knowledge' && Object.keys(scope.domainSystems).length === 0) {
-    throw new Error('当前会话没有选择知识范围。请在输入框上方点「选择知识范围」，勾选至少一个知识库，然后重试。不要用已选代码库代替知识库检索。')
-  }
-  if (kind === 'code' && scope.repositoryIds.length === 0) {
-    throw new Error('当前会话没有选择远程代码库。请在输入框上方点「选择代码库」并勾选仓库，然后重试。不要用本地工作区代替远程代码检索。')
-  }
-  const directedQuestion = retrievalQuestion(kind, question, priorSessionId !== undefined)
-  const body = kind === 'knowledge' ? { question: directedQuestion, domain_system_config: Object.fromEntries(Object.entries(scope.domainSystems).map(([domainId, systems]) => [domainId, { self: false, systems }])), forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) } : { question: directedQuestion, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
-  const emit = (eventType?: string, content = '', process = '') => onProgress?.({ chars: content.length, content, ...(eventType === undefined ? {} : { eventType }), ...(process === '' ? {} : { process }) })
-  const response = await knowledgeFetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(body), signal })
-  if (!response.ok || response.body === null) throw new Error(`knowledge_platform_http_${response.status}`)
-  emit('connected')
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let visualContent = ''; let process = ''; let sources: Array<{ id: string; title: string }> = []; let sessionId: string | undefined; let done = false; let marker = false; let stop = false
-  const consume = (chunk: string): void => {
-    const parsed = sseEvents(buffer, chunk)
-    buffer = parsed.remainder
-    for (const event of parsed.events) {
-      if (event === '[DONE]') { marker = true; continue }
-      let payload: Record<string, unknown>
-      try { payload = JSON.parse(event) as Record<string, unknown> } catch { continue }
-      if (payload.type === 'error') {
-        if (answer.length > 0) { stop = true; break }
-        throw new Error(typeof payload.error === 'string' ? payload.error : 'knowledge_platform_error')
-      }
-      if (payload.type === 'text_delta') continue
-      if (isProcessEvent(payload)) {
-        const incoming = processEventText(payload)
-        if (incoming !== undefined) process = appendProcess(process, incoming)
-        emit(typeof payload.type === 'string' ? payload.type : 'progress', visualContent, process)
-      } else if (typeof payload.delta === 'string' && isAnswerDelta(payload)) {
-        answer = mergeStreamText(answer, payload.delta)
-        visualContent = answer
-        emit(typeof payload.type === 'string' ? payload.type : undefined, visualContent, process)
-      }
-      if (payload.type === 'citations' || payload.type === 'done') {
-        sources = (Array.isArray(payload.citations) ? payload.citations : []).flatMap((item): Array<{ id: string; title: string }> => {
-          const id = field(item, 'page_id') ?? field(item, 'id')
-          const title = field(item, 'page_title') ?? field(item, 'title') ?? id
-          return id === undefined ? [] : [{ id, title: title ?? id }]
-        }).slice(0, 20)
-      }
-      if (payload.type === 'done') {
-        done = true
-        sessionId = typeof payload.session_id === 'string' ? payload.session_id : sessionId
-      }
-    }
-  }
-  try {
-    while (!stop) {
-      const read = await reader.read()
-      if (read.done) break
-      consume(decoder.decode(read.value, { stream: true }))
-    }
-    consume(decoder.decode())
-  } catch (error) {
-    try { consume(decoder.decode()) } catch { /* keep the original transport error */ }
-    if (answer.length === 0) throw new Error(describeKnowledgeTransportError(error, process), { cause: error instanceof Error ? error : undefined })
-  } finally { reader.releaseLock() }
-  if (answer.length === 0 && !done && !marker) throw new Error('knowledge_platform_incomplete_sse')
-  const complete = (done || marker) && answer.length < 16_000
-  return { result: { status: answer.length >= 16_000 ? 'truncated' : complete ? 'complete' : 'partial', answer, sources }, ...(sessionId === undefined ? {} : { sessionId }) }
+  return { domainSystems, repositoryIds: scope.repositoryIds.filter((id) => allowedRepositories.has(id)) }
 }
 function selectedScopeNames(ids: string[], entries: Array<{ id: string; name: string }>, fallbackToId = false): string[] {
   const byId = new Map(entries.map((entry) => [entry.id, entry.name]))
@@ -715,7 +293,7 @@ function selectedSourceScopeEcho(record: { scope: KnowledgeScope; enabled: boole
   return { enabled: record.enabled, codeSelected: repositories.length > 0, knowledgeSelected: knowledge.length > 0, repositories, knowledge }
 }
 
-const NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
+const NATIVE_HOST_NAME = ACCRUI_NATIVE_HOST_NAME
 const START_TIMEOUT_MS = 30_000
 const PROTOTYPE_STUDIO_OPEN_PATH = '/api/prototype-studio/open'
 const PROTOTYPE_STUDIO_RECOVER_PATH = '/api/prototype-studio/recover'
@@ -801,7 +379,27 @@ const pendingReleaseUpdates = new Map<string, { resolve: (value: { ok: boolean, 
 let nativeUrl: string | undefined
 let nativeRuntimeIdentity: RuntimeIdentitySummary | undefined
 let startPromise: Promise<string> | undefined
+// A Run exists even when it began in none mode, so keep its identity separate
+// from the optional Browser Target binding.
+let currentNativeRunId: string | undefined
 const boundBrowserTargets = new Map<string, BrowserTargetBinding>()
+interface BrowserTargetRunLock {
+  sessionId: string
+  submissionId: string
+  binding: BrowserTargetBinding
+  port: chrome.runtime.Port
+  state: 'pending' | 'active'
+  canceled: boolean
+  resolve: (locked: boolean) => void
+  reject: (error: Error) => void
+}
+const runBrowserTargetLocks = new Map<string, BrowserTargetRunLock>()
+const cancelledBrowserTargetSubmissions = new Set<string>()
+
+function rejectBrowserTargetRunLocks(error: Error): void {
+  for (const lock of runBrowserTargetLocks.values()) lock.reject(error)
+  runBrowserTargetLocks.clear()
+}
 interface PresentationFrameBinding {
   frameId: number
   frameUrl: string
@@ -870,8 +468,14 @@ let nativeLifecycle: Promise<void> = Promise.resolve()
 const prototypeStudioAuthorizations = new Map<string, PrototypeStudioAuthorization>()
 let prototypeStudioAuthorizationMutation: Promise<void> = Promise.resolve()
 
+function isKnowledgeRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 function asError(value: unknown): string {
-  return errorChain(value)
+  if (value instanceof Error) return value.message
+  if (isKnowledgeRecord(value) && typeof value.message === 'string') return value.message
+  return String(value)
 }
 
 /** Read-only Chrome tab metadata shown by the embedded Harness composer. */
@@ -993,7 +597,7 @@ function isTeamKnowledgeParent(value: unknown): value is TeamKnowledgeParent {
 function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnowledgeItemRequest {
   const candidate = message as NativeMessage & Partial<TeamKnowledgeItemRequest>
   if (!(message.type === CONNECTOR_REQUEST && typeof message.requestId === 'string' && typeof message.runId === 'string'
-    && typeof message.generation === 'string' && message.tool === 'team_knowledge_batch' && isBrowserTarget(message.browserTarget)
+    && typeof message.generation === 'string' && message.tool === 'team_knowledge_batch' && validBrowserTarget(message.browserTarget)
     && ['inspect_parent', 'create', 'readback', 'release'].includes(String(candidate.action)))) return false
   const hasBatchLease = typeof candidate.batchId === 'string' && candidate.batchId.length > 0 && candidate.batchId.length <= 128
     && (candidate.lease === 'acquire' || candidate.lease === 'reuse' || candidate.lease === 'release')
@@ -1095,11 +699,11 @@ function isNativeTransferPayload(value: unknown): value is { runId: string; brow
   const payload = value as NativeTransferPayload
   return typeof value === 'object' && value !== null
     && typeof payload.runId === 'string'
-    && isBrowserTarget(payload.browserTarget)
+    && validBrowserTarget(payload.browserTarget)
     && (payload.browserTargets === undefined || (Array.isArray(payload.browserTargets)
-      && payload.browserTargets.every(isBrowserTarget)))
+      && payload.browserTargets.every(validBrowserTarget)))
     && (payload.unavailableBrowserTargets === undefined || (Array.isArray(payload.unavailableBrowserTargets)
-      && payload.unavailableBrowserTargets.every(isUnavailableBrowserTarget)))
+      && payload.unavailableBrowserTargets.every(validUnavailableBrowserTarget)))
 }
 
 function targetStorage(): chrome.storage.StorageArea | undefined {
@@ -1428,7 +1032,7 @@ async function accountAccessSnapshot(): Promise<AccountAccessSnapshot> {
       message: '公司账号已登录；可使用个人 Key 配置公司网关模型。',
     }
   } catch (error) {
-    if (knowledgeServiceState(error) === 'unauthenticated') {
+    if (knowledgeTransport.serviceState(error) === 'unauthenticated') {
       return { status: 'guest', knowledgeAccess: false, codeAccess: false, modelMode: 'manual' }
     }
     return {
@@ -1456,7 +1060,7 @@ async function locallySignOutAccount(): Promise<AccountAccessSnapshot> {
   await invalidateCompanyPortalSession()
   await clearCompanyAuthenticationCookies()
   await setAccountLocallySignedOut(true)
-  knowledgeCatalogCache = undefined
+  knowledgeTransport.clearCatalog()
   for (const controller of activeKnowledgeQueries.values()) controller.abort()
   await clearKnowledgeScopeStorage()
   await knowledgeSessionStorage()?.remove(KNOWLEDGE_SESSION_STORAGE_KEY)
@@ -1487,7 +1091,7 @@ async function respondToSelectedSourceScope(port: chrome.runtime.Port, request: 
     let scope = record?.scope ?? empty
     let catalog: { domains: Array<{ id: string; name: string }>; systems: Array<{ id: string; name: string }>; repositories: Array<{ id: string; name: string }> } = { domains: [], systems: [], repositories: [] }
     try {
-      catalog = await loadKnowledgeCatalog()
+      catalog = await knowledgeTransport.loadCatalog()
       scope = pruneScope(scope, catalog)
     } catch { /* names fall back to stored ids when the catalog is unavailable */ }
     port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, result: selectedSourceScopeEcho({ scope, enabled }, catalog) })
@@ -1523,16 +1127,16 @@ async function respondToKnowledge(port: chrome.runtime.Port, request: KnowledgeQ
     if (record === undefined) throw new Error('当前会话还没有知识/代码范围记录。请先在输入框上方选择知识范围或代码库，再发起检索。')
     if (!record.enabled) throw new Error('知识查询开关已关闭。请打开输入框上方的知识查询开关后再试。')
     let scope = record.scope
-    try { scope = pruneScope(record.scope, await loadKnowledgeCatalog()) } catch { /* catalog failure must not erase the exact stored domain-system pairs */ }
+    try { scope = pruneScope(record.scope, await knowledgeTransport.loadCatalog()) } catch { /* catalog failure must not erase the exact stored domain-system pairs */ }
     const kind: KnowledgeKind = request.tool === 'knowledge_search' ? 'knowledge' : 'code'
     const fingerprint = scopeFingerprint(scope)
     const sessions = await knowledgeSessions()
     const owner = knowledgeConversationOwner(request.harnessSessionId, request.harnessParentSessionId)
     const continuation = planKnowledgeContinuation(sessions, owner, kind, fingerprint)
-    const executed = await executeKnowledgeQuery(kind, request.question.trim(), scope, continuation.priorSessionId, controller.signal, (progress) => {
+    const executed = await knowledgeTransport.query({ kind, question: request.question.trim(), scope, priorSessionId: continuation.priorSessionId, signal: controller.signal, onProgress: (progress) => {
       if (progress.process !== undefined && progress.process !== '') lastProcess = progress.process
       broadcast('streaming', progress.chars, progress.content, progress.eventType, progress.process)
-    })
+    } })
     if (executed.sessionId !== undefined) {
       sessions[continuation.key] = { sessionId: executed.sessionId, fingerprint }
       await knowledgeSessionStorage()?.set({ [KNOWLEDGE_SESSION_STORAGE_KEY]: sessions })
@@ -1578,7 +1182,9 @@ async function restartHarnessForSettings(): Promise<string> {
     }
     nativeUrl = undefined
     nativeRuntimeIdentity = undefined
+    currentNativeRunId = undefined
     boundBrowserTargets.clear()
+    rejectBrowserTargetRunLocks(new Error('Harness restarted before the Browser Target lock completed.'))
     presentationFrameBindings.clear()
     spreadsheetFrameBindings.clear()
     return startHarnessForSettings()
@@ -2419,6 +2025,15 @@ async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<Br
   // Tab-update candidate persistence and Connector dispatch can arrive in the
   // same event turn. Read settings only after that serialized update settles.
   await browserTargetRuntime.settled()
+  const locked = runBrowserTargetLocks.get(request.runId)
+  if (locked !== undefined) {
+    const tab = await chrome.tabs.get(locked.binding.browserTarget.tabId).catch(() => undefined)
+    const live = tab === undefined ? undefined : targetFromActionTab(tab)
+    if (live === undefined || !sameBrowserTarget(live, locked.binding.browserTarget)) {
+      throw new Error('The Browser Target captured for this Harness Run changed before the Office request.')
+    }
+    return locked.binding
+  }
   const settings = await readBrowserTargetSettings()
   if (settings.mode === 'none') throw new Error('Browser use is disabled for the next Office turn.')
   const binding = settings.mode === 'pinned-tabs'
@@ -2435,6 +2050,54 @@ async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<Br
     await transferBrowserTarget(request.runId, binding, request.requestId)
   }
   return binding
+}
+
+async function submittedBrowserTarget(browserTarget: BrowserTarget): Promise<BrowserTargetBinding> {
+  const tab = await chrome.tabs.get(browserTarget.tabId).catch(() => undefined)
+  const verified = tab === undefined ? undefined : targetFromActionTab(tab)
+  if (verified === undefined || !sameBrowserTarget(verified, browserTarget)) {
+    throw new Error('The Browser Target selected when this prompt was submitted changed before it could be locked.')
+  }
+  return bindingForTarget(verified)
+}
+
+async function lockFollowBrowserTarget(sessionId: string, submissionId: string, browserTarget: BrowserTarget): Promise<boolean> {
+  const runId = currentNativeRunId
+  const port = nativePort
+  if (runId === undefined || port === undefined) throw new Error('Harness is not connected; the Browser Target cannot be locked.')
+  if (cancelledBrowserTargetSubmissions.delete(submissionId)) return false
+  return new Promise<boolean>((resolve, reject) => {
+    const existing = runBrowserTargetLocks.get(runId)
+    if (existing !== undefined && existing.submissionId !== submissionId) {
+      reject(new Error('另一个对话正在运行，结束后再试。'))
+      return
+    }
+    const lock: BrowserTargetRunLock = { sessionId, submissionId, binding: bindingForTarget(browserTarget), port, state: 'pending', canceled: false, resolve, reject }
+    runBrowserTargetLocks.set(runId, lock)
+    void (async () => {
+      try {
+        await browserTargetRuntime.settled()
+        if (lock.canceled || cancelledBrowserTargetSubmissions.delete(submissionId)) { runBrowserTargetLocks.delete(runId); resolve(false); return }
+        if ((await readBrowserTargetSettings()).mode !== 'follow-active-tab') { runBrowserTargetLocks.delete(runId); resolve(false); return }
+        lock.binding = await submittedBrowserTarget(browserTarget)
+        if (nativePort !== port || currentNativeRunId !== runId) throw new Error('Harness Run changed before the Browser Target lock was confirmed.')
+        const current = boundBrowserTargets.get(runId)
+        if (current === undefined || !sameBrowserTarget(current.browserTarget, lock.binding.browserTarget)) await transferBrowserTarget(runId, lock.binding)
+        if (lock.canceled || nativePort !== port || currentNativeRunId !== runId) { runBrowserTargetLocks.delete(runId); resolve(false); return }
+        lock.state = 'active'; resolve(true)
+      } catch (error) { runBrowserTargetLocks.delete(runId); reject(new Error(asError(error))) }
+    })()
+  })
+}
+
+function unlockFollowBrowserTarget(sessionId: string, submissionId: string): void {
+  for (const [runId, lock] of runBrowserTargetLocks) {
+    if (lock.sessionId !== sessionId || lock.submissionId !== submissionId) continue
+    lock.canceled = true
+    if (lock.state === 'active') runBrowserTargetLocks.delete(runId)
+    return
+  }
+  cancelledBrowserTargetSubmissions.add(submissionId)
 }
 
 const WORK_TAB_CONTENT_LIMIT = 12_000
@@ -3301,16 +2964,16 @@ function respondToOfficeRequest(port: chrome.runtime.Port, request: RoutedOffice
   void respond(execute())
 }
 
-async function htmlWorkbenchPageState(tabId: number, refresh: boolean): Promise<{ domFingerprint: string; sourceFingerprint: string; url: string }> {
+async function htmlWorkbenchPageState(tabId: number, refresh: boolean, expectedStylesheets: HtmlWorkbenchStylesheetFingerprint[] = [], expectedAnchorSelectors: string[] = []): Promise<{ domFingerprint: string; sourceFingerprint: string; url: string; stylesheetFingerprints: HtmlWorkbenchStylesheetFingerprint[]; anchorStates: { selector: string; computedStyle: Record<string, string> }[] }> {
   if (refresh) {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => { chrome.webNavigation.onCompleted.removeListener(completed); reject(new Error('html_workbench_reload_timeout')) }, 10_000)
       const completed = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => { if (details.tabId !== tabId || details.frameId !== 0) return; clearTimeout(timeout); chrome.webNavigation.onCompleted.removeListener(completed); resolve() }
       chrome.webNavigation.onCompleted.addListener(completed)
-      void chrome.tabs.reload(tabId).catch(error => { clearTimeout(timeout); chrome.webNavigation.onCompleted.removeListener(completed); reject(error) })
+      void chrome.tabs.reload(tabId, { bypassCache: true }).catch(error => { clearTimeout(timeout); chrome.webNavigation.onCompleted.removeListener(completed); reject(error) })
     })
   }
-  const execution = await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', func: async () => {
+  const execution = await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', args: [expectedStylesheets, expectedAnchorSelectors], func: async (expectedStylesheets: HtmlWorkbenchStylesheetFingerprint[] = [], expectedAnchorSelectors: string[] = []) => {
     const domFingerprint = (text: string) => { let value = 2166136261; for (let index = 0; index < text.length; index += 1) value = Math.imul(value ^ text.charCodeAt(index), 16777619); return (value >>> 0).toString(16).padStart(64, '0') }
     const sourceFingerprint = async (text: string) => {
       const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
@@ -3321,10 +2984,28 @@ async function htmlWorkbenchPageState(tabId: number, refresh: boolean): Promise<
       if (reply.ok || (location.protocol === 'file:' && reply.status === 0 && reply.url === location.href)) return reply.text()
       return Promise.reject(new Error(`file_source_readback_${reply.status}`))
     })
-    return { domFingerprint: domFingerprint(text), sourceFingerprint: await sourceFingerprint(source), url: location.href }
+    const stylesheetFingerprints = await Promise.all(expectedStylesheets.map(async expected => {
+      const matching = [...document.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]')].find(link => {
+        const url = new URL(link.href); url.search = ''; url.hash = ''
+        return url.href === expected.url
+      })
+      if (!matching) throw new Error(`html_workbench_stylesheet_missing:${expected.url}`)
+      const stylesheet = await fetch(matching.href, { cache: 'no-store' }).then(reply => {
+        if (reply.ok || (new URL(matching.href).protocol === 'file:' && reply.status === 0 && reply.url === matching.href)) return reply.text()
+        return Promise.reject(new Error(`html_workbench_stylesheet_readback_${reply.status}:${expected.url}`))
+      })
+      return { url: expected.url, fingerprint: await sourceFingerprint(stylesheet) }
+    }))
+    const anchorStates = expectedAnchorSelectors.map(selector => {
+      const element = document.querySelector(selector)
+      if (!element) throw new Error(`html_workbench_anchor_missing:${selector}`)
+      const style = getComputedStyle(element)
+      return { selector, computedStyle: { display: style.display, visibility: style.visibility, color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, width: style.width, height: style.height } }
+    })
+    return { domFingerprint: domFingerprint(text), sourceFingerprint: await sourceFingerprint(source), url: location.href, stylesheetFingerprints, anchorStates }
   } })
   const result = execution[0]?.result
-  if (!result || typeof result.domFingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(result.sourceFingerprint) || typeof result.url !== 'string') throw new Error('file_access_permission_missing_or_page_unreadable')
+  if (!result || typeof result.domFingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(result.sourceFingerprint) || typeof result.url !== 'string' || !validHtmlWorkbenchStylesheetFingerprints(result.stylesheetFingerprints) || !Array.isArray(result.anchorStates)) throw new Error('file_access_permission_missing_or_page_unreadable')
   return result
 }
 
@@ -3336,12 +3017,19 @@ function respondToHtmlWorkbenchRequest(port: chrome.runtime.Port, request: HtmlW
     if (tab.url !== request.browserTarget.url || !tab.url?.startsWith('file:')) throw new Error('HTML Workbench requires the unchanged local file:// Browser Target.')
     const picker = htmlWorkbenchPickers.get(request.browserTarget.tabId)
     if (request.action === 'refresh_readback') {
-      await new Promise(resolve => setTimeout(resolve, 100))
-      const page = await htmlWorkbenchPageState(request.browserTarget.tabId, true)
-      return { ...page, verified: page.sourceFingerprint === request.expectedSourceFingerprint && page.url === request.browserTarget.url, selections: picker?.anchors ?? [] }
+      const expectedStylesheets = request.expectedStylesheets
+      const expectedAnchorSelectors = request.expectedAnchorSelectors
+      if (!expectedStylesheets || !expectedAnchorSelectors) throw new Error('html_workbench_readback_expectations_missing')
+      const page = await htmlWorkbenchPageState(request.browserTarget.tabId, true, expectedStylesheets, expectedAnchorSelectors)
+      const stylesheetsMatch = page.stylesheetFingerprints.length === expectedStylesheets.length && page.stylesheetFingerprints.every((item, index) => item.url === expectedStylesheets[index].url && item.fingerprint === expectedStylesheets[index].fingerprint)
+      const anchorsMatch = page.anchorStates.length === expectedAnchorSelectors.length && page.anchorStates.every((item, index) => item.selector === expectedAnchorSelectors[index])
+      const verified = page.sourceFingerprint === request.expectedSourceFingerprint && stylesheetsMatch && anchorsMatch && page.url === request.browserTarget.url
+      return { ...page, verified, ...(verified ? {} : { error: 'html_workbench_readback_mismatch' }), selections: picker?.anchors ?? [] }
     }
-    const page = await htmlWorkbenchPageState(request.browserTarget.tabId, false)
-    return { domFingerprint: page.domFingerprint, selections: picker?.url === request.browserTarget.url ? picker.anchors : [] }
+    const selections = picker?.url === request.browserTarget.url ? picker.anchors : []
+    const expectedAnchorSelectors = selections.map(anchor => (anchor as { selector?: unknown }).selector).filter((selector): selector is string => typeof selector === 'string' && selector.length > 0 && selector.length <= 2_000)
+    const page = await htmlWorkbenchPageState(request.browserTarget.tabId, false, [], expectedAnchorSelectors)
+    return { domFingerprint: page.domFingerprint, anchorStates: page.anchorStates, selections }
   })().then(result => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
     .catch(error => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: asError(error) }))
 }
@@ -4004,7 +3692,7 @@ function isTeamKnowledgeBatchLease(value: unknown): value is TeamKnowledgeBatchL
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const lease = value as Partial<TeamKnowledgeBatchLease>
   return typeof lease.runId === 'string' && lease.runId.length > 0 && typeof lease.batchId === 'string' && lease.batchId.length > 0
-    && isBrowserTarget(lease.browserTarget) && typeof lease.parentFingerprint === 'string' && lease.parentFingerprint.length > 0
+    && validBrowserTarget(lease.browserTarget) && typeof lease.parentFingerprint === 'string' && lease.parentFingerprint.length > 0
 }
 
 async function teamKnowledgeBatchLeases(): Promise<Record<string, TeamKnowledgeBatchLease>> {
@@ -4519,9 +4207,11 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   console.error('[deepseek-harness] Native Messaging disconnected:', error)
   nativeUrl = undefined
   nativeRuntimeIdentity = undefined
-  knowledgeProxyConfig = undefined
+  currentNativeRunId = undefined
+  knowledgeTransport.clearProxy()
   nativePort = undefined
   boundBrowserTargets.clear()
+  rejectBrowserTargetRunLocks(new Error(error))
   presentationFrameBindings.clear()
   spreadsheetFrameBindings.clear()
   rejectTargetTransfers(new Error(error))
@@ -4601,9 +4291,11 @@ function connectNativePort(): chrome.runtime.Port {
     if (message.type !== 'server_started') return
     const payload = message.payload as NativeStartPayload | undefined
     if (typeof payload?.url !== 'string') return
-    if (validKnowledgeProxyConfig(payload.knowledgeProxyUrl, payload.knowledgeProxyToken)) knowledgeProxyConfig = { url: payload.knowledgeProxyUrl, token: payload.knowledgeProxyToken as string }
+    if (typeof payload.runId !== 'string' || payload.runId.length === 0) return
+    knowledgeTransport.configureProxy(payload.knowledgeProxyUrl, payload.knowledgeProxyToken)
     nativeRuntimeIdentity = runtimeIdentitySummary(payload.runtimeIdentity)
     nativeUrl = payload.url
+    currentNativeRunId = payload.runId
     void publishHarnessReady(nativeUrl)
   })
   nativePort = port
@@ -4611,8 +4303,8 @@ function connectNativePort(): chrome.runtime.Port {
 }
 
 async function transferBrowserTarget(runId: unknown, binding: BrowserTargetBinding, requestId: string = crypto.randomUUID()): Promise<void> {
-  if (typeof runId !== 'string' || runId.length === 0 || !isBrowserTarget(binding.browserTarget)
-    || binding.browserTargets.length === 0 || !binding.browserTargets.every(isBrowserTarget)) {
+  if (typeof runId !== 'string' || runId.length === 0 || !validBrowserTarget(binding.browserTarget)
+    || binding.browserTargets.length === 0 || !binding.browserTargets.every(validBrowserTarget)) {
     throw new Error('transfer-browser-target requires a Run id and an explicit Chrome Browser Target.')
   }
   if (nativePort === undefined) throw new Error('Harness is not connected; no running Run can be migrated.')
@@ -4670,7 +4362,8 @@ function startHarness(binding?: BrowserTargetBinding): Promise<string> {
           }
           nativeUrl = payload.url
           nativeRuntimeIdentity = runtimeIdentitySummary(payload.runtimeIdentity)
-          if (validKnowledgeProxyConfig(payload.knowledgeProxyUrl, payload.knowledgeProxyToken)) knowledgeProxyConfig = { url: payload.knowledgeProxyUrl, token: payload.knowledgeProxyToken as string }
+          currentNativeRunId = payload.runId
+          knowledgeTransport.configureProxy(payload.knowledgeProxyUrl, payload.knowledgeProxyToken)
           if (binding !== undefined) {
             boundBrowserTargets.set(payload.runId, binding)
             presentationFrameBindings.delete(payload.runId)
@@ -5140,6 +4833,24 @@ async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, 
   return delivery
 }
 
+function reportPrdReviewAction(record: MarkdownReviewRecord, requestId: string, action: 'rewrite' | 'accept', outcome: 'succeeded' | 'failed' | 'timeout', status?: string): void {
+  try {
+    const port = nativePort ?? connectNativePort()
+    port.postMessage({
+      type: 'report-prd-event',
+      payload: {
+        eventId: `review:${record.reviewId}:${requestId}`,
+        eventType: 'review_action',
+        outcome,
+        occurredAt: new Date().toISOString(),
+        sessionId: record.harnessSessionId,
+        action,
+        ...(status === undefined ? {} : { status }),
+      },
+    })
+  } catch { /* Telemetry must never change the review action result. */ }
+}
+
 export default defineBackground(() => {
   const sidePanel = chrome.sidePanel
   chrome.runtime.onConnect?.addListener((port) => {
@@ -5180,8 +4891,14 @@ export default defineBackground(() => {
           return
         }
         if (message.type === 'markdown-review-session-action-request') {
-          const action = await deliverMarkdownReviewSessionAction(record, message)
-          port.postMessage({ v: 1, type: 'markdown-review-session-action-response', requestId: message.requestId, ok: true, ...action })
+          try {
+            const action = await deliverMarkdownReviewSessionAction(record, message)
+            reportPrdReviewAction(record, message.requestId, message.action, 'succeeded', action.status)
+            port.postMessage({ v: 1, type: 'markdown-review-session-action-response', requestId: message.requestId, ok: true, ...action })
+          } catch (error) {
+            reportPrdReviewAction(record, message.requestId, message.action, /timeout|timed out|超时|未在.{0,20}秒/i.test(asError(error)) ? 'timeout' : 'failed')
+            throw error
+          }
           return
         }
         const delivery = await retryExpiredWorkspaceReviewCapability(record, () => deliverMarkdownReview(record, message))
@@ -5220,7 +4937,7 @@ export default defineBackground(() => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; candidateId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown; nonce?: unknown; pageUrl?: unknown; anchors?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; submissionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; candidateId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown; nonce?: unknown; pageUrl?: unknown; anchors?: unknown }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -5302,6 +5019,7 @@ export default defineBackground(() => {
           await preserveFullscreenBrowserTarget(windowId, activeBrowserTarget, updateBrowserTargetSettings)
           const url = new URL(chrome.runtime.getURL('sidepanel.html'))
           url.searchParams.set('dshHarnessSurface', 'fullscreen-tab')
+          url.searchParams.set('dshHarnessHandoffNonce', crypto.randomUUID())
           if (typeof request.sessionId === 'string') url.searchParams.set('dshHarnessSessionId', request.sessionId)
           const tab = await chrome.tabs.create({ windowId, active: true, url: url.toString() })
           try {
@@ -5323,21 +5041,26 @@ export default defineBackground(() => {
       return false
     }
     if (request.type === 'prepare-sidepanel-handoff/v1') {
-      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || !Number.isInteger(request.tabId) || (request.tabId as number) < 0 || !validSessionIdentity(request.sessionId) || chrome.tabs?.get === undefined) {
+      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || !Number.isInteger(request.tabId) || (request.tabId as number) < 0 || !validSessionIdentity(request.sessionId) || !validHandoffNonce(request.nonce) || chrome.tabs?.get === undefined) {
         sendResponse({ ok: false, error: 'Chrome could not prepare the Harness side-panel handoff.' })
         return false
       }
       const windowId = request.windowId as number
       const tabId = request.tabId as number
       const sessionId = request.sessionId
-      pendingSidePanelHandoffs.set(windowId, { sessionId, tabId, expiresAt: Date.now() + SIDE_PANEL_HANDOFF_TTL_MS })
+      const nonce = request.nonce
+      const handoff = { sessionId, tabId, nonce, expiresAt: Date.now() + SIDE_PANEL_HANDOFF_TTL_MS }
+      pendingSidePanelHandoffs.set(windowId, handoff)
       void (async () => {
         try {
           const tab = await chrome.tabs.get(tabId)
           if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
+          const url = new URL(tab.url ?? '')
+          if (url.searchParams.get('dshHarnessSurface') !== 'fullscreen-tab' || url.searchParams.get('dshHarnessHandoffNonce') !== nonce) throw new Error('The full-screen Harness Tab handoff nonce is invalid.')
+          await persistSidePanelHandoff(windowId, handoff)
         } catch (error) {
           const handoff = pendingSidePanelHandoffs.get(windowId)
-          if (handoff?.tabId === tabId && handoff.sessionId === sessionId) pendingSidePanelHandoffs.delete(windowId)
+          if (handoff?.tabId === tabId && handoff.sessionId === sessionId && handoff.nonce === nonce) { pendingSidePanelHandoffs.delete(windowId); await persistSidePanelHandoff(windowId, undefined) }
           throw error
         }
       })()
@@ -5351,34 +5074,36 @@ export default defineBackground(() => {
         return false
       }
       const windowId = request.windowId as number
-      const handoff = pendingSidePanelHandoffs.get(windowId)
-      if (handoff === undefined || handoff.expiresAt <= Date.now()) {
-        pendingSidePanelHandoffs.delete(windowId)
-        sendResponse({ ok: true })
-        return false
-      }
-      sendResponse({ ok: true, sessionId: handoff.sessionId, tabId: handoff.tabId })
-      return false
+      void (async () => {
+        const handoff = pendingSidePanelHandoffs.get(windowId) ?? await readPersistedSidePanelHandoff(windowId)
+        if (handoff === undefined || handoff.expiresAt <= Date.now()) {
+          pendingSidePanelHandoffs.delete(windowId)
+          await persistSidePanelHandoff(windowId, undefined)
+          sendResponse({ ok: true })
+          return
+        }
+        pendingSidePanelHandoffs.set(windowId, handoff)
+        sendResponse({ ok: true, sessionId: handoff.sessionId, tabId: handoff.tabId, nonce: handoff.nonce })
+      })().catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
     }
     if (request.type === 'session-handoff-applied/v1') {
-      if (!Number.isInteger(request.windowId) || (request.windowId as number) < 0 || !Number.isInteger(request.tabId) || (request.tabId as number) < 0 || !validSessionIdentity(request.sessionId) || chrome.tabs?.get === undefined || chrome.tabs?.remove === undefined) {
+      if (!isSidePanelSender(sender) || !Number.isInteger(request.windowId) || (request.windowId as number) < 0 || !Number.isInteger(request.tabId) || (request.tabId as number) < 0 || !validSessionIdentity(request.sessionId) || !validHandoffNonce(request.nonce) || chrome.tabs?.get === undefined || chrome.tabs?.remove === undefined) {
         sendResponse({ ok: false, error: 'Chrome could not complete the Harness side-panel handoff.' })
         return false
       }
       const windowId = request.windowId as number
       const tabId = request.tabId as number
-      const handoff = pendingSidePanelHandoffs.get(windowId)
-      if (handoff !== undefined && handoff.expiresAt <= Date.now()) {
-        pendingSidePanelHandoffs.delete(windowId)
-      }
-      const activeHandoff = pendingSidePanelHandoffs.get(windowId)
-      if (activeHandoff !== undefined && (activeHandoff.tabId !== tabId || activeHandoff.sessionId !== request.sessionId)) {
-        sendResponse({ ok: false, error: 'The Harness side-panel handoff does not match the restored session.' })
-        return false
-      }
       void (async () => {
+        const handoff = pendingSidePanelHandoffs.get(windowId) ?? await readPersistedSidePanelHandoff(windowId)
+        if (handoff !== undefined && handoff.expiresAt <= Date.now()) { pendingSidePanelHandoffs.delete(windowId); await persistSidePanelHandoff(windowId, undefined); throw new Error('The Harness side-panel handoff has expired.') }
+        const activeHandoff = handoff
+        if (activeHandoff === undefined || activeHandoff.tabId !== tabId || activeHandoff.sessionId !== request.sessionId || activeHandoff.nonce !== request.nonce) throw new Error('The Harness side-panel handoff does not match the restored session.')
         const tab = await chrome.tabs.get(tabId)
         if (tab?.windowId !== windowId) throw new Error('The full-screen Harness Tab is no longer in this browser window.')
+        const url = new URL(tab.url ?? '')
+        const tabNonce = url.searchParams.get('dshHarnessHandoffNonce')
+        if (url.origin !== new URL(chrome.runtime.getURL('/')).origin || url.searchParams.get('dshHarnessSurface') !== 'fullscreen-tab' || !validHandoffNonce(tabNonce) || activeHandoff?.nonce !== tabNonce || request.nonce !== tabNonce) throw new Error('The Harness side-panel handoff nonce is no longer current.')
         // The full-screen Tab configures the replacement Side Panel's local
         // path in its click task. That URL is an exact fallback if the panel
         // starts before this worker has recorded its advisory pending entry.
@@ -5391,6 +5116,7 @@ export default defineBackground(() => {
         }
         await chrome.tabs.remove(tabId)
         pendingSidePanelHandoffs.delete(windowId)
+        await persistSidePanelHandoff(windowId, undefined)
         await chrome.sidePanel?.setOptions({ path: 'sidepanel.html' })
       })()
         .then(() => sendResponse({ ok: true }))
@@ -5433,7 +5159,7 @@ export default defineBackground(() => {
         if (command === 'logout') return locallySignOutAccount()
         if (command === 'login') {
           await setAccountLocallySignedOut(false)
-          knowledgeCatalogCache = undefined
+          knowledgeTransport.clearCatalog()
           await chrome.tabs.create({ url: KNOWLEDGE_LOGIN_URL, active: true })
         }
         return accountAccessSnapshot()
@@ -5449,9 +5175,9 @@ export default defineBackground(() => {
       }
       const sessionId = request.sessionId
       void (async () => {
-        if (knowledgeProxyConfig === undefined) await startHarnessForSettings()
+        if (!knowledgeTransport.hasProxy()) await startHarnessForSettings()
         if (request.action === 'login' || request.action === 'retry') {
-          knowledgeCatalogCache = undefined
+          knowledgeTransport.clearCatalog()
         }
         if (request.action === 'login') {
           await setAccountLocallySignedOut(false)
@@ -5467,12 +5193,12 @@ export default defineBackground(() => {
         const preference = await knowledgeEnabledPreference()
         const savedScope = record?.scope
         try {
-          const catalog = await loadKnowledgeCatalog()
+          const catalog = await knowledgeTransport.loadCatalog()
           const scope = savedScope === undefined ? savedScope : pruneScope(savedScope, catalog)
           sendResponse({ ok: true, scope, enabled: record?.enabled ?? (preference.remember ? preference.enabled : true), remember: preference.remember, notice: record?.notice, serviceState: 'ready', catalog })
         } catch (error) {
           const text = asError(error)
-          sendResponse({ ok: false, scope: savedScope, enabled: record?.enabled, remember: preference.remember, notice: record?.notice, serviceState: knowledgeServiceState(error), error: text })
+          sendResponse({ ok: false, scope: savedScope, enabled: record?.enabled, remember: preference.remember, notice: record?.notice, serviceState: knowledgeTransport.serviceState(error), error: text })
         }
       })().catch(async (error: unknown) => {
         const record = await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest)
@@ -5483,7 +5209,7 @@ export default defineBackground(() => {
           enabled: record?.enabled ?? (preference.remember ? preference.enabled : true),
           remember: preference.remember,
           notice: record?.notice,
-          serviceState: knowledgeServiceState(error),
+          serviceState: knowledgeTransport.serviceState(error),
           error: asError(error),
         })
       })
@@ -5502,7 +5228,7 @@ export default defineBackground(() => {
       return true
     }
     if (request.type === 'capture-design-reference/v1') {
-      if (!isSidePanelSender(sender) || !isBrowserTarget(request.browserTarget) || !validSessionIdentity(request.sessionId)) {
+      if (!isSidePanelSender(sender) || !validBrowserTarget(request.browserTarget) || !validSessionIdentity(request.sessionId)) {
         sendResponse({ ok: false, error: 'A trusted Side Panel, Harness session, and explicit Browser Target are required.' })
         return false
       }
@@ -5512,7 +5238,7 @@ export default defineBackground(() => {
       return true
     }
     if (request.type === 'capture-responsive-design-reference/v1') {
-      if (!isSidePanelSender(sender) || !isBrowserTarget(request.browserTarget) || !validSessionIdentity(request.sessionId)) {
+      if (!isSidePanelSender(sender) || !validBrowserTarget(request.browserTarget) || !validSessionIdentity(request.sessionId)) {
         sendResponse({ ok: false, error: '多尺寸实测需要可信侧栏、Harness 对话和明确参考网页。' })
         return false
       }
@@ -5523,7 +5249,7 @@ export default defineBackground(() => {
       return true
     }
     if (request.type === 'capture-design-references/v1') {
-      if (!isSidePanelSender(sender) || !Array.isArray(request.browserTargets) || request.browserTargets.length < 2 || request.browserTargets.length > 3 || !request.browserTargets.every(isBrowserTarget) || new Set(request.browserTargets.map(item => item.tabId)).size !== request.browserTargets.length || !validSessionIdentity(request.sessionId)) {
+      if (!isSidePanelSender(sender) || !Array.isArray(request.browserTargets) || request.browserTargets.length < 2 || request.browserTargets.length > 3 || !request.browserTargets.every(validBrowserTarget) || new Set(request.browserTargets.map(item => item.tabId)).size !== request.browserTargets.length || !validSessionIdentity(request.sessionId)) {
         sendResponse({ ok: false, error: 'A trusted Side Panel, Harness session, and two to three explicit Browser Targets are required.' })
         return false
       }
@@ -5731,6 +5457,34 @@ export default defineBackground(() => {
       }).then(() => sendResponse({ ok: true })).catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
+    if (request.type === 'lock-browser-target/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 4 || !keys.every(key => ['type', 'sessionId', 'submissionId', 'browserTarget'].includes(key)) || !validSessionIdentity(request.sessionId) || !validSessionIdentity(request.submissionId) || !validBrowserTarget(request.browserTarget)) {
+        sendResponse({ ok: false, error: 'Browser Target lock request is invalid.' })
+        return false
+      }
+      void lockFollowBrowserTarget(request.sessionId, request.submissionId, request.browserTarget)
+        .then(locked => sendResponse({ ok: true, locked }))
+        .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
+      return true
+    }
+    if (request.type === 'unlock-browser-target/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'sessionId', 'submissionId'].includes(key)) || !validSessionIdentity(request.sessionId) || !validSessionIdentity(request.submissionId)) {
+        sendResponse({ ok: false, error: 'Browser Target unlock request is invalid.' })
+        return false
+      }
+      unlockFollowBrowserTarget(request.sessionId, request.submissionId)
+      sendResponse({ ok: true })
+      return false
+    }
+    if (request.type === 'reconcile-browser-target-lock/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 2 || !keys.every(key => ['type', 'sessionId'].includes(key)) || !validSessionIdentity(request.sessionId)) { sendResponse({ ok: false, error: 'Browser Target reconciliation request is invalid.' }); return false }
+      for (const [runId, lock] of runBrowserTargetLocks) if (lock.sessionId === request.sessionId && lock.state === 'active') runBrowserTargetLocks.delete(runId)
+      sendResponse({ ok: true })
+      return false
+    }
     if (request.type === 'save-browser-target-settings') {
       const settings = settingsFromUnknown(request.settings)
       void saveBrowserTargetSettings(settings)
@@ -5739,7 +5493,7 @@ export default defineBackground(() => {
       return true
     }
     if (request.type === 'transfer-browser-target') {
-      if (!isBrowserTarget(request.browserTarget)) {
+      if (!validBrowserTarget(request.browserTarget)) {
         sendResponse({ ok: false, error: 'A Browser Target is required.' })
         return false
       }

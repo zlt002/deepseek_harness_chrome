@@ -13,6 +13,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
+import { ACCRUI_NATIVE_HOST_NAME } from '../../apps/native-server/src/product-runtime-identity.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -22,8 +23,7 @@ export const ACCR_UI_EXTENSION_MANIFEST_KEY =
   'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtjVzlR9cE9zV44l999YtraoKbQ77NfaFgwJmpeABPL2HxUK82pD0DFRSv/7FfZ4nEZRDlgZz1zj1yIF4HLnftCZyf/xYIrwhXDojQfYULE8miIGufKEJf/IUBkpFdFKHgfKgowV0M72wNzqaYd27MdR6DczCR5PQKwi5G2JKUJxx4xc2+KD3GOUjpE8DrhzliD3gYcwEZ8lphtOuCUIx5kI97etKEiixqrwFGRoUbHFLXT14+Fqg7jmSu/HaUVWbl/Dx1VbI1hgVZdnJI//UJY+T0qMLV8hcfHPpwBum0lf1rfP+FQwnqoV2wf4k+6f70dE/Xrlckddpkl0IWDSEdwIDAQAB'
 export const ACCR_UI_EXTENSION_ID = 'cmgjacoohdgjedoekbdbhbelpmboankg'
 export const ACCR_UI_REPLACEMENT_MIN_VERSION = '1.1.63'
-export const NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
-export const LEGACY_NATIVE_HOST_NAME = 'com.chromemcp.nativehost'
+export const NATIVE_HOST_NAME = ACCRUI_NATIVE_HOST_NAME
 export const HARNESS_RUNTIME_MARKER = 'harness-runtime.json'
 
 const REQUIRED_HARNESS_PATHS = [
@@ -144,11 +144,11 @@ export async function validateHarnessRuntime(harnessRuntimeDir) {
 }
 
 function nativeHostBat(productVersion) {
-  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "ACCR_INSTALL_ROOT=%PACKAGE_DIR%.."\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" (\r\n  echo ERROR: Verified Node.js path is missing. Re-run install.ps1 or runtime\\register-native-host.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" (\r\n  echo ERROR: Verified Node.js path is empty. Re-run install.ps1. 1>&2\r\n  exit /b 1\r\n)\r\nif not exist "%NODE_EXEC%" (\r\n  echo ERROR: Verified Node.js executable no longer exists: %NODE_EXEC% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server.mjs"\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_CWD=%PACKAGE_DIR%..\\workspace\\project"\r\nset "DSH_DEFAULT_WORKSPACE=%DSH_CWD%"\r\nif not exist "%DSH_DEFAULT_WORKSPACE%" mkdir "%DSH_DEFAULT_WORKSPACE%"\r\nif not exist "%DSH_DEFAULT_WORKSPACE%" (\r\n  echo ERROR: Failed to create default workspace: %DSH_DEFAULT_WORKSPACE% 1>&2\r\n  exit /b 1\r\n)\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills"\r\nset "ACCR_PRODUCT_VERSION=${productVersion}"\r\nset "DSH_NATIVE_LOG=%PACKAGE_DIR%..\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"\r\n`
+  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "ACCR_INSTALL_ROOT=%PACKAGE_DIR%.."\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" exit /b 1\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" exit /b 1\r\nset "DSH_HARNESS_RUNTIME_PLUGIN="\r\nset "DSH_HARNESS_TRACKING_PLUGIN="\r\nset "DSH_DEFAULT_WORKSPACE_PLUGIN="\r\nset "DSH_PRODUCT_OFFICE_SKILLS_PLUGIN="\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server.mjs"\r\nset "DSH_HOME=%ACCR_INSTALL_ROOT%\\profile"\r\nset "DSH_CWD=%ACCR_INSTALL_ROOT%\\workspace\\project"\r\nset "DSH_CONNECTOR_STATE_DIR=%ACCR_INSTALL_ROOT%\\connector-state"\r\nset "ACCRUI_CONNECTOR_STATE_DIR=%DSH_CONNECTOR_STATE_DIR%"\r\nset "DSH_DEFAULT_WORKSPACE=%DSH_CWD%"\r\nif not exist "%DSH_DEFAULT_WORKSPACE%" mkdir "%DSH_DEFAULT_WORKSPACE%"\r\nset "DSH_PRODUCT_PLUGIN_ROOT=%PACKAGE_DIR%product-plugins"\r\nset "DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills"\r\nset "ACCR_PRODUCT_VERSION=${productVersion}"\r\nset "DSH_NATIVE_LOG=%ACCR_INSTALL_ROOT%\\logs\\native-host.log"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"\r\n`
 }
 
 function pluginManagerBat() {
-  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" exit /b 1\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" exit /b 1\r\nset "DSH_HOME=%APPDATA%\\accr-ui-harness\\profile"\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%harness\\apps\\cli\\lib\\plugin-manager.mjs" plugin --profile web %*\r\n`
+  return `@echo off\r\nsetlocal\r\nset "PACKAGE_DIR=%~dp0"\r\nset "ACCR_INSTALL_ROOT=%PACKAGE_DIR%.."\r\nset "NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt"\r\nif not exist "%NODE_PATH_FILE%" exit /b 1\r\nset /p "NODE_EXEC=" < "%NODE_PATH_FILE%"\r\nif "%NODE_EXEC%"=="" exit /b 1\r\nset "DSH_HARNESS_RUNTIME_PLUGIN="\r\nset "DSH_HARNESS_TRACKING_PLUGIN="\r\nset "DSH_DEFAULT_WORKSPACE_PLUGIN="\r\nset "DSH_PRODUCT_OFFICE_SKILLS_PLUGIN="\r\nset "DSH_HOME=%ACCR_INSTALL_ROOT%\\profile"\r\nset "DSH_ROOT=%PACKAGE_DIR%harness"\r\nset "DSH_CONNECTOR_STATE_DIR=%ACCR_INSTALL_ROOT%\\connector-state"\r\nset "ACCRUI_CONNECTOR_STATE_DIR=%DSH_CONNECTOR_STATE_DIR%"\r\n"%NODE_EXEC%" "%PACKAGE_DIR%harness\\apps\\cli\\lib\\plugin-manager.mjs" plugin --profile web %*\r\n`
 }
 
 function nativeHostManifest(nativeHostName) {
@@ -189,7 +189,7 @@ if (-not $PublishOnly) {
   $nodePathFile = Join-Path $runtimeDir 'node-path.txt'
   [System.IO.File]::WriteAllText($nodePathFile, $nodePath + [Environment]::NewLine, $utf8NoBom)
   New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
-  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}', '${LEGACY_NATIVE_HOST_NAME}')) {
+  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}')) {
     $templatePath = Join-Path $runtimeDir ($nativeHostName + '.json')
     if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) { throw "缺少 Native Host manifest 模板：$templatePath" }
     $manifest = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json
@@ -206,7 +206,7 @@ if (-not $PrepareOnly -and -not $PublishOnly) {
   if ($LASTEXITCODE -ne 0) { throw 'Native Host 启动检查失败；尚未发布 Native Messaging 注册。' }
 }
 if (-not $PrepareOnly) {
-  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}', '${LEGACY_NATIVE_HOST_NAME}')) {
+  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}')) {
     $installedManifestPath = Join-Path $manifestDir ($nativeHostName + '.json')
     if (-not (Test-Path -LiteralPath $installedManifestPath -PathType Leaf)) { throw "缺少已准备的 Native Host manifest：$installedManifestPath" }
     $manifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
@@ -267,7 +267,7 @@ function startVbs() {
 }
 
 function releaseReadme(version) {
-  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- Harness 核心为静态 JavaScript bundle，不包含 \`runtime/harness/node_modules\`。\n- 内置 skill 在 \`runtime/skills\`，启动器通过 \`DSH_PRODUCT_SKILLS_ROOT\` 挂载；产品 \`/product-prototype\`、\`/pmd-prd\`、\`/pptx\`、\`/xlsx\`、\`/docx\`、\`/pdf\` 优先于 \`%USERPROFILE%\\.claude\\skills\` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。\n- 原生 Windows 文件仅在 \`runtime/native\`；用户后安装的插件写入 \`%APPDATA%\\accr-ui-harness\\profile\`，升级主程序不会删除。\n- 在 \`runtime\` 目录可执行 \`dsh-plugin.bat add <插件包名>\` 安装兼容插件，无需重新发布主包。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
+  return `# AccrUI Harness UI Windows Lite\n\n这是一个 AccrUI 更新器兼容的 Harness UI 候选包。\n\n- 扩展 ID：\`${ACCR_UI_EXTENSION_ID}\`（与正式 AccrUI 一致）\n- 扩展版本：\`${version}\`\n- Harness 核心为静态 JavaScript bundle，不包含 \`runtime/harness/node_modules\`。\n- 内置 skill 在 \`runtime/skills\`，启动器通过 \`DSH_PRODUCT_SKILLS_ROOT\` 挂载；产品 \`/product-prototype\`、\`/pmd-prd\`、\`/pptx\`、\`/xlsx\`、\`/docx\`、\`/pdf\` 优先于 \`%USERPROFILE%\\.claude\\skills\` 里的同名 skill，其中四个 Office skill 不会被用户端覆盖。\n- 原生 Windows 文件仅在 \`runtime/native\`；用户后安装的插件写入安装目录的 \`profile\`（\`<InstallRoot>\\profile\`），升级主程序不会删除。\n- 在 \`runtime\` 目录可执行 \`dsh-plugin.bat add <插件包名>\` 安装兼容插件，无需重新发布主包。\n- 安装后请重新加载原有 AccrUI 扩展；首次灰度必须在真实 Windows 机器验证 Native Messaging、Harness 启动和回滚。\n`
 }
 
 function runZip(cwd, outputPath, input) {
@@ -398,7 +398,6 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   const startEntry = 'runtime/start.vbs'
   const nativeManifestEntries = [
     `runtime/${NATIVE_HOST_NAME}.json`,
-    `runtime/${LEGACY_NATIVE_HOST_NAME}.json`,
   ]
   const productSkillEntries = [
     'runtime/skills/product-prototype/SKILL.md',
@@ -440,7 +439,6 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     const registerScript = readZipText(payloadZipPath, registerNativeHostEntry)
     for (const requiredText of [
       NATIVE_HOST_NAME,
-      LEGACY_NATIVE_HOST_NAME,
       'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts',
       'HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts',
       'Set-Item -Path $registryKey -Value $installedManifestPath',
@@ -455,7 +453,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   }
   if (payloadEntries.includes(nativeLauncherEntry)) {
     const launcher = readZipText(payloadZipPath, nativeLauncherEntry)
-    for (const requiredText of ['NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt', 'set /p "NODE_EXEC=" < "%NODE_PATH_FILE%"', 'DSH_HOME=%APPDATA%\\accr-ui-harness\\profile', 'DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills', '"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"']) {
+    for (const requiredText of ['NODE_PATH_FILE=%PACKAGE_DIR%node-path.txt', 'set /p "NODE_EXEC=" < "%NODE_PATH_FILE%"', 'DSH_HOME=%ACCR_INSTALL_ROOT%\\profile', 'DSH_PRODUCT_SKILLS_ROOT=%PACKAGE_DIR%skills', '"%NODE_EXEC%" "%PACKAGE_DIR%native-server\\runtime.mjs"']) {
       if (!launcher.includes(requiredText)) errors.push(`run_native_host.bat is missing ${requiredText}`)
     }
     if (launcher.includes('node "%PACKAGE_DIR%native-server')) errors.push('run_native_host.bat must not fall back to Chrome PATH node')
@@ -466,7 +464,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       errors.push('runtime/start.vbs does not silently re-register the Native Host')
     }
   }
-  for (const [nativeHostName, entry] of [[NATIVE_HOST_NAME, nativeManifestEntries[0]], [LEGACY_NATIVE_HOST_NAME, nativeManifestEntries[1]]]) {
+  for (const [nativeHostName, entry] of [[NATIVE_HOST_NAME, nativeManifestEntries[0]]]) {
     if (!payloadEntries.includes(entry)) continue
     const nativeManifest = JSON.parse(readZipText(payloadZipPath, entry))
     if (nativeManifest.name !== nativeHostName || nativeManifest.path !== '__REGISTERED_NATIVE_HOST_LAUNCHER__' || nativeManifest.type !== 'stdio') {
@@ -603,7 +601,6 @@ export async function buildWindowsRelease({
   await writeFile(path.join(runtimeDir, 'register-native-host.ps1'), utf8Bom(registerNativeHostPs1()))
   await writeFile(path.join(runtimeDir, 'start.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(startVbs(), 'utf16le')]))
   await writeFile(path.join(runtimeDir, `${NATIVE_HOST_NAME}.json`), nativeHostManifest(NATIVE_HOST_NAME), 'utf8')
-  await writeFile(path.join(runtimeDir, `${LEGACY_NATIVE_HOST_NAME}.json`), nativeHostManifest(LEGACY_NATIVE_HOST_NAME), 'utf8')
   await writeFile(path.join(payloadDir, 'guide-state.json'), '{\n  "completed": false\n}\n', 'utf8')
   await writeFile(path.join(payloadDir, 'release.json'), `${JSON.stringify({
     format: 'accr-ui-windows-lite-v1',

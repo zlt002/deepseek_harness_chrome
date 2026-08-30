@@ -1,9 +1,10 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SessionId, WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { CompactWorkspacePicker } from './CompactWorkspacePicker.tsx'
 import type { ClaudeImportController } from './ClaudeImportModal.tsx'
-import { claudeImportRequest, type PreparedImport } from './claude-import-api.ts'
+import { claudeImportRequest, type NativeImportResult, type PreparedImport } from './claude-import-api.ts'
+import { openImportedSession } from './open-imported-session.mjs'
 import { createWorkspaceHeaderClaudeImportAction } from './WorkspaceSurfaceActions.tsx'
 
 export const inject = ['slots', 'sessions', 'workspaces']
@@ -16,23 +17,24 @@ export function apply(ctx: ClientContext): void {
         action: 'prepare', projectKey: input.projectKey, sessionId: input.session.sessionId,
         sourceRoot: input.sourceRoot, workspacePath: input.workspacePath, forceCopy: input.forceCopy === true,
       }, input.signal)
+      if (prepared.kind === 'conflict') return 'conflict'
       if (prepared.kind === 'existing') {
         const existing = prepared.sessionId as SessionId
-        if (ctx.sessions.list.getSnapshot().byId[existing] === undefined) return 'existing-unavailable'
-        ctx.sessions.open(existing)
-        return 'opened-existing'
+        return await openImportedSession(ctx.sessions, existing) ? 'opened-existing' : 'existing-unavailable'
       }
       if (input.signal?.aborted === true) throw new DOMException('Claude Code 导入已取消', 'AbortError')
       input.onCreating()
-      const sessionId = await ctx.workspaces.connectWorkspace(input.workspaceId as WorkspaceId)
-      const session = ctx.sessions.binding(sessionId)?.session
-      if (session === undefined) throw new Error('新会话创建成功，但客户端尚未能访问它')
-      const admitted = await session.prompt([{ type: 'text', text: prepared.prompt }], 'queue')
-      if (!admitted.ok) throw new Error(`迁移上下文发送失败：${admitted.error.message}`)
-      await claudeImportRequest({ action: 'commit', sourceRoot: input.sourceRoot, sourceKey: prepared.sourceKey, sessionId })
-      ctx.sessions.open(sessionId)
-      const renamed = await session.rename(prepared.title)
-      if (!renamed.ok) throw new Error(`会话已导入，但标题更新失败：${renamed.error.message}`)
+      const imported = await claudeImportRequest<NativeImportResult>({
+        action: 'import', projectKey: input.projectKey, sessionId: input.session.sessionId,
+        sourceRoot: input.sourceRoot, workspacePath: input.workspacePath, forceCopy: input.forceCopy === true,
+      })
+      if (imported.kind === 'conflict') return 'conflict'
+      if (imported.kind === 'existing') {
+        const existing = imported.sessionId as SessionId
+        return await openImportedSession(ctx.sessions, existing) ? 'opened-existing' : 'existing-unavailable'
+      }
+      const sessionId = imported.sessionId as SessionId
+      if (!await openImportedSession(ctx.sessions, sessionId)) throw new Error('会话已写入，但刷新后仍未出现在 Harness 会话列表中。')
       return 'imported'
     },
   }

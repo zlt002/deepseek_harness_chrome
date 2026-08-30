@@ -4,14 +4,16 @@ import { existsSync } from 'node:fs'
 import { readFile, readlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { ACCRUI_INSTALL_DIRECTORY, ACCRUI_CONNECTOR_TMP_PREFIX } from '../apps/native-server/src/product-runtime-identity.mjs'
 
 const plugin = '@accrui/harness-ui-message-annotations'
-const packageDir = join(homedir(), 'Library/Application Support/DeepSeekHarness/native-server/product-plugins/harness-ui-message-annotations')
-const profileLink = join(homedir(), '.dsh/profiles/web/node_modules', ...plugin.split('/'))
+const installRoot = join(homedir(), 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY)
+const packageDir = join(installRoot, 'native-server/product-plugins/harness-ui-message-annotations')
+const profileLink = join(installRoot, 'profile/profiles/web/node_modules', ...plugin.split('/'))
 
 function runningWebCommand() {
   const output = execFileSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' })
-  return output.split('\n').find(line => line.includes('apps/cli/lib/bin.js') && line.includes('--profile web'))
+  return output.split('\n').find(line => line.includes(ACCRUI_CONNECTOR_TMP_PREFIX) && line.includes('apps/cli/lib/bin.js') && line.includes('--profile web'))
 }
 
 const command = runningWebCommand()

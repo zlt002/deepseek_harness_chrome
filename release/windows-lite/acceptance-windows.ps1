@@ -17,10 +17,12 @@ if (-not (Test-Path -LiteralPath $payloadZip -PathType Leaf)) { throw "Missing p
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $acceptanceRoot = Join-Path $env:RUNNER_TEMP 'accrui-harness-windows-acceptance'
 $env:LOCALAPPDATA = Join-Path $acceptanceRoot 'localappdata'
+$env:APPDATA = Join-Path $acceptanceRoot 'appdata'
 $installRoot = Join-Path $env:LOCALAPPDATA 'accr-ui-harness'
 $seedRoot = Join-Path $acceptanceRoot 'previous-release'
 $productKey = 'HKCU:\Software\accr-ui\Lite'
-$nativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
+$nativeHostNames = @('com.accrui.harness.chrome')
+$legacyNativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
 $registryRoots = @(
   'HKCU:\Software\Google\Chrome\NativeMessagingHosts',
   'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts'
@@ -80,8 +82,9 @@ $registryRoots = @(
   'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts'
 )
 foreach ($nativeHostName in @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')) {
-  $templatePath = Join-Path $runtimeDir ($nativeHostName + '.json')
+  $templatePath = Join-Path $runtimeDir 'com.accrui.harness.chrome.json'
   $manifest = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json
+  $manifest.name = $nativeHostName
   $manifest.path = $launcher
   $installedManifestPath = Join-Path $manifestDir ($nativeHostName + '.json')
   [System.IO.File]::WriteAllText($installedManifestPath, ($manifest | ConvertTo-Json -Depth 4), $utf8NoBom)
@@ -318,7 +321,7 @@ function Assert-LockedExtensionUpgradeFailsSafely {
       throw 'Locked unpacked extension upgrade did not retain the old runnable runtime.'
     }
     foreach ($registryRoot in $registryRoots) {
-      foreach ($nativeHostName in $nativeHostNames) {
+      foreach ($nativeHostName in $legacyNativeHostNames) {
         $registryKey = Join-Path $registryRoot $nativeHostName
         if (-not (Test-Path -LiteralPath $registryKey)) { throw "Locked unpacked extension upgrade did not restore Native Messaging registration: $registryKey" }
         $manifestPath = (Get-Item -LiteralPath $registryKey).GetValue('')
@@ -384,7 +387,7 @@ try {
   [System.IO.File]::WriteAllText($lockScriptPath, $lockSource, [System.Text.UTF8Encoding]::new($true))
   [System.IO.File]::WriteAllText($supervisorScriptPath, $supervisorSource, [System.Text.UTF8Encoding]::new($true))
   $config = @{
-    RegistryKey = (Join-Path $registryRoots[0] $nativeHostNames[0])
+    RegistryKey = (Join-Path $registryRoots[0] $legacyNativeHostNames[0])
     TargetPath = $targetPath
     ReadyPath = $readyPath
     SuspendedPath = $suspendedPath
@@ -491,9 +494,9 @@ if ($PrepareOnly) {
   & (Join-Path $PSScriptRoot 'register-native-host-real.ps1') -InstallRoot $InstallRoot -PrepareOnly
   return
 }
-$registryKey = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.deepseek.harness.chrome'
+$registryKey = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.accrui.harness.chrome'
 New-Item -Path $registryKey -Force | Out-Null
-Set-Item -Path $registryKey -Value (Join-Path $InstallRoot 'native-messaging\com.deepseek.harness.chrome.json')
+Set-Item -Path $registryKey -Value (Join-Path $InstallRoot 'native-messaging\com.accrui.harness.chrome.json')
 $readyPath = $env:ACCRUI_TEST_CANDIDATE_LOCK_READY
 $deadline = [DateTime]::UtcNow.AddSeconds(15)
 while (([string]::IsNullOrWhiteSpace($readyPath) -or -not (Test-Path -LiteralPath $readyPath)) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
@@ -527,7 +530,7 @@ function Assert-CandidateRegistrationFailureRollsBack {
     Assert-Equal (Read-Version $installRoot) '1.1.62' 'Failed candidate registration did not restore the previous version.'
     Assert-ExtensionResources $installRoot
     foreach ($registryRoot in $registryRoots) {
-      foreach ($nativeHostName in $nativeHostNames) {
+      foreach ($nativeHostName in $legacyNativeHostNames) {
         if (-not (Test-Path -LiteralPath (Join-Path $registryRoot $nativeHostName))) { throw "Failed candidate registration did not restore Native Messaging: $nativeHostName" }
       }
     }
@@ -572,7 +575,7 @@ function Assert-CandidateStartupFailureRollsBack {
   Assert-Equal (Read-Version $installRoot) '1.1.62' 'Candidate Native Host startup failure did not restore the previous version.'
   Assert-ExtensionResources $installRoot
   foreach ($registryRoot in $registryRoots) {
-    foreach ($nativeHostName in $nativeHostNames) {
+    foreach ($nativeHostName in $legacyNativeHostNames) {
       if (-not (Test-Path -LiteralPath (Join-Path $registryRoot $nativeHostName))) { throw "Candidate Native Host startup failure did not restore Native Messaging: $nativeHostName" }
     }
   }
@@ -630,6 +633,19 @@ try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $sentinel) -Force | Out-Null
     Set-Content -LiteralPath $sentinel -Value 'preserve-me' -NoNewline
   }
+  # Reproduce the migration edge case: a prior launch has already created the
+  # install-local profile while a user-installed plugin still lives in the old
+  # roaming profile. The upgrade must merge the missing plugin and preserve the
+  # newer local setting on a colliding path.
+  $installedProfileSetting = Join-Path $installRoot 'profile\settings.json'
+  New-Item -ItemType Directory -Path (Split-Path -Parent $installedProfileSetting) -Force | Out-Null
+  Set-Content -LiteralPath $installedProfileSetting -Value 'current-setting' -NoNewline
+  $legacyProfileSetting = Join-Path $env:APPDATA 'accr-ui-harness\profile\settings.json'
+  New-Item -ItemType Directory -Path (Split-Path -Parent $legacyProfileSetting) -Force | Out-Null
+  Set-Content -LiteralPath $legacyProfileSetting -Value 'legacy-setting' -NoNewline
+  $legacyPlugin = Join-Path $env:APPDATA 'accr-ui-harness\profile\plugins\legacy-user-plugin\package.json'
+  New-Item -ItemType Directory -Path (Split-Path -Parent $legacyPlugin) -Force | Out-Null
+  Set-Content -LiteralPath $legacyPlugin -Value '{"name":"legacy-user-plugin"}' -NoNewline
 
   & (Join-Path $installRoot 'runtime\register-native-host.ps1') -InstallRoot $installRoot
 
@@ -654,6 +670,8 @@ try {
   foreach ($relativePath in @('workspace\user.txt', 'logs\user.txt', '.webmcp\user.txt')) {
     Assert-Equal (Get-Content -LiteralPath (Join-Path $installRoot $relativePath) -Raw) 'preserve-me' "User data was not preserved: $relativePath"
   }
+  Assert-Equal (Get-Content -LiteralPath $installedProfileSetting -Raw) 'current-setting' 'Legacy profile migration overwrote the current local setting.'
+  Assert-Equal (Get-Content -LiteralPath (Join-Path $installRoot 'profile\plugins\legacy-user-plugin\package.json') -Raw) '{"name":"legacy-user-plugin"}' 'Legacy user plugin was not merged into an existing local profile.'
   Assert-Equal (Get-ItemPropertyValue -Path $productKey -Name Version) $ExpectedVersion 'Product registry version is stale after upgrade.'
 
   foreach ($registryRoot in $registryRoots) {
@@ -663,6 +681,10 @@ try {
       $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
       Assert-Equal $manifest.name $nativeHostName 'Native Messaging manifest name mismatch.'
       Assert-Equal $manifest.path (Join-Path $installRoot 'runtime\run_native_host.bat') 'Native Messaging launcher path mismatch.'
+    }
+    foreach ($legacyNativeHostName in $legacyNativeHostNames) {
+      $legacyKey = Join-Path $registryRoot $legacyNativeHostName
+      if (Test-Path -LiteralPath $legacyKey) { throw "Owned legacy Native Messaging registration survived the upgrade: $legacyKey" }
     }
   }
   $productSkill = Join-Path $installRoot 'runtime\skills\pmd-prd\SKILL.md'
@@ -712,7 +734,7 @@ try {
     if (-not $orphanRuntimeLockHolder.HasExited) { & taskkill.exe /PID $orphanRuntimeLockHolder.Id /T /F | Out-Null }
   }
   foreach ($registryRoot in $registryRoots) {
-    foreach ($nativeHostName in $nativeHostNames) {
+    foreach ($nativeHostName in @($nativeHostNames + $legacyNativeHostNames)) {
       $key = Join-Path $registryRoot $nativeHostName
       if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force }
     }

@@ -1,6 +1,7 @@
 /** Host half: bounded Claude Code discovery and on-demand conversion. */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { CLAUDE_IMPORT_PATH, ClaudeImportDirectory } from './claude-import.mjs'
+import { importNativeHistory } from './native-history.mjs'
 
 export const name = 'accrui-workspace-picker'
 
@@ -8,16 +9,30 @@ interface HostContext {
   webServer: { register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void }
   inject(deps: readonly string[], callback: (ctx: HostContext) => void): void
   effect(callback: () => () => void, name: string): void
+  sessions: {
+    get(id: string): unknown
+    prepare(id: string, options: { seed: readonly unknown[]; meta: { cwd: string; createdAt?: number; seedLength?: number; agentPreset?: string } }): {
+      header: unknown
+      events: readonly unknown[]
+    }
+  }
+  workspaceRegistry: { resolveByPath(path: string): Promise<{ attachSession(id: string): Promise<void> } | undefined> }
+  sessionPersistence: {
+    create(header: unknown): Promise<void>
+    inspect(id: string): Promise<{ events: readonly unknown[] }>
+    append(id: string, events: readonly unknown[]): Promise<void>
+  }
+  agentPresets: { resolve(id?: string): Promise<{ id: string }> }
 }
 
 export function apply(ctx: HostContext): void {
   const directory = new ClaudeImportDirectory()
-  ctx.inject(['webServer'], webCtx => webCtx.effect(() => webCtx.webServer.register({
-    kind: 'exact', path: CLAUDE_IMPORT_PATH, handler: (req, res) => { void handleImport(directory, req, res) },
+  ctx.inject(['webServer', 'sessions', 'workspaceRegistry', 'sessionPersistence', 'agentPresets'], webCtx => webCtx.effect(() => webCtx.webServer.register({
+    kind: 'exact', path: CLAUDE_IMPORT_PATH, handler: (req, res) => { void handleImport(directory, webCtx, req, res) },
   }), 'accrui-workspace-picker: Claude Code import route'))
 }
 
-async function handleImport(directory: ClaudeImportDirectory, req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function handleImport(directory: ClaudeImportDirectory, hostCtx: HostContext, req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') return json(res, 405, { error: 'Claude Code import accepts POST only' })
   if (!trusted(req)) return json(res, 403, { error: 'Claude Code import is loopback same-origin only' })
   const controller = new AbortController()
@@ -36,17 +51,26 @@ async function handleImport(directory: ClaudeImportDirectory, req: IncomingMessa
     if (action === 'detail') return json(res, 200, await directory.detail({
       projectKey: required(body.projectKey, 'projectKey'), sessionId: required(body.sessionId, 'sessionId'), sourceRoot, signal: controller.signal,
     }))
-    if (action === 'prepare') return json(res, 200, await directory.prepare({
+    if (action === 'prepare') return json(res, 200, publicPrepare(await directory.prepare({
+      projectKey: required(body.projectKey, 'projectKey'), sessionId: required(body.sessionId, 'sessionId'),
+      workspacePath: required(body.workspacePath, 'workspacePath'), sourceRoot, forceCopy: body.forceCopy === true, signal: controller.signal,
+    })))
+    if (action === 'import') return json(res, 200, await importNativeHistory(directory, hostCtx, {
       projectKey: required(body.projectKey, 'projectKey'), sessionId: required(body.sessionId, 'sessionId'),
       workspacePath: required(body.workspacePath, 'workspacePath'), sourceRoot, forceCopy: body.forceCopy === true, signal: controller.signal,
     }))
-    if (action === 'commit') return json(res, 200, await directory.commit({ sourceKey: required(body.sourceKey, 'sourceKey'), sessionId: required(body.sessionId, 'sessionId'), sourceRoot }))
     return json(res, 400, { error: '未知的 Claude Code 导入操作' })
   } catch (error) {
     if (!res.destroyed) return json(res, controller.signal.aborted ? 499 : 400, { error: error instanceof Error ? error.message : String(error) })
   } finally {
     req.off('aborted', requestAborted); req.off('close', requestClosed); res.off('close', responseClosed)
   }
+}
+
+function publicPrepare(prepared: any): any {
+  if (prepared.kind === 'prepared') return { kind: prepared.kind, sourceKey: prepared.sourceKey, title: prepared.title, sourceUpdatedAt: prepared.sourceUpdatedAt }
+  if (prepared.kind === 'append') return { kind: prepared.kind, sourceKey: prepared.sourceKey, sessionId: prepared.sessionId, title: prepared.title, sourceUpdatedAt: prepared.sourceUpdatedAt }
+  return prepared
 }
 
 async function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {

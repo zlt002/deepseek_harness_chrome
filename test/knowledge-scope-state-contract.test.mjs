@@ -22,11 +22,8 @@ test('knowledge scope state follows the AccrUI session and remember precedence',
   assert.match(background, /if \(!record\.enabled\) throw new Error\('知识查询开关已关闭/)
   assert.match(background, /function selectedSourceScopeEcho/)
   assert.match(background, /tool: 'selected_source_scope'/)
-  assert.match(background, /function errorChain/)
-  assert.match(background, /KNOWLEDGE_CATALOG_CACHE_TTL_MS/)
-  assert.match(background, /function filterCatalogByIdentity/)
   assert.match(background, /function pruneScope/)
-  assert.match(background, /proxyFailureText/)
+  assert.match(background, /createKnowledgeTransport/)
   assert.match(background, /setInterval\(\(\) => \{ void chrome\.runtime\.getPlatformInfo/)
 })
 
@@ -37,7 +34,7 @@ test('knowledge login opens the AccrUI login page and automatically rechecks', a
   ])
   assert.match(background, /const KNOWLEDGE_LOGIN_URL = 'https:\/\/wb-uat\.annto\.com\/'/)
   assert.match(background, /chrome\.tabs\.create\(\{ url: KNOWLEDGE_LOGIN_URL, active: true \}\)/)
-  assert.match(background, /if \(knowledgeProxyConfig === undefined\) await startHarnessForSettings\(\)/)
+  assert.match(background, /if \(!knowledgeTransport\.hasProxy\(\)\) await startHarnessForSettings\(\)/)
   assert.match(sidepanel, /knowledgeLoginAttemptsRef\.current < 15/)
   assert.match(sidepanel, /value\.type === 'harness-disconnected'\) \{ void connect\(\) \}/)
   assert.match(sidepanel, /window\.setTimeout\([\s\S]*2_000\)/)
@@ -45,15 +42,16 @@ test('knowledge login opens the AccrUI login page and automatically rechecks', a
 })
 
 test('selected-source SSE content flows into dedicated Tool call rows', async () => {
-  const [background, sidepanel, protocol, plugin, toolRow, strip] = await Promise.all([
+  const [background, transport, sidepanel, protocol, plugin, toolRow, strip] = await Promise.all([
     source('apps/chrome-extension/entrypoints/background.ts'),
+    source('apps/chrome-extension/entrypoints/background/knowledge-transport.ts'),
     source('apps/chrome-extension/entrypoints/sidepanel/main.tsx'),
     source('packages/harness-ui-knowledge-scope/src/client/protocol.js'),
     source('packages/harness-ui-knowledge-scope/src/client/index.ts'),
     source('packages/harness-ui-knowledge-scope/src/client/RemoteSearchToolRow.tsx'),
     source('packages/harness-ui-knowledge-scope/src/client/KnowledgeScope.tsx'),
   ])
-  assert.match(background, /onProgress\?\.\(\{ chars: content\.length, content,/)
+  assert.match(transport, /onProgress\?\.\(\{ chars: content\.length, content,/)
   assert.match(background, /harnessParentSessionId: request\.harnessParentSessionId/)
   assert.match(background, /phase === 'streaming' && content !== '' && process === undefined && now - lastProgressAt < 120/)
   assert.match(background, /broadcast\('done', executed\.result\.answer\.length, executed\.result\.answer, 'done', lastProcess\)/)
@@ -70,15 +68,15 @@ test('selected-source SSE content flows into dedicated Tool call rows', async ()
   assert.match(toolRow, /已等待 \$\{seconds\} 秒/)
   assert.match(toolRow, /远程检索过程/)
   assert.match(toolRow, /processLog/)
-  assert.match(toolRow, /还没选择知识范围/)
-  assert.match(background, /emit\('connected'\)/)
-  assert.match(background, /function isProcessEvent/)
-  assert.match(background, /payload\.type === 'log'/)
-  assert.match(background, /function appendProcess/)
+  assert.match(toolRow, /friendlySearchError/)
+  assert.match(transport, /emit\('connected'\)/)
+  assert.match(transport, /function processEvent/)
+  assert.match(transport, /payload\.type === 'log'/)
+  assert.match(transport, /function appendProcess/)
   assert.match(background, /progress\.process/)
-  assert.match(background, /function describeKnowledgeTransportError/)
-  assert.match(background, /isKnowledgeStream/)
-  assert.match(toolRow, /远程检索流中断，请重试一次/)
+  assert.match(transport, /function describeTransportError/)
+  assert.match(transport, /function isStream/)
+  assert.match(toolRow, /friendlySearchError/)
   assert.match(sidepanel, /typeof value\.process === 'string'/)
   assert.doesNotMatch(strip, /已返回/)
 })

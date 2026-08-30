@@ -29,6 +29,10 @@
   --review-danger: var(--dsw-alias-state-error-primary, #a43232);
   --review-danger-soft: var(--dsw-alias-state-error-tertiary, #fff3f3);
   --review-danger-border: var(--dsw-alias-state-error-secondary, #f1c3c3);
+  --review-success-action: #18794e;
+  --review-success-action-hover: #12613f;
+  --review-danger-action: #b42318;
+  --review-danger-action-hover: #8f1d15;
   --review-shadow-1: var(--dsw-shadow-lv1, 0 1px 2px #2029380a);
   --review-shadow-2: var(--dsw-shadow-lv2, 0 5px 18px #20293820);
   --review-shadow-3: var(--dsw-shadow-lv3, 0 12px 36px #2029382e);
@@ -67,6 +71,10 @@
     --review-danger: var(--dsw-alias-state-error-primary, #f07474);
     --review-danger-soft: var(--dsw-alias-state-error-tertiary, #43252d);
     --review-danger-border: var(--dsw-alias-state-error-secondary, #8c4955);
+    --review-success-action: #34d399;
+    --review-success-action-hover: #6ee7b7;
+    --review-danger-action: #f97066;
+    --review-danger-action-hover: #fca5a5;
     --review-shadow-1: var(--dsw-shadow-lv1, 0 1px 2px #0004);
     --review-shadow-2: var(--dsw-shadow-lv2, 0 5px 18px #0005);
     --review-shadow-3: var(--dsw-shadow-lv3, 0 12px 36px #0006);
@@ -291,6 +299,18 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
 .history-actions button { min-height: 28px; padding: 4px 9px; border-radius: 14px; font-size: 12px; }
 .review-header-actions .icon-button { width: 28px; min-height: 28px; padding: 0; border-radius: 50%; font-size: 16px; line-height: 1; }
 .review-session-action { min-height: 28px; padding: 4px 9px; font-size: 12px; }
+.review-session-action.is-rewrite,
+.review-session-action.is-accept {
+  border-color: transparent;
+  color: var(--review-text-inverse);
+  font-weight: 700;
+}
+.review-session-action.is-rewrite { background: var(--review-danger-action); }
+.review-session-action.is-rewrite:hover:not(:disabled) { background: var(--review-danger-action-hover); }
+.review-session-action.is-accept { background: var(--review-success-action); }
+.review-session-action.is-accept:hover:not(:disabled) { background: var(--review-success-action-hover); }
+.review-session-action.is-rewrite:focus-visible { outline-color: var(--review-danger-action); }
+.review-session-action.is-accept:focus-visible { outline-color: var(--review-success-action); }
 .truncated { flex: none; color: var(--review-warn); font-size: 11px; line-height: 18px; white-space: nowrap; }
 
 .document-canvas { display: flex; min-height: 0; flex: 1; overflow: hidden; }

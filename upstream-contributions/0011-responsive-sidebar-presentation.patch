@@ -15,7 +15,7 @@ diff --git a/packages/client/ui-layout/src/client/AppFrame.tsx b/packages/client
 +  const cols = computeColumns(viewport, compact ? 0 : sidebarPreference, detailsSession === undefined ? 0 : panels.details)
    const colsRef = useRef(cols)
    colsRef.current = cols
- 
+
 @@ -165,8 +166,9 @@
      <div
        ref={frameRef}
@@ -78,7 +78,7 @@ diff --git a/packages/client/ui-layout/src/client/index.ts b/packages/client/ui-
 --- a/packages/client/ui-layout/src/client/index.ts
 +++ b/packages/client/ui-layout/src/client/index.ts
 @@ -92,6 +92,8 @@
- 
+
  /** Sidebar owner share: live column state from the frame's concession solve. */
  export interface SidebarOwnerProps {
 +  /** Responsive surface selected by the frame. */
@@ -90,13 +90,13 @@ diff --git a/packages/client/ui-layout/tests/app-frame.client.spec.tsx b/package
 --- a/packages/client/ui-layout/tests/app-frame.client.spec.tsx
 +++ b/packages/client/ui-layout/tests/app-frame.client.spec.tsx
 @@ -216,7 +216,7 @@
- 
+
    it('sidebar slot receives live concession output as owner props', () => {
      const { slotCalls } = mountFrame()
 -    expect(slotCalls.find(c => c.key === 'sidebar')!.props).toEqual({ collapsed: false, width: 280 })
 +    expect(slotCalls.find(c => c.key === 'sidebar')!.props).toEqual({ presentation: 'column', collapsed: false, width: 280 })
    })
- 
+
    it('sidebar drag widens through rAF-batched pointer moves', () => {
 @@ -258,7 +258,7 @@
      expect(getByTestId('sidebar-content')).toBeTruthy()
@@ -105,11 +105,11 @@ diff --git a/packages/client/ui-layout/tests/app-frame.client.spec.tsx b/package
 -    expect(lastSidebarCall.props).toEqual({ collapsed: true, width: SIDEBAR_COLLAPSED })
 +    expect(lastSidebarCall.props).toEqual({ presentation: 'column', collapsed: true, width: SIDEBAR_COLLAPSED })
    })
- 
+
    it('viewport shrink triggers the concession chain via ResizeObserver', () => {
 @@ -285,34 +285,38 @@
  })
- 
+
  describe('AppFrame — narrow-viewport auto-collapse', () => {
 -  it('mounts collapsed below the breakpoint with no sidebar handle', () => {
 +  it('mounts the compact header below the breakpoint with no sidebar track or handle', () => {
@@ -126,7 +126,7 @@ diff --git a/packages/client/ui-layout/tests/app-frame.client.spec.tsx b/package
 +    expect(slotCalls.filter(c => c.key === 'sidebar').at(-1)!.props).toEqual({ presentation: 'compact', collapsed: true, width: 0 })
      expect(frame.querySelectorAll('[class*="handle"]')).toHaveLength(0)
    })
- 
+
 -  it('narrow toggle re-expands over the squeezed center and back', () => {
 +  it('stays compact when the legacy narrow toggle changes its stored override', () => {
      frameWidth = 980
@@ -142,7 +142,7 @@ diff --git a/packages/client/ui-layout/tests/app-frame.client.spec.tsx b/package
 -    expect(tracks(frame)).toEqual([SIDEBAR_COLLAPSED, 0])
 +    expect(tracks(frame)).toEqual([0, 0])
    })
- 
+
 -  it('a wide-closed preference re-expands at the contract default while narrow', () => {
 +  it('a wide-closed preference remains visually compact while narrow', () => {
      frameWidth = 1920
@@ -155,7 +155,7 @@ diff --git a/packages/client/ui-layout/tests/app-frame.client.spec.tsx b/package
 +    expect(tracks(frame)).toEqual([0, 0])
      expect(instance.getSnapshot().sidebar).toBe(0) // preference untouched
    })
- 
+
 @@ -321,7 +325,7 @@
      act(() => { instance.actions.setSidebar(400) })
      frameWidth = 980
@@ -219,7 +219,7 @@ diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.module.css b/pack
 +  color: var(--dsw-alias-label-primary);
 +  cursor: pointer;
  }
- 
+
 +.compactFallbackAction:hover {
 +  background: var(--dsw-alias-interactive-bg-hover);
 +}
@@ -237,7 +237,7 @@ diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/cl
 -import type { SidebarRootComponentProps } from './contract/slots.ts'
 +import type { SidebarCompactPresentationOwnerProps, SidebarRootComponentProps } from './contract/slots.ts'
  import css from './SidebarRoot.module.css'
- 
+
  /** Wide-content unmount delay; matches the 150ms wide-content fade-out. */
 @@ -41,7 +41,8 @@
   * @param props - composed slot props (runtime share + injected callbacks, contract/slots.ts).
@@ -330,7 +330,7 @@ diff --git a/packages/client/ui-sidebar/src/client/contract/slots.ts b/packages/
  import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
  import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
 +import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
- 
+
  declare module '@deepseek-ai/dsh-client-ui-slots' {
    interface SlotMap {
 @@ -33,6 +35,22 @@
@@ -355,7 +355,7 @@ diff --git a/packages/client/ui-sidebar/src/client/contract/slots.ts b/packages/
 +    'sidebar.compact.presentation': { kind: 'chain'; scope: 'root'; owner: SidebarCompactPresentationOwnerProps }
    }
  }
- 
+
 @@ -43,7 +61,7 @@
  export interface SidebarSectionOwnerProps {
    /** Shell fold-state output: wide renders the full browser, rail the icon column. */
@@ -368,7 +368,7 @@ diff --git a/packages/client/ui-sidebar/src/client/contract/slots.ts b/packages/
 @@ -66,12 +84,47 @@
    wide: boolean
  }
- 
+
 +/** Stable identity supplied to compact-only actions of an opened subagent. */
 +export interface CompactSubagentHeaderOwnerProps {
 +  /** The addressed child currently displayed in the conversation. */
@@ -441,7 +441,7 @@ diff --git a/packages/client/ui-sidebar/src/client/index.ts b/packages/client/ui
  import type { SidebarRootInjected } from './contract/slots.ts'
 @@ -7,6 +8,7 @@
  import { en, zh, type SidebarKey } from './locales.ts'
- 
+
  export type {
 +  CompactSubagentHeaderOwnerProps, CompactTrajectoryHeaderOwnerProps, SidebarCompactPresentationMode, SidebarCompactPresentationOwnerProps,
    SidebarFooterActionOwnerProps, SidebarRootComponentProps, SidebarRootInjected,
@@ -450,7 +450,7 @@ diff --git a/packages/client/ui-sidebar/src/client/index.ts b/packages/client/ui
 @@ -19,11 +21,20 @@
    }
  }
- 
+
 +declare module '@deepseek-ai/cordis' {
 +  interface Context {
 +    /** The compact shell reads the current chat view through this narrow service face. */
@@ -462,16 +462,16 @@ diff --git a/packages/client/ui-sidebar/src/client/index.ts b/packages/client/ui
 +
  /** Dictionary namespace owned by this plugin (shell controls copy). */
  const NS = 'sidebar'
- 
+
  /** Services required by the sidebar plugin. */
 -export const inject = ['slots', 'layout', 'sessions', 'workspaces', 'locale']
 +export const inject = ['slots', 'layout', 'sessions', 'workspaces', 'locale', 'conversationViewState']
- 
+
  /** Registers the sidebar shell and its service callbacks.
   * @param ctx - Client root context.
 @@ -32,6 +43,7 @@
    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-sidebar: dictionaries')
- 
+
    const injectProps = (): SidebarRootInjected => ({
 +    hooks: { view: ctx.get('conversationViewState')!.currentSource(ctx.sessions.list) },
      // The shell's New Session button rides the runtime's shared action
@@ -502,13 +502,13 @@ diff --git a/packages/client/ui-sidebar/tests/apply.client.spec.tsx b/packages/c
    const slots = ctx.get('slots') as SlotRegistry
    if (declare) {
 @@ -28,7 +31,7 @@
- 
+
  describe('ui-sidebar apply', () => {
    it('declares only the services it uses', () => {
 -    expect(inject).toEqual(['slots', 'layout', 'sessions', 'workspaces', 'locale'])
 +    expect(inject).toEqual(['slots', 'layout', 'sessions', 'workspaces', 'locale', 'conversationViewState'])
    })
- 
+
    it('registers the shell and declares its child seats', async () => {
 @@ -38,10 +41,14 @@
      expect(b.slots.spec('sidebar.workspaces')).toEqual({ kind: 'single', scope: 'root' })
@@ -571,11 +571,11 @@ diff --git a/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx b/pac
 +import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
  import { SidebarRoot } from '../src/client/SidebarRoot.tsx'
  import { en } from '../src/client/locales.ts'
- 
+
 @@ -21,34 +25,81 @@
  // props share; stub them as never-called functions.
  const neverHook = (() => { throw new Error('shell must not read global hooks') }) as never
- 
+
 -function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; width?: number } = {}) {
 +function mountShell({
 +  collapsed = false,
@@ -684,7 +684,7 @@ diff --git a/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx b/pac
        view.rerender(root())
 @@ -74,6 +131,12 @@
  }
- 
+
  describe('SidebarRoot shell', () => {
 +  it('uses a dedicated compact header while a regular session is viewing its trajectory', () => {
 +    const b = mountShell({ presentation: 'compact', trajectory: true })

@@ -18,7 +18,11 @@ async function createFakeCommands() {
   const directory = await mkdtemp(join(tmpdir(), 'deepseek-harness-dev-port-'))
   const lsof = join(directory, 'lsof')
   const kill = join(directory, 'kill')
+  const ps = join(directory, 'ps')
   await writeFile(lsof, `#!/bin/sh
+case " $* " in
+  *" -d cwd "*) printf 'n%s\\n' "$DEV_PORT_TEST_WXT_CWD"; exit 0 ;;
+esac
 if [ "\${DEV_PORT_TEST_LSOF_EXIT:-0}" -ne 0 ]; then
   exit "\$DEV_PORT_TEST_LSOF_EXIT"
 fi
@@ -30,6 +34,9 @@ if [ -f "\$DEV_PORT_TEST_TERM_FILE" ] && [ "\${DEV_PORT_TEST_TERM_KEEPS_LISTENIN
 fi
 printf '%s\\n' "\$DEV_PORT_TEST_LISTENERS"
 `, 'utf8')
+  await writeFile(ps, `#!/bin/sh
+printf '%s\\n' "$DEV_PORT_TEST_WXT_COMMAND"
+`, 'utf8')
   await writeFile(kill, `#!/bin/sh
 printf '%s\\n' "\$*" >> "\$DEV_PORT_TEST_CALLS_FILE"
 if [ "$1" = '-TERM' ]; then
@@ -38,7 +45,7 @@ elif [ "$1" = '-KILL' ]; then
   touch "\$DEV_PORT_TEST_KILL_FILE"
 fi
 `, 'utf8')
-  await Promise.all([chmod(lsof, 0o755), chmod(kill, 0o755)])
+  await Promise.all([chmod(lsof, 0o755), chmod(kill, 0o755), chmod(ps, 0o755)])
   return directory
 }
 
@@ -56,6 +63,8 @@ async function runPrepare(overrides = {}) {
     DEV_PORT_TEST_CALLS_FILE: callsFile,
     DEV_PORT_TEST_TERM_FILE: termFile,
     DEV_PORT_TEST_KILL_FILE: killFile,
+    DEV_PORT_TEST_WXT_COMMAND: `node ${join(projectRoot, 'apps/chrome-extension/node_modules/wxt/bin/wxt.mjs')} --port 3101`,
+    DEV_PORT_TEST_WXT_CWD: join(projectRoot, 'apps/chrome-extension'),
   }
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script], { cwd: projectRoot, env, stdio: 'pipe' })

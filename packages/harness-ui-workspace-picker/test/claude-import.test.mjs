@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { ClaudeImportDirectory, parseClaudeSession } from '../src/claude-import.mjs'
+import { ClaudeImportDirectory, defaultRegistryPath, parseClaudeSession } from '../src/claude-import.mjs'
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(tmpdir(), 'claude-import-'))
@@ -15,6 +15,13 @@ async function fixture(t) {
 }
 
 function line(value) { return `${JSON.stringify(value)}\n` }
+
+test('keeps the established Claude import registry path across upgrades', () => {
+  const environment = { ACCRUI_CONNECTOR_STATE_DIR: '/accrui/state', DSH_CONNECTOR_STATE_DIR: '/other-harness/state' }
+  assert.equal(defaultRegistryPath(environment, 'darwin', '/Users/test'), '/Users/test/Library/Application Support/DeepSeekHarness/claude-code-imports.json')
+  assert.equal(defaultRegistryPath(environment, 'win32', 'C:\\Users\\test'), path.join('C:\\Users\\test', 'DeepSeekHarness', 'claude-code-imports.json'))
+  assert.equal(defaultRegistryPath(environment, 'linux', '/home/test'), '/home/test/.local/share/DeepSeekHarness/claude-code-imports.json')
+})
 
 test('indexes only directory metadata and parses one selected session on demand', async t => {
   const { projects, importer } = await fixture(t)
@@ -29,9 +36,10 @@ test('indexes only directory metadata and parses one selected session on demand'
   assert.equal(sessions.sessions[0].title, '修复当前问题')
   const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
   assert.equal(prepared.kind, 'prepared')
-  assert.match(prepared.prompt, /修复当前问题/)
-  assert.match(prepared.prompt, /已经定位原因/)
-  assert.doesNotMatch(prepared.prompt, /must-not-migrate/)
+  const seed = JSON.stringify(prepared.seed)
+  assert.match(seed, /修复当前问题/)
+  assert.match(seed, /已经定位原因/)
+  assert.doesNotMatch(seed, /must-not-migrate/)
 })
 
 test('rejects traversal and malformed selected JSONL with exact line evidence', async t => {
@@ -111,8 +119,8 @@ test('synthetic Claude wrappers do not become titles or migrated user text', asy
   const listing = await importer.listSessions('-tmp-demo')
   assert.equal(listing.sessions[0].title, '如何修复真实问题？')
   const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
-  assert.doesNotMatch(prepared.prompt, /synthetic browser payload|synthetic reminder/)
-  assert.match(prepared.prompt, /如何修复真实问题？/)
+  assert.doesNotMatch(JSON.stringify(prepared.seed), /synthetic browser payload|synthetic reminder/)
+  assert.match(JSON.stringify(prepared.seed), /如何修复真实问题？/)
   const ordinary = parseClaudeSession(line({ type: 'user', message: { content: '<browser_context> 是普通用户要解释的标签' } }))
   assert.equal(ordinary.title, '<browser_context> 是普通用户要解释的标签')
   assert.throws(() => parseClaudeSession(line({ type: 'user', isMeta: true, message: { content: 'synthetic only' } })), /没有可迁移/)
@@ -130,8 +138,8 @@ test('language instruction wrappers do not become titles or migrated user text',
   const listing = await importer.listSessions('-tmp-demo')
   assert.equal(listing.sessions[0].title, '帮我整理这份需求')
   const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
-  assert.doesNotMatch(prepared.prompt, /请始终使用中文进行对话/)
-  assert.match(prepared.prompt, /帮我整理这份需求|第二段真实用户输入/)
+  assert.doesNotMatch(JSON.stringify(prepared.seed), /请始终使用中文进行对话/)
+  assert.match(JSON.stringify(prepared.seed), /帮我整理这份需求|第二段真实用户输入/)
   const ordinary = parseClaudeSession(line({ type: 'user', message: { content: '请解释 <language_instruction> 这个标签的用途' } }))
   assert.equal(ordinary.title, '请解释 <language_instruction> 这个标签的用途')
 })
@@ -146,8 +154,8 @@ test('user-request wrappers keep their contents without exposing wrapper tags', 
   const listing = await importer.listSessions('-tmp-demo')
   assert.equal(listing.sessions[0].title, '检索 mobileinvitewxkfi 的问题')
   const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
-  assert.match(prepared.prompt, /检索 mobileinvitewxkfi 的问题/)
-  assert.doesNotMatch(prepared.prompt, /<用户原始请求>|<\/用户原始请求>/)
+  assert.match(JSON.stringify(prepared.seed), /检索 mobileinvitewxkfi 的问题/)
+  assert.doesNotMatch(JSON.stringify(prepared.seed), /<用户原始请求>|<\/用户原始请求>/)
   const ordinary = parseClaudeSession(line({ type: 'user', message: { content: '请解释 <用户原始请求> 这个标签的用途' } }))
   assert.equal(ordinary.title, '请解释 <用户原始请求> 这个标签的用途')
 })
@@ -159,6 +167,131 @@ test('parser keeps only bounded user and assistant text', () => {
     line({ type: 'assistant', message: { content: [{ type: 'text', text: '答案' }] } }),
   ].join(''))
   assert.deepEqual(parsed.messages.map(message => message.text), ['问题', '答案'])
+})
+
+test('native seed keeps record timestamps, pairs parallel out-of-order tools, redacts secrets, and marks unsupported data', () => {
+  const parsed = parseClaudeSession([
+    line({ type: 'user', timestamp: '2026-08-20T01:00:00.000Z', message: { content: [{ type: 'text', text: '请检查' }] } }),
+    line({ type: 'assistant', timestamp: '2026-08-20T01:01:00.000Z', message: { model: 'claude-test', content: [
+      { type: 'thinking', thinking: '先分析' }, { type: 'text', text: '开始处理' },
+      { type: 'tool_use', id: 'call-a', name: 'Read', input: { api_key: 'sk-supersecret123456' } },
+      { type: 'tool_use', id: 'call-b', name: 'Bash', input: { token: 'private-token' } }, { type: 'image', source: 'not-migrated' },
+    ] } }),
+    line({ type: 'user', timestamp: '2026-08-20T01:02:00.000Z', message: { content: [
+      { type: 'tool_result', tool_use_id: 'call-b', content: 'B'.repeat(13_000) },
+    ] } }),
+    line({ type: 'assistant', timestamp: '2026-08-20T01:03:00.000Z', message: { content: [{ type: 'text', text: '完成' }] } }),
+  ].join(''))
+  assert.deepEqual(parsed.seed.filter(event => event.type === 'turn/start').map(event => event.time), [Date.parse('2026-08-20T01:00:00.000Z')])
+  assert.equal(parsed.seed.find(event => event.type === 'assistant/message').data.message.content.some(block => block.type === 'reasoning'), true)
+  const results = parsed.seed.filter(event => event.type === 'tool/result')
+  assert.equal(results.find(event => event.data.message.source.callId === 'call-b').data.message.content[0].content[0].text.includes('[已裁剪]'), true)
+  assert.match(results.find(event => event.data.message.source.callId === 'call-a').data.message.content[0].content[0].text, /未知结果/)
+  for (const result of results) {
+    const callId = result.data.message.source.callId
+    const call = parsed.seed.find(event => event.type === 'tool/call' && event.data.callId === callId)
+    assert.deepEqual(result.sourceEventSeqs, [call.seq])
+  }
+  const serialized = JSON.stringify(parsed.seed)
+  assert.doesNotMatch(serialized, /supersecret|private-token/)
+  assert.deepEqual(parsed.details.unsupported, ['image'])
+})
+
+test('native seed keeps each assistant model and does not claim a tool-ended transcript completed', () => {
+  const parsed = parseClaudeSession([
+    line({ type: 'user', message: { content: '执行检查' } }),
+    line({ type: 'assistant', message: { model: 'claude-first', content: [{ type: 'tool_use', id: 'call-1', name: 'Read', input: { file_path: '/tmp/a' } }] } }),
+    line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'ok' }] } }),
+    line({ type: 'user', message: { content: '继续说明' } }),
+    line({ type: 'assistant', message: { model: 'claude-second', content: [{ type: 'text', text: '最终说明' }] } }),
+  ].join(''))
+  assert.deepEqual(parsed.seed.filter(event => event.type === 'assistant/message').map(event => event.data.message.source.model), ['claude-first', 'claude-second'])
+  assert.deepEqual(parsed.seed.filter(event => event.type === 'turn/end').map(event => event.data.reason), [{ kind: 'interrupted' }, { kind: 'completed' }])
+  assert.equal(parsed.details.interruptedTurns, 1)
+})
+
+test('native seed pairs a tool result that appears in an earlier JSONL record than its tool call', () => {
+  const parsed = parseClaudeSession([
+    line({ type: 'user', timestamp: '2026-08-20T01:00:00.000Z', message: { content: '请继续处理' } }),
+    line({ type: 'user', timestamp: '2026-08-20T01:01:00.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 'late-call', content: '已经读取' }] } }),
+    line({ type: 'assistant', timestamp: '2026-08-20T01:02:00.000Z', message: { content: [{ type: 'tool_use', id: 'late-call', name: 'Read', input: { file_path: '/tmp/a' } }] } }),
+    line({ type: 'assistant', timestamp: '2026-08-20T01:03:00.000Z', message: { content: '读取完成' } }),
+  ].join(''))
+  const result = parsed.seed.find(event => event.type === 'tool/result')
+  assert.equal(result.data.message.content[0].content[0].text, '已经读取')
+  assert.equal(parsed.details.orphanToolResults, 0)
+  assert.equal(parsed.details.unknownToolResults, 0)
+  assert.equal(result.time >= parsed.seed.find(event => event.type === 'tool/call').time, true)
+})
+
+test('titles, ordinary text, and detail text redact secrets while reporting orphan results', () => {
+  const parsed = parseClaudeSession([
+    line({ type: 'ai-title', aiTitle: '排查 sk-ant-titleSecret123456' }),
+    line({ type: 'summary', summary: '最终摘要 Authorization: Bearer title-token-123456' }),
+    line({ type: 'user', message: { content: 'Authorization: Bearer user-token-123456' } }),
+    line({ type: 'assistant', message: { model: 'claude-a', content: [{ type: 'text', text: 'AWS_SECRET_ACCESS_KEY=assistant-secret-123456' }] } }),
+    line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'orphan-call', content: 'COOKIE=session-cookie-123456' }] } }),
+  ].join(''))
+  const serialized = JSON.stringify({ title: parsed.title, messages: parsed.messages, seed: parsed.seed })
+  assert.equal(parsed.title.startsWith('最终摘要'), true)
+  assert.doesNotMatch(serialized, /titleSecret|title-token|user-token|assistant-secret|session-cookie/)
+  assert.equal(parsed.details.orphanToolResults, 1)
+})
+
+test('native seed has an independent total-content bound across many records', () => {
+  const raw = []
+  for (let turn = 0; turn < 12; turn += 1) {
+    raw.push(line({ type: 'user', message: { content: `问题-${turn}-${'x'.repeat(70_000)}` } }))
+    raw.push(line({ type: 'assistant', message: { content: `答案-${turn}-${'y'.repeat(70_000)}` } }))
+  }
+  const parsed = parseClaudeSession(raw.join(''))
+  assert.equal(parsed.truncated, true)
+  assert.equal(parsed.details.unsupported.includes('record-limit'), true)
+  assert.equal(JSON.stringify(parsed.seed).length < 700_000, true)
+})
+
+test('a main transcript keeps ai-title and summary metadata while a sidechain is rejected', async t => {
+  const { projects, importer } = await fixture(t)
+  const sessionId = 'main-session-1234'
+  await writeFile(path.join(projects, '-tmp-demo', `${sessionId}.jsonl`), [
+    line({ type: 'ai-title', aiTitle: 'AI 标题' }),
+    line({ type: 'summary', summary: '摘要标题' }),
+    line({ type: 'user', sessionId, message: { content: '主会话问题' } }),
+    line({ type: 'assistant', sessionId, message: { content: '主会话回答' } }),
+  ].join(''))
+  const listing = await importer.listSessions('-tmp-demo')
+  assert.equal(listing.sessions.find(session => session.sessionId === sessionId)?.title, '摘要标题')
+  const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
+  assert.equal(prepared.title, '摘要标题')
+
+  const sidechainId = 'sidechain-1234'
+  await writeFile(path.join(projects, '-tmp-demo', `${sidechainId}.jsonl`), line({ type: 'user', sessionId, isSidechain: true, message: { content: '辅助记录' } }))
+  await assert.rejects(importer.prepare({ projectKey: '-tmp-demo', sessionId: sidechainId, workspacePath: '/tmp/demo' }), /辅助或子代理记录/)
+})
+
+test('session index uses ai-title before falling back to the first user message', async t => {
+  const { projects, importer } = await fixture(t)
+  const sessionId = 'ai-title-session'
+  await writeFile(path.join(projects, '-tmp-demo', `${sessionId}.jsonl`), [
+    line({ type: 'ai-title', aiTitle: 'Claude 原始标题' }),
+    line({ type: 'user', sessionId, message: { content: '第一句用户问题' } }),
+  ].join(''))
+  const listing = await importer.listSessions('-tmp-demo')
+  assert.equal(listing.sessions.find(session => session.sessionId === sessionId)?.title, 'Claude 原始标题')
+})
+
+test('registry distinguishes unchanged reopen, append-only import, and changed or shortened source conflicts', async t => {
+  const { projects, importer } = await fixture(t)
+  const sessionId = 'increment-session'
+  const file = path.join(projects, '-tmp-demo', `${sessionId}.jsonl`)
+  await writeFile(file, line({ type: 'user', message: { content: 'first' } }) + line({ type: 'assistant', message: { content: 'first answer' } }))
+  const first = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
+  await importer.commit({ sourceKey: first.sourceKey, sessionId: 'harness-session', source: first.revision, seed: first.seed, seedEventCount: first.seed.length, harnessNextSeq: first.seed.length + 1 })
+  assert.equal((await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })).kind, 'existing')
+  await writeFile(file, line({ type: 'user', message: { content: 'first' } }) + line({ type: 'assistant', message: { content: 'first answer' } }) + line({ type: 'user', message: { content: 'second' } }) + line({ type: 'assistant', message: { content: 'second answer' } }))
+  assert.equal((await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })).kind, 'append')
+  await writeFile(file, line({ type: 'user', message: { content: 'changed' } }))
+  assert.equal((await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })).kind, 'conflict')
 })
 
 test('reads selected details on demand without selecting or importing the session', async t => {
@@ -180,7 +313,7 @@ test('prepares a selected session above the former 8 MiB source-file limit', asy
   await writeFile(path.join(projects, '-tmp-demo', `${sessionId}.jsonl`), line({ type: 'user', message: { content: 'x'.repeat(8 * 1024 * 1024 + 1) } }))
   const prepared = await importer.prepare({ projectKey: '-tmp-demo', sessionId, workspacePath: '/tmp/demo' })
   assert.equal(prepared.kind, 'prepared')
-  assert.equal(prepared.prompt.includes('x'.repeat(120_000)), true)
+  assert.equal(JSON.stringify(prepared.seed).includes('x'.repeat(120_000)), true)
   const detail = await importer.detail({ projectKey: '-tmp-demo', sessionId })
   assert.equal(detail.truncated, true)
   assert.equal(detail.messages[0].text.length, 120_000)

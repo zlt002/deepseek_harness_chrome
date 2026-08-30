@@ -13,11 +13,12 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
 import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
+import { ACCRUI_NATIVE_HOST_NAME } from '../../apps/native-server/src/product-runtime-identity.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
 const GENERATED_HARNESS_ROOT = path.join(PROJECT_ROOT, '.generated', 'harness-product')
-const EXPLICIT_HARNESS_ROOT = process.env.DSH_ROOT?.trim()
+const EXPLICIT_HARNESS_ROOT = process.env.ACCRUI_HARNESS_ROOT?.trim()
 const HARNESS_ROOT = path.resolve(EXPLICIT_HARNESS_ROOT || GENERATED_HARNESS_ROOT)
 const PACKAGE_NAME = 'accr-ui-mac-production-poc'
 const EXTENSION_VERSION = '1.1.63'
@@ -44,7 +45,7 @@ export const RUNTIME_SELECTED_PLUGIN_PACKAGES = [
 
 function assertHarnessProductAvailable() {
   if (!EXPLICIT_HARNESS_ROOT && !existsSync(path.join(GENERATED_HARNESS_ROOT, '.harness-product.json'))) {
-    throw new Error(`Generated product Harness is missing: ${GENERATED_HARNESS_ROOT}. Run pnpm build:harness-product first, or set DSH_ROOT explicitly for a different Harness checkout.`)
+    throw new Error(`Generated product Harness is missing: ${GENERATED_HARNESS_ROOT}. Run pnpm build:harness-product first, or set ACCRUI_HARNESS_ROOT for this product build.`)
   }
 }
 function run(command, args, options = {}) {
@@ -126,7 +127,6 @@ export function staticWebRunner(aliases, typertPackages) {
   return `import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { boot, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, resolveBundleDir } from '@deepseek-ai/dsh-app-boot';
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment';
@@ -179,7 +179,7 @@ function rewriteStaticPackageNames(value) {
 }
 const CONFIG_PATH = resolve(dirname(process.argv[1]), '../config/static-web.cordis.yml');
 const PACKAGED_PRESET_ROOT = resolve(dirname(CONFIG_PATH), 'agent-presets');
-const DSH_HOME_PATH = process.env.DSH_HOME || resolve(homedir(), '.dsh');
+const DSH_HOME_PATH = resolve(dirname(process.argv[1]), '../../../../profile');
 const PROFILE_DIR = resolve(DSH_HOME_PATH, 'profiles/web');
 const PLUGIN_BASE_URL = pathToFileURL(resolve(PROFILE_DIR, 'package.json')).href;
 const PLUGIN_REQUIRE = createRequire(PLUGIN_BASE_URL);
@@ -596,11 +596,15 @@ if ! test -x "$NODE_EXEC"; then
   printf 'Verified Node.js executable is unavailable: %s\n' "$NODE_EXEC" >&2
   exit 1
 fi
+unset DSH_ROOT DSH_CLI_PATH DSH_HOME DSH_CWD DSH_NATIVE_LOG DSH_HARNESS_RUNTIME_PLUGIN DSH_HARNESS_TRACKING_PLUGIN DSH_DEFAULT_WORKSPACE_PLUGIN DSH_PRODUCT_OFFICE_SKILLS_PLUGIN DSH_PRODUCT_PLUGIN_ROOT DSH_PRODUCT_SKILLS_ROOT DSH_CONNECTOR_STATE_DIR || true
 export DSH_ROOT="$PACKAGE_DIR/harness"
 export DSH_CLI_PATH="$DSH_ROOT/apps/cli/lib/server.mjs"
+export DSH_HOME="$PACKAGE_DIR/../profile"
 export DSH_CWD="$PACKAGE_DIR/../workspace"
 export DSH_PRODUCT_PLUGIN_ROOT="$PACKAGE_DIR/product-plugins"
 export DSH_PRODUCT_SKILLS_ROOT="$PACKAGE_DIR/skills"
+export ACCRUI_CONNECTOR_STATE_DIR="$PACKAGE_DIR/../connector-state"
+export DSH_CONNECTOR_STATE_DIR="$ACCRUI_CONNECTOR_STATE_DIR"
 export ACCR_PRODUCT_VERSION=${JSON.stringify(productVersion)}
 export DSH_NODE_PTY_SPAWN_HELPER="$PACKAGE_DIR/native/node-pty/spawn-helper"
 export DSH_NATIVE_LOG="$PACKAGE_DIR/../logs/native-host.log"
@@ -614,6 +618,9 @@ set -eu
 PACKAGE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 IFS= read -r NODE_EXEC < "$PACKAGE_DIR/node-path.txt"
 test -x "$NODE_EXEC"
+unset DSH_ROOT DSH_CLI_PATH DSH_HOME DSH_CWD DSH_NATIVE_LOG DSH_HARNESS_RUNTIME_PLUGIN DSH_HARNESS_TRACKING_PLUGIN DSH_DEFAULT_WORKSPACE_PLUGIN DSH_PRODUCT_OFFICE_SKILLS_PLUGIN DSH_PRODUCT_PLUGIN_ROOT DSH_PRODUCT_SKILLS_ROOT DSH_CONNECTOR_STATE_DIR || true
+export DSH_HOME="$PACKAGE_DIR/../profile"
+export DSH_ROOT="$PACKAGE_DIR/harness"
 exec "$NODE_EXEC" "$PACKAGE_DIR/harness/apps/cli/lib/plugin-manager.mjs" plugin --profile web "$@"
 `
 }
@@ -638,7 +645,7 @@ LAUNCHER="$PACKAGE_DIR/run-native-host.sh"
 EXTENSION_ID="cmgjacoohdgjedoekbdbhbelpmboankg"
 for TARGET in "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts" "$HOME/Library/Application Support/Microsoft Edge/NativeMessagingHosts"; do
   mkdir -p "$TARGET"
-  for NAME in com.deepseek.harness.chrome com.chromemcp.nativehost; do
+  for NAME in ${ACCRUI_NATIVE_HOST_NAME}; do
     printf '{\n  "name": "%s",\n  "description": "DeepSeek Harness Native Messaging host",\n  "path": "%s",\n  "type": "stdio",\n  "allowed_origins": ["chrome-extension://%s/"]\n}\n' "$NAME" "$LAUNCHER" "$EXTENSION_ID" > "$TARGET/$NAME.json"
   done
 done

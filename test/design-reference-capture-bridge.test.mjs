@@ -91,7 +91,7 @@ test('background capture validates the Side Panel and the same Browser Target be
   assert.match(background, /request\.type === 'capture-design-references\/v1'/)
   assert.match(background, /browserTargets\.length < 2 \|\| browserTargets\.length > 3/)
   assert.match(background, /design-reference-capture-progress\/v1/)
-  assert.match(background, /!isSidePanelSender\(sender\) \|\| !isBrowserTarget\(request\.browserTarget\)/)
+  assert.match(background, /!isSidePanelSender\(sender\) \|\| !validBrowserTarget\(request\.browserTarget\)/)
   assert.match(background, /!sameBrowserTarget\(liveBefore, browserTarget\)/)
   assert.match(background, /world: 'ISOLATED'/)
   assert.match(background, /captureVisibleTab\(browserTarget\.windowId, \{ format: 'jpeg', quality: 60 \}\)/)

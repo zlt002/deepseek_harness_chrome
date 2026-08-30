@@ -6,6 +6,11 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from './bundle-harness-runtime-plugin.mjs'
 import { PRODUCT_UI_PLUGIN_DIRECTORIES, PRODUCT_UI_PLUGIN_PACKAGE_NAMES } from '../apps/native-server/src/product-plugin-manifest.mjs'
+import {
+  ACCRUI_INSTALL_DIRECTORY,
+  ACCRUI_NATIVE_HOST_NAME,
+  nativeHostManifestFilename,
+} from '../apps/native-server/src/product-runtime-identity.mjs'
 import { createRuntimeIdentity } from './runtime-identity.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -18,8 +23,11 @@ const extensionIds = [...new Set(
 const nativeServerSource = resolve(projectRoot, 'apps', 'native-server')
 const skillsSource = resolve(projectRoot, 'skills')
 const productPluginsSource = resolve(projectRoot, 'packages')
-const explicitHarnessRoot = process.env.DSH_ROOT?.trim() || undefined
-const explicitHarnessCli = process.env.DSH_CLI_PATH?.trim() || undefined
+// Generic DSH_* variables may belong to another Harness checkout.  Only this
+// product's names are accepted at the registration boundary, then the
+// generated launcher exports the DSH_* variables it owns.
+const explicitHarnessRoot = process.env.ACCRUI_HARNESS_ROOT?.trim() || undefined
+const explicitHarnessCli = process.env.ACCRUI_HARNESS_CLI_PATH?.trim() || undefined
 const generatedHarnessRoot = resolve(projectRoot, '.generated/harness-product')
 const inferredHarnessRoot = !explicitHarnessRoot && !explicitHarnessCli
   && existsSync(join(generatedHarnessRoot, '.harness-product.json'))
@@ -49,25 +57,29 @@ const targets = platform() === 'darwin'
     ? [join(process.env.APPDATA ?? join(homedir(), 'AppData/Roaming'), 'Google/Chrome/NativeMessagingHosts')]
     : [join(homedir(), '.config/google-chrome/NativeMessagingHosts')]
 const installRoot = platform() === 'darwin'
-  ? join(homedir(), 'Library/Application Support/DeepSeekHarness')
+  ? join(homedir(), 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY)
   : platform() === 'win32'
-    ? join(process.env.APPDATA ?? join(homedir(), 'AppData/Roaming'), 'DeepSeekHarness')
-    : join(homedir(), '.local/share/DeepSeekHarness')
+    ? join(process.env.APPDATA ?? join(homedir(), 'AppData/Roaming'), ACCRUI_INSTALL_DIRECTORY)
+    : join(homedir(), '.local/share', ACCRUI_INSTALL_DIRECTORY)
 const nativeServer = join(installRoot, 'native-server')
 const skills = join(installRoot, 'skills')
-const launcher = join(installRoot, 'com.deepseek.harness.chrome')
+const launcher = join(installRoot, ACCRUI_NATIVE_HOST_NAME)
+const profile = join(installRoot, 'profile')
 
 if (process.argv.includes('--check')) {
   const expectedOrigins = extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`)
   const errors = []
   for (const target of targets) {
-    const manifestPath = join(target, 'com.deepseek.harness.chrome.json')
+    const manifestPath = join(target, nativeHostManifestFilename())
     if (!existsSync(manifestPath)) {
       errors.push(`manifest is missing: ${manifestPath}`)
       continue
     }
     try {
       const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+      if (manifest.name !== ACCRUI_NATIVE_HOST_NAME) errors.push(`${manifestPath} has an unexpected host name`)
+      if (manifest.type !== 'stdio') errors.push(`${manifestPath} has an unexpected host type`)
+      if (manifest.path !== launcher) errors.push(`${manifestPath} does not point to the AccrUI launcher`)
       for (const origin of expectedOrigins) {
         if (!Array.isArray(manifest.allowed_origins) || !manifest.allowed_origins.includes(origin)) {
           errors.push(`${origin} is not allowed by ${manifestPath}`)
@@ -76,6 +88,14 @@ if (process.argv.includes('--check')) {
     } catch (error) {
       errors.push(`manifest is unreadable: ${manifestPath}: ${error.message}`)
     }
+  }
+  if (existsSync(launcher)) {
+    const launcherSource = await readFile(launcher, 'utf8')
+    for (const [name, value] of [['DSH_ROOT', activeHarnessRoot], ['DSH_HOME', profile], ['DSH_CONNECTOR_STATE_DIR', join(installRoot, 'connector-state')]]) {
+      if (value !== undefined && !launcherSource.includes(`export ${name}=${shellQuote(value)}`)) errors.push(`launcher does not export the expected ${name}`)
+    }
+  } else {
+    errors.push(`launcher is missing: ${launcher}`)
   }
   if (errors.length > 0) {
     console.error(`Native Messaging host is forbidden for the requested extension:\n${errors.join('\n')}`)
@@ -86,51 +106,38 @@ if (process.argv.includes('--check')) {
 }
 
 if (!explicitHarnessRoot && !explicitHarnessCli && inferredHarnessRoot === undefined) {
-  console.error(`Generated product Harness is missing or not built: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set DSH_ROOT/DSH_CLI_PATH explicitly for a different Harness checkout.`)
+  console.error(`Generated product Harness is missing or not built: ${generatedHarnessRoot}. Run pnpm build:harness-product first, or set ACCRUI_HARNESS_ROOT/ACCRUI_HARNESS_CLI_PATH for this product runtime.`)
   process.exit(2)
 }
 
 const launcherLines = [
   '#!/bin/sh',
+  'unset DSH_ROOT DSH_CLI_PATH DSH_HOME DSH_CWD DSH_NATIVE_LOG DSH_HARNESS_RUNTIME_PLUGIN DSH_HARNESS_TRACKING_PLUGIN DSH_DEFAULT_WORKSPACE_PLUGIN DSH_PRODUCT_OFFICE_SKILLS_PLUGIN DSH_PRODUCT_PLUGIN_ROOT DSH_PRODUCT_SKILLS_ROOT DSH_CONNECTOR_STATE_DIR',
   `exec ${shellQuote(process.execPath)} ${shellQuote(join(nativeServer, 'bin.mjs'))}`,
 ]
 for (const [name, value] of [
   ['DSH_ROOT', explicitHarnessRoot ?? inferredHarnessRoot],
   ['DSH_CLI_PATH', explicitHarnessCli],
-  ['DSH_CWD', process.env.DSH_CWD?.trim()],
-  ['DSH_NATIVE_LOG', process.env.DSH_NATIVE_LOG?.trim()],
-  ['DSH_HARNESS_RUNTIME_PLUGIN', process.env.DSH_HARNESS_RUNTIME_PLUGIN?.trim()],
-  ['DSH_HARNESS_TRACKING_PLUGIN', process.env.DSH_HARNESS_TRACKING_PLUGIN?.trim()],
-  ['ACCR_PRODUCT_VERSION', process.env.ACCR_PRODUCT_VERSION?.trim()],
+  ['DSH_HOME', profile],
+  ['ACCRUI_CONNECTOR_STATE_DIR', join(installRoot, 'connector-state')],
+  ['DSH_CONNECTOR_STATE_DIR', join(installRoot, 'connector-state')],
+  ['DSH_CWD', process.env.ACCRUI_HARNESS_CWD?.trim() || join(installRoot, 'workspace')],
+  ['DSH_NATIVE_LOG', process.env.ACCRUI_NATIVE_LOG?.trim()],
+  ['DSH_HARNESS_RUNTIME_PLUGIN', process.env.ACCRUI_HARNESS_RUNTIME_PLUGIN?.trim()],
+  ['DSH_HARNESS_TRACKING_PLUGIN', process.env.ACCRUI_HARNESS_TRACKING_PLUGIN?.trim()],
+  ['ACCR_PRODUCT_VERSION', process.env.ACCRUI_PRODUCT_VERSION?.trim()],
 ]) {
-  if (value !== undefined && value !== '') launcherLines.splice(1, 0, `export ${name}=${shellQuote(value)}`)
+  if (value !== undefined && value !== '') launcherLines.splice(2, 0, `export ${name}=${shellQuote(value)}`)
 }
-async function mergedManifest(manifestPath) {
-  let existingManifest = {}
-  if (existsSync(manifestPath)) {
-    try {
-      existingManifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-    } catch (error) {
-      throw new Error(`Unable to read existing Native Messaging manifest ${manifestPath}: ${error.message}`)
-    }
-    if (existingManifest === null || typeof existingManifest !== 'object' || Array.isArray(existingManifest)) {
-      throw new Error(`Existing Native Messaging manifest ${manifestPath} must contain a JSON object`)
-    }
-  }
-  const existingOrigins = existingManifest.allowed_origins ?? []
-  if (!Array.isArray(existingOrigins) || existingOrigins.some((origin) => typeof origin !== 'string')) {
-    throw new Error(`Existing Native Messaging manifest ${manifestPath} has invalid allowed_origins`)
-  }
+function productManifest() {
   return {
-    ...existingManifest,
-    name: 'com.deepseek.harness.chrome',
-    description: 'DeepSeek Harness Native Messaging host',
+    name: ACCRUI_NATIVE_HOST_NAME,
+    description: 'AccrUI Harness Native Messaging host',
     path: launcher,
     type: 'stdio',
-    allowed_origins: [...new Set([
-      ...existingOrigins,
-      ...extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`),
-    ])],
+    // Do not inherit origins from an old manifest: the file is product-owned
+    // and an unknown origin would bridge a different extension into AccrUI.
+    allowed_origins: extensionIds.map((extensionId) => `chrome-extension://${extensionId}/`),
   }
 }
 
@@ -201,9 +208,9 @@ await writeFile(launcher, `${launcherLines.join('\n')}\n`, 'utf8')
 await chmod(launcher, 0o755)
 for (const target of targets) {
   await mkdir(target, { recursive: true })
-  const manifestPath = join(target, 'com.deepseek.harness.chrome.json')
-  await writeManifestAtomically(manifestPath, await mergedManifest(manifestPath))
+  const manifestPath = join(target, nativeHostManifestFilename())
+  await writeManifestAtomically(manifestPath, productManifest())
   console.log(`Manifest: ${manifestPath}`)
 }
-console.log('Registered com.deepseek.harness.chrome')
+console.log(`Registered ${ACCRUI_NATIVE_HOST_NAME}`)
 console.log(`Launcher: ${launcher}`)

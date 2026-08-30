@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 
-const productRoot = path.resolve(process.env.DSH_ROOT?.trim() || '.generated/harness-product')
+const productRoot = path.resolve(process.env.ACCRUI_HARNESS_ROOT?.trim() || '.generated/harness-product')
 const subagentPluginRoot = path.resolve('packages/harness-ui-subagent-compact')
 const sessionLogCopyPluginRoot = path.resolve('packages/harness-ui-session-log-copy')
 const knowledgeScopePluginRoot = path.resolve('packages/harness-ui-knowledge-scope')
@@ -50,7 +50,8 @@ test('materialized Harness preserves the latest compact product UI contracts', a
   assert.match(selectedSourceToolviewIndex, /mcp__chrome__selected_source_scope/)
   assert.match(selectedSourceToolview, /已选远程范围/)
   assert.match(selectedSourceToolview, /if \(failed\) setExpanded\(true\)/)
-  assert.match(selectedSourceToolview, /<MarkdownText text=\{text\} streaming=\{running\} \/>/)
+  assert.match(selectedSourceToolview, /const displayText = failed \? friendlySearchError\(text\) : text/)
+  assert.match(selectedSourceToolview, /<MarkdownText text=\{displayText\} streaming=\{running\} \/>/)
   await assert.rejects(
     source('packages/client/ui-knowledge-scope/package.json'),
     error => error?.code === 'ENOENT',

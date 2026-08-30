@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { claudeImportRequest } from '../src/client/claude-import-request.mjs'
+import { CLAUDE_IMPORT_ACTION_TIMEOUTS, claudeImportRequest } from '../src/client/claude-import-request.mjs'
+
+test('native import uses a two-minute default deadline without waiting for it in this test', () => {
+  assert.equal(CLAUDE_IMPORT_ACTION_TIMEOUTS.import, 120_000)
+})
 
 test('a transport that never settles rejects at its action deadline instead of leaving preparing forever', async () => {
   const request = claudeImportRequest(

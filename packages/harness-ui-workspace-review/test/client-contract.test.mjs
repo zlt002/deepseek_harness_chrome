@@ -65,6 +65,8 @@ test('renders through the picker child slot and desktop header action without a 
   assert.match(client, /existing\.trim\(\) === '' \? addition : `\$\{existing\}/)
   assert.doesNotMatch(client, /input\.submit/)
   assert.match(client, /scopedConversation\.send\(acceptPrompt\(action\)\)/)
+  assert.match(client, /请按\/pmd-prd Skill 的同步到远程doc文档这个步骤继续/)
+  assert.doesNotMatch(client, new RegExp(['请按当前 Skill', '的下一步继续'].join(' ')))
   assert.match(host, /WORKSPACE_REVIEW_SNAPSHOT_PATH/)
   assert.match(host, /isTrustedSessionRequest/)
   assert.match(host, /bearer\(req\)/)

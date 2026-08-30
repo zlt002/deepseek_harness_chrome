@@ -67,12 +67,16 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.match(serverSource, /\.\/workflow-worker\.cjs/)
   const packagedLauncher = await readFile(path.join(installed, 'runtime/run-native-host.sh'), 'utf8')
   assert.doesNotMatch(packagedLauncher, /DSH_(?:LEGACY_UI_OVERLAY|ENABLE_KNOWLEDGE_SCOPE_UI|ENABLE_SKILL_SETTINGS_UI)/)
+  assert.match(packagedLauncher, /DSH_HOME="\$PACKAGE_DIR\/\.\.\/profile"/)
   assert.match(packagedLauncher, /DSH_PRODUCT_PLUGIN_ROOT=/)
   assert.match(packagedLauncher, /DSH_PRODUCT_SKILLS_ROOT=/)
   assert.match(packagedLauncher, /ACCR_PRODUCT_VERSION="1\.1\.63"/)
   const packagedReadme = await readFile(path.join(result.packageDir, 'README.zh-CN.md'), 'utf8')
   assert.match(packagedReadme, /DSH_PRODUCT_SKILLS_ROOT/)
   assert.match(packagedReadme, /\/pptx/)
+  const nativeHostRegistration = await readFile(path.join(installed, 'runtime', 'register-native-host.sh'), 'utf8')
+  assert.match(nativeHostRegistration, /com\.accrui\.harness\.chrome/)
+  assert.doesNotMatch(nativeHostRegistration, /com\.deepseek\.harness\.chrome|com\.chromemcp\.nativehost/)
   const extensionManifest = JSON.parse(await readFile(path.join(installed, 'extension', 'manifest.json'), 'utf8'))
   const webAccessibleResources = new Set(
     (extensionManifest.web_accessible_resources ?? []).flatMap((entry) => entry.resources ?? []),

@@ -5,6 +5,17 @@ import { createPublicKey, verify } from 'node:crypto'
 import { NativeHost } from '../apps/native-server/src/native-host.mjs'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 
+test('forwards only validated PRD events to the durable tracker', async () => {
+  const events = []
+  const tracker = { start() {}, stop() {}, setProductVersion() {}, async report(event) { events.push(event) } }
+  const host = new NativeHost({ prdEventTracker: tracker, exit: () => {} })
+  await host.handle({ type: 'report-prd-event', payload: { eventId: 'review:1', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite' } })
+  await host.handle({ type: 'report-prd-event', payload: { eventId: 'invalid', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite', body: 'must not pass' } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(events, [{ eventId: 'review:1', eventType: 'markdown_review_rewrite', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1' }])
+  tracker.stop()
+})
+
 test('signs only an exact, short-lived Prototype Studio recovery assertion with a Host-private key', () => {
   const host = new NativeHost({
     processFactory: () => ({ start: async () => 'http://127.0.0.1:48127', stop: async () => {} }),

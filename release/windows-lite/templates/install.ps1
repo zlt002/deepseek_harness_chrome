@@ -26,7 +26,8 @@ $rollbackRoot = Join-Path $installRoot 'rollback'
 $managedNames = @('extension', 'runtime', 'release.json')
 $swappableManagedNames = @('runtime', 'release.json')
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
-$nativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
+$nativeHostNames = @('com.accrui.harness.chrome')
+$legacyNativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
 $nativeHostRegistryRoots = @(
   'HKCU:\Software\Google\Chrome\NativeMessagingHosts',
   'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts'
@@ -45,6 +46,24 @@ function Write-InstallProgress([int]$Percent, [string]$State, [string]$Detail = 
   )
 }
 
+function Get-AccrUiLegacyNativeHostRegistrations {
+  $matches = @()
+  $expectedLauncher = (Join-Path $installRoot 'runtime\run_native_host.bat')
+  foreach ($registryRoot in $nativeHostRegistryRoots) {
+    foreach ($nativeHostName in $legacyNativeHostNames) {
+      $key = Join-Path $registryRoot $nativeHostName
+      if (-not (Test-Path -LiteralPath $key)) { continue }
+      $manifestPath = (Get-Item -LiteralPath $key).GetValue('')
+      if ([string]::IsNullOrWhiteSpace($manifestPath) -or -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { continue }
+      try { $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { continue }
+      if ($manifest.name -eq $nativeHostName -and $manifest.path -eq $expectedLauncher) {
+        $matches += [pscustomobject]@{ Path = $key; Value = $manifestPath }
+      }
+    }
+  }
+  return $matches
+}
+
 function Suspend-NativeHostRegistration {
   if ($script:nativeHostRegistrationSuspended) { return }
   $captured = @()
@@ -58,6 +77,10 @@ function Suspend-NativeHostRegistration {
       }
       Remove-Item -LiteralPath $key -Recurse -Force
     }
+  }
+  foreach ($registration in @(Get-AccrUiLegacyNativeHostRegistrations)) {
+    $captured += $registration
+    Remove-Item -LiteralPath $registration.Path -Recurse -Force
   }
   $script:suspendedNativeHostRegistrations = $captured
   $script:nativeHostRegistrationSuspended = $true
@@ -375,9 +398,46 @@ function Assert-NativeHostRegistrationReadback([string]$Root) {
   }
 }
 
+function Migrate-AccrUiRoamingProfile([string]$Root) {
+  $legacyProfile = Join-Path $env:APPDATA 'accr-ui-harness\profile'
+  $profile = Join-Path $Root 'profile'
+  if (-not (Test-Path -LiteralPath $legacyProfile -PathType Container)) { return }
+  if (-not (Test-Path -LiteralPath $profile)) {
+    Copy-Item -LiteralPath $legacyProfile -Destination $profile -Recurse -Force -ErrorAction Stop
+    Write-Host '已复制旧版 ACCRUI 设置到本安装目录的 profile。'
+    return
+  }
+
+  # A prior launch or interrupted upgrade may already have created the new
+  # profile. Merge only paths that are still absent so user-installed plugins
+  # survive without rolling current settings back to legacy values.
+  $legacyPrefix = ([System.IO.Path]::GetFullPath($legacyProfile)).TrimEnd('\') + '\'
+  $copied = 0
+  foreach ($directory in @(Get-ChildItem -LiteralPath $legacyProfile -Recurse -Directory -Force)) {
+    $relativePath = $directory.FullName.Substring($legacyPrefix.Length)
+    $destinationPath = Join-Path $profile $relativePath
+    if (-not (Test-Path -LiteralPath $destinationPath)) {
+      New-Item -ItemType Directory -Path $destinationPath -Force -ErrorAction Stop | Out-Null
+    }
+  }
+  foreach ($file in @(Get-ChildItem -LiteralPath $legacyProfile -Recurse -File -Force)) {
+    $relativePath = $file.FullName.Substring($legacyPrefix.Length)
+    $destinationPath = Join-Path $profile $relativePath
+    if (-not (Test-Path -LiteralPath $destinationPath)) {
+      New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force -ErrorAction Stop | Out-Null
+      Copy-Item -LiteralPath $file.FullName -Destination $destinationPath -Force -ErrorAction Stop
+      $copied += 1
+    }
+  }
+  if ($copied -gt 0) {
+    Write-Host "已合并 $copied 个旧版 ACCRUI profile 文件，现有设置保持不变。"
+  }
+}
+
 function Register-ReleaseTree([string]$Root) {
   $normalizedRoot = ([System.IO.Path]::GetFullPath($Root)).TrimEnd('\')
   if (-not $script:preparedCandidateRoots.Contains($normalizedRoot)) { throw "拒绝发布未完成 Native Host 启动检查的候选版本：$Root" }
+  Migrate-AccrUiRoamingProfile $Root
   $registerScript = Join-Path $Root 'runtime\register-native-host.ps1'
   & $registerScript -InstallRoot $Root -PublishOnly
   Assert-NativeHostRegistrationReadback $Root

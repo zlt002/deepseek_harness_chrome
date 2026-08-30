@@ -33,6 +33,24 @@ function verified(request, id) {
   return { status: 'verified_write', item: { catalogId: id, kind: 'light_document', name: request.name, url: `https://doc.midea.com/teamKnowledge/detail/docOnline/${id}?id=${id}`, fingerprint: `item-${id}` }, stages: ['parent_inspected', 'created', 'rediscovered', 'body_written', 'readback_verified'], readback: { body: request.body } }
 }
 
+function visibleMarkdownReadback(body) {
+  const visible = (value) => value
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/`([^`]*)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1').replace(/~~([^~]+)~~/g, '$1').trim()
+  return body.replace(/<!--[\s\S]*?-->/g, '').split(/\n+/).flatMap((sourceLine) => {
+    const line = sourceLine.trim()
+    if (!line || /^(?:`{3,}|~{3,}|-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return []
+    if (/^\|.*\|$/.test(line)) {
+      const cells = line.slice(1, -1).split('|').map(visible)
+      return cells.every((cell) => /^:?-{3,}:?$/.test(cell)) ? [] : [cells.join('\t')]
+    }
+    const heading = /^#{1,6}\s+/.test(line)
+    const withoutBlockPrefix = line.replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '').replace(/^(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, '')
+    const fragment = visible(heading ? withoutBlockPrefix.replace(/^\d+(?:\.\d+)*[.)、．]?\s+/, '') : withoutBlockPrefix)
+    return fragment ? [fragment] : []
+  }).join('\n')
+}
+
 function lightDocumentRead(request) {
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: 'Batch document', fingerprint: 'light-document-v1' }
   if (request.action === 'write') {
@@ -48,13 +66,13 @@ function lightDocumentRead(request) {
   return { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ id: 'block-1', type: 'p', text: '旧内容' }], ...(selection ? { selection } : {}) } }
 }
 
-async function open(responder, responseTarget = (request) => request.browserTarget, { releaseError } = {}) {
+async function open(responder, responseTarget = (request) => request.browserTarget, { releaseError, reportPrdEvent } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'team-knowledge-batch-'))
   const batchStore = new TeamKnowledgeBatchRecordStore({ recordPath: join(directory, 'batch.json') })
   const teamDocStore = new TeamDocRecordStore({ recordPath: join(directory, 'items.json') })
   let connector
   const requests = []
-  connector = new BrowserConnector({ teamKnowledgeBatchStore: batchStore, teamDocStore, requestExtension: (request) => {
+  connector = new BrowserConnector({ teamKnowledgeBatchStore: batchStore, teamDocStore, reportPrdEvent, requestExtension: (request) => {
     requests.push(request)
     queueMicrotask(() => {
       const resolvedTarget = typeof responseTarget === 'function' ? responseTarget(request) : responseTarget
@@ -99,7 +117,7 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
     assert.equal(modelVisibleChallenge, plan.result.structuredContent.challenge)
     assert.ok(plan.result.structuredContent.expiresAt - Date.now() > 9 * 60_000)
     const result = await harness.callTool('team_knowledge_batch_create', 2, { batchId: 'batch-success', challenge: modelVisibleChallenge })
-    assert.equal(result.result.structuredContent.status, 'verified_write')
+    assert.equal(result.result.structuredContent.status, 'verified_write', JSON.stringify(result))
     assert.equal(result.result.content[0].text, '已完成 2 个子文档的创建、内容写入和回读验证。')
     assert.doesNotMatch(result.result.content[0].text, /team_knowledge_|partial_delivery/)
     assert.deepEqual(result.result.structuredContent.batch.items.map((item) => item.status), ['created', 'created'])
@@ -343,6 +361,27 @@ test('accepts a PMD batch only when the single PRD structure is complete', async
     assert.equal(response.result.isError, undefined)
     assert.equal(typeof response.result.structuredContent.challenge, 'string')
     assert.equal(inspections, 1)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('reports a body-free online-document event only after a PMD Verified Write', async () => {
+  const prdBody = await authoritativePmdBody()
+  const events = []
+  const harness = await open(
+    (request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : { ...verified(request, '701'), readback: { body: visibleMarkdownReadback(request.body) } },
+    (request) => request.browserTarget,
+    { reportPrdEvent: async (event) => { events.push(event) } },
+  )
+  try {
+    const plan = await preview(harness, 'pmd:req-telemetry', [{ name: 'REQ_CRM_PRD', body: prdBody }])
+    const result = await create(harness, 'pmd:req-telemetry', plan.result.structuredContent.challenge)
+    assert.equal(result.result.structuredContent.status, 'verified_write', JSON.stringify(result))
+    assert.equal(events.length, 1)
+    assert.deepEqual({ ...events[0], occurredAt: '<time>', eventId: '<id>' }, {
+      eventId: '<id>', eventType: 'document_published', outcome: 'succeeded', occurredAt: '<time>', runId: 'batch-run', batchId: 'pmd:req-telemetry', itemIndex: 0,
+      documentName: 'REQ_CRM_PRD', documentCatalogId: '701', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/701?id=701',
+    })
+    assert.equal('body' in events[0], false)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 

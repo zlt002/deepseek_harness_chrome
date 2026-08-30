@@ -35,7 +35,7 @@
 @@ -5,6 +5,14 @@
    gap: 8px;
  }
- 
+
 +.button {
 +  min-width: 0;
 +  max-width: 88px;
@@ -75,7 +75,7 @@
 +    expect(await screen.findByRole('button', { name: 'Configuration file' })).toBeTruthy()
      expect(describe).toHaveBeenCalledTimes(2)
    })
- 
+
 @@ -144,8 +144,8 @@
        controller={controller}
        useSnapshot={bindSnapshotSelector(controller.store)}

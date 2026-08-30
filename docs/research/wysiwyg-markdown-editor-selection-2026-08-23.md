@@ -170,4 +170,3 @@
 - 编辑器接受后的 Markdown 能无缝进入现有 Verified Write，而不绕开 capability/approval/readback。
 
 若 Milkdown 失败：优先判断失败原因。若是默认 UI，继续用 Milkdown core 重组；若是解析/序列化兼容性，再转 MDXEditor；若主要诉求变成“最快得到成熟中文 WYSIWYG，接受大包和自建 Diff”，再选 Vditor。
-

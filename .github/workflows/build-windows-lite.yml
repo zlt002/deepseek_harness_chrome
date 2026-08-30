@@ -9,12 +9,27 @@ on:
       version:
         description: AccrUI-compatible extension version
         required: true
-        default: 1.1.85
+        default: 1.1.88
       full_validation:
         description: Run full acceptance tests (~38 min added) for pre-release validation
         required: false
         type: boolean
         default: false
+      publish_public:
+        description: Publish the public update only after real Windows Chrome/Edge UAT passes
+        required: false
+        type: boolean
+        default: false
+      uat_candidate_commit:
+        description: Exact draft candidate commit approved by Windows Chrome/Edge UAT
+        required: false
+      uat_candidate_sha256:
+        description: Exact candidate ZIP SHA256 approved by Windows Chrome/Edge UAT
+        required: false
+
+concurrency:
+  group: windows-lite-stable-publication
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -114,18 +129,18 @@ jobs:
         run: >-
           node release/windows-lite/windows-release.mjs
           --harness-runtime release/windows-lite/harness-static-win32-x64
-          --version "${{ inputs.version || '1.1.85' }}"
+          --version "${{ inputs.version || '1.1.88' }}"
 
-      - name: Accept Windows install, Native Messaging, upgrade, and rollback
+      - name: Accept locally built Windows candidate
         # Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention.
         # Visual Chrome/Edge sidepanel UAT on a target Windows machine remains required.
-        if: ${{ inputs.full_validation == true }}
+        if: ${{ inputs.full_validation == true && inputs.publish_public != true }}
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: >-
           ./release/windows-lite/acceptance-windows.ps1
           -PackageDir release/accr-ui-windows-lite-x64
-          -ExpectedVersion "${{ inputs.version || '1.1.85' }}"
+          -ExpectedVersion "${{ inputs.version || '1.1.88' }}"
 
       - name: Write checksum
         working-directory: deepseek_harness_chrome
@@ -135,13 +150,14 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
           [System.IO.File]::WriteAllText("$zip.sha256", "$hash  accr-ui-windows-lite-x64.zip`n", [System.Text.UTF8Encoding]::new($false))
 
-      - name: Upload Windows package to draft release
+      - name: Upload Windows package to draft candidate
+        if: ${{ inputs.publish_public != true }}
         working-directory: deepseek_harness_chrome
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.85' }}-candidate
-          RELEASE_VERSION: ${{ inputs.version || '1.1.85' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.88' }}-candidate
+          RELEASE_VERSION: ${{ inputs.version || '1.1.88' }}
         run: |
           $repo = '${{ github.repository }}'
           $zip = 'release/accr-ui-windows-lite-x64.zip'
@@ -157,41 +173,271 @@ jobs:
             throw "$Label failed after 4 attempts."
           }
 
-          $releaseExists = $false
-          for ($attempt = 1; $attempt -le 4; $attempt++) {
-            $viewOutput = gh release view $env:RELEASE_TAG --repo $repo 2>&1
-            if ($LASTEXITCODE -eq 0) {
-              $releaseExists = $true
-              break
-            }
-            $viewText = $viewOutput | Out-String
-            if ($viewText -match 'HTTP 404|release not found|Not Found') { break }
-            if ($attempt -eq 4) { throw 'Draft release lookup failed after 4 attempts.' }
-            Start-Sleep -Seconds (5 * $attempt)
+          function Assert-DraftCandidate {
+            $candidateOutput = gh release view $env:RELEASE_TAG --repo $repo --json targetCommitish,isDraft,isPrerelease 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Unable to inspect draft candidate $env:RELEASE_TAG: $($candidateOutput | Out-String)" }
+            $candidate = ($candidateOutput | Out-String) | ConvertFrom-Json
+            if (-not $candidate.isDraft -or $candidate.isPrerelease) { throw "Candidate $env:RELEASE_TAG must remain a draft; published or prerelease candidates cannot be changed." }
+            if ($candidate.targetCommitish -ne '${{ github.sha }}') { throw "Draft candidate $env:RELEASE_TAG targets $($candidate.targetCommitish), not current commit ${{ github.sha }}." }
           }
 
-          if (-not $releaseExists) {
-            Invoke-GhRetry -Label 'Draft release creation' -Command {
+          $candidate = gh release view $env:RELEASE_TAG --repo $repo --json targetCommitish,isDraft,isPrerelease,assets 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            Assert-DraftCandidate
+          } elseif ((($candidate | Out-String) -match 'HTTP 404|release not found|Not Found')) {
+            Invoke-GhRetry -Label 'Draft candidate creation' -Command {
+              gh release create $env:RELEASE_TAG --repo $repo --draft --target '${{ github.sha }}' --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" --notes "Draft candidate only. It did not complete full Windows install, upgrade, rollback, and reconnect validation."
+            }
+            Assert-DraftCandidate
+          } else {
+            throw "Unable to inspect draft candidate: $($candidate | Out-String)"
+          }
+          Assert-DraftCandidate
+          $candidateStateOutput = gh release view $env:RELEASE_TAG --repo $repo --json assets 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "Unable to inspect draft candidate assets: $($candidateStateOutput | Out-String)" }
+          $candidateAssets = @((($candidateStateOutput | Out-String) | ConvertFrom-Json).assets | ForEach-Object { $_.name })
+          $hasZip = $candidateAssets -contains 'accr-ui-windows-lite-x64.zip'
+          $hasChecksum = $candidateAssets -contains 'accr-ui-windows-lite-x64.zip.sha256'
+          if (-not $hasZip -and $hasChecksum) { throw 'Draft candidate has a checksum without its ZIP; refusing to replace or repair ambiguous assets.' }
+
+          $canonicalRoot = 'release/candidate-canonical'
+          New-Item -ItemType Directory -Path $canonicalRoot -Force | Out-Null
+          $canonicalZip = Join-Path $canonicalRoot 'accr-ui-windows-lite-x64.zip'
+          $canonicalChecksum = "$canonicalZip.sha256"
+          if ($hasZip) {
+            gh release download $env:RELEASE_TAG --repo $repo --pattern 'accr-ui-windows-lite-x64.zip' --dir $canonicalRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to download the existing draft candidate ZIP.' }
+            if ($hasChecksum) {
+              gh release download $env:RELEASE_TAG --repo $repo --pattern 'accr-ui-windows-lite-x64.zip.sha256' --dir $canonicalRoot
+              if ($LASTEXITCODE -ne 0) { throw 'Unable to download the existing draft candidate checksum.' }
+            }
+          } else {
+            Copy-Item -LiteralPath $zip -Destination $canonicalZip
+          }
+          $canonicalSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $canonicalZip).Hash.ToLowerInvariant()
+          $expectedChecksum = "$canonicalSha256  accr-ui-windows-lite-x64.zip"
+          if ($hasChecksum -and ([System.IO.File]::ReadAllText($canonicalChecksum).Trim()) -ne $expectedChecksum) { throw 'Existing draft candidate ZIP and checksum disagree; refusing to clobber either asset.' }
+          if (-not $hasZip) {
+            Assert-DraftCandidate
+            Invoke-GhRetry -Label 'Draft candidate ZIP upload' -Command { gh release upload $env:RELEASE_TAG $canonicalZip --repo $repo }
+          }
+          if (-not $hasChecksum) {
+            [System.IO.File]::WriteAllText($canonicalChecksum, "$expectedChecksum`n", [System.Text.UTF8Encoding]::new($false))
+            Assert-DraftCandidate
+            Invoke-GhRetry -Label 'Draft candidate checksum upload' -Command { gh release upload $env:RELEASE_TAG $canonicalChecksum --repo $repo }
+          }
+          Assert-DraftCandidate
+
+      - name: Reject public publication without full validation
+        if: ${{ inputs.publish_public == true }}
+        shell: pwsh
+        run: |
+          if ('${{ inputs.full_validation }}' -ne 'true') { throw 'publish_public=true requires full_validation=true.' }
+
+      - name: Validate public promotion and download exact UAT candidate
+        if: ${{ inputs.full_validation == true && inputs.publish_public == true }}
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version || '1.1.88' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.88' }}
+          RELEASE_SHA: ${{ github.sha }}
+          CANDIDATE_TAG: windows-lite-v${{ inputs.version || '1.1.88' }}-candidate
+          UAT_CANDIDATE_COMMIT: ${{ inputs.uat_candidate_commit }}
+          UAT_CANDIDATE_SHA256: ${{ inputs.uat_candidate_sha256 }}
+        run: |
+          $repo = '${{ github.repository }}'
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw "Release version must be x.y.z, received $env:RELEASE_VERSION" }
+          if ($env:UAT_CANDIDATE_COMMIT -notmatch '^[0-9a-f]{40}$' -or $env:UAT_CANDIDATE_SHA256 -notmatch '^[0-9a-f]{64}$') { throw 'publish_public=true requires the exact UAT-approved candidate commit and ZIP SHA256.' }
+          if ($env:UAT_CANDIDATE_COMMIT -ne $env:RELEASE_SHA) { throw "UAT approval is bound to $env:UAT_CANDIDATE_COMMIT, not this workflow commit $env:RELEASE_SHA." }
+          $releases = gh release list --repo $repo --limit 100 --json tagName,isDraft,isPrerelease 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "Unable to list published Windows Lite releases: $($releases | Out-String)" }
+          $publishedVersions = @()
+          foreach ($release in (($releases | Out-String) | ConvertFrom-Json)) {
+            if (-not $release.isDraft -and -not $release.isPrerelease -and $release.tagName -ne $env:RELEASE_TAG -and $release.tagName -match '^windows-lite-v(\d+\.\d+\.\d+)$') {
+              $publishedVersions += [version]$Matches[1]
+            }
+          }
+          if ($publishedVersions.Count -gt 0) {
+            $highestVersion = $publishedVersions | Sort-Object -Descending | Select-Object -First 1
+            if ([version]$env:RELEASE_VERSION -le $highestVersion) { throw "Release version $env:RELEASE_VERSION must be greater than highest published Windows Lite version $highestVersion." }
+          }
+          $existingOutput = gh release view $env:RELEASE_TAG --repo $repo --json tagName,targetCommitish,isDraft,isPrerelease,assets 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            $existing = ($existingOutput | Out-String) | ConvertFrom-Json
+            if ($existing.isDraft -or $existing.isPrerelease) { throw "Existing public release $env:RELEASE_TAG is not publishable." }
+            if ($existing.targetCommitish -ne $env:UAT_CANDIDATE_COMMIT) { throw "Existing public release $env:RELEASE_TAG targets $($existing.targetCommitish), not UAT-approved commit $env:UAT_CANDIDATE_COMMIT." }
+          } elseif ((($existingOutput | Out-String) -notmatch 'HTTP 404|release not found|Not Found')) {
+            throw "Unable to inspect public release $env:RELEASE_TAG: $($existingOutput | Out-String)"
+          } elseif ($publishedVersions.Count -gt 0 -and [version]$env:RELEASE_VERSION -eq $highestVersion) {
+            throw "Release version $env:RELEASE_VERSION already exists under another public Windows Lite release tag."
+          }
+          $candidateOutput = gh release view $env:CANDIDATE_TAG --repo $repo --json tagName,targetCommitish,isDraft,isPrerelease,assets 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "Unable to inspect UAT candidate $env:CANDIDATE_TAG: $($candidateOutput | Out-String)" }
+          $candidate = ($candidateOutput | Out-String) | ConvertFrom-Json
+          if (-not $candidate.isDraft -or $candidate.isPrerelease) { throw "UAT candidate $env:CANDIDATE_TAG must still be a draft; published or prerelease candidates are rejected." }
+          if ($candidate.targetCommitish -ne $env:UAT_CANDIDATE_COMMIT) { throw "UAT candidate $env:CANDIDATE_TAG targets $($candidate.targetCommitish), not approved commit $env:UAT_CANDIDATE_COMMIT." }
+          $requiredAssets = @('accr-ui-windows-lite-x64.zip', 'accr-ui-windows-lite-x64.zip.sha256')
+          $assetNames = @($candidate.assets | ForEach-Object { $_.name })
+          foreach ($requiredAsset in $requiredAssets) { if ($assetNames -notcontains $requiredAsset) { throw "UAT candidate is missing required asset $requiredAsset." } }
+          $promotionRoot = 'release/promotion-candidate'
+          New-Item -ItemType Directory -Path $promotionRoot -Force | Out-Null
+          foreach ($requiredAsset in $requiredAssets) {
+            gh release download $env:CANDIDATE_TAG --repo $repo --pattern $requiredAsset --dir $promotionRoot
+            if ($LASTEXITCODE -ne 0) { throw "Unable to download exact UAT candidate asset $requiredAsset." }
+          }
+          $candidateZip = Join-Path $promotionRoot 'accr-ui-windows-lite-x64.zip'
+          $candidateChecksum = Join-Path $promotionRoot 'accr-ui-windows-lite-x64.zip.sha256'
+          $candidateSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $candidateZip).Hash.ToLowerInvariant()
+          if ($candidateSha256 -ne $env:UAT_CANDIDATE_SHA256) { throw "Downloaded UAT candidate ZIP SHA256 $candidateSha256 does not match approved SHA256 $env:UAT_CANDIDATE_SHA256." }
+          if (([System.IO.File]::ReadAllText($candidateChecksum).Trim()) -ne "$candidateSha256  accr-ui-windows-lite-x64.zip") { throw 'Downloaded UAT candidate checksum does not attest to the exact candidate ZIP.' }
+
+      - name: Accept exact downloaded UAT candidate
+        if: ${{ inputs.full_validation == true && inputs.publish_public == true }}
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: |
+          $candidateZip = 'release/promotion-candidate/accr-ui-windows-lite-x64.zip'
+          $candidatePackageRoot = 'release/promotion-candidate/package'
+          Expand-Archive -LiteralPath $candidateZip -DestinationPath $candidatePackageRoot -Force
+          $candidatePackageDir = Join-Path $candidatePackageRoot 'accr-ui-windows-lite-x64'
+          if (-not (Test-Path -LiteralPath $candidatePackageDir -PathType Container)) { throw "Exact UAT candidate ZIP did not contain the expected package directory: $candidatePackageDir" }
+          ./release/windows-lite/acceptance-windows.ps1 `
+          -PackageDir $candidatePackageDir `
+          -ExpectedVersion "${{ inputs.version || '1.1.88' }}"
+
+      - name: Promote exact UAT candidate to published release
+        if: ${{ inputs.full_validation == true && inputs.publish_public == true }}
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.88' }}
+          CHANNEL_TAG: windows-lite-current
+          RELEASE_VERSION: ${{ inputs.version || '1.1.88' }}
+          UAT_CANDIDATE_COMMIT: ${{ inputs.uat_candidate_commit }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $zip = 'release/promotion-candidate/accr-ui-windows-lite-x64.zip'
+          $checksum = "$zip.sha256"
+
+          function Invoke-GhRetry {
+            param([scriptblock]$Command, [string]$Label)
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              & $Command
+              if ($LASTEXITCODE -eq 0) { return }
+              if ($attempt -lt 4) { Start-Sleep -Seconds (5 * $attempt) }
+            }
+            throw "$Label failed after 4 attempts."
+          }
+
+          $existingOutput = gh release view $env:RELEASE_TAG --repo $repo --json tagName,targetCommitish,isDraft,isPrerelease,assets 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            $existing = ($existingOutput | Out-String) | ConvertFrom-Json
+            if ($existing.isDraft -or $existing.isPrerelease -or $existing.targetCommitish -ne $env:UAT_CANDIDATE_COMMIT) { throw "Existing public release $env:RELEASE_TAG cannot be resumed safely." }
+          } elseif ((($existingOutput | Out-String) -match 'HTTP 404|release not found|Not Found')) {
+            Invoke-GhRetry -Label 'Published release creation' -Command {
               gh release create $env:RELEASE_TAG `
                 --repo $repo `
-                --draft `
-                --target '${{ github.sha }}' `
-                --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
-                --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
+                --target $env:UAT_CANDIDATE_COMMIT `
+                --title "Harness UI Windows Lite $env:RELEASE_VERSION" `
+                --notes "Windows x64 release for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Automated Windows validation and real Chrome/Edge UAT completed before publication."
             }
+          } else {
+            throw "Unable to inspect public release $env:RELEASE_TAG: $($existingOutput | Out-String)"
           }
 
-          Invoke-GhRetry -Label 'Draft release update' -Command {
-            gh release edit $env:RELEASE_TAG `
-              --repo $repo `
-              --target '${{ github.sha }}' `
-              --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" `
-              --notes "Windows x64 candidate for AccrUI-compatible Harness UI $env:RELEASE_VERSION. Visual Chrome/Edge sidepanel UAT on a target Windows machine is required."
+          $recoveryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("accr-ui-release-recovery-" + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $recoveryRoot -Force | Out-Null
+          try {
+            function Assert-ExistingAssetMatches([string]$Asset) {
+              $assetName = Split-Path -Leaf $Asset
+              & gh release download $env:RELEASE_TAG --repo $repo --pattern $assetName --dir $recoveryRoot
+              if ($LASTEXITCODE -ne 0) { throw "Unable to download existing immutable release asset $assetName for comparison." }
+              $downloadedAsset = Join-Path $recoveryRoot $assetName
+              if (-not (Test-Path -LiteralPath $downloadedAsset -PathType Leaf)) { throw "Existing immutable release asset was not downloaded: $assetName" }
+              if ($assetName -eq (Split-Path -Leaf $zip)) {
+                $existingSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadedAsset).Hash.ToLowerInvariant()
+                $candidateSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+                if ($existingSha256 -ne $candidateSha256) { throw 'Existing immutable ZIP SHA256 differs from the UAT candidate.' }
+                return
+              }
+              $existingChecksum = [System.IO.File]::ReadAllText($downloadedAsset)
+              $currentChecksum = [System.IO.File]::ReadAllText($Asset)
+              if ($existingChecksum -ne $currentChecksum) { throw 'Existing immutable checksum differs from the UAT candidate.' }
+            }
+
+            function Upload-IfMissing([string]$Asset, [string]$Label) {
+              $stateOutput = gh release view $env:RELEASE_TAG --repo $repo --json assets 2>&1
+              if ($LASTEXITCODE -ne 0) { throw "Unable to inspect public release assets: $($stateOutput | Out-String)" }
+              $assetName = Split-Path -Leaf $Asset
+              $existingAssets = ((($stateOutput | Out-String) | ConvertFrom-Json).assets | ForEach-Object { $_.name })
+              if ($existingAssets -contains $assetName) { Assert-ExistingAssetMatches $Asset; return }
+              Invoke-GhRetry -Label $Label -Command { gh release upload $env:RELEASE_TAG $Asset --repo $repo }
+            }
+
+            Upload-IfMissing $zip 'Published release ZIP upload'
+            Upload-IfMissing $checksum 'Published release checksum upload'
+          } finally {
+            Remove-Item -LiteralPath $recoveryRoot -Recurse -Force -ErrorAction SilentlyContinue
           }
 
-          Invoke-GhRetry -Label 'Draft release ZIP upload' -Command {
-            gh release upload $env:RELEASE_TAG $zip --repo $repo --clobber
+      - name: Write update manifest from exact UAT candidate
+        if: ${{ inputs.full_validation == true && inputs.publish_public == true }}
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        env:
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.88' }}
+          RELEASE_VERSION: ${{ inputs.version || '1.1.88' }}
+          UAT_CANDIDATE_SHA256: ${{ inputs.uat_candidate_sha256 }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $zip = 'release/promotion-candidate/accr-ui-windows-lite-x64.zip'
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:UAT_CANDIDATE_SHA256) { throw 'Promotion manifest must use the exact UAT candidate ZIP.' }
+          $manifest = [ordered]@{
+            format = 'accr-ui-windows-lite-update-v1'
+            releaseUrl = "https://github.com/$repo/releases/tag/$env:RELEASE_TAG"
+            version = $env:RELEASE_VERSION
+            sha256 = $hash
+            packageUrl = "https://github.com/$repo/releases/download/$env:RELEASE_TAG/accr-ui-windows-lite-x64.zip"
           }
-          Invoke-GhRetry -Label 'Draft release checksum upload' -Command {
-            gh release upload $env:RELEASE_TAG $checksum --repo $repo --clobber
+          [System.IO.File]::WriteAllText('release/accr-ui-windows-lite-update.json', (($manifest | ConvertTo-Json -Depth 2) + "`n"), [System.Text.UTF8Encoding]::new($false))
+
+      - name: Publish strictly newer stable update manifest
+        if: ${{ inputs.full_validation == true && inputs.publish_public == true }}
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL_TAG: windows-lite-current
+          RELEASE_VERSION: ${{ inputs.version || '1.1.88' }}
+          UAT_CANDIDATE_COMMIT: ${{ inputs.uat_candidate_commit }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $manifest = 'release/accr-ui-windows-lite-update.json'
+          $channel = gh release view $env:CHANNEL_TAG --repo $repo --json isDraft,isPrerelease 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            $channelState = ($channel | Out-String) | ConvertFrom-Json
+            if ($channelState.isDraft -or $channelState.isPrerelease) { throw "Stable manifest channel $env:CHANNEL_TAG must be a published release." }
+          } elseif ((($channel | Out-String) -match 'HTTP 404|release not found|Not Found')) {
+            gh release create $env:CHANNEL_TAG --repo $repo --target $env:UAT_CANDIDATE_COMMIT --title 'Windows Lite stable update channel' --notes 'Contains only the current signed-by-checksum update manifest. Version packages remain immutable.'
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to create stable manifest channel.' }
+          } else {
+            throw "Unable to inspect stable manifest channel: $($channel | Out-String)"
           }
+          $channelStateOutput = gh release view $env:CHANNEL_TAG --repo $repo --json assets 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "Unable to re-read stable manifest channel: $($channelStateOutput | Out-String)" }
+          $channelAssets = ((($channelStateOutput | Out-String) | ConvertFrom-Json).assets | ForEach-Object { $_.name })
+          if ($channelAssets -contains 'accr-ui-windows-lite-update.json') {
+            $currentRoot = Join-Path 'release/promotion-candidate' 'current-stable-manifest'
+            New-Item -ItemType Directory -Path $currentRoot -Force | Out-Null
+            gh release download $env:CHANNEL_TAG --repo $repo --pattern 'accr-ui-windows-lite-update.json' --dir $currentRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to re-read the current stable update manifest.' }
+            $currentManifest = Get-Content -LiteralPath (Join-Path $currentRoot 'accr-ui-windows-lite-update.json') -Raw | ConvertFrom-Json
+            if ($currentManifest.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Current stable update manifest has an invalid version; refusing to overwrite it.' }
+            if ([version]$env:RELEASE_VERSION -le [version]$currentManifest.version) { throw "Stable manifest currently serves version $($currentManifest.version); refusing non-incrementing version $env:RELEASE_VERSION." }
+          }
+          gh release upload $env:CHANNEL_TAG $manifest --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to publish the stable update manifest.' }

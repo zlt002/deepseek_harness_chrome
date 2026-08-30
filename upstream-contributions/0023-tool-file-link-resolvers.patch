@@ -90,11 +90,11 @@ index 04af306..d09cce5 100644
 +import type { SessionId, ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
  import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
  import type {} from '@deepseek-ai/dsh-client-locale/client'
- 
+
 @@ -24,8 +24,43 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
    }
  }
- 
+
 +/** A resolver-owned action for a Tool argument path. */
 +export interface ToolFileLink {
 +  open(): void
@@ -162,7 +162,7 @@ index ec2f0b8..16d8d98 100644
      },
 -  }, ToolCallTree))
 +  }, props => createElement(ToolCallTree, { ...props, toolFileLinks: ctx.toolFileLinks })))
- 
+
    ctx.slots.inject('conversation.details.tool', () => ctx.slots.register({
      name: 'conversation.details.tool',
      name: 'conversation.details.tool',
@@ -179,9 +179,9 @@ index db3ed0a..a455a00 100644
 +import type { ToolCallOwnerProps, ToolFileLinkProvider, ToolTreeProps } from '../contract/slots.ts'
  import { GenericToolCard } from './toolviews/GenericToolCard.tsx'
  import css from './ToolCallTree.module.css'
- 
+
 @@ -12,22 +12,30 @@ function callName(node: ToolCallBlock): string {
- 
+
  /** One atomic call dispatched through the Tool-owned keyed slot. */
  const ToolCall = memo(function ToolCall({
 -  renderSlot, callId, toolName, block, openFile, selected, cwd, inspectCall, t, children,
@@ -228,7 +228,7 @@ index db3ed0a..a455a00 100644
      </div>
 @@ -45,9 +53,10 @@ const ToolCall = memo(function ToolCall({
  })
- 
+
  const ToolCallBranch = memo(function ToolCallBranch({
 -  renderSlot, block, selectedCallId, cwd, openFile, inspectCall, t,
 -}: Pick<ToolTreeProps, 'renderSlot' | 'selectedCallId' | 'cwd' | 'openFile' | 'inspectCall' | 't'> & {

@@ -12,7 +12,6 @@ import {
   ACCR_UI_EXTENSION_MANIFEST_KEY,
   ACCR_UI_WINDOWS_PACKAGE_NAME,
   HARNESS_RUNTIME_MARKER,
-  LEGACY_NATIVE_HOST_NAME,
   NATIVE_HOST_NAME,
   assertAccrUiReplacementVersion,
   buildWindowsRelease,
@@ -116,6 +115,10 @@ test('Windows acceptance exercises the detached online-update handoff and waits 
   assert.match(acceptance, /function Start-OrphanRuntimeLockHolder/)
   assert.match(acceptance, /function Convert-SeedToLegacyRelease/)
   assert.match(acceptance, /Convert-SeedToLegacyRelease/)
+  assert.match(acceptance, /\$env:APPDATA = Join-Path \$acceptanceRoot 'appdata'/)
+  assert.match(acceptance, /profile\\plugins\\legacy-user-plugin\\package\.json/)
+  assert.match(acceptance, /Legacy user plugin was not merged into an existing local profile\./)
+  assert.match(acceptance, /Legacy profile migration overwrote the current local setting\./)
   assert.match(acceptance, /Injected candidate registration failure after Chrome Native Messaging was published\./)
   assert.match(acceptance, /Failed candidate registration stopped the new runtime, restored the old release, and retained the original error\./)
   assert.match(acceptance, /Candidate Native Host startup failure did not restore the previous version/)
@@ -324,8 +327,8 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.equal(payloadEntries.some((entry) => /(^|\/)node_modules\//.test(entry)), false)
   assert.match(launcher, /DSH_ROOT=%PACKAGE_DIR%harness/)
   assert.match(launcher, /DSH_CLI_PATH=%DSH_ROOT%\\apps\\cli\\lib\\server\.mjs/)
-  assert.match(launcher, /DSH_HOME=%APPDATA%\\accr-ui-harness\\profile/)
-  assert.match(launcher, /DSH_CWD=%PACKAGE_DIR%\.\.\\workspace\\project/)
+  assert.match(launcher, /DSH_HOME=%ACCR_INSTALL_ROOT%\\profile/)
+  assert.match(launcher, /DSH_CWD=%ACCR_INSTALL_ROOT%\\workspace\\project/)
   assert.match(launcher, /DSH_DEFAULT_WORKSPACE=%DSH_CWD%/)
   assert.match(launcher, /mkdir "%DSH_DEFAULT_WORKSPACE%"/)
   assert.doesNotMatch(launcher, /DSH_(?:LEGACY_UI_OVERLAY|ENABLE_KNOWLEDGE_SCOPE_UI|ENABLE_SKILL_SETTINGS_UI)/)
@@ -335,6 +338,8 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   const packagedReadme = await readFile(path.join(result.packageDir, 'README.zh-CN.md'), 'utf8')
   assert.match(packagedReadme, /DSH_PRODUCT_SKILLS_ROOT/)
   assert.match(packagedReadme, /runtime\/skills/)
+  assert.match(packagedReadme, /安装目录的 `profile`（`<InstallRoot>\\profile`）/)
+  assert.doesNotMatch(packagedReadme, /%APPDATA%\\accr-ui-harness\\profile/)
   const packagedSkill = readZip(payloadZip, 'runtime/skills/pmd-prd/SKILL.md', 'utf8')
   assert.match(packagedSkill, /Harness Workspace 是唯一用户界面/)
   assert.doesNotMatch(packagedSkill, /pmd-workspace|clarification\.md/)
@@ -391,7 +396,7 @@ test('release validation rejects a build whose manifest still references a delet
   )
 })
 
-test('the in-place updater start script re-registers both native-host names through one Node-gated script', async () => {
+test('the in-place updater start script re-registers the AccrUI native host through one Node-gated script', async () => {
   const fixture = await createFixture()
   const result = await buildWindowsRelease({ ...fixture, releaseDir: path.join(fixture.root, 'release') })
   const payloadZip = path.join(result.packageDir, 'payload.zip')
@@ -402,7 +407,6 @@ test('the in-place updater start script re-registers both native-host names thro
     'runtime/register-native-host.ps1',
     'runtime/native-message-smoke.mjs',
     `runtime/${NATIVE_HOST_NAME}.json`,
-    `runtime/${LEGACY_NATIVE_HOST_NAME}.json`,
   ]) assert.ok(payloadEntries.includes(requiredPath))
   const startScript = readZipUtf16Le(payloadZip, 'runtime/start.vbs')
   const registerScript = readZip(payloadZip, 'runtime/register-native-host.ps1', 'utf8')
@@ -411,7 +415,7 @@ test('the in-place updater start script re-registers both native-host names thro
   assert.match(startScript, /register-native-host\.ps1/)
   assert.match(startScript, / 0, False/)
   assert.match(registerScript, new RegExp(NATIVE_HOST_NAME.replaceAll('.', '\\.')))
-  assert.match(registerScript, new RegExp(LEGACY_NATIVE_HOST_NAME.replaceAll('.', '\\.')))
+  assert.doesNotMatch(registerScript, /com\.deepseek\.harness\.chrome|com\.chromemcp\.nativehost/)
   assert.match(registerScript, /HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts/)
   assert.match(registerScript, /HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts/)
   assert.match(registerScript, /-lt 22/)
@@ -432,6 +436,10 @@ test('the in-place updater start script re-registers both native-host names thro
   assert.match(installer, /accr-ui-harness-install\.log/)
   assert.match(installer, /if \(\$Interactive\) \{ Read-Host/)
   assert.match(installer, /Register-ReleaseTree \$installRoot/)
+  assert.match(installer, /function Migrate-AccrUiRoamingProfile/)
+  assert.match(installer, /Get-ChildItem -LiteralPath \$legacyProfile -Recurse -File -Force/)
+  assert.match(installer, /if \(-not \(Test-Path -LiteralPath \$destinationPath\)\)/)
+  assert.match(installer, /Copy-Item -LiteralPath \$file\.FullName -Destination \$destinationPath/)
   assert.match(installer, /Move-ManagedTree \$installRoot \$previousRoot/)
   assert.match(installer, /Move-ManagedTree \$previousRoot \$installRoot/)
   assert.match(installer, /Move-ManagedTree \$rollbackRoot \$installRoot/)

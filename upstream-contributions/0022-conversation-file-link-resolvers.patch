@@ -23,7 +23,7 @@ index a3e7bcf577..d55d40ada7 100644
 --- a/packages/client/ui-conversation/src/client/chat/AssistantNodeView.tsx
 +++ b/packages/client/ui-conversation/src/client/chat/AssistantNodeView.tsx
 @@ -4,7 +4,7 @@ import { AssistantMarkdown } from './AssistantMarkdown.tsx'
- 
+
  /** Streaming, settled, and interrupted Assistant states share one keyed renderer instance. */
  export const AssistantNodeView = memo(function AssistantNodeView({
 -  node, useTurnData, openFile, loadImage, fileMentions, t,
@@ -47,7 +47,7 @@ index f3343a183f..1007bd80f9 100644
 --- a/packages/client/ui-conversation/src/client/chat/ChatNodeSeat.tsx
 +++ b/packages/client/ui-conversation/src/client/chat/ChatNodeSeat.tsx
 @@ -17,7 +17,7 @@ type RoutedChatNodeOwner = {
- 
+
  /** Subscribe and dispatch one stable Context key without observing sibling Nodes. */
  export const ChatNodeSeat = memo(function ChatNodeSeat({
 -  nodeKey, selectedCallId, cwd, openFile, inspectCall, forkAt,
@@ -89,7 +89,7 @@ index d4d27570f9..a424caac0a 100644
 --- a/packages/client/ui-conversation/src/client/chat/TurnTailNodeView.tsx
 +++ b/packages/client/ui-conversation/src/client/chat/TurnTailNodeView.tsx
 @@ -10,7 +10,7 @@ type TurnTailNodeViewProps = ChatNodeViewProps<'turn-tail'>
- 
+
  /** Turn-local actions and feature tail over the Location index, independent of Assistant placement. */
  export const TurnTailNodeView = memo(function TurnTailNodeView({
 -  node, openFile, forkAt, renderSlot, renderSlotChain, t, useSession,
@@ -122,7 +122,7 @@ index 64d7c2a387..6bec3745e7 100644
 @@ -331,10 +331,32 @@ export interface ChatFileMentions {
    forClosing(owner: TurnTailOwnerProps): MarkdownFileMentions | undefined
  }
- 
+
 +/** Ordered, composable providers for closed-assistant file mentions. */
 +export class ChatFileMentionRegistry implements ChatFileMentionProvider {
 +  readonly #providers = new Set<ChatFileMentionProvider>()
@@ -153,7 +153,7 @@ index 64d7c2a387..6bec3745e7 100644
 +    chatFileMentions: ChatFileMentionRegistry
    }
  }
- 
+
 @@ -344,6 +366,10 @@ declare module '@deepseek-ai/cordis' {
   * and open files through the same opener the tool rows use.
   */
@@ -166,7 +166,7 @@ index 64d7c2a387..6bec3745e7 100644
    turn: TurnLocation
    /** The closing assistant's seq — the anchor the tail renders under. */
 @@ -379,6 +405,8 @@ export interface ChatNodeTurnDataInjected {
- 
+
  /** Stable owner currency delivered to one keyed Chat business renderer. */
  export interface ChatNodeOwnerProps {
 +  /** Session that owns this rendered chat node. */
@@ -192,7 +192,7 @@ index 326ecbb51e..039b6e0e28 100644
  } from './contract/slots.ts'
 +export { ChatFileMentionRegistry } from './contract/slots.ts'
  // Export discipline: packages/client/AGENTS.md.
- 
+
  declare module '@deepseek-ai/cordis' {
 diff --git a/packages/client/ui-deliverables/src/client/ProducedFiles.tsx b/packages/client/ui-deliverables/src/client/ProducedFiles.tsx
 index 1eeb58be0f..d427a2a5ea 100644
@@ -208,7 +208,7 @@ index 1eeb58be0f..d427a2a5ea 100644
  import type { NS } from './locales.ts'
 @@ -56,6 +57,12 @@ export interface ProducedFilesInjected {
  }
- 
+
  /** Matched paths plus the opener, locale, and injected Host capability. */
 +export interface ProducedFilesMatch {
 +  paths: readonly string[]
@@ -329,12 +329,12 @@ index 1521010497..999b5d390d 100644
 -  return { seq, openFile, turn: turnLocation(turn, data) }
 +  return { sessionId: 'test-session' as never, cwd: '/test', seq, openFile, turn: turnLocation(turn, data) }
  }
- 
+
  interface TimelineSnapshot {
 @@ -306,6 +306,30 @@ describe('ProducedFiles row', () => {
      expect(fitProducedFiles(20, 8, [60], [70, 50])).toBe(0)
    })
- 
+
 +  it('lets a resolver open produced Markdown before the Host opener', () => {
 +    const hostOpen = vi.fn<(path: string) => void>()
 +    const reviewOpen = vi.fn<(path: string) => void>()
@@ -368,10 +368,10 @@ index 1521010497..999b5d390d 100644
      ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
 +    ctx.provide('chatFileMentions', new ChatFileMentionRegistry())
      await ctx.plugin({ inject: localeInject, apply: applyLocale }).await()
- 
+
      const fiber = ctx.plugin({ inject: [...inject], apply })
 @@ -494,7 +495,7 @@ describe('plugin registration', () => {
- 
+
      await fiber.dispose()
      expect(ctx.slots.entries('conversation.chat.turnTail')).toHaveLength(0)
 -    // Fiber teardown retracts the service: the consumer's ctx.get sees the off state.
@@ -409,7 +409,7 @@ index 452e0fc475..25dec6554e 100644
      case 'image':
 @@ -449,8 +451,13 @@ function renderSafeLink(href: string, children: ReactNode[], key: Key): ReactNod
  }
- 
+
  /** Anchor over a parsed markdown destination, which hast normalized before the allowlist saw it. */
 -function renderAnchor(url: string, children: ReactNode[], key: Key): ReactNode {
 -  return renderSafeLink(normalizeUri(url), children, key)
@@ -421,7 +421,7 @@ index 452e0fc475..25dec6554e 100644
 +  }
 +  return renderSafeLink(href, children, key)
  }
- 
+
  /**
 @@ -506,7 +513,7 @@ function renderLinkReference(
      // not an anchor, so mentions inside it stay live.
@@ -430,7 +430,7 @@ index 452e0fc475..25dec6554e 100644
 -  return renderAnchor(definition.url, renderChildren(node.children, { ...context, inLink: true }), key)
 +  return renderAnchor(definition.url, renderChildren(node.children, { ...context, inLink: true }), key, context)
  }
- 
+
  function renderImageReference(
 diff --git a/packages/client/ui-primitives/tests/markdown.client.spec.tsx b/packages/client/ui-primitives/tests/markdown.client.spec.tsx
 index 6b35712bd2..75acf797f9 100644
@@ -439,7 +439,7 @@ index 6b35712bd2..75acf797f9 100644
 @@ -191,6 +191,20 @@ describe('MarkdownText', () => {
      expect(streamed.container.querySelector('button')).toBeNull()
    })
- 
+
 +  it('lets a file-mention resolver claim a Markdown link while preserving normal links', () => {
 +    const opened: string[] = []
 +    const fileMentions = {

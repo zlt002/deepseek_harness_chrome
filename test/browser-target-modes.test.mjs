@@ -1,10 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 import { JSDOM } from '../.generated/harness-product/node_modules/jsdom/lib/api.js'
 
-async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion, runtimeGetUrl, backgroundFetch } = {}) {
+test('composer keeps the draft and surfaces Browser Target preparation failures', async () => {
+  const hub = await readFile(new URL('../.generated/harness-product/packages/client/ui-conversation/src/client/input/hub.ts', import.meta.url), 'utf8')
+  const preparationFailure = hub.indexOf("shell?.notify('error', error instanceof Error ? error.message : String(error))")
+  const commit = hub.indexOf('shell?.commitSend(imageIds)')
+  assert.ok(preparationFailure >= 0, 'a rejected Browser Target lock must be visible to the user')
+  assert.ok(commit > preparationFailure, 'the draft is committed only after every submission guard succeeds')
+})
+
+async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, reload, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion, runtimeGetUrl, backgroundFetch } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
@@ -12,6 +21,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
   let createdListener
   let updatedListener
   let currentActiveTab = activeTab
+  const completedNavigationListeners = new Set()
   const nativeMessages = []
   const createdUrls = []
   const removedTabs = []
@@ -87,12 +97,22 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
         return createdTab ?? Object.values(tabsById).find((tab) => tab.url === options.url)
       },
       remove: async (tabId) => { removedTabs.push(tabId) },
+      reload: async (tabId) => {
+        await reload?.(tabId)
+        for (const listener of completedNavigationListeners) listener({ tabId, frameId: 0 })
+      },
       onActivated: { addListener: (listener) => { activatedListener = listener } },
       onCreated: { addListener: (listener) => { createdListener = listener } },
       onUpdated: { addListener: (listener) => { updatedListener = listener } },
     },
     scripting: { executeScript: async (options) => executeScript?.(options) ?? [] },
-    webNavigation: { getAllFrames: async () => [] },
+    webNavigation: {
+      getAllFrames: async () => [],
+      onCompleted: {
+        addListener: (listener) => completedNavigationListeners.add(listener),
+        removeListener: (listener) => completedNavigationListeners.delete(listener),
+      },
+    },
     sidePanel: {
       open: async (options) => openSidePanel?.(options),
       close: async (options) => closeSidePanel?.(options),
@@ -152,7 +172,12 @@ test('background creates the selected-session full-screen Harness Tab before clo
   try {
     const response = await background.sendRuntimeMessage({ type: 'switch-harness-surface/v1', surface: 'fullscreen-tab', windowId: 7, sessionId: 'session-current' })
     assert.deepEqual(response, { ok: true })
-    assert.deepEqual(background.createdUrls, ['chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab&dshHarnessSessionId=session-current'])
+    const createdUrl = new URL(background.createdUrls[0])
+    assert.equal(createdUrl.protocol, 'chrome-extension:')
+    assert.equal(createdUrl.host, 'test')
+    assert.equal(createdUrl.searchParams.get('dshHarnessSurface'), 'fullscreen-tab')
+    assert.equal(createdUrl.searchParams.get('dshHarnessSessionId'), 'session-current')
+    assert.match(createdUrl.searchParams.get('dshHarnessHandoffNonce'), /^[A-Za-z0-9._:-]{32,160}$/)
     assert.equal(createdAtClose, 1, 'the persistent background creates the Tab before it closes the side-panel document')
     assert.deepEqual(closeCalls, [{ windowId: 7 }])
   } finally {
@@ -237,21 +262,79 @@ test('HTML Workbench reads a same-URL local source when Chromium reports a reada
   } finally { background.cleanup(); dom.window.close() }
 })
 
+test('HTML Workbench refresh readback fails closed until the loaded stylesheet hash and selected DOM state are observable', async () => {
+  const target = { id: 42, windowId: 7, url: 'file:///tmp/supply-hall.html', title: 'Supply hall' }
+  const browserTarget = { browser: 'chrome', windowId: 7, tabId: target.id, url: target.url }
+  const stylesheetUrl = 'file:///tmp/supply-hall.css'
+  const source = '<!doctype html><link rel="stylesheet" href="supply-hall.css"><p id="selected">Supply hall</p>'
+  const stylesheet = '#selected { color: rgb(1, 2, 3); }'
+  const fingerprint = (value) => createHash('sha256').update(value).digest('hex')
+  const dom = new JSDOM('<!doctype html><link rel="stylesheet" href="supply-hall.css"><p id="selected">Supply hall</p>', { url: target.url, runScripts: 'outside-only' })
+  const { window } = dom
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: target,
+    runtimeGetUrl: path => `https://extension.invalid/${path}`,
+    backgroundFetch: async () => ({ ok: false }),
+    executeScript: async (options) => {
+      window.fetch = async (url) => {
+        if (url === target.url) return { ok: false, status: 0, url: target.url, text: async () => source }
+        if (url === stylesheetUrl) return { ok: false, status: 0, url: stylesheetUrl, text: async () => stylesheet }
+        throw new Error(`unexpected readback URL ${url}`)
+      }
+      Object.defineProperty(window, 'crypto', { value: globalThis.crypto })
+      window.TextEncoder = TextEncoder
+      const injected = window.eval(`(${options.func.toString()})`)
+      return [{ result: await injected(...(options.args ?? [])) }]
+    },
+  })
+  const responseFor = async (requestId) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === requestId)
+      if (response !== undefined) return response
+    }
+    throw new Error(`missing ${requestId} response`)
+  }
+  try {
+    const started = await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(started, { ok: true, url: 'http://127.0.0.1:43123' })
+    background.emitNative({
+      type: 'connector_request', requestId: 'html-css-stale-readback', runId: 'run-follow', generation: 'generation-1', browserTarget, tool: 'html_workbench', action: 'refresh_readback',
+      expectedSourceFingerprint: fingerprint(source), expectedStylesheets: [{ url: stylesheetUrl, fingerprint: fingerprint('stale stylesheet') }], expectedAnchorSelectors: ['#selected'],
+    })
+    const stale = await responseFor('html-css-stale-readback')
+    assert.equal(stale.error, undefined)
+    assert.equal(stale.result.verified, false, 'a CSS-only stale readback must never be reported as a Verified Write')
+    assert.equal(stale.result.error, 'html_workbench_readback_mismatch')
+    background.emitNative({
+      type: 'connector_request', requestId: 'html-css-readback', runId: 'run-follow', generation: 'generation-1', browserTarget, tool: 'html_workbench', action: 'refresh_readback',
+      expectedSourceFingerprint: fingerprint(source), expectedStylesheets: [{ url: stylesheetUrl, fingerprint: fingerprint(stylesheet) }], expectedAnchorSelectors: ['#selected'],
+    })
+    const response = await responseFor('html-css-readback')
+    assert.equal(response.error, undefined)
+    assert.equal(response.result.verified, true)
+    assert.equal(JSON.stringify(response.result.stylesheetFingerprints), JSON.stringify([{ url: stylesheetUrl, fingerprint: fingerprint(stylesheet) }]))
+    assert.equal(JSON.stringify(response.result.anchorStates.map(item => item.selector)), JSON.stringify(['#selected']))
+    assert.equal(typeof response.result.anchorStates[0].computedStyle.color, 'string')
+  } finally { background.cleanup(); dom.window.close() }
+})
+
 test('background prepares the Side Panel handoff but never calls the user-gesture-only open API', async () => {
-  const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab', title: 'ACCRUI' }
+  const handoffNonce = '9'.repeat(32)
+  const fullScreenTab = { id: 91, windowId: 7, url: `chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab&dshHarnessHandoffNonce=${handoffNonce}`, title: 'ACCRUI' }
   const background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab: fullScreenTab,
     openSidePanel: async () => { throw new Error('sidePanel.open() may only be called in response to a user gesture') },
   })
   try {
-    const response = await background.sendRuntimeMessage({ type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    const response = await background.sendRuntimeMessage({ type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 91, nonce: handoffNonce, sessionId: 'session-current' })
     assert.deepEqual(response, { ok: true })
     assert.deepEqual(background.removedTabs, [], 'the full-screen Tab stays open until the side panel applies the session')
-    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 }), { ok: true, sessionId: 'session-current', tabId: 91 })
-    assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, sessionId: 'session-other' }), { ok: false, error: 'The Harness side-panel handoff does not match the restored session.' })
+    assert.deepEqual((await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 })).nonce, handoffNonce)
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, nonce: handoffNonce, sessionId: 'session-other' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: false, error: 'The Harness side-panel handoff does not match the restored session.' })
     assert.deepEqual(background.removedTabs, [], 'an invalid session ACK must not close the full-screen Tab')
-    assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, sessionId: 'session-current' }), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, nonce: handoffNonce, sessionId: 'session-current' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true })
     assert.deepEqual(background.removedTabs, [91])
   } finally {
     background.cleanup()
@@ -259,14 +342,15 @@ test('background prepares the Side Panel handoff but never calls the user-gestur
 })
 
 test('background preserves the full-screen Tab when handoff preparation identifies a Tab from another window', async () => {
-  const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab', title: 'ACCRUI' }
+  const handoffNonce = 'a'.repeat(32)
+  const fullScreenTab = { id: 91, windowId: 7, url: `chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab&dshHarnessHandoffNonce=${handoffNonce}`, title: 'ACCRUI' }
   const background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab: fullScreenTab,
     tabsById: { 91: { ...fullScreenTab, windowId: 8 } },
   })
   try {
-    const response = await background.sendRuntimeMessage({ type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    const response = await background.sendRuntimeMessage({ type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 91, nonce: handoffNonce, sessionId: 'session-current' })
     assert.deepEqual(response, { ok: false, error: 'The full-screen Harness Tab is no longer in this browser window.' })
     assert.deepEqual(background.removedTabs, [])
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 }), { ok: true })
@@ -276,13 +360,15 @@ test('background preserves the full-screen Tab when handoff preparation identifi
 })
 
 test('the URL-defined Side Panel handoff closes the full-screen Tab even if background preparation arrives late', async () => {
-  const fullScreenTab = { id: 91, windowId: 7, url: 'chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab&dshHarnessSessionId=session-current', title: 'ACCRUI' }
+  const handoffNonce = 'b'.repeat(32)
+  const fullScreenTab = { id: 91, windowId: 7, url: `chrome-extension://test/sidepanel.html?dshHarnessSurface=fullscreen-tab&dshHarnessSessionId=session-current&dshHarnessHandoffNonce=${handoffNonce}`, title: 'ACCRUI' }
   const background = await loadBackground({
     settings: { mode: 'follow-active-tab', pinnedTabs: [] },
     activeTab: fullScreenTab,
   })
   try {
-    const response = await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, sessionId: 'session-current' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'prepare-sidepanel-handoff/v1', windowId: 7, tabId: 91, nonce: handoffNonce, sessionId: 'session-current' }), { ok: true })
+    const response = await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, nonce: handoffNonce, sessionId: 'session-current' }, { url: 'chrome-extension://test/sidepanel.html' })
     assert.deepEqual(response, { ok: true })
     assert.deepEqual(background.removedTabs, [91])
   } finally {
@@ -390,7 +476,9 @@ test('manual tab activation updates only the next-Run candidate and never transf
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     background.activateTab(43)
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some((message) => message.type === 'connector_response' && message.requestId === 'wb-turn'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
     const restored = await background.sendRuntimeMessage({ type: 'get-browser-target-settings' })
     assert.deepEqual(restored.settings.candidate, {
       browser: 'chrome', windowId: 7, tabId: 43, url: second.url,
@@ -403,36 +491,115 @@ test('manual tab activation updates only the next-Run candidate and never transf
   }
 })
 
-test('follow-active-tab uses the tab activated after one office turn for the next office turn', async () => {
+test('follow-active-tab keeps the Browser Target frozen after the Run starts, even when the active tab changes', async () => {
   const baidu = { id: 42, windowId: 7, url: 'https://www.baidu.com/', title: 'Baidu' }
   const wb = { id: 43, windowId: 7, url: 'https://wb.example.test/', title: 'WB' }
   const baiduTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: baidu.url }
   const background = await loadBackground({
-    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: baidu, tabsById: { 43: wb },
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: baidu, tabsById: { 42: baidu, 43: wb },
   })
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    // This is deliberately the target carried by the submission, not a later
+    // active-tab lookup. Switch first to prove the lock retains the submitted
+    // Browser Target.
+    background.activateTab(43)
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'session-follow', submissionId: 'follow-1', browserTarget: baiduTarget,
+    }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true, locked: true })
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'session-other', submissionId: 'follow-2', browserTarget: { browser: 'chrome', windowId: 7, tabId: 43, url: wb.url },
+    }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: false, error: '另一个对话正在运行，结束后再试。' })
     background.emitNative({
       type: 'connector_request', requestId: 'baidu-turn', runId: 'run-follow', generation: 'generation-1',
       browserTarget: baiduTarget, tool: 'list_work_tabs',
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    background.activateTab(43)
     await new Promise((resolve) => setTimeout(resolve, 0))
     background.emitNative({
       type: 'connector_request', requestId: 'wb-turn', runId: 'run-follow', generation: 'generation-1',
       browserTarget: baiduTarget, tool: 'list_work_tabs',
     })
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some((message) => message.type === 'connector_response' && message.requestId === 'wb-turn'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
     const transferIndex = background.nativeMessages.findIndex((message) => message.type === 'transfer-browser-target' && message.requestId === 'wb-turn')
     const responseIndex = background.nativeMessages.findIndex((message) => message.type === 'connector_response' && message.requestId === 'wb-turn')
-    assert.notEqual(transferIndex, -1)
-    assert.ok(responseIndex > transferIndex)
+    assert.equal(transferIndex, -1, 'an active-tab change must not migrate an in-flight Run')
     const secondTurn = background.nativeMessages[responseIndex]
-    assert.equal(secondTurn.result.pageIdentity.url, wb.url)
+    assert.equal(secondTurn.result.pageIdentity.url, baidu.url)
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-follow', submissionId: 'follow-1' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true })
+    background.emitNative({
+      type: 'connector_request', requestId: 'after-complete', runId: 'run-follow', generation: 'generation-1',
+      browserTarget: baiduTarget, tool: 'list_work_tabs',
+    })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some((message) => message.type === 'connector_response' && message.requestId === 'after-complete'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    const afterComplete = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'after-complete')
+    assert.equal(afterComplete.result.pageIdentity.url, wb.url, 'completion restores follow-current Browser Target behavior')
   } finally {
     background.cleanup()
   }
+})
+
+test('follow lock can bind a Run started with none mode and an unlock before transfer confirmation cancels it', async () => {
+  const first = { id: 42, windowId: 7, url: 'https://docs.example.test/first', title: 'First' }
+  const second = { id: 43, windowId: 7, url: 'https://docs.example.test/second', title: 'Second' }
+  const firstTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: first.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const transferGate = Promise.withResolvers()
+  const background = await loadBackground({
+    settings: { mode: 'none', pinnedTabs: [] }, activeTab: first, tabsById: { 42: first, 43: second },
+    waitForTransferAck: transferGate.promise,
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    await background.sendRuntimeMessage({ type: 'save-browser-target-settings', settings: { mode: 'follow-active-tab', pinnedTabs: [] } })
+    const locking = background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-follow', submissionId: 'first', browserTarget: firstTarget }, sender)
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'transfer-browser-target'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.nativeMessages.some(message => message.type === 'transfer-browser-target'), true)
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-follow', submissionId: 'first' }, sender), { ok: true })
+    transferGate.resolve()
+    assert.deepEqual(await locking, { ok: true, locked: false })
+    background.activateTab(43)
+    background.emitNative({ type: 'connector_request', requestId: 'after-unlock', runId: 'run-follow', generation: 'generation-1', browserTarget: firstTarget, tool: 'list_work_tabs' })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-unlock')
+    assert.equal(response.result.pageIdentity.url, second.url)
+  } finally { background.cleanup() }
+})
+
+test('fixed and unbound Browser Target modes ignore the transient follow lock', async () => {
+  const active = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
+  const fixed = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/fixed' }
+  const fixedTab = { id: 52, windowId: 7, url: fixed.url, title: 'Fixed' }
+  const switched = { id: 43, windowId: 7, url: 'https://docs.example.test/switched', title: 'Switched' }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const pinned = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [fixed], primaryTabId: 52 }, activeTab: active,
+    tabsById: { 42: active, 43: switched, 52: fixedTab },
+  })
+  try {
+    await pinned.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await pinned.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-fixed', submissionId: 'fixed-1', browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: active.url } }, sender), { ok: true, locked: false })
+    pinned.activateTab(43)
+    await pinned.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-fixed', submissionId: 'fixed-1' }, sender)
+    pinned.emitNative({ type: 'connector_request', requestId: 'fixed-after-complete', runId: 'run-follow', generation: 'generation-1', browserTarget: fixed, tool: 'list_work_tabs' })
+    for (let attempt = 0; attempt < 20 && !pinned.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'fixed-after-complete'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const fixedResponse = pinned.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'fixed-after-complete')
+    assert.equal(fixedResponse.result.pageIdentity.url, fixed.url)
+  } finally { pinned.cleanup() }
+
+  const unbound = await loadBackground({ settings: { mode: 'none', pinnedTabs: [] }, activeTab: active, tabsById: { 42: active } })
+  try {
+    await unbound.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await unbound.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-none', submissionId: 'none-1', browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: active.url } }, sender), { ok: true, locked: false })
+    unbound.emitNative({ type: 'connector_request', requestId: 'none-after-complete', runId: 'run-follow', generation: 'generation-1', browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: active.url }, tool: 'list_work_tabs' })
+    for (let attempt = 0; attempt < 20 && !unbound.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'none-after-complete'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const noneResponse = unbound.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'none-after-complete')
+    assert.match(noneResponse.error, /disabled/i)
+  } finally { unbound.cleanup() }
 })
 
 test('follow-active-tab refreshes a same-tab URL change before the next Office turn', async () => {

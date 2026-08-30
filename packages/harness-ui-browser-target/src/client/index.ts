@@ -1,4 +1,4 @@
-import { createSnapshotStore, type ClientContext, type SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import { createSnapshotStore, type ClientContext, type SessionFace, type SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -7,8 +7,9 @@ import { FullscreenReturnControl, type FullscreenReturnControlInjected } from '.
 import { HarnessReconnectAction, type HarnessReconnectActionInjected } from './HarnessReconnectAction.tsx'
 import { activeTabBridgeConfig, createBrowserTargetBridge } from './active-tab-bridge.ts'
 import { restoreHandoffSession } from './session-handoff.ts'
+import { BrowserTargetSessionRunLock, shouldCaptureSessionRunTarget } from './session-run-lock.ts'
 
-export const inject = ['slots', 'sessions', 'settingsQuickActions']
+export const inject = ['slots', 'sessions', 'settingsQuickActions', 'composerSubmissionTransforms']
 
 /** Mount the accepted e327 Browser Target UI through public slots. */
 export function apply(ctx: ClientContext): void {
@@ -69,6 +70,120 @@ export function apply(ctx: ClientContext): void {
   }
   const bridge = createBrowserTargetBridge(config.nonce, config.parentOrigin)
   const panel = createSnapshotStore(false)
+  const lifecycleLocks = new Map<string, { state: BrowserTargetSessionRunLock; unsubscribe?: () => void }>()
+  const pendingLockAcks = new Map<string, { sessionId: string; resolve: (locked: boolean) => void; reject: (error: Error) => void; timeout: number }>()
+  let disposed = false
+  const postUnlock = (sessionId: string, submissionId: string): void => {
+    window.parent.postMessage({ type: 'browser-target-unlock/v1', nonce: config.nonce, sessionId, submissionId }, config.parentOrigin)
+  }
+  const releaseLifecycleLock = (sessionId: string, submissionId?: string): void => {
+    const lock = lifecycleLocks.get(sessionId)
+    if (lock !== undefined && (submissionId === undefined || lock.state.submissionId === submissionId)) {
+      lock.unsubscribe?.()
+      lifecycleLocks.delete(sessionId)
+    }
+    if (submissionId === undefined && lock === undefined) return
+    postUnlock(sessionId, submissionId ?? lock!.state.submissionId)
+  }
+  const lockSubmission = (sessionId: string, browserTarget: { browser: 'chrome'; windowId: number; tabId: number; url: string }): Promise<{ submissionId: string; locked: boolean }> => {
+    const submissionId = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        if (pendingLockAcks.delete(submissionId) === false) return
+        postUnlock(sessionId, submissionId)
+        reject(new Error('Timed out waiting for the Browser Target lock acknowledgement.'))
+      }, 20_000)
+      pendingLockAcks.set(submissionId, {
+        sessionId,
+        timeout,
+        resolve: (locked) => resolve({ submissionId, locked }),
+        reject,
+      })
+      window.parent.postMessage({ type: 'browser-target-lock/v1', nonce: config.nonce, sessionId, submissionId, browserTarget }, config.parentOrigin)
+    })
+  }
+  const submissionTransforms = ctx.get('composerSubmissionTransforms')!
+  ctx.effect(() => {
+    const unregister = submissionTransforms.register({
+      id: 'browser-target-run-lock',
+      prepare: async (sessionId, text) => {
+        const id = String(sessionId)
+        const session = ctx.sessions.binding(sessionId)?.session
+        const targetSnapshot = bridge.source.getSnapshot()
+        if (session === undefined || !shouldCaptureSessionRunTarget(session.getSnapshot(), lifecycleLocks.has(id))) return { text }
+        if (targetSnapshot?.settings.mode === 'follow-active-tab' && targetSnapshot.activeTab !== undefined) {
+          const lock = await lockSubmission(id, { browser: 'chrome', windowId: targetSnapshot.activeTab.windowId, tabId: targetSnapshot.activeTab.tabId, url: targetSnapshot.activeTab.url })
+          if (lock.locked) {
+            const lifecycle = { state: new BrowserTargetSessionRunLock(lock.submissionId), unsubscribe: undefined as (() => void) | undefined }
+            const reconcile = (): void => {
+              if (lifecycle.state.observe(session.getSnapshot())) releaseLifecycleLock(id, lock.submissionId)
+            }
+            lifecycleLocks.set(id, lifecycle)
+            return {
+              text,
+              accept: () => {
+                if (lifecycle.state.accept(session.getSnapshot())) {
+                  releaseLifecycleLock(id, lock.submissionId)
+                  return
+                }
+                if (!disposed) lifecycle.unsubscribe = session.subscribe(reconcile)
+              },
+              reject: () => { releaseLifecycleLock(id, lock.submissionId) },
+            }
+          }
+        }
+        return { text }
+      },
+    })
+    return () => {
+      disposed = true
+      unregister()
+      for (const [submissionId, pending] of pendingLockAcks) {
+        window.clearTimeout(pending.timeout)
+        pendingLockAcks.delete(submissionId)
+        postUnlock(pending.sessionId, submissionId)
+        pending.reject(new Error('Browser Target locking was cancelled because the Harness surface closed.'))
+      }
+      for (const [sessionId, lock] of [...lifecycleLocks]) {
+        lock.unsubscribe?.()
+        lifecycleLocks.delete(sessionId)
+        if (!lock.state.accepted) postUnlock(sessionId, lock.state.submissionId)
+      }
+    }
+  }, 'accrui-browser-target: lock follow target on composer submission')
+  ctx.effect(() => {
+    const sessionSubscriptions = new Map<string, () => void>()
+    const reconcile = (sessionId: string, session: SessionFace): void => {
+      const snapshot = session.getSnapshot()
+      if (!snapshot.running && snapshot.queue.length === 0) {
+        window.parent.postMessage({ type: 'browser-target-reconcile/v1', nonce: config.nonce, sessionId }, config.parentOrigin)
+      }
+    }
+    const syncSessionSubscriptions = (): void => {
+      const sessionIds = ctx.sessions.list.getSnapshot().ids
+      const expected = new Set(sessionIds.map(String))
+      for (const sessionId of sessionIds) {
+        const id = String(sessionId)
+        if (sessionSubscriptions.has(id)) continue
+        const session = ctx.sessions.binding(sessionId)?.session
+        if (session === undefined) continue
+        const onSnapshot = (): void => { reconcile(id, session) }
+        sessionSubscriptions.set(id, session.subscribe(onSnapshot))
+        onSnapshot()
+      }
+      for (const [sessionId, unsubscribe] of sessionSubscriptions) {
+        if (expected.has(sessionId)) continue
+        unsubscribe()
+        sessionSubscriptions.delete(sessionId)
+      }
+    }
+    const unsubscribeList = ctx.sessions.list.subscribe(syncSessionSubscriptions)
+    syncSessionSubscriptions()
+    return () => {
+      unsubscribeList()
+      for (const unsubscribe of sessionSubscriptions.values()) unsubscribe()
+    }
+  }, 'accrui-browser-target: reconcile stale idle locks')
   const injected = (): BrowserTargetInjected => ({
     hooks: { browserTarget: bridge.source, browserTargetPanel: panel },
     onBrowserTargetCommand: command => {
@@ -87,7 +202,24 @@ export function apply(ctx: ClientContext): void {
     },
   })
   ctx.effect(() => {
-    const receive = (event: MessageEvent): void => { bridge.accept(event, window.parent) }
+    const receive = (event: MessageEvent): void => {
+      if (event.source === window.parent && event.origin === config.parentOrigin && typeof event.data === 'object' && event.data !== null) {
+        const message = event.data as { type?: unknown; nonce?: unknown; submissionId?: unknown; ok?: unknown; locked?: unknown; error?: unknown }
+        if (message.type === 'browser-target-lock-ack/v1' && message.nonce === config.nonce && typeof message.submissionId === 'string') {
+          const pending = pendingLockAcks.get(message.submissionId)
+          if (pending === undefined) return
+          pendingLockAcks.delete(message.submissionId)
+          window.clearTimeout(pending.timeout)
+          if (message.ok !== true) {
+            pending.reject(new Error(typeof message.error === 'string' ? message.error : 'Browser Target lock was not confirmed.'))
+            return
+          }
+          pending.resolve(message.locked === true)
+          return
+        }
+      }
+      bridge.accept(event, window.parent)
+    }
     window.addEventListener('message', receive)
     window.parent.postMessage({ type: 'browser-target-ready/v1', nonce: config.nonce }, config.parentOrigin)
     return () => window.removeEventListener('message', receive)

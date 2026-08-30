@@ -6,7 +6,7 @@ import { claudeImportRequest } from './claude-import-api.ts'
 import css from './CompactWorkspacePicker.module.css'
 
 export interface ClaudeImportController {
-  importSession(input: { sourceRoot: string; projectKey: string; session: ClaudeSession; workspaceId: string; workspacePath: string; forceCopy?: boolean; signal?: AbortSignal; onCreating(): void }): Promise<'opened-existing' | 'existing-unavailable' | 'imported'>
+  importSession(input: { sourceRoot: string; projectKey: string; session: ClaudeSession; workspaceId: string; workspacePath: string; forceCopy?: boolean; signal?: AbortSignal; onCreating(): void }): Promise<'opened-existing' | 'existing-unavailable' | 'conflict' | 'imported'>
 }
 
 export function ClaudeImportModal({ open, onClose, workspace, controller }: {
@@ -26,6 +26,7 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
   const [phase, setPhase] = useState<'idle' | 'projects' | 'sessions' | 'preparing' | 'creating' | 'duplicate' | 'done' | 'error'>('idle')
   const [error, setError] = useState<string>()
   const [duplicateUnavailable, setDuplicateUnavailable] = useState(false)
+  const [duplicateConflict, setDuplicateConflict] = useState(false)
   const [detail, setDetail] = useState<ClaudeSessionDetail>()
   const [detailPhase, setDetailPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [detailError, setDetailError] = useState<string>()
@@ -45,7 +46,7 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
   useEffect(() => {
     if (!open) return
     const abort = new AbortController(); abortRef.current = abort; irreversibleRef.current = false
-    setPhase('projects'); setError(undefined); setDuplicateUnavailable(false); setDetail(undefined); setProjects([]); setSessions([]); setSessionsTotal(0); setProjectKey(undefined); setSelectedSessionId(undefined); setQuery(''); setSourceRoot('default'); setSourceDraft('')
+    setPhase('projects'); setError(undefined); setDuplicateUnavailable(false); setDuplicateConflict(false); setDetail(undefined); setProjects([]); setSessions([]); setSessionsTotal(0); setProjectKey(undefined); setSelectedSessionId(undefined); setQuery(''); setSourceRoot('default'); setSourceDraft('')
     void claudeImportRequest<{ sourceRoot: string; projects: ClaudeProject[] }>({ action: 'projects', sourceRoot: 'default' }, abort.signal).then(result => {
       setSourceRoot(result.sourceRoot); setSourceDraft(result.sourceRoot); setProjects(result.projects); setPhase('idle')
       if (result.projects[0] !== undefined) selectProject(result.projects[0].key, result.sourceRoot)
@@ -90,7 +91,7 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
     const abort = new AbortController(); abortRef.current = abort; setPhase('preparing'); setError(undefined)
     void controller.importSession({ sourceRoot, projectKey, session: selected, workspaceId: workspace.id, workspacePath: workspace.path, forceCopy, signal: abort.signal, onCreating: () => { irreversibleRef.current = true; setPhase('creating') } }).then(result => {
       irreversibleRef.current = false
-      if (result !== 'imported') { setDuplicateUnavailable(result === 'existing-unavailable'); setPhase('duplicate'); return }
+      if (result !== 'imported') { setDuplicateUnavailable(result === 'existing-unavailable'); setDuplicateConflict(result === 'conflict'); setPhase('duplicate'); return }
       setPhase('done'); window.setTimeout(onClose, 500)
     }).catch(reason => { irreversibleRef.current = false; if (!abort.signal.aborted) fail(reason) })
   }
@@ -161,8 +162,8 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
           {sessionsTotal > 0 && <progress className={css.importProgress} value={sessions.length} max={sessionsTotal} />}
         </div>}
         {phase === 'preparing' && <div className={css.importStatus} role="status" data-import-stage="prepare">1 / 3　读取并整理记录，可取消…</div>}
-        {phase === 'creating' && <div className={css.importStatus} role="status" data-import-stage="create">2 / 3　创建会话并提交上下文，此阶段不能撤回…</div>}
-        {phase === 'duplicate' && <div className={css.importStatus} role="status">{duplicateUnavailable ? '以前导入的会话已不可用，可以重新导入为副本。' : '该记录已经导入，已打开已有会话。也可以重新导入为副本。'}</div>}
+        {phase === 'creating' && <div className={css.importStatus} role="status" data-import-stage="create">2 / 3　正在写入原生历史，不会自动请求模型…</div>}
+        {phase === 'duplicate' && <div className={css.importStatus} role="status">{duplicateConflict ? 'Claude 来源或现有 Harness 会话已经变化，不能安全合并；可以导入为独立副本。' : duplicateUnavailable ? '以前导入的会话已不可用，可以重新导入为副本。' : '该记录已经导入，已打开已有会话。也可以重新导入为副本。'}</div>}
         {phase === 'done' && <div className={css.importStatus} role="status" data-import-stage="done">3 / 3　导入完成，正在打开新会话…</div>}
         {phase === 'error' && <div className={css.renameError} role="alert">{error}</div>}
       </main>
@@ -178,7 +179,7 @@ export function ClaudeImportModal({ open, onClose, workspace, controller }: {
           <div className={css.importDetailContent} aria-live="polite">
             {detailPhase === 'loading' && <div role="status">正在按需读取会话详情…</div>}
             {detailPhase === 'error' && <div className={css.renameError} role="alert">{detailError}</div>}
-            {detailPhase === 'ready' && <>{detail.truncated && <div className={css.importDetailNotice} role="status">为控制迁移内容大小，仅显示最近 120,000 个字符。</div>}{detail.messages.map((message, index) => <article key={`${message.timestamp ?? index}-${message.role}`} className={classes(css.importDetailMessage, message.role === 'user' ? css.importDetailUser : css.importDetailAssistant)}><strong>{message.role === 'user' ? '用户' : '助手'}</strong>{message.timestamp !== undefined && <time>{formatSessionDate(message.timestamp).join(' ')}</time>}<pre>{message.text}</pre></article>)}</>}
+            {detailPhase === 'ready' && <>{detail.truncated && <div className={css.importDetailNotice} role="status">为控制迁移内容大小，仅显示最近 120,000 个字符；原生历史也有独立总量上限。</div>}{detail.details !== undefined && <div className={css.importDetailNotice} role="status">将迁移 {detail.details.toolCount} 个工具调用；所有文字、参数和结果都会隐藏常见敏感值并裁剪。图片、附件、权限和子代理不会迁移。{detail.details.unknownToolResults > 0 ? ` ${detail.details.unknownToolResults} 个调用缺少结果，已标记为未知。` : ''}{detail.details.orphanToolResults > 0 ? ` ${detail.details.orphanToolResults} 个孤立结果未迁移。` : ''}{detail.details.unsupported.length > 0 ? ` 未支持项：${detail.details.unsupported.join('、')}。` : ''}</div>}{detail.messages.map((message, index) => <article key={`${message.timestamp ?? index}-${message.role}`} className={classes(css.importDetailMessage, message.role === 'user' ? css.importDetailUser : css.importDetailAssistant)}><strong>{message.role === 'user' ? '用户' : '助手'}</strong>{message.timestamp !== undefined && <time>{formatSessionDate(message.timestamp).join(' ')}</time>}<pre>{message.text}</pre></article>)}</>}
           </div>
           <footer className={css.importDetailFooter}><Button variant="primary" onClick={closeDetail}>我已查看</Button></footer>
         </div>

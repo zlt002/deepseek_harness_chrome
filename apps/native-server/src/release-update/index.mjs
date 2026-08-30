@@ -10,25 +10,25 @@ export async function checkUpdate(options = {}) {
   const source = await resolveReleaseSource(options)
   const { bytes, etag } = await fetchRelease(source, options.fetchImpl)
   try {
-    const verified = verifyWindowsLitePackage(bytes, { currentVersion: options.currentVersion, expectedSha256: source.expectedSha256 })
-    return { available: true, ...verified, packageUrl: source.packageUrl, ...(etag === undefined ? {} : { etag }) }
+    const verified = verifyWindowsLitePackage(bytes, { currentVersion: options.currentVersion, expectedSha256: source.expectedSha256, expectedVersion: source.expectedVersion })
+    return { available: true, ...verified, packageUrl: source.packageUrl, ...(source.releaseUrl === undefined ? {} : { releaseUrl: source.releaseUrl }), ...(etag === undefined ? {} : { etag }) }
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes('未高于当前版本')) throw error
-    const verified = verifyWindowsLitePackage(bytes, { expectedSha256: source.expectedSha256 })
-    return { available: false, ...verified, packageUrl: source.packageUrl, ...(etag === undefined ? {} : { etag }) }
+    const verified = verifyWindowsLitePackage(bytes, { expectedSha256: source.expectedSha256, expectedVersion: source.expectedVersion })
+    return { available: false, ...verified, packageUrl: source.packageUrl, ...(source.releaseUrl === undefined ? {} : { releaseUrl: source.releaseUrl }), ...(etag === undefined ? {} : { etag }) }
   }
 }
 
 export async function prepareUpdate(options = {}) {
   const source = await resolveReleaseSource(options)
   const { bytes, etag } = await fetchRelease(source, options.fetchImpl)
-  const verified = verifyWindowsLitePackage(bytes, { currentVersion: options.currentVersion, expectedSha256: source.expectedSha256 })
+  const verified = verifyWindowsLitePackage(bytes, { currentVersion: options.currentVersion, expectedSha256: source.expectedSha256, expectedVersion: source.expectedVersion })
   const root = await mkdtemp(join(tmpdir(), 'accrui-release-update-'))
   const packagePath = join(root, 'accr-ui-windows-lite-x64.zip')
   await writeFile(packagePath, bytes)
   const extractRoot = join(root, 'package')
   await extractZip(bytes, extractRoot, { stripCommonRoot: true })
-  return { ...verified, packagePath, extractRoot, packageUrl: source.packageUrl, ...(etag === undefined ? {} : { etag }) }
+  return { ...verified, packagePath, extractRoot, packageUrl: source.packageUrl, ...(source.releaseUrl === undefined ? {} : { releaseUrl: source.releaseUrl }), ...(etag === undefined ? {} : { etag }) }
 }
 
 export async function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform, handshakeTimeoutMs: requestedHandshakeTimeoutMs, writeFileImpl = writeFile, renameImpl = rename } = {}) {

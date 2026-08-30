@@ -23,7 +23,7 @@ index 6146d42810..28a53c35d0 100644
 @@ -196,6 +196,15 @@
    gap: var(--dsh-composer-stack-gap);
  }
- 
+
 +/* Height-0 seat for card-wide upward panels. The takeover chain replaces only
 +   the input card, so this anchor must live on the stack rather than inside
 +   the hidden fallback. */
@@ -43,7 +43,7 @@ index 72382ffe2b..70297a2e01 100644
 @@ -122,32 +122,28 @@ export function ConversationRoot({
      footer: !hero && zone !== undefined ? renderSlot('conversation.composer.dock', zone) : null,
    })
- 
+
 -  const composerBar = (
 -    <ComposerOverlayProvider>
 -      <div className={clsx(css.composerStack, hero && css.composerHero)}>
@@ -66,7 +66,7 @@ index 72382ffe2b..70297a2e01 100644
 -    { fallback: composerBar, overlay: true },
 +    { fallback: inputBar, overlay: true },
    )
- 
+
 -  // The footer wraps the whole chain output (fallback + elected overlay), not
 -  // only `.composerStack`: overlay:true renders those as siblings, and every
 -  // elected input surface must remain outside the session scrollport.
@@ -86,7 +86,7 @@ index 72382ffe2b..70297a2e01 100644
 +      </div>
 +    </ComposerOverlayProvider>
    )
- 
+
    const presentation: ConversationPresentationOwnerProps = {
 diff --git a/packages/client/ui-conversation/tests/skeleton.client.spec.tsx b/packages/client/ui-conversation/tests/skeleton.client.spec.tsx
 index acf618fb2b..6fd025b02b 100644
@@ -106,7 +106,7 @@ index acf618fb2b..6fd025b02b 100644
 @@ -348,6 +348,18 @@ describe('ConversationRoot resident composer', () => {
      expect(seat?.contains(fallback)).toBe(true)
    })
- 
+
 +  it('keeps the composer-above strip outside a takeover-hidden input card', () => {
 +    const b = mount(conversationSnapshot(), undefined, undefined, { overlayTakeover: true })
 +    const fallback = b.view.container.querySelector('[data-chain-overlay-fallback="conversation.composer"]')
@@ -127,27 +127,27 @@ index ba4b23150a..988559b857 100644
 --- a/packages/client/ui-user-questions/README.md
 +++ b/packages/client/ui-user-questions/README.md
 @@ -4,7 +4,7 @@ English | [中文](README.zh.md)
- 
+
  Web question feature plugin: its browser half registers the `question` entry in the conversation-owned `conversation.composer` keyed slot. Its host half is empty on purpose — mounting `dsh-tool-ask-user` there put the tool in the registry's GLOBAL layer, which merges into every agent regardless of the preset that composed it, so a two-tool benchmark preset really presented three. Rendering a question is a host UI capability; having the tool is an agent capability, so the `tool-ask-user` row belongs to the presets that want it (and to the TUI composition, which has no presets).
- 
+
 -The component renders one question at a time with progress navigation, single- and multi-select choices, recommendation badges derived from label suffixes, and custom answers. A multi-select draft keeps its selected labels while the user opens or edits the custom answer, so its submitted item may carry both `selected` and `custom`; a single-select custom answer remains exclusive. Question detail reuses the assistant-output `MarkdownText` primitive, including its GFM rendering and untrusted-content policy. The capped card keeps its title, navigation, and submission actions fixed while long detail and choices share an internal scroll region. Single-select choices advance immediately, and Enter submits once every question is answered or skipped; Enter during IME composition confirms the input candidate without advancing. It submits one structured answer batch for the whole request: “Skip this question” retains other drafts and emits the existing blank `{ selected: [] }` shape for that item, while close rejects the whole wait as `ASK_CANCELLED`.
 +The component renders one question at a time with progress navigation, a collapse control that keeps only the title over the input card, single- and multi-select choices, recommendation badges derived from label suffixes, and custom answers. A multi-select draft keeps its selected labels while the user opens or edits the custom answer, so its submitted item may carry both `selected` and `custom`; a single-select custom answer remains exclusive. Question detail reuses the assistant-output `MarkdownText` primitive, including its GFM rendering and untrusted-content policy. The capped card keeps its title, navigation, and submission actions fixed while long detail and choices share an internal scroll region. Single-select choices advance immediately, and Enter submits once every question is answered or skipped; Enter during IME composition confirms the input candidate without advancing. It submits one structured answer batch for the whole request: “Skip this question” retains other drafts and emits the existing blank `{ selected: [] }` shape for that item, while close rejects the whole wait as `ASK_CANCELLED`.
- 
+
  A request whose single question declares a presentation intent renders as that intent's own surface instead. `plan-review` — set by `dsh-plan-mode` on the `exit_plan_mode` review — takes the waiting-approval card shape: a `Plan review` strip, the plan as the scrolling markdown body, the question text as the card's accessible name, and one decision row of `Chat about it` / `Refuse` / `Approve`. Approve and Refuse answer with the asker's own option labels (the intent names which label approves, so the verdict never rides option order) and keep the asker's descriptions as tooltips; `Chat about it` rejects the wait as `ASK_CANCELLED`, returning the composer so the user can say what they want instead. The card claims a request only when it can send every answer that request allows: one question, the intent declared, the plan present as `detail`, the named approve label offered, and a binary single choice (at most one option besides approve, not multi-select). Anything else — no intent, a batch of several questions, a missing plan, an approve label naming no option, a third option, a multi-select decision — stays on the generic flow, which can express it. An intent changes the layout, never which answers are reachable.
- 
+
 diff --git a/packages/client/ui-user-questions/README.zh.md b/packages/client/ui-user-questions/README.zh.md
 index 96c81800ef..ca8fe30906 100644
 --- a/packages/client/ui-user-questions/README.zh.md
 +++ b/packages/client/ui-user-questions/README.zh.md
 @@ -4,7 +4,7 @@
- 
+
  Web 提问功能插件：其浏览器侧把 `question` 条目注册到会话拥有的 `conversation.composer` 键控 slot 中。其主机侧刻意为空——在那里挂载 `dsh-tool-ask-user` 会把工具放进注册表的**全局层**，而全局层会并入每一个 agent（智能体），无论它由哪个 preset 组装，于是一个「两工具」的 benchmark preset 实际会呈现三个。渲染提问是宿主的 UI 能力，拥有该工具则是 agent 的能力，因此 `tool-ask-user` 行属于需要它的各个 preset（以及没有 preset 的 TUI 组装）。
- 
+
 -组件每次渲染一个问题，提供进度导航、单选和多选选项、由标签后缀派生的推荐徽标，以及自定义答案。用户打开或编辑自定义答案时，多选题草稿会保留已选中的标签，因此提交项可以同时携带 `selected` 与 `custom`；单选题的自定义答案仍保持互斥。问题详情复用助手输出的 `MarkdownText` 原语，包括其 GFM 渲染与不受信任内容策略。限高卡片保持标题、导航与提交动作固定，超长的详情与选项共享内部滚动区。选择单选选项后会立即前进；所有问题均已回答或跳过后，Enter 会提交；IME 组合输入期间按 Enter 只会确认输入候选，不会前进。组件为整个请求提交一批结构化答案：「跳过此问题」会保留其他草稿，并为该项发出既有的空 `{ selected: [] }` 形状；关闭则以 `ASK_CANCELLED` 拒绝整个等待。
 +组件每次渲染一个问题，提供进度导航、可将卡片收成只盖住输入框标题行的折叠控制、单选和多选选项、由标签后缀派生的推荐徽标，以及自定义答案。用户打开或编辑自定义答案时，多选题草稿会保留已选中的标签，因此提交项可以同时携带 `selected` 与 `custom`；单选题的自定义答案仍保持互斥。问题详情复用助手输出的 `MarkdownText` 原语，包括其 GFM 渲染与不受信任内容策略。限高卡片保持标题、导航与提交动作固定，超长的详情与选项共享内部滚动区。选择单选选项后会立即前进；所有问题均已回答或跳过后，Enter 会提交；IME 组合输入期间按 Enter 只会确认输入候选，不会前进。组件为整个请求提交一批结构化答案：「跳过此问题」会保留其他草稿，并为该项发出既有的空 `{ selected: [] }` 形状；关闭则以 `ASK_CANCELLED` 拒绝整个等待。
- 
+
  若某个请求的唯一问题声明了呈现意图，则改为渲染该意图自己的界面。`plan-review`——由 `dsh-plan-mode` 在 `exit_plan_mode` 审阅上设置——采用等待审批卡片的形状：一条 `Plan review` 条带、计划作为可滚动的 markdown 主体、问题文本作为卡片的无障碍名称，以及一行 `Chat about it` / `Refuse` / `Approve` 的决定操作。Approve 与 Refuse 用提问方自己的选项标签回答（意图指名哪个标签表示批准，因此裁决绝不依赖选项顺序），并把提问方的描述保留为 tooltip；`Chat about it` 以 `ASK_CANCELLED` 拒绝该等待，让编辑器归位，用户可以直接说出他想说的话。卡片只在能够发出该请求允许的每一个答案时才接管：只有一个问题、声明了意图、计划以 `detail` 存在、提供了被指名的批准标签，且是二元单选（除批准外最多一个选项，且非多选）。其他任何情形——没有意图、一批含多个问题、缺少计划、批准标签未命中任何选项、出现第三个选项、多选决定——都留在能够表达它的通用流程上。意图改变的只是布局，从不改变可达的答案。
- 
+
 diff --git a/packages/client/ui-user-questions/src/client/QuestionComposer.module.css b/packages/client/ui-user-questions/src/client/QuestionComposer.module.css
 index c0b83182d2..958cc0d893 100644
 --- a/packages/client/ui-user-questions/src/client/QuestionComposer.module.css
@@ -155,7 +155,7 @@ index c0b83182d2..958cc0d893 100644
 @@ -39,6 +39,23 @@
    box-sizing: border-box;
  }
- 
+
 +/* Collapsed card keeps the title row over the input only, so the
 +   composer-above strip stays clickable. */
 +.cardCollapsed {
@@ -179,7 +179,7 @@ index c0b83182d2..958cc0d893 100644
 @@ -50,6 +67,13 @@
    padding: 20px 16px 0 24px;
  }
- 
+
 +.headerActions {
 +  display: flex;
 +  align-items: center;
@@ -216,7 +216,7 @@ index 596e1ec727..1d74fc231b 100644
    const question = questions[index]!
 @@ -190,8 +192,11 @@ function QuestionFlow({ pending, t }: { pending: PendingQuestion } & Pick<Questi
    }
- 
+
    return (
 -    <div className={css.frame} data-question-key={pending.key}>
 -      <section className={css.card} aria-labelledby={`question-${pending.key}-${String(index)}`}>
@@ -258,7 +258,7 @@ index 596e1ec727..1d74fc231b 100644
 +            </button>
 +          </div>
          </header>
- 
+
 -        <div className={css.body} data-question-scroll>
 +        {!collapsed && <div className={css.body} data-question-scroll>
            {question.detail !== undefined && (
@@ -270,7 +270,7 @@ index 596e1ec727..1d74fc231b 100644
            </div>
 -        </div>
 +        </div>}
- 
+
 -        <footer className={css.footer}>
 +        {!collapsed && <footer className={css.footer}>
            <div className={css.pager}>
@@ -297,7 +297,7 @@ index 9f3fce1ab4..d09bfb935e 100644
      expect(screen.getByRole('button', { name: 'Skip this question' })).toBeTruthy()
      expect(screen.getByPlaceholderText('Type your answer')).toBeTruthy()
    })
- 
+
 +  it('collapses to the title row and restores the question body', () => {
 +    const { carrier } = wait()
 +    render(<QuestionComposer matched={carrier} interactions={[carrier]} {...kit} />)

@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
 import { redactSensitiveDiagnostic } from './redact.mjs'
 import { PRODUCT_UI_PLUGIN_PACKAGE_NAMES } from './product-plugin-manifest.mjs'
+import { ACCRUI_CONNECTOR_TMP_PREFIX } from './product-runtime-identity.mjs'
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -202,7 +203,7 @@ export function resolveProductSkillsRoot(env = process.env) {
   return [
     // Product source: apps/native-server/src -> repository skills/.
     resolve(THIS_DIR, '../../../skills'),
-    // Installed Mac Native Host: DeepSeekHarness/native-server/src -> ../skills.
+    // Installed AccrUI Native Host: accr-ui-harness/native-server/src -> ../skills.
     resolve(THIS_DIR, '../../skills'),
     // Packaged Mac/Windows runtime: runtime/native-server -> runtime/skills.
     resolve(THIS_DIR, '../skills'),
@@ -461,7 +462,7 @@ export class HarnessWebProcess {
     if (this.mcpConnector !== undefined && !existsSync(this.runtimePluginPath)) {
       throw new Error(`Harness runtime plugin was not found: ${this.runtimePluginPath}`)
     }
-    const directory = await mkdtemp(`${tmpdir()}/deepseek-harness-connector-`)
+    const directory = await mkdtemp(`${tmpdir()}/${ACCRUI_CONNECTOR_TMP_PREFIX}`)
     const patchPath = resolve(directory, 'connector.cordis.yml')
     const connector = this.mcpConnector === undefined ? '' : connectorPatch(this.mcpConnector.url, this.mcpConnector.token, this.runtimePluginPath)
     await writeFile(patchPath, `${claudeSkillsPatch(this.env)}${companyGatewayModelPatch()}${productUiPatch(this.env)}${defaultWorkspacePatch(this.env)}${effectiveSessionTrackingPatch(this.env)}${connector}`, { mode: 0o600 })
