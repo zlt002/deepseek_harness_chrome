@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { HarnessWebProcess, claudeSkillsPatch, defaultWorkspacePatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveDefaultWorkspacePlugin, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome, withProductNodeOnPath } from '../apps/native-server/src/harness-process.mjs'
-import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -234,6 +234,40 @@ test('migrates a managed product UI symlink when the installed package root chan
     resolve(dirname(link), await readlink(link)),
     resolve(projectRoot, 'packages/harness-ui-agent-preset'),
   )
+})
+
+test('backs up a legacy materialized product UI package before linking the current package', async (t) => {
+  const dshHome = await mkdtemp(resolve(tmpdir(), 'harness-product-ui-legacy-package-'))
+  t.after(() => rm(dshHome, { recursive: true, force: true }))
+  const link = resolve(dshHome, 'profiles/web/node_modules/@accrui/harness-ui-agent-preset')
+  await mkdir(link, { recursive: true })
+  await writeFile(resolve(link, 'package.json'), '{"name":"@accrui/harness-ui-agent-preset"}')
+  await writeFile(resolve(link, 'legacy-state.txt'), 'preserve-me')
+
+  await prepareProductUiPackages({ DSH_HOME: dshHome })
+  await prepareProductUiPackages({ DSH_HOME: dshHome })
+
+  assert.equal(
+    resolve(dirname(link), await readlink(link)),
+    resolve(projectRoot, 'packages/harness-ui-agent-preset'),
+  )
+  const backupNames = (await readdir(dirname(link))).filter((name) => name.startsWith('harness-ui-agent-preset.accrui-product-plugin-backup'))
+  assert.deepEqual(backupNames, ['harness-ui-agent-preset.accrui-product-plugin-backup'])
+  assert.equal(await readFile(resolve(dirname(link), backupNames[0], 'legacy-state.txt'), 'utf8'), 'preserve-me')
+})
+
+test('refuses to replace an unmanaged non-product package directory', async (t) => {
+  const dshHome = await mkdtemp(resolve(tmpdir(), 'harness-product-ui-unmanaged-package-'))
+  t.after(() => rm(dshHome, { recursive: true, force: true }))
+  const link = resolve(dshHome, 'profiles/web/node_modules/@accrui/harness-ui-agent-preset')
+  await mkdir(link, { recursive: true })
+  await writeFile(resolve(link, 'package.json'), '{"name":"unmanaged-user-package"}')
+
+  await assert.rejects(
+    prepareProductUiPackages({ DSH_HOME: dshHome }),
+    new RegExp(`Refusing to replace unmanaged Harness plugin path: ${link.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`),
+  )
+  assert.equal(JSON.parse(await readFile(resolve(link, 'package.json'), 'utf8')).name, 'unmanaged-user-package')
 })
 
 test('mounts the Harness-native pmd-prd skill with its template contract', async () => {

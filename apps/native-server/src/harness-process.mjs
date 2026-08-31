@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { dirname, join, resolve, win32 } from 'node:path'
@@ -316,6 +316,26 @@ function productUiPackages() {
   return PRODUCT_UI_PLUGIN_PACKAGE_NAMES
 }
 
+async function isLegacyProductUiPackageDirectory(path, packageName) {
+  try {
+    const manifest = JSON.parse(await readFile(resolve(path, 'package.json'), 'utf8'))
+    return manifest?.name === packageName
+  } catch {
+    return false
+  }
+}
+
+async function backupLegacyProductUiPackageDirectory(path) {
+  const backupBase = `${path}.accrui-product-plugin-backup`
+  let backup = backupBase
+  let index = 2
+  while (existsSync(backup)) {
+    backup = `${backupBase}-${index}`
+    index += 1
+  }
+  await rename(path, backup)
+}
+
 /**
  * Make product packages resolvable from the Harness Web profile without
  * copying them into the official checkout or overwriting user-installed data.
@@ -345,10 +365,16 @@ export async function prepareProductUiPackages(env = process.env) {
     let needsLink = true
     try {
       const info = await lstat(link)
-      if (!info.isSymbolicLink()) throw new Error(`Refusing to replace unmanaged Harness plugin path: ${link}`)
-      const current = resolve(dirname(link), await readlink(link))
-      if (current === source) needsLink = false
-      else await rm(link, { recursive: true, force: true })
+      if (!info.isSymbolicLink()) {
+        if (!info.isDirectory() || !await isLegacyProductUiPackageDirectory(link, packageName)) {
+          throw new Error(`Refusing to replace unmanaged Harness plugin path: ${link}`)
+        }
+        await backupLegacyProductUiPackageDirectory(link)
+      } else {
+        const current = resolve(dirname(link), await readlink(link))
+        if (current === source) needsLink = false
+        else await rm(link, { recursive: true, force: true })
+      }
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
