@@ -30,10 +30,11 @@ test('connector recovery fallbacks stay beneath the supplied AccrUI home', () =>
 })
 
 test('dev-port ownership requires the current checkout in command or cwd', () => {
-  const root = '/workspace/accrui'
-  assert.equal(listenerBelongsToProject({ command: 'node /workspace/accrui/apps/chrome-extension/node_modules/wxt/bin/wxt.mjs', cwd: '/workspace/accrui/apps/chrome-extension' }, root), true)
-  assert.equal(listenerBelongsToProject({ command: 'node /unknown/server.mjs', cwd: '/workspace/accrui/apps/chrome-extension' }, root), false)
-  assert.equal(listenerBelongsToProject({ command: 'node /other/harness.mjs', cwd: '/other' }, root), false)
+  const root = join(process.cwd(), 'fixture-accrui')
+  const extensionRoot = join(root, 'apps/chrome-extension')
+  assert.equal(listenerBelongsToProject({ command: `node ${join(extensionRoot, 'node_modules/wxt/bin/wxt.mjs')}`, cwd: extensionRoot }, root), true)
+  assert.equal(listenerBelongsToProject({ command: `node ${join(process.cwd(), 'unknown/server.mjs')}`, cwd: extensionRoot }, root), false)
+  assert.equal(listenerBelongsToProject({ command: `node ${join(process.cwd(), 'other/harness.mjs')}`, cwd: join(process.cwd(), 'other') }, root), false)
 })
 
 test('dev-port protection never signals an external listener', async () => {

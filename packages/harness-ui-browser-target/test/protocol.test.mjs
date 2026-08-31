@@ -51,6 +51,24 @@ test('accepts only a bounded integer for the in-flight design-reference tab id',
   }
 })
 
+test('projects an acknowledged follow-mode Run target until it is cleared, without changing pinned or none modes', async () => {
+  const { browserTargetTriggerTab, createBrowserTargetBridge } = await activeBridge()
+  const a = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://a.example.test', title: 'A' }
+  const b = { browser: 'chrome', windowId: 1, tabId: 3, url: 'https://b.example.test', title: 'B' }
+
+  const followLocked = { settings: { mode: 'follow-active-tab', pinnedTabs: [] }, tabs: [a, b], activeTab: b, lockedRunTarget: a }
+  const bridge = createBrowserTargetBridge('nonce', 'chrome-extension://abc')
+  const parent = {}
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...followLocked } }, parent), true)
+  assert.deepEqual(bridge.source.getSnapshot().lockedRunTarget, a, 'the acknowledged target is carried into the snapshot')
+  assert.deepEqual(browserTargetTriggerTab(followLocked), a, 'an active-tab change during the Run must not replace the acknowledged target')
+  assert.deepEqual(browserTargetTriggerTab({ ...followLocked, lockedRunTarget: undefined }), b, 'the next idle snapshot returns to the active tab')
+
+  const pinned = { settings: { mode: 'pinned-tabs', pinnedTabs: [a], primaryTabId: a.tabId }, tabs: [a, b], activeTab: b, lockedRunTarget: b }
+  assert.deepEqual(browserTargetTriggerTab(pinned), a, 'a follow-mode lock never overrides the pinned primary target')
+  assert.equal(browserTargetTriggerTab({ ...pinned, settings: { mode: 'none', pinnedTabs: [] } }), undefined, 'none remains unbound')
+})
+
 test('requires an exact chrome extension parent origin in the opt-in bridge URL', () => {
   assert.deepEqual(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabc')), { nonce: 'n', parentOrigin: 'chrome-extension://abc', surface: 'sidepanel' })
   assert.deepEqual(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabc&dshBrowserTargetSurface=fullscreen-tab&dshHarnessSessionId=session-current')), { nonce: 'n', parentOrigin: 'chrome-extension://abc', surface: 'fullscreen-tab', sessionId: 'session-current' })

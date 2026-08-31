@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
 const protocolUrl = new URL('../apps/native-server/src/connector-protocol.mjs', import.meta.url)
@@ -32,7 +33,7 @@ test('Connector protocol is browser-safe and the Extension imports it instead of
   }
 
   const bundled = await build({
-    entryPoints: [protocolUrl.pathname],
+    entryPoints: [fileURLToPath(protocolUrl)],
     bundle: true,
     format: 'esm',
     platform: 'browser',

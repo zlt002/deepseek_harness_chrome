@@ -7,7 +7,7 @@ import { FullscreenReturnControl, type FullscreenReturnControlInjected } from '.
 import { HarnessReconnectAction, type HarnessReconnectActionInjected } from './HarnessReconnectAction.tsx'
 import { activeTabBridgeConfig, createBrowserTargetBridge } from './active-tab-bridge.ts'
 import { restoreHandoffSession } from './session-handoff.ts'
-import { BrowserTargetSessionRunLock, shouldCaptureSessionRunTarget } from './session-run-lock.ts'
+import { BrowserTargetSessionRunLock, shouldCaptureSessionRunTarget, shouldReconcileSessionRunTarget } from './session-run-lock.ts'
 
 export const inject = ['slots', 'sessions', 'settingsQuickActions', 'composerSubmissionTransforms']
 
@@ -85,8 +85,7 @@ export function apply(ctx: ClientContext): void {
     if (submissionId === undefined && lock === undefined) return
     postUnlock(sessionId, submissionId ?? lock!.state.submissionId)
   }
-  const lockSubmission = (sessionId: string, browserTarget: { browser: 'chrome'; windowId: number; tabId: number; url: string }): Promise<{ submissionId: string; locked: boolean }> => {
-    const submissionId = crypto.randomUUID()
+  const lockSubmission = (sessionId: string, submissionId: string, browserTarget: { browser: 'chrome'; windowId: number; tabId: number; url: string }): Promise<boolean> => {
     return new Promise((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         if (pendingLockAcks.delete(submissionId) === false) return
@@ -96,7 +95,7 @@ export function apply(ctx: ClientContext): void {
       pendingLockAcks.set(submissionId, {
         sessionId,
         timeout,
-        resolve: (locked) => resolve({ submissionId, locked }),
+        resolve,
         reject,
       })
       window.parent.postMessage({ type: 'browser-target-lock/v1', nonce: config.nonce, sessionId, submissionId, browserTarget }, config.parentOrigin)
@@ -112,25 +111,33 @@ export function apply(ctx: ClientContext): void {
         const targetSnapshot = bridge.source.getSnapshot()
         if (session === undefined || !shouldCaptureSessionRunTarget(session.getSnapshot(), lifecycleLocks.has(id))) return { text }
         if (targetSnapshot?.settings.mode === 'follow-active-tab' && targetSnapshot.activeTab !== undefined) {
-          const lock = await lockSubmission(id, { browser: 'chrome', windowId: targetSnapshot.activeTab.windowId, tabId: targetSnapshot.activeTab.tabId, url: targetSnapshot.activeTab.url })
-          if (lock.locked) {
-            const lifecycle = { state: new BrowserTargetSessionRunLock(lock.submissionId), unsubscribe: undefined as (() => void) | undefined }
+          const submissionId = crypto.randomUUID()
+          const lifecycle = { state: new BrowserTargetSessionRunLock(submissionId), unsubscribe: undefined as (() => void) | undefined }
+          lifecycleLocks.set(id, lifecycle)
+          let locked: boolean
+          try {
+            locked = await lockSubmission(id, submissionId, { browser: 'chrome', windowId: targetSnapshot.activeTab.windowId, tabId: targetSnapshot.activeTab.tabId, url: targetSnapshot.activeTab.url })
+          } catch (error) {
+            if (lifecycleLocks.get(id) === lifecycle) lifecycleLocks.delete(id)
+            throw error
+          }
+          if (locked) {
             const reconcile = (): void => {
-              if (lifecycle.state.observe(session.getSnapshot())) releaseLifecycleLock(id, lock.submissionId)
+              if (lifecycle.state.observe(session.getSnapshot())) releaseLifecycleLock(id, submissionId)
             }
-            lifecycleLocks.set(id, lifecycle)
             return {
               text,
               accept: () => {
                 if (lifecycle.state.accept(session.getSnapshot())) {
-                  releaseLifecycleLock(id, lock.submissionId)
+                  releaseLifecycleLock(id, submissionId)
                   return
                 }
                 if (!disposed) lifecycle.unsubscribe = session.subscribe(reconcile)
               },
-              reject: () => { releaseLifecycleLock(id, lock.submissionId) },
+              reject: () => { releaseLifecycleLock(id, submissionId) },
             }
           }
+          if (lifecycleLocks.get(id) === lifecycle) lifecycleLocks.delete(id)
         }
         return { text }
       },
@@ -155,7 +162,7 @@ export function apply(ctx: ClientContext): void {
     const sessionSubscriptions = new Map<string, () => void>()
     const reconcile = (sessionId: string, session: SessionFace): void => {
       const snapshot = session.getSnapshot()
-      if (!snapshot.running && snapshot.queue.length === 0) {
+      if (shouldReconcileSessionRunTarget(snapshot, lifecycleLocks.get(sessionId)?.state)) {
         window.parent.postMessage({ type: 'browser-target-reconcile/v1', nonce: config.nonce, sessionId }, config.parentOrigin)
       }
     }

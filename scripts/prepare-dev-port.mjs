@@ -35,12 +35,14 @@ async function listenerPids() {
 }
 
 export function listenerBelongsToProject({ command, cwd }, root = projectRoot) {
-  const normalizedRoot = resolve(root)
+  const normalizedRoot = resolve(root).replaceAll('\\', '/')
   const extensionRoot = `${normalizedRoot}/apps/chrome-extension/`
-  return typeof command === 'string'
-    && command.includes(extensionRoot)
-    && /(?:^|\/)wxt(?:\.mjs)?(?:\s|$)/.test(command)
-    && (cwd === undefined || cwd === `${normalizedRoot}/apps/chrome-extension` || cwd.startsWith(extensionRoot))
+  const normalizedCommand = typeof command === 'string' ? command.replaceAll('\\', '/') : command
+  const normalizedCwd = typeof cwd === 'string' ? resolve(cwd).replaceAll('\\', '/') : cwd
+  return typeof normalizedCommand === 'string'
+    && normalizedCommand.includes(extensionRoot)
+    && /(?:^|\/)wxt(?:\.mjs)?(?:\s|$)/.test(normalizedCommand)
+    && (normalizedCwd === undefined || normalizedCwd === `${normalizedRoot}/apps/chrome-extension` || normalizedCwd.startsWith(extensionRoot))
 }
 
 async function listenerIdentity(pid) {

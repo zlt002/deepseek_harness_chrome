@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { BrowserTargetCommand, BrowserTargetSnapshot, BrowserTargetTab } from './active-tab-bridge.ts'
+import { browserTargetTriggerTab, type BrowserTargetCommand, type BrowserTargetSnapshot, type BrowserTargetTab } from './active-tab-bridge.ts'
 import css from './ActiveTabDock.module.css'
 
 export interface BrowserTargetInjected {
@@ -27,9 +27,7 @@ function selectedTabs(snapshot: BrowserTargetSnapshot): BrowserTargetTab[] {
 }
 
 function triggerTab(snapshot: BrowserTargetSnapshot): BrowserTargetTab | undefined {
-  if (snapshot.settings.mode === 'follow-active-tab') return snapshot.activeTab
-  if (snapshot.settings.mode === 'none') return undefined
-  return snapshot.tabs.find(tab => tab.tabId === snapshot.settings.primaryTabId) ?? selectedTabs(snapshot)[0]
+  return browserTargetTriggerTab(snapshot)
 }
 
 function selectionCount(snapshot: BrowserTargetSnapshot): number {

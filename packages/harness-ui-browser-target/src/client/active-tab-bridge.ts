@@ -30,9 +30,20 @@ export interface BrowserTargetSnapshot {
   settings: BrowserTargetSettings
   tabs: BrowserTargetTab[]
   activeTab?: BrowserTargetTab
+  /** The acknowledged target for an in-flight follow-mode Harness Run. */
+  lockedRunTarget?: BrowserTargetTab
   capturingDesignReferenceTabId?: number
   capturingDesignReferenceProgress?: { current: number; total: number }
   error?: string
+}
+
+/** Resolve the Browser Target displayed beside the composer without weakening pinned or none modes. */
+export function browserTargetTriggerTab(snapshot: BrowserTargetSnapshot): BrowserTargetTab | undefined {
+  if (snapshot.settings.mode === 'follow-active-tab') return snapshot.lockedRunTarget ?? snapshot.activeTab
+  if (snapshot.settings.mode === 'none') return undefined
+  const byId = new Map(snapshot.tabs.map(tab => [tab.tabId, tab]))
+  const selected = snapshot.settings.pinnedTabs.map(pin => byId.get(pin.tabId) ?? { ...pin, title: pin.url })
+  return snapshot.tabs.find(tab => tab.tabId === snapshot.settings.primaryTabId) ?? selected[0]
 }
 
 /** The only settings actions accepted by the extension shell. */
@@ -91,6 +102,7 @@ function isBrowserTargetSnapshotMessage(value: unknown): value is BrowserTargetS
     && Array.isArray((value as BrowserTargetSnapshotMessage).tabs)
     && (value as BrowserTargetSnapshotMessage).tabs.every(isBrowserTargetTab)
     && ((value as BrowserTargetSnapshotMessage).activeTab === undefined || isBrowserTargetTab((value as BrowserTargetSnapshotMessage).activeTab))
+    && ((value as BrowserTargetSnapshotMessage).lockedRunTarget === undefined || isBrowserTargetTab((value as BrowserTargetSnapshotMessage).lockedRunTarget))
     && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId === undefined || isBoundedTabId((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId))
     && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress === undefined || (typeof (value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress === 'object' && (value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress !== null && Number.isInteger((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current) && Number.isInteger((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.total) && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current ?? 0) >= 1 && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.total ?? 0) >= ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current ?? 0)))
     && ((value as BrowserTargetSnapshotMessage).error === undefined || typeof (value as BrowserTargetSnapshotMessage).error === 'string')
@@ -114,7 +126,7 @@ export function createBrowserTargetBridge(nonce: string, parentOrigin: string): 
       if (event.source !== parent || event.origin !== parentOrigin) return false
       if (!isBrowserTargetSnapshotMessage(event.data) || event.data.nonce !== nonce || event.data.sequence <= incomingSequence) return false
       incomingSequence = event.data.sequence
-      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.capturingDesignReferenceTabId === undefined ? {} : { capturingDesignReferenceTabId: event.data.capturingDesignReferenceTabId }), ...(event.data.capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress: event.data.capturingDesignReferenceProgress }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
+      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.lockedRunTarget === undefined ? {} : { lockedRunTarget: event.data.lockedRunTarget }), ...(event.data.capturingDesignReferenceTabId === undefined ? {} : { capturingDesignReferenceTabId: event.data.capturingDesignReferenceTabId }), ...(event.data.capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress: event.data.capturingDesignReferenceProgress }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
       return true
     },
     send(command, parent): void {

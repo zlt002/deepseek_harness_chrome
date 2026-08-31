@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const workflowPath = resolve(projectRoot, '.github/workflows/build-windows-lite.yml')
 test('Windows CI builds from the recursive upstream submodule and materialized product tree', async () => {
-  const workflow = await readFile(workflowPath, 'utf8')
+  const workflow = (await readFile(workflowPath, 'utf8')).replaceAll('\r\n', '\n')
 
   assert.match(workflow, /uses:\s*actions\/checkout@v4[\s\S]*?submodules:\s*recursive/)
   assert.equal(workflow.match(/uses:\s*actions\/checkout@v4/g)?.length, 1)

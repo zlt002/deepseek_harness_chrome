@@ -2,8 +2,17 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import ts from 'typescript'
 import { bundleTypescript } from './helpers/bundle-typescript.mjs'
 import { JSDOM } from '../.generated/harness-product/node_modules/jsdom/lib/api.js'
+
+async function loadSessionRunLock() {
+  const source = await readFile(new URL('../packages/harness-ui-browser-target/src/client/session-run-lock.ts', import.meta.url), 'utf8')
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  return import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}-${Math.random()}`)
+}
 
 test('composer keeps the draft and surfaces Browser Target preparation failures', async () => {
   const hub = await readFile(new URL('../.generated/harness-product/packages/client/ui-conversation/src/client/input/hub.ts', import.meta.url), 'utf8')
@@ -538,6 +547,50 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
     }
     const afterComplete = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'after-complete')
     assert.equal(afterComplete.result.pageIdentity.url, wb.url, 'completion restores follow-current Browser Target behavior')
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('an accepted follow lock ignores the initial idle reconciliation window so read_work_tab remains on A after B activates', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a, 43: b },
+    executeScript: async ({ target }) => [{ result: target.tabId === a.id ? 'A visible text' : 'B visible text' }],
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA,
+    }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true, locked: true })
+
+    const { BrowserTargetSessionRunLock, shouldReconcileSessionRunTarget } = await loadSessionRunLock()
+    const lifecycle = new BrowserTargetSessionRunLock('submission-a')
+    lifecycle.accept({ running: false, queue: [] })
+    const initialIdle = { running: false, queue: [] }
+    const initialIdleMayReconcile = shouldReconcileSessionRunTarget(initialIdle, lifecycle)
+    assert.equal(initialIdleMayReconcile, false, 'the acknowledged lock remains until this Run was actually observed')
+    if (initialIdleMayReconcile) {
+      await background.sendRuntimeMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a' }, { url: 'chrome-extension://test/sidepanel.html' })
+    }
+
+    background.activateTab(b.id)
+    background.emitNative({
+      type: 'connector_request', requestId: 'read-after-b-activation', runId: 'run-follow', generation: 'generation-a',
+      tool: 'read_work_tab', tab: 1, browserTarget: targetA, browserTargets: [targetA],
+    })
+    let response
+    for (let attempt = 0; attempt < 20 && response === undefined; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'read-after-b-activation')
+    }
+    assert.equal(response.error, undefined)
+    assert.equal(response.result.pageIdentity.url, a.url)
+    assert.equal(response.result.content, 'A visible text')
+    lifecycle.observe({ running: true, queue: [] })
+    assert.equal(shouldReconcileSessionRunTarget(initialIdle, lifecycle), true, 'only a Run observed as running may be released after it becomes idle')
   } finally {
     background.cleanup()
   }

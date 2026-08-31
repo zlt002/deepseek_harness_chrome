@@ -24,6 +24,7 @@ function snapshotMessage(value) {
     && (value.settings.primaryTabId === undefined || Number.isInteger(value.settings.primaryTabId))
     && Array.isArray(value.tabs) && value.tabs.every(tab)
     && (value.activeTab === undefined || tab(value.activeTab))
+    && (value.lockedRunTarget === undefined || tab(value.lockedRunTarget))
     && (value.error === undefined || typeof value.error === 'string')
 }
 
@@ -41,6 +42,7 @@ export function createBrowserTargetProtocol({ createStore, nonce, parentOrigin }
         settings: event.data.settings,
         tabs: event.data.tabs,
         ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }),
+        ...(event.data.lockedRunTarget === undefined ? {} : { lockedRunTarget: event.data.lockedRunTarget }),
         ...(event.data.error === undefined ? {} : { error: event.data.error }),
       })
       return true

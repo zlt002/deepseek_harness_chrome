@@ -22,6 +22,11 @@ export class BrowserTargetSessionRunLock {
   }
 }
 
+/** A stale-idle sweep cannot release a submitted target before its Run was observed. */
+export function shouldReconcileSessionRunTarget(snapshot: SessionRunSnapshot, lock?: BrowserTargetSessionRunLock): boolean {
+  return !snapshot.running && snapshot.queue.length === 0 && (lock === undefined || lock.observe(snapshot))
+}
+
 /** Pending or active work keeps the Browser Target chosen when that lifecycle began. */
 export function shouldCaptureSessionRunTarget(snapshot: SessionRunSnapshot, hasLock: boolean): boolean {
   return !hasLock && !snapshot.running && snapshot.queue.length === 0
