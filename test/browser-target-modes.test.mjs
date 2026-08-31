@@ -147,10 +147,9 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
         reject(new Error('runtime message did not keep its response channel open'))
       }
     }),
-    activateTab: async (tabId) => {
+    activateTab: (tabId) => {
       currentActiveTab = tabsById[tabId] ?? currentActiveTab
       activatedListener({ tabId })
-      await new Promise(resolve => setTimeout(resolve, 0))
     },
     createTab: (tab) => createdListener(tab),
     updateActiveTab: (changeInfo, tab) => {
@@ -159,7 +158,8 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
     },
     emitNative: (message, portIndex = ports.length - 1) => ports[portIndex].emit(message),
     disconnectNative: () => ports.at(-1).disconnect(),
-    cleanup: () => {
+    cleanup: async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
       globalThis.fetch = originalFetch
       delete globalThis.chrome
       delete globalThis.defineBackground
@@ -191,7 +191,7 @@ test('background creates the selected-session full-screen Harness Tab before clo
     assert.equal(createdAtClose, 1, 'the persistent background creates the Tab before it closes the side-panel document')
     assert.deepEqual(closeCalls, [{ windowId: 7 }])
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -225,7 +225,7 @@ test('HTML Workbench picker clears native text selection for Shift multi-select 
     ;[...window.document.querySelectorAll('#accrui-html-workbench-picker button')].find(button => button.textContent === '取消').click()
     assert.equal(window.document.documentElement.hasAttribute('data-accrui-html-workbench-picking'), false)
     assert.equal(window.document.querySelector('#accrui-html-workbench-picker'), null)
-  } finally { background.cleanup(); dom.window.close() }
+  } finally { await background.cleanup(); dom.window.close() }
 })
 
 test('HTML Workbench reads a same-URL local source when Chromium reports a readable status-0 response', async () => {
@@ -269,7 +269,7 @@ test('HTML Workbench reads a same-URL local source when Chromium reports a reada
     const response = await responseFor('html-status-zero')
     assert.equal(response.error, undefined)
     assert.match(response.result.domFingerprint, /^[a-f0-9]{64}$/)
-  } finally { background.cleanup(); dom.window.close() }
+  } finally { await background.cleanup(); dom.window.close() }
 })
 
 test('HTML Workbench refresh readback fails closed until the loaded stylesheet hash and selected DOM state are observable', async () => {
@@ -326,7 +326,7 @@ test('HTML Workbench refresh readback fails closed until the loaded stylesheet h
     assert.equal(JSON.stringify(response.result.stylesheetFingerprints), JSON.stringify([{ url: stylesheetUrl, fingerprint: fingerprint(stylesheet) }]))
     assert.equal(JSON.stringify(response.result.anchorStates.map(item => item.selector)), JSON.stringify(['#selected']))
     assert.equal(typeof response.result.anchorStates[0].computedStyle.color, 'string')
-  } finally { background.cleanup(); dom.window.close() }
+  } finally { await background.cleanup(); dom.window.close() }
 })
 
 test('background prepares the Side Panel handoff but never calls the user-gesture-only open API', async () => {
@@ -347,7 +347,7 @@ test('background prepares the Side Panel handoff but never calls the user-gestur
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'session-handoff-applied/v1', windowId: 7, tabId: 91, nonce: handoffNonce, sessionId: 'session-current' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true })
     assert.deepEqual(background.removedTabs, [91])
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -365,7 +365,7 @@ test('background preserves the full-screen Tab when handoff preparation identifi
     assert.deepEqual(background.removedTabs, [])
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-sidepanel-handoff/v1', windowId: 7 }), { ok: true })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -382,7 +382,7 @@ test('the URL-defined Side Panel handoff closes the full-screen Tab even if back
     assert.deepEqual(response, { ok: true })
     assert.deepEqual(background.removedTabs, [91])
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -402,7 +402,7 @@ test('sidepanel ensure-harness resolves the last-focused active tab for the defa
       browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://docs.example.test/follow' },
     }])
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -416,7 +416,7 @@ test('product-owned extension Tabs are absent from the Browser Target roster', a
     const response = await background.sendRuntimeMessage({ type: 'get-browser-target-settings' })
     assert.deepEqual(response.tabs, [])
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -434,7 +434,7 @@ test('follow-active-tab keeps the last revalidated Browser Target while a produc
     assert.deepEqual(response, { ok: true, url: 'http://127.0.0.1:43123' })
     assert.deepEqual(background.nativeMessages, [{ type: 'start', browserTarget: candidate }])
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -451,7 +451,7 @@ test('pinned mode treats a product-owned extension Tab as unavailable', async ()
     assert.match(response.error, /Select it again/i)
     assert.deepEqual(background.nativeMessages, [])
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -473,7 +473,7 @@ test('transfer revalidation rejects a product-owned extension Tab', async () => 
     assert.equal(response.ok, false)
     assert.match(response.error, /changed before transfer/i)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -497,7 +497,7 @@ test('manual tab activation updates only the next-Run candidate and never transf
     assert.equal(background.nativeMessages.length, 1)
     assert.equal(background.nativeMessages[0].type, 'start')
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -549,7 +549,7 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
     const afterComplete = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'after-complete')
     assert.equal(afterComplete.result.pageIdentity.url, wb.url, 'completion restores follow-current Browser Target behavior')
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -584,7 +584,7 @@ test('follow-active-tab permits concurrent sessions on the same frozen Browser T
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock').result.pageIdentity.url, b.url, 'follow mode returns only after the last owner releases')
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -607,7 +607,7 @@ test('concurrent first locks for one Browser Target share a single Native transf
     assert.deepEqual(await Promise.all([first, second]), [{ ok: true, locked: true }, { ok: true, locked: true }])
   } finally {
     transferGate.resolve()
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -627,7 +627,7 @@ test('follow-active-tab caps concurrent Browser Target owners at the snapshot pr
     const active = await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender)
     assert.equal(active.locks.length, 32)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -644,7 +644,7 @@ test('releasing a disappeared session lock lets the next session lock the same R
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetB }, sender), { ok: true, locked: true })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -684,7 +684,7 @@ test('a follow lock keeps its send-moment Browser Target while an in-flight sett
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-unlock-none'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.match(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-unlock-none').error, /disabled/i)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -704,7 +704,7 @@ test('the sidepanel can recover only the active current-Run Browser Target lock 
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), { ok: true })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -726,7 +726,7 @@ test('a late same-session reconciliation removes only its own completed Run lock
       ok: true, lock: { sessionId: 'session-a', submissionId: 'submission-b', browserTarget: targetB },
     })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -770,7 +770,7 @@ test('an accepted follow lock ignores the initial idle reconciliation window so 
     lifecycle.observe({ running: true, queue: [] })
     assert.equal(shouldReconcileSessionRunTarget(initialIdle, lifecycle), true, 'only a Run observed as running may be released after it becomes idle')
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -816,7 +816,7 @@ test('follow lock can bind a Run started with none mode and an unlock before tra
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-unlock')
     assert.equal(response.result.pageIdentity.url, second.url)
-  } finally { background.cleanup() }
+  } finally { await background.cleanup() }
 })
 
 test('fixed and unbound Browser Target policies apply when no follow-mode client lock was sent', async () => {
@@ -868,7 +868,7 @@ test('follow-active-tab refreshes a same-tab URL change before the next Office t
     const transfer = background.nativeMessages.find((message) => message.type === 'transfer-browser-target' && message.requestId === 'selected-parent-turn')
     assert.deepEqual(transfer.browserTarget, { browser: 'chrome', windowId: 7, tabId: 42, url: selected.url })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -896,7 +896,7 @@ test('Team Knowledge inspection transfers to a same-tab selected parent without 
     const transfer = background.nativeMessages.find((message) => message.type === 'transfer-browser-target' && message.requestId === 'team-knowledge-inspect')
     assert.deepEqual(transfer.browserTarget, { browser: 'chrome', windowId: 7, tabId: 42, url: selected.url })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -930,7 +930,7 @@ test('Team Knowledge create keeps its confirmed Browser Target when the user act
     assert.deepEqual(injectedTabIds, [42])
     assert.equal(background.nativeMessages.some((message) => message.type === 'transfer-browser-target' && message.requestId === 'team-knowledge-confirmed-create'), false)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -967,7 +967,7 @@ test('Team Knowledge create fails closed when its confirmed Browser Target close
         assert.deepEqual(injectedTabIds, [])
         assert.equal(background.nativeMessages.some((message) => message.type === 'transfer-browser-target' && message.requestId === requestId), false)
       } finally {
-        background.cleanup()
+        await background.cleanup()
       }
     })
   }
@@ -1004,7 +1004,7 @@ test('Team Knowledge retry preview keeps the original batch tab after a partial 
     background.emitNative({ type: 'connector_request', requestId: 'batch-retry-preview', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-partial', lease: 'reuse' })
     assert.deepEqual((await responseFor('batch-retry-preview')).browserTarget, confirmedTarget)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1038,7 +1038,7 @@ test('Team Knowledge completed batch release restores the configured follow targ
     background.emitNative({ type: 'connector_request', requestId: 'ordinary-follow', runId: 'run-follow', generation: 'generation-1', browserTarget: released.browserTarget, tool: 'list_work_tabs' })
     assert.equal((await responseFor('ordinary-follow')).browserTarget.tabId, 43)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1112,7 +1112,7 @@ test('Team Knowledge batch lease fails closed when its tab closes or navigates',
         assert.match(response.error, expectedError)
         assert.deepEqual(injectedTabIds, [])
       } finally {
-        background.cleanup()
+        await background.cleanup()
       }
     })
   }
@@ -1151,7 +1151,7 @@ test('Team Knowledge waits for a same-tab candidate update before resolving its 
     assert.equal(response.error, undefined)
     assert.equal(response.browserTarget.url, selected.url)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1194,7 +1194,7 @@ test('candidate updates serialize with settings saves without overwriting mode, 
       candidate: { browser: 'chrome', windowId: 7, tabId: 43, url: candidate.url },
     })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1231,7 +1231,7 @@ test('sidepanel persists pinned multiple tabs with a primary target, and none st
     })
     assert.deepEqual(savedNone.settings, { mode: 'none', pinnedTabs: [] })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 
   const noTargetBackground = await loadBackground({
@@ -1273,7 +1273,7 @@ test('pinned list_work_tabs returns every available checked tab, keeps the prima
     ])
     assert.equal(response.result.pages.find((page) => page.isPrimary)?.browserTarget.tabId, primary.tabId)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1289,7 +1289,7 @@ test('saving next-Run policy preserves the current Run until explicit restart-ha
     assert.deepEqual(restarted, { ok: true, url: 'http://127.0.0.1:43123' })
     assert.deepEqual(background.nativeMessages[1], { type: 'start', browserTarget: undefined })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1320,7 +1320,7 @@ test('restart waits for an in-flight settings write before resolving its next-Ru
     await restarting
     assert.deepEqual(background.nativeMessages[1], { type: 'start', browserTarget: undefined })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1340,7 +1340,7 @@ test('pinned mode follows the same tab after it navigates and refreshes the save
     assert.deepEqual(restored.settings.pinnedTabs, [live])
     assert.equal(restored.settings.primaryTabId, 52)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1369,7 +1369,7 @@ test('pinned list_work_tabs transfers the live URL after a same-tab navigation',
     const transfer = background.nativeMessages.find((message) => message.type === 'transfer-browser-target')
     assert.deepEqual(transfer.browserTarget, live)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1404,7 +1404,7 @@ test('read_work_tab captures visible text immediately and reports a host-permiss
     assert.equal(response.error.code, 'unsupported')
     assert.match(response.error.message, /host permission/i)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1444,7 +1444,7 @@ test('read_work_tab reads a non-primary pinned page without changing the write t
     assert.equal(response.result.isPrimary, false)
     assert.equal(injections[0]?.injectImmediately, true)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1482,7 +1482,7 @@ test('a hung read_work_tab does not stall a later list_work_tabs roster', async 
     ])
     assert.equal(background.nativeMessages.find((message) => message.requestId === 'hung-read'), undefined)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1498,7 +1498,7 @@ test('pinned restart rejects a pinned tab that was closed', async () => {
     assert.match(response.error, /Select it again/i)
     assert.equal(background.nativeMessages.length, 0)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1521,7 +1521,7 @@ test('a running Run moves only after the explicit runtime transfer-browser-targe
     assert.equal(typeof transfer.requestId, 'string')
     assert.deepEqual(transfer.browserTarget, { browser: 'chrome', windowId: 7, tabId: 43, url: second.url })
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })
 
@@ -1542,6 +1542,6 @@ test('Native transfer NACK rejects the correlated runtime request immediately', 
     assert.match(response.error, /does not match/i)
     assert.ok(performance.now() - startedAt < 100)
   } finally {
-    background.cleanup()
+    await background.cleanup()
   }
 })

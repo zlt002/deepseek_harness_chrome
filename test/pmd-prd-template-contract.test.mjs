@@ -12,7 +12,8 @@ const authorityPath = resolve(projectRoot, 'skills/pmd-prd/references/templates.
 const validatorPath = resolve(projectRoot, 'skills/pmd-prd/scripts/validate-deliverables.mjs')
 
 function prdTemplate(authority) {
-  return [...authority.matchAll(/```markdown\s*\n([\s\S]*?)\n```/g)].map((match) => match[1]).find((body) => body.includes('# PRD:'))
+  const normalized = authority.replaceAll('\r\n', '\n')
+  return [...normalized.matchAll(/```markdown\s*\n([\s\S]*?)\n```/g)].map((match) => match[1]).find((body) => body.includes('# PRD:'))
 }
 
 function materialise(body) {
