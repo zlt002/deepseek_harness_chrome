@@ -397,7 +397,7 @@ try {
   [System.IO.File]::WriteAllText($lockScriptPath, $lockSource, [System.Text.UTF8Encoding]::new($true))
   [System.IO.File]::WriteAllText($supervisorScriptPath, $supervisorSource, [System.Text.UTF8Encoding]::new($true))
   $config = @{
-    RegistryKey = (Join-Path $registryRoots[0] $legacyNativeHostNames[0])
+    RegistryKey = (Join-Path $registryRoots[0] $legacyAccrUiNativeHostNames[0])
     TargetPath = $targetPath
     ReadyPath = $readyPath
     SuspendedPath = $suspendedPath
@@ -540,7 +540,7 @@ function Assert-CandidateRegistrationFailureRollsBack {
     Assert-Equal (Read-Version $installRoot) '1.1.62' 'Failed candidate registration did not restore the previous version.'
     Assert-ExtensionResources $installRoot
     foreach ($registryRoot in $registryRoots) {
-      foreach ($nativeHostName in $legacyNativeHostNames) {
+      foreach ($nativeHostName in @($legacyAccrUiNativeHostNames + $deprecatedNativeHostNames)) {
         if (-not (Test-Path -LiteralPath (Join-Path $registryRoot $nativeHostName))) { throw "Failed candidate registration did not restore Native Messaging: $nativeHostName" }
       }
     }
@@ -585,7 +585,7 @@ function Assert-CandidateStartupFailureRollsBack {
   Assert-Equal (Read-Version $installRoot) '1.1.62' 'Candidate Native Host startup failure did not restore the previous version.'
   Assert-ExtensionResources $installRoot
   foreach ($registryRoot in $registryRoots) {
-    foreach ($nativeHostName in $legacyNativeHostNames) {
+    foreach ($nativeHostName in @($legacyAccrUiNativeHostNames + $deprecatedNativeHostNames)) {
       if (-not (Test-Path -LiteralPath (Join-Path $registryRoot $nativeHostName))) { throw "Candidate Native Host startup failure did not restore Native Messaging: $nativeHostName" }
     }
   }
@@ -746,19 +746,27 @@ try {
   Invoke-ProductUiSmoke
   Write-Host 'Windows install, Native Messaging, upgrade, rollback, and restore acceptance passed.'
 } finally {
-  if ($null -ne $respawnSupervisor) {
-    $respawnSupervisor.Process.Refresh()
-    if (-not $respawnSupervisor.Process.HasExited) { & taskkill.exe /PID $respawnSupervisor.Process.Id /T /F | Out-Null }
-  }
-  if ($null -ne $orphanRuntimeLockHolder) {
-    $orphanRuntimeLockHolder.Refresh()
-    if (-not $orphanRuntimeLockHolder.HasExited) { & taskkill.exe /PID $orphanRuntimeLockHolder.Id /T /F | Out-Null }
-  }
+  try {
+    if ($null -ne $respawnSupervisor) {
+      $respawnSupervisor.Process.Refresh()
+      if (-not $respawnSupervisor.Process.HasExited) { & taskkill.exe /PID $respawnSupervisor.Process.Id /T /F | Out-Null }
+    }
+  } catch { Write-Host "Acceptance cleanup warning: could not stop Native Host respawn supervisor: $($_.Exception.Message)" }
+  try {
+    if ($null -ne $orphanRuntimeLockHolder) {
+      $orphanRuntimeLockHolder.Refresh()
+      if (-not $orphanRuntimeLockHolder.HasExited) { & taskkill.exe /PID $orphanRuntimeLockHolder.Id /T /F | Out-Null }
+    }
+  } catch { Write-Host "Acceptance cleanup warning: could not stop orphan runtime lock holder: $($_.Exception.Message)" }
   foreach ($registryRoot in $registryRoots) {
-    foreach ($nativeHostName in @($nativeHostNames + $legacyNativeHostNames)) {
-      $key = Join-Path $registryRoot $nativeHostName
-      if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force }
+    foreach ($nativeHostName in @($nativeHostNames + $legacyAccrUiNativeHostNames + $deprecatedNativeHostNames)) {
+      try {
+        $key = Join-Path $registryRoot $nativeHostName
+        if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop }
+      } catch { Write-Host "Acceptance cleanup warning: could not remove Native Messaging registration $nativeHostName: $($_.Exception.Message)" }
     }
   }
-  if (Test-Path -LiteralPath $productKey) { Remove-Item -LiteralPath $productKey -Recurse -Force }
+  try {
+    if (Test-Path -LiteralPath $productKey) { Remove-Item -LiteralPath $productKey -Recurse -Force -ErrorAction Stop }
+  } catch { Write-Host "Acceptance cleanup warning: could not remove product registry state: $($_.Exception.Message)" }
 }
