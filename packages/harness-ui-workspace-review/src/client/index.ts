@@ -37,7 +37,7 @@ function rewriteDraft(action: WorkspaceReviewSessionAction): string {
 }
 
 function acceptPrompt(action: WorkspaceReviewSessionAction): string {
-  return `/pmd-prd 我已采纳左侧 Markdown Review 中已保存的 PRD（${action.displayPath}）。请保留这次采纳意图：如果当前已打开可创建的远程在线文档位置，立即执行 team_knowledge_batch_preview，再立即执行 team_knowledge_batch_create，不再向我请求第二次创建确认；如果尚未打开目标位置，只用通俗的话提示我打开目标在线文档所在的目录标签并选中它。用户选好目标后的下一次继续操作，自动继续同步，无需再点击采纳。仅在目标已变化、写入失败或同一在线文档的回读失败时才停止并说明原因。这不是恢复历史任务：只使用当前会话的绑定；若当前会话尚未绑定，请只围绕该文件新建本轮交付状态，禁止扫描、匹配或复用任何其他历史 Run/manifest。`
+  return `/pmd-prd 请把左侧已采纳的 PRD 写入当前打开的空白轻文档：${action.displayPath}。如果当前不是空白轻文档，请直接告诉我。`
 }
 
 interface ProducedFileFact {
@@ -165,14 +165,14 @@ export function apply(ctx: ClientContext): void {
       const actionRequest = sessionActionMessage(event, window.parent, bridge)
       if (actionRequest !== undefined) {
         const { requestId, action } = actionRequest
-        let target: WorkspaceReviewFeedbackDelivery
         try {
-          target = boundWorkspaceReviewTarget(ctx, action.harnessSessionId)
-          ctx.sessions.open(action.harnessSessionId as SessionId)
-          const binding = ctx.sessions.binding(action.harnessSessionId as SessionId)
           const conversation = ctx.get('conversation') as IConversation | undefined
-          if (binding === undefined || conversation === undefined) throw new Error('绑定的 Harness 对话当前不可用；请重试。')
+          if (conversation === undefined) throw new Error('右侧会话当前不可用；请重试。')
           if (action.action === 'rewrite') {
+            const target = boundWorkspaceReviewTarget(ctx, action.harnessSessionId)
+            ctx.sessions.open(action.harnessSessionId as SessionId)
+            const binding = ctx.sessions.binding(action.harnessSessionId as SessionId)
+            if (binding === undefined) throw new Error('绑定的 Harness 对话当前不可用；请重试。')
             const input = conversation.input.for(binding.ctx)
             const existing = input.state.getSnapshot().draft
             const addition = rewriteDraft(action)
@@ -181,12 +181,14 @@ export function apply(ctx: ClientContext): void {
             respondSessionAction(window.parent, bridge, requestId, true, undefined, delivery)
             return
           }
-          const scoped = ctx.sessions.scope(action.harnessSessionId as SessionId)
-          const scopedConversation = scoped?.get('conversation') as IConversation | undefined
-          if (scopedConversation === undefined) throw new Error('绑定的 Harness 对话当前不可用；请重试。')
-          void scopedConversation.send(acceptPrompt(action))
-            .then(() => respondSessionAction(window.parent, bridge, requestId, true, undefined, { action: 'accept', targetSessionId: target.targetSessionId, targetSessionTitle: target.targetSessionTitle, status: target.status }))
-            .catch(error => respondSessionAction(window.parent, bridge, requestId, false, error instanceof Error ? error.message : String(error)))
+          const currentSessionId = ctx.sessions.list.getSnapshot().current
+          if (currentSessionId === undefined) throw new Error('右侧当前没有可用会话；请先打开一个会话后重试。')
+          const target = boundWorkspaceReviewTarget(ctx, String(currentSessionId))
+          const binding = ctx.sessions.binding(currentSessionId)
+          if (binding === undefined) throw new Error('右侧当前会话不可用；请重试。')
+          const input = conversation.input.for(binding.ctx)
+          input.setDraft(acceptPrompt(action))
+          respondSessionAction(window.parent, bridge, requestId, true, undefined, { action: 'accept', targetSessionId: target.targetSessionId, targetSessionTitle: target.targetSessionTitle, status: 'draft_ready' })
         } catch (error) {
           respondSessionAction(window.parent, bridge, requestId, false, error instanceof Error ? error.message : String(error))
         }

@@ -357,6 +357,28 @@ test('rejects a PMD batch that is not one complete company-template PRD', async 
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
+test('allows a .java locator only in a PMD child item locator table', async () => {
+  const body = (await authoritativePmdBody()).replace('| 前端代码文件 | [待确认]（未取得已选代码库证据，无法确认实现位置） |', '| 前端代码文件 | src/contracts/ContractDetail.java |')
+  const items = [{ name: 'REQ_CRM_PRD', body }]
+  const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
+  try {
+    recordPmdReviewAdoption(harness, body)
+    const response = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'pmd:req-code-locator', items }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
+    assert.equal(response.result.isError, undefined, JSON.stringify(response))
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('rejects a .java locator in a fake PMD locator table outside a child item', async () => {
+  const body = `${await authoritativePmdBody()}\n\n## 第八章伪定位\n\n| 定位项 | 位置 |\n|---|---|\n| 前端代码文件 | src/contracts/ContractDetail.java |`
+  const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
+  try {
+    recordPmdReviewAdoption(harness, body)
+    const response = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'pmd:req-fake-locator', items: [{ name: 'REQ_CRM_PRD', body }] }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
+    assert.equal(response.result.isError, true)
+    assert.match(response.result.content[0].text, /pmd_prd_template_invalid: PRD document contains a code locator: src\/contracts\/ContractDetail.java/)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
 test('creates the exact adopted PMD directly without a model receipt or page confirmation', async () => {
   const prdBody = await authoritativePmdBody()
   const harness = await open((request) => request.action === 'inspect_parent'
@@ -385,13 +407,14 @@ test('keeps PMD adoption bound to its session, exact body, and first batch id', 
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
   try {
     recordPmdReviewAdoption(harness, prdBody)
+    harness.connector.bindBrowserTarget('batch-run-after-review', target)
     const changed = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'pmd:req-crm', items: [{ ...items[0], body: `${prdBody}\n` }] }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
     assert.equal(changed.result.isError, true)
     assert.match(changed.result.content[0].text, /pmd_prd_review_adoption_content_changed/)
     const crossSession = await harness.callTool('team_knowledge_batch_preview', 2, { batchId: 'pmd:req-crm', items }, { 'io.deepseek.harness/sessionId': 'other-session' })
     assert.equal(crossSession.result.isError, true)
     assert.match(crossSession.result.content[0].text, /pmd_prd_review_adoption_required/)
-    const first = await harness.callTool('team_knowledge_batch_preview', 3, { batchId: 'pmd:req-crm', items }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
+    const first = await harness.callTool('team_knowledge_batch_preview', 3, { batchId: 'pmd:req-crm', items }, { 'io.deepseek.harness/sessionId': 'tool-session', 'io.deepseek.harness/parentSessionId': 'pmd-session' })
     assert.equal(first.result.isError, undefined)
     const otherBatch = await harness.callTool('team_knowledge_batch_preview', 4, { batchId: 'pmd:req-other', items }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
     assert.equal(otherBatch.result.isError, true)
@@ -399,8 +422,7 @@ test('keeps PMD adoption bound to its session, exact body, and first batch id', 
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('reports a body-free online-document event only after a PMD Verified Write', async () => {
-  const prdBody = await authoritativePmdBody()
+test('reports a body-free online-document event after every batch Verified Write', async () => {
   const events = []
   const harness = await open(
     (request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : { ...verified(request, '701'), readback: { body: visibleMarkdownReadback(request.body) } },
@@ -408,15 +430,14 @@ test('reports a body-free online-document event only after a PMD Verified Write'
     { reportPrdEvent: async (event) => { events.push(event) } },
   )
   try {
-    const items = [{ name: 'REQ_CRM_PRD', body: prdBody }]
-    recordPmdReviewAdoption(harness, prdBody)
-    const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'pmd:req-telemetry', items }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
-    const result = await create(harness, 'pmd:req-telemetry', plan.result.structuredContent.challenge)
+    const items = [{ name: '普通在线文档', body: '# 内容' }]
+    const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'batch:req-telemetry', items }, { 'io.deepseek.harness/sessionId': 'document-session' })
+    const result = await create(harness, 'batch:req-telemetry', plan.result.structuredContent.challenge)
     assert.equal(result.result.structuredContent.status, 'verified_write', JSON.stringify(result))
     assert.equal(events.length, 1)
     assert.deepEqual({ ...events[0], occurredAt: '<time>', eventId: '<id>' }, {
-      eventId: '<id>', eventType: 'document_published', outcome: 'succeeded', occurredAt: '<time>', runId: 'batch-run', batchId: 'pmd:req-telemetry', itemIndex: 0,
-      documentName: 'REQ_CRM_PRD', documentCatalogId: '701', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/701?id=701',
+      eventId: '<id>', eventType: 'document_published', outcome: 'succeeded', occurredAt: '<time>', runId: 'batch-run', batchId: 'batch:req-telemetry', itemIndex: 0,
+      documentName: '普通在线文档', documentCatalogId: '701', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/701?id=701',
     })
     assert.equal('body' in events[0], false)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }

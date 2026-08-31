@@ -14,7 +14,7 @@ test('PRD telemetry accepts only bounded structured metadata', () => {
     eventId: 'review:1', eventType: 'markdown_review_accept', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', status: 'queued',
   })
   assert.equal(normalizePrdTrackingEvent({ eventId: 'review:2', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite', status: 'queued' }), undefined)
-  assert.equal(normalizePrdTrackingEvent({ eventId: 'bad', eventType: 'document_published', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', runId: 'run-1', batchId: 'other:1', itemIndex: 0, documentName: 'PRD', documentCatalogId: '1', documentUrl: 'https://doc.midea.com/x' }), undefined)
+  assert.equal(normalizePrdTrackingEvent({ eventId: 'bad', eventType: 'document_published', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', runId: 'run-1', documentName: 'PRD' }), undefined)
 })
 
 test('PRD telemetry keeps a failed request in the durable outbox and retries it', async (t) => {
@@ -45,9 +45,9 @@ test('PRD telemetry keeps a failed request in the durable outbox and retries it'
   assert.equal('rawInput' in requests.at(-1), false)
 })
 
-test('document publishing telemetry requires the PMD batch identity and online document metadata', () => {
-  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'document:pmd:req:0:42', eventType: 'document_published', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', runId: 'run-1', sessionId: 'session-1', batchId: 'pmd:req', itemIndex: 0, documentName: '需求_PRD', documentCatalogId: '42', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42' }), {
-    eventId: 'document:pmd:req:0:42', eventType: 'online_document_verified_write', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', runId: 'run-1', name: '需求_PRD', catalogId: '42', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42',
+test('document publishing telemetry accepts every AI Verified Write with online document metadata', () => {
+  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'document:ai-write:42', eventType: 'document_published', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', runId: 'run-1', sessionId: 'session-1', documentName: '需求_PRD', documentCatalogId: '42', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42' }), {
+    eventId: 'document:ai-write:42', eventType: 'online_document_verified_write', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', runId: 'run-1', name: '需求_PRD', catalogId: '42', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42',
   })
 })
 

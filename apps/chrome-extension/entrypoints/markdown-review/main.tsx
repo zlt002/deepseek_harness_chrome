@@ -15,7 +15,7 @@ import {
   type PreparedWrite,
 } from './protocol'
 import { reduceReviewState, type ReviewState } from './review-state'
-import { adoptionBlockedReason, beginCommit, canUpdateAnnotationDeliveryStatus, failUnsettledAnnotations, isCurrentCommit, pendingAnnotationCount, reviewSaveBlockedReason, reviewSelectionProposal, settleCommit, shouldProtectLocalReviewWork, updateAnnotationDeliveryStatus, verifiedWriteCleanupAllowed, type CommitAttempt } from './review-state-safety'
+import { beginCommit, canUpdateAnnotationDeliveryStatus, failUnsettledAnnotations, isCurrentCommit, pendingAnnotationCount, reviewSaveBlockedReason, reviewSelectionProposal, settleCommit, shouldProtectLocalReviewWork, updateAnnotationDeliveryStatus, verifiedWriteCleanupAllowed, type CommitAttempt } from './review-state-safety'
 import { VisualMarkdownEditor, type VisualMarkdownEditorHandle, type VisualReviewAnnotation } from './visual-markdown-editor'
 import type { VisualSelection } from './visual-selection'
 import { MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS } from './delivery-timeouts'
@@ -23,7 +23,7 @@ import './style.css'
 
 type LocalAnnotation = MarkdownReviewAnnotation & VisualReviewAnnotation
 type PreparedWriteState = { preparation: PreparedWrite; content: string; idempotencyKey: string }
-type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'session-action'; action: 'rewrite' | 'accept' } | { kind: 'proposals' } | { kind: 'prepare'; content: string } | { kind: 'commit'; content: string; token: string }
+type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'session-action'; action: 'rewrite' | 'accept' } | { kind: 'proposals' } | { kind: 'prepare'; content: string; adoption?: true } | { kind: 'commit'; content: string; token: string; adoption?: true }
 
 const initialState: ReviewState = { status: 'initializing' }
 const SIDE_PANEL_STARTUP_RETRY_DELAYS_MS = [500, 1_000, 2_000, 3_000] as const
@@ -75,6 +75,8 @@ function App(): React.JSX.Element {
   const [saveNotice, setSaveNotice] = useState<string>()
   const [verifiedSaveNoticeToken, setVerifiedSaveNoticeToken] = useState<string>()
   const [sessionActionPending, setSessionActionPending] = useState<'rewrite' | 'accept'>()
+  const [adoptionConfirmation, setAdoptionConfirmation] = useState<MarkdownReviewSnapshot>()
+  const [adoptionReady, setAdoptionReady] = useState(false)
   const portRef = useRef<chrome.runtime.Port | undefined>(undefined)
   const pendingRef = useRef(new Map<string, PendingRequest>())
   const deliveryTimeoutsRef = useRef(new Map<string, number>())
@@ -348,7 +350,7 @@ function App(): React.JSX.Element {
           setAiTarget({ id: message.targetSessionId!, title: message.targetSessionTitle! })
           setProposalNotice(message.action === 'rewrite'
             ? `已切换到“${message.targetSessionTitle}”，重写提示已加入输入框，请补充原因和问题后手动发送。`
-            : `已在“${message.targetSessionTitle}”采纳并继续当前 Skill。`)
+            : `执行指令已放入右侧输入框，请选择空白轻文档后发送。`)
         } else {
           setProposalNotice(`无法${expected.action === 'rewrite' ? '准备重写' : '采纳'}：${message.error?.message ?? '未知错误'}`)
           if (message.error?.reopenRequired) dispatch({ type: 'request-failed', error: message.error })
@@ -356,11 +358,25 @@ function App(): React.JSX.Element {
       }
       if (message.type === 'markdown-review-prepare-write-response' && expected.kind === 'prepare') {
         if (!message.ok || message.preparation === undefined) {
-          showSaveNotice(`无法准备保存：${message.error?.message ?? '未知错误'}`)
+          if (expected.adoption) { setSessionActionPending(undefined); setProposalNotice(`无法采纳：${message.error?.message ?? '无法准备保存当前内容'}`) }
+          else showSaveNotice(`无法准备保存：${message.error?.message ?? '未知错误'}`)
         } else if (message.preparation.status === 'conflict') {
           setPreparedWrite(undefined)
           preparedWriteRef.current = undefined
-          showSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
+          if (expected.adoption) { setSessionActionPending(undefined); setProposalNotice('无法采纳：文件已被外部修改，未覆盖任何内容。请重新读取后再试。') }
+          else showSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
+        } else if (expected.adoption) {
+          const idempotencyKey = requestId()
+          const attempt = beginCommit(commitRef.current, { token: requestId(), idempotencyKey, content: expected.content })
+          if (!attempt.started) { setSessionActionPending(undefined); setProposalNotice('无法采纳：当前保存仍在确认中。'); return }
+          commitRef.current = attempt.active
+          setCommitting(true)
+          pendingRef.current.set(attempt.active.token, { kind: 'commit', content: attempt.active.content, token: attempt.active.token, adoption: true })
+          if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-commit-write-request', requestId: attempt.active.token, reviewId: reviewId!, approval: message.preparation.approval, idempotencyKey, content: expected.content })) {
+            pendingRef.current.delete(attempt.active.token)
+            commitRef.current = settleCommit(commitRef.current, attempt.active.token)
+            setCommitting(false); setSessionActionPending(undefined); dispatch({ type: 'port-disconnected' })
+          }
         } else {
           const nextPreparedWrite = { preparation: message.preparation, content: expected.content, idempotencyKey: requestId() }
           preparedWriteRef.current = nextPreparedWrite
@@ -374,10 +390,17 @@ function App(): React.JSX.Element {
         setPreparedWrite(undefined)
         preparedWriteRef.current = undefined
         if (!message.ok || message.result === undefined) {
-          showSaveNotice(`保存未完成：${message.error?.message ?? '未知错误'}`)
+          if (expected.adoption) { setSessionActionPending(undefined); setProposalNotice(`无法采纳：${message.error?.message ?? '当前内容未保存'}`) }
+          else showSaveNotice(`保存未完成：${message.error?.message ?? '未知错误'}`)
         } else if (message.result.status === 'verified_write') {
           const prior = snapshotRef.current
-          if (prior === undefined) { showSaveNotice('保存已验证；请重新读取文件。'); return }
+          if (prior === undefined) {
+            if (expected.adoption) {
+              setSessionActionPending(undefined)
+              setProposalNotice('无法采纳：保存已验证，但当前文件快照已失效。请重新读取后再试。')
+            } else showSaveNotice('保存已验证；请重新读取文件。')
+            return
+          }
           const next = { ...prior, resource: message.result.resource, content: expected.content }
           snapshotRef.current = next
           draftRef.current = expected.content
@@ -424,10 +447,16 @@ function App(): React.JSX.Element {
             verifiedSaveNoticeTokenRef.current = verifiedNoticeToken
             setVerifiedSaveNoticeToken(verifiedNoticeToken); showSaveNotice(VERIFIED_SAVE_NOTICE)
           }
+          if (expected.adoption) {
+            setSessionActionPending(undefined)
+            setAdoptionReady(true)
+          }
         } else if (message.result.status === 'conflict') {
-          showSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
+          if (expected.adoption) { setSessionActionPending(undefined); setProposalNotice('无法采纳：文件已被外部修改，未覆盖任何内容。请重新读取后再试。') }
+          else showSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
         } else {
-          showSaveNotice(`写入状态不确定：${message.result.message} 请重新读取，不会自动重试。`)
+          if (expected.adoption) { setSessionActionPending(undefined); setProposalNotice(`无法采纳：写入状态不确定：${message.result.message} 请重新读取后再试。`) }
+          else showSaveNotice(`写入状态不确定：${message.result.message} 请重新读取，不会自动重试。`)
         }
       }
     }
@@ -510,16 +539,6 @@ function App(): React.JSX.Element {
   const failedAnnotations = annotations.filter((annotation) => annotation.deliveryStatus === 'failed')
   const failedAnnotation = failedAnnotations[0]
   const saveBlockedReason = reviewSaveBlockedReason({ annotationCount: pendingAnnotationCount(annotations), candidateReviewActive })
-  const acceptBlockedReason = adoptionBlockedReason({
-    snapshotContent: snapshot?.content,
-    editorMarkdown: draft,
-    annotationCount: pendingAnnotationCount(annotations),
-    candidateReviewActive,
-    preparedWrite: preparedWrite !== undefined,
-    committing,
-    externalUpdatePending,
-    truncated: snapshot?.truncated === true,
-  })
   const onMarkdownChange = useCallback((markdown: string) => {
     draftRef.current = markdown
     setDraft(markdown)
@@ -559,22 +578,10 @@ function App(): React.JSX.Element {
   }, [failSendingAnnotations, post, reviewId])
   deliverAnnotationRef.current = deliverAnnotation
 
-  const runSessionAction = useCallback((action: 'rewrite' | 'accept') => {
+  const runSessionAction = useCallback((action: 'rewrite' | 'accept', confirmed = false) => {
     const activeSnapshot = snapshotRef.current
     if (activeSnapshot === undefined || reviewId === undefined || sessionActionPending !== undefined) return
-    if (action === 'accept') {
-      const blocked = adoptionBlockedReason({
-        snapshotContent: activeSnapshot.content,
-        editorMarkdown: syncEditorMarkdown(),
-        annotationCount: pendingAnnotationCount(annotationsRef.current),
-        candidateReviewActive: candidateReviewActiveRef.current,
-        preparedWrite: preparedWriteRef.current !== undefined,
-        committing: commitRef.current !== undefined,
-        externalUpdatePending,
-        truncated: activeSnapshot.truncated,
-      })
-      if (blocked !== undefined) { setProposalNotice(blocked); return }
-    }
+    if (action === 'accept' && !confirmed) { setAdoptionConfirmation(activeSnapshot); return }
     const request = requestId()
     pendingRef.current.set(request, { kind: 'session-action', action })
     setSessionActionPending(action)
@@ -594,6 +601,27 @@ function App(): React.JSX.Element {
     }, MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS)
     deliveryTimeoutsRef.current.set(request, timeout)
   }, [externalUpdatePending, post, reviewId, sessionActionPending, syncEditorMarkdown])
+
+  useEffect(() => {
+    if (!adoptionReady) return
+    setAdoptionReady(false)
+    runSessionAction('accept', true)
+  }, [adoptionReady, runSessionAction])
+
+  const confirmAdoption = () => {
+    const activeSnapshot = snapshotRef.current
+    if (activeSnapshot === undefined || reviewId === undefined) return
+    setAdoptionConfirmation(undefined)
+    const content = syncEditorMarkdown()
+    if (content === activeSnapshot.content) { runSessionAction('accept', true); return }
+    const request = requestId()
+    pendingRef.current.set(request, { kind: 'prepare', content, adoption: true })
+    setSessionActionPending('accept')
+    const expected = { resourceId: activeSnapshot.resource.resourceId, revision: activeSnapshot.resource.revision, fingerprint: activeSnapshot.resource.fingerprint }
+    if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-prepare-write-request', requestId: request, reviewId, expected, content })) {
+      pendingRef.current.delete(request); setSessionActionPending(undefined); dispatch({ type: 'port-disconnected' })
+    }
+  }
 
   const submitAnnotation = useCallback((selection: VisualSelection, comment: string): boolean => {
     const activeSnapshot = snapshotRef.current
@@ -776,7 +804,7 @@ function App(): React.JSX.Element {
         {snapshot?.truncated === true && <span className="status truncated" title="文件快照已截断，不能安全保存或发送完整文档">内容已截断</span>}
         <span className="history-actions" role="group" aria-label="编辑历史"><button type="button" className="secondary icon-button" title="撤销（Ctrl+Z）" aria-label="撤销（Ctrl+Z）" onClick={() => { if (editorRef.current?.undo() === true) syncEditorMarkdown() }}>↶</button><button type="button" className="secondary icon-button" title="重做（Ctrl+Y）" aria-label="重做（Ctrl+Y）" onClick={() => { if (editorRef.current?.redo() === true) syncEditorMarkdown() }}>↷</button></span>
         <button type="button" className="review-session-action is-rewrite" onClick={() => runSessionAction('rewrite')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中准备重写提示">↺ 重写</button>
-        <button type="button" className="review-session-action is-accept" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required' || acceptBlockedReason !== undefined} title={acceptBlockedReason ?? '在绑定会话中采纳并继续 Skill'}>✓ 采纳</button>
+        <button type="button" className="review-session-action is-accept" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required' || snapshot?.truncated === true} title={snapshot?.truncated === true ? '内容已截断，不能安全采纳' : '把执行指令放入右侧当前会话'}>✓ 采纳</button>
         {dirty && snapshot?.truncated !== true && <button type="button" onClick={prepareSave} disabled={preparedWrite !== undefined || committing || state.status === 'reopen-required' || saveBlockedReason !== undefined} title={saveBlockedReason ?? '保存当前草稿'}>保存草稿</button>}
         <button className="secondary icon-button" type="button" title="重新读取" aria-label="重新读取" onClick={requestSnapshotReload} disabled={state.status === 'loading' || state.status === 'reopen-required'}>↻</button>
       </div>
@@ -795,6 +823,13 @@ function App(): React.JSX.Element {
         <h2 id="write-confirmation-title">确认写入草稿</h2>
         <p>将把当前草稿写入已核对的文件版本。确认只在一分钟内有效。</p>
         <footer><button type="button" onClick={() => { preparedWriteRef.current = undefined; setPreparedWrite(undefined); showSaveNotice(undefined) }} className="secondary" disabled={committing}>取消</button><button type="button" onClick={commitSave} disabled={committing}>{committing ? '正在确认写入…' : '确认写入'}</button></footer>
+      </section>
+    </div>}
+    {adoptionConfirmation !== undefined && <div className="confirmation-dialog-backdrop">
+      <section className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="adoption-confirmation-title">
+        <h2 id="adoption-confirmation-title">确认采纳</h2>
+        <p>确认把执行指令放到右侧当前会话吗？</p>
+        <footer><button type="button" className="secondary" onClick={() => setAdoptionConfirmation(undefined)} disabled={sessionActionPending !== undefined}>取消</button><button type="button" onClick={confirmAdoption} disabled={sessionActionPending !== undefined}>确认</button></footer>
       </section>
     </div>}
     {showRecoveryState ? <section className={`review-recovery${snapshot === undefined && state.error === undefined ? ' is-loading' : ''}`} role={state.error === undefined ? undefined : 'alert'}>

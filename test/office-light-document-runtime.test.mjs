@@ -514,6 +514,56 @@ test('light-document runtime inserts mermaid drawings, structured blocks, and se
   assert.equal(rejected.error.code, 'unsupported')
 })
 
+test('light-document runtime inserts a Mermaid drawing immediately after the stable current selection', async () => {
+  const call = await runtime({
+    initialXml: '<apcanvas><outlineTitle id="title">演示文档</outlineTitle><p id="before">前置正文</p><p id="selected-one">能力一</p><p id="selected-two">能力二</p><p id="after">后置正文</p></apcanvas>',
+    otlSelection: { from: 10, to: 20, anchor: 10, head: 20, empty: false },
+    selectionInfo: { selected_tag_ids: ['selected-one', 'selected-two'] },
+    selection: {
+      async getSelectionContent() { return { text: '能力一 能力二' } },
+      async getSelectionAnchor() { return { blockId: 'selected-one', start: 10, end: 20 } },
+    },
+  })
+  const selected = await call({ action: 'selection' })
+  const drawing = await call({
+    action: 'write', operation: 'insert_drawing', resource: selected.result.resource,
+    payload: {
+      mermaid: 'flowchart TD\n开始 --> 结束', position: 'after_selection',
+      expectedSelectionFingerprint: selected.result.document.selection.selectionFingerprint,
+    },
+  })
+  assert.equal(drawing.ok, true, JSON.stringify(drawing))
+  assert.deepEqual(Array.from(drawing.result.observed.insertion.selectedTagIds), ['selected-one', 'selected-two'])
+  const after = await call({ action: 'read' })
+  assert.deepEqual(Array.from(after.result.document.blocks, (block) => block.id), ['before', 'selected-one', 'selected-two', null, 'after'])
+  assert.equal(after.result.document.blocks[3].language, 'mermaid')
+})
+
+test('light-document preview rejects incompatible Mermaid and stale insertion or deletion targets before approval', async () => {
+  const call = await runtime({ initialXml: '<apcanvas><outlineTitle id="title">演示文档</outlineTitle><p id="current">当前正文</p></apcanvas>' })
+  const read = await call({ action: 'read' })
+  const incompatible = await call({ action: 'inspect_write', operation: 'insert_drawing', resource: read.result.resource, payload: { mermaid: 'xychart-beta\n  x-axis [一月, 二月]\n  bar [1, 2]', position: 'end' } })
+  assert.equal(incompatible.ok, false)
+  assert.equal(incompatible.error.code, 'invalid_range')
+  assert.match(incompatible.error.message, /xychart-beta.*not supported|not supported.*xychart-beta/i)
+
+  const compatible = await call({ action: 'inspect_write', operation: 'insert_drawing', resource: read.result.resource, payload: { mermaid: 'sequenceDiagram\n参与者甲->>参与者乙: 确认', position: 'end' } })
+  assert.equal(compatible.ok, true, JSON.stringify(compatible))
+  const sequence = await call({ action: 'write', operation: 'insert_drawing', resource: read.result.resource, payload: { mermaid: 'sequenceDiagram\n参与者甲->>参与者乙: 确认', position: 'end' } })
+  assert.equal(sequence.ok, true, JSON.stringify(sequence))
+  assert.equal(sequence.result.observed.observedBlocks[0].language, 'mermaid')
+
+  const staleInsert = await call({ action: 'inspect_write', operation: 'insert_drawing', resource: read.result.resource, payload: { mermaid: 'flowchart TD\n开始 --> 结束', position: 'after', id: 'stale-id' } })
+  assert.equal(staleInsert.ok, false)
+  assert.equal(staleInsert.error.code, 'invalid_range')
+  assert.match(staleInsert.error.message, /light_document_read/)
+
+  const staleDelete = await call({ action: 'inspect_write', operation: 'blocks_delete', resource: read.result.resource, payload: { blocks: [{ id: 'stale-id' }] } })
+  assert.equal(staleDelete.ok, false)
+  assert.equal(staleDelete.error.code, 'invalid_range')
+  assert.match(staleDelete.error.message, /light_document_read/)
+})
+
 test('light-document runtime atomically replaces a stable whole-block selection when replaceContent is unavailable', async () => {
   const state = {}
   const firstId = 'pxbYLFAvkv'; const secondId = 'pxbK7R0v8n'

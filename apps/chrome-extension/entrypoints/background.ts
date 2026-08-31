@@ -4904,9 +4904,7 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Deli
 function markdownReviewSessionActionDelivery(value: unknown, action: 'rewrite' | 'accept'): MarkdownReviewSessionActionDelivery | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   const item = value as Record<string, unknown>
-  const expectedStatus = action === 'rewrite'
-    ? item.status === 'draft_ready'
-    : item.status === 'queued' || item.status === 'processing'
+  const expectedStatus = item.status === 'draft_ready'
   return item.ok === true && item.action === action && expectedStatus
     && reviewId(item.targetSessionId) && boundedReviewText(item.targetSessionTitle, 2_048)
     ? { action, targetSessionId: item.targetSessionId, targetSessionTitle: item.targetSessionTitle, status: item.status as MarkdownReviewSessionActionDelivery['status'] }
@@ -4919,9 +4917,6 @@ async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, 
   if (request.action === 'accept' && snapshot.truncated) throw new Error('Markdown file snapshot is truncated; reopen a complete PRD before adopting it.')
   if (request.revision !== snapshot.resource.revision || request.fingerprint !== snapshot.resource.fingerprint) {
     throw new Error('Markdown file changed since this review. Re-read and review the current saved file before adopting it.')
-  }
-  if (request.action === 'accept') {
-    await recordPmdPrdReviewAdoption({ harnessSessionId: record.harnessSessionId, reviewId: record.reviewId, resourceId: record.resourceId, displayPath: record.displayPath, revision: snapshot.resource.revision, fingerprint: snapshot.resource.fingerprint }, snapshot.content)
   }
   let response: unknown
   try {
@@ -4943,6 +4938,22 @@ async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, 
   }
   const delivery = markdownReviewSessionActionDelivery(response, request.action)
   if (delivery === undefined) throw new Error((response as { error?: unknown } | undefined)?.error as string ?? SIDE_PANEL_UNAVAILABLE_MESSAGE)
+  if (request.action === 'accept') {
+    if (record.sourceTabId === undefined) throw new Error('执行指令已放入右侧输入框，但未找到当前 Browser Target，无法打开在线文档。请重新打开 PRD 后再采纳。')
+    await recordPmdPrdReviewAdoption({
+      harnessSessionId: delivery.targetSessionId,
+      reviewId: record.reviewId,
+      resourceId: record.resourceId,
+      displayPath: record.displayPath,
+      revision: snapshot.resource.revision,
+      fingerprint: snapshot.resource.fingerprint,
+    }, snapshot.content)
+    try {
+      await chrome.tabs.update(record.sourceTabId, { url: 'https://doc.midea.com/docs', active: true })
+    } catch (error) {
+      throw new Error(`执行指令已放入右侧输入框，但无法打开在线文档：${asError(error)}`)
+    }
+  }
   return delivery
 }
 

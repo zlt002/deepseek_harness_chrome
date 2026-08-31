@@ -11,6 +11,9 @@ const ALLOWED_MISSING_MARKERS = ['[待确认]', '不适用（原因）']
 const FINAL_FIELD_LABEL = /\[(?:必填|选填|建议填写|涉及多系统交互时必填)\]|【选填】/
 const ACCEPTANCE_CATEGORIES = ['正常情况', '异常情况', '边界情况', '权限情况', '兼容情况']
 const IMPACT_RISK_HEADER = ['直接改动', '关联影响', '可能风险', '建议处理', '是否需要产品决策']
+const LOCATOR_HEADER = ['定位项', '位置']
+const LOCATOR_ITEMS = ['PC 页面 URL', '前端代码文件', '后端代码文件/接口']
+const SYSTEM_BOUNDARIES = ['超时', '并发', '数据量极值']
 
 function normaliseText(value) { return value.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n') }
 
@@ -152,29 +155,74 @@ function validateFunctionalRequirements(body) {
     return ['PRD functional requirements must keep 正常业务场景 → 边界场景 → 异常业务场景']
   }
 
-  const functionStarts = lines.flatMap((line, index) => index > normalStart && index < boundaryStart && /^###\s+功能[:：]\s*\S/.test(line.trim()) ? [index] : [])
-  if (functionStarts.length === 0) return ['PRD normal business scenarios must contain at least one ### 功能： heading']
-  const required = ['#### 现状', '#### 调整方式', '#### 输入/输出规则', '#### 调整后效果']
-  for (let functionIndex = 0; functionIndex < functionStarts.length; functionIndex += 1) {
-    const start = functionStarts[functionIndex]
-    const end = functionStarts[functionIndex + 1] ?? boundaryStart
-    const blockLines = lines.slice(start, end)
-    const functionName = lines[start].trim()
-    let cursor = -1
-    for (const heading of required) {
-      const index = exactHeadingIndex(blockLines, heading, cursor)
-      if (index < 0) {
-        errors.push(`${functionName} is missing or reorders: ${heading}`)
-        break
-      }
-      cursor = index
+  if (lines.slice(normalStart + 1, boundaryStart).some((line) => /^##\s+(?:（四）)?(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()) || /^(?:###|##)\s+(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()))) errors.push('PRD normal business scenarios must not add a change overview or locator overview')
+  const changeStarts = lines.flatMap((line, index) => index > normalStart && index < boundaryStart && /^###\s+4\.\d+\s+改动点：\S/.test(line.trim()) ? [index] : [])
+  if (changeStarts.length === 0) return ['PRD normal business scenarios must contain at least one ### 4.x 改动点： heading']
+  for (let changeIndex = 0; changeIndex < changeStarts.length; changeIndex += 1) {
+    const start = changeStarts[changeIndex]
+    const end = changeStarts[changeIndex + 1] ?? boundaryStart
+    const changeHeading = lines[start].trim()
+    const changeNumber = changeHeading.match(/^###\s+4\.(\d+)\s+改动点：/)?.[1]
+    const childStarts = lines.flatMap((line, index) => index > start && index < end && /^####\s+4\.\d+\.\d+\s+\S+：\S/.test(line.trim()) ? [index] : [])
+    if (childStarts.length === 0) { errors.push(`${changeHeading} must contain at least one specific child item`); continue }
+    for (let childIndex = 0; childIndex < childStarts.length; childIndex += 1) {
+      const childStart = childStarts[childIndex]
+      const childEnd = childStarts[childIndex + 1] ?? end
+      const childNumber = lines[childStart].trim().match(/^####\s+4\.(\d+)\.\d+\s+/)?.[1]
+      if (childNumber !== changeNumber) errors.push(`${lines[childStart].trim()} must be numbered under ${changeHeading}`)
+      errors.push(...validateFunctionalChild(lines.slice(childStart, childEnd)))
     }
-    const block = blockLines.join('\n')
-    const headers = tableHeaders(block)
-    if (!headers.some((header) => equalRows(header, ['输入字段或操作', '类型/触发方式', '是否必填', '长度/格式/取值范围', '校验或操作条件']))) errors.push(`${functionName} is missing the complete input rules table`)
-    if (!headers.some((header) => equalRows(header, ['输出结果', '展示/数据格式', '触发条件']))) errors.push(`${functionName} is missing the complete output rules table`)
+  }
+  const boundaryLines = lines.slice(boundaryStart + 1, abnormalStart)
+  const boundarySection = boundaryLines.join('\n')
+  const boundaryRows = tableDataRows(boundarySection, ['系统边界', '系统表现', '[待确认]及影响'])
+  const estimatedDays = estimatedPersonDays(lines)
+  const notApplicable = boundarySection.includes('不适用（预估人天不超过10人天）')
+  if (estimatedDays !== null && estimatedDays <= 10 && notApplicable) return errors
+  for (const boundary of SYSTEM_BOUNDARIES) {
+    const row = boundaryRows.find((candidate) => candidate[0] === boundary)
+    if (!row || row.length !== 3 || row.some((cell) => cell.length === 0)) { errors.push(`PRD boundary scenarios must define system behaviour for: ${boundary}`); continue }
+    if (estimatedDays !== null && row[1].includes('[待确认]')) errors.push(`PRD boundary scenarios must define system behaviour for: ${boundary}`)
+    if (estimatedDays === null && (!row[1].includes('[待确认]') || row[2].includes('[待确认]') || row[2].length < 4)) errors.push(`PRD boundary scenarios must retain [待确认] and impact for unknown 预估人天: ${boundary}`)
   }
   return errors
+}
+
+function validateFunctionalChild(lines) {
+  const errors = []; const childHeading = lines[0]?.trim() ?? 'PRD child item'
+  const typeLine = lines.find((line) => /^\*\*变更类型：\*\*\s*(改造|新增)\s*$/.test(line.trim()))
+  const changeType = typeLine?.trim().replace(/^\*\*变更类型：\*\*\s*/, '')
+  if (!changeType) { errors.push(`${childHeading} must declare 变更类型：改造 or 新增`); return errors }
+  const block = lines.join('\n'); const locatorRows = tableDataRows(block, LOCATOR_HEADER)
+  for (const item of LOCATOR_ITEMS) {
+    const row = locatorRows.find((candidate) => candidate[0] === item)
+    if (!row || row.length !== 2 || !row[1]) errors.push(`${childHeading} is missing locator: ${item}`)
+    else if (row[1].includes('[待确认]') && !/（[^）]+）/.test(row[1])) errors.push(`${childHeading} must explain the impact when locator ${item} is [待确认]`)
+  }
+  if (changeType === '改造') {
+    const original = exactHeadingIndex(lines, '##### 原逻辑'); const updated = exactHeadingIndex(lines, '##### 调整后逻辑', original)
+    if (original < 0 || updated < 0) errors.push(`${childHeading} is a 改造 item and must compare 原逻辑 with 调整后逻辑`)
+    else {
+      if (!headingHasContent(lines, original)) errors.push(`${childHeading} 原逻辑 must contain content`)
+      if (!headingHasContent(lines, updated)) errors.push(`${childHeading} 调整后逻辑 must contain content`)
+    }
+  } else {
+    const rules = exactHeadingIndex(lines, '##### 交互与规则')
+    if (exactHeadingIndex(lines, '##### 原逻辑') >= 0 || exactHeadingIndex(lines, '##### 调整后逻辑') >= 0) errors.push(`${childHeading} is a 新增 item and must not retain 原逻辑 or 调整后逻辑 headings`)
+    if (rules < 0 || !headingHasContent(lines, rules)) errors.push(`${childHeading} is a 新增 item and must describe applicable rules`)
+  }
+  return errors
+}
+
+function headingHasContent(lines, start) {
+  const end = lines.findIndex((line, index) => index > start && /^#{1,5}\s+/.test(line.trim()))
+  return lines.slice(start + 1, end < 0 ? lines.length : end).some((line) => line.trim().length > 0 && !/^\|\s*:?-{3,}/.test(line.trim()))
+}
+
+function estimatedPersonDays(lines) {
+  const row = lines.map(tableRow).find((cells) => cells?.[0] === '产品经理' && cells[2] === '预估人天')
+  const match = row?.[3]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
+  return match ? Number(match[1]) : null
 }
 
 function validateTestFocus(body) {
@@ -205,6 +253,30 @@ function validateTestFocus(body) {
   return errors
 }
 
+function locatorTableLineIndexes(lines) {
+  const indexes = new Set()
+  const normalStart = exactHeadingIndex(lines, '## （一）正常业务场景')
+  const boundaryStart = exactHeadingIndex(lines, '## 边界场景', normalStart)
+  if (normalStart < 0 || boundaryStart < 0) return indexes
+  const changes = lines.flatMap((line, index) => index > normalStart && index < boundaryStart && /^###\s+4\.(\d+)\s+改动点：\S/.test(line.trim()) ? [{ index, number: line.trim().match(/^###\s+4\.(\d+)/)?.[1] }] : [])
+  for (let changeIndex = 0; changeIndex < changes.length; changeIndex += 1) {
+    const change = changes[changeIndex]; const end = changes[changeIndex + 1]?.index ?? boundaryStart
+    const children = lines.flatMap((line, index) => index > change.index && index < end && new RegExp(`^####\\s+4\\.${change.number}\\.\\d+\\s+\\S+：\\S`).test(line.trim()) ? [index] : [])
+    for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
+      const childEnd = children[childIndex + 1] ?? end
+      for (let index = children[childIndex] + 1; index < childEnd - 1; index += 1) {
+        if (!equalRows(tableRow(lines[index]) ?? [], LOCATOR_HEADER) || !tableRow(lines[index + 1])) continue
+        indexes.add(index); indexes.add(index + 1)
+        for (let cursor = index + 2; cursor < childEnd; cursor += 1) {
+          const row = tableRow(lines[cursor]); if (!row) break
+          indexes.add(cursor)
+        }
+      }
+    }
+  }
+  return indexes
+}
+
 function validatePrdLanguage(body) {
   const visible = markdownOutsideFences(body); const errors = []
   const unresolvedLine = visible.split('\n').find((line) => /^\s*\{[^{}\n]+\}\s*$/.test(line))
@@ -216,9 +288,10 @@ function validatePrdLanguage(body) {
   if (visible.includes('\\n')) errors.push('PRD contains a literal \\n outside a fenced code block')
   const internalTerm = visible.match(/\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/)
   if (internalTerm) errors.push(`PRD exposes an internal delivery term: ${internalTerm[0]}`)
-  const codeLocator = visible.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs)\b/m)
+  const lines = visible.split('\n'); const outsideLocatorTables = lines.filter((_, index) => !locatorTableLineIndexes(lines).has(index)).join('\n')
+  const codeLocator = outsideLocatorTables.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/im)
   if (codeLocator) errors.push(`PRD contains a code locator: ${codeLocator[0].trim()}`)
-  const codeIdentifier = visible.match(/\b[a-z]{2,}[A-Z][A-Za-z0-9]*\b/)
+  const codeIdentifier = outsideLocatorTables.match(/\b[a-z]{2,}[A-Z][A-Za-z0-9]*\b/)
   if (codeIdentifier) errors.push(`PRD contains a code-style identifier that belongs in the implementation handoff: ${codeIdentifier[0]}`)
   return errors
 }

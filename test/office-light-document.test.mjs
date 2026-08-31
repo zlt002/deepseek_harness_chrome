@@ -22,12 +22,12 @@ function normalizeLightDocumentCall(name, arguments_) {
   return { name, arguments: arguments_ }
 }
 
-async function call(endpoint, name, arguments_, id = 1) {
+async function call(endpoint, name, arguments_, id = 1, meta) {
   const mapped = normalizeLightDocumentCall(name, arguments_)
   const response = await fetch(`${endpoint.url}/mcp`, {
     method: 'POST',
     headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: mapped.name, arguments: mapped.arguments } }),
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: mapped.name, arguments: mapped.arguments, ...(meta === undefined ? {} : { _meta: meta }) } }),
   })
   assert.equal(response.status, 200)
   return response.json()
@@ -36,11 +36,16 @@ async function call(endpoint, name, arguments_, id = 1) {
 test('advertises and explains the recoverable insert_drawing Mermaid contract', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 11, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/99?id=99' }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '流程图文档', fingerprint: 'before' }
+  const selectionFingerprint = 'selection-v4-1234567890abcdef1234567890abcdef'
+  let received
   const connector = new BrowserConnector({
-    requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+    requestExtension: (request) => queueMicrotask(() => {
+      received = request
+      connector.acceptExtensionResponse({
       type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
-      result: { status: 'ok', resource, document: { blockCount: 0, offset: 0, limit: 1, hasMore: false, blocks: [] } },
-    })),
+      result: { status: 'ok', resource, document: { blockCount: 2, offset: 0, limit: 2, hasMore: false, blocks: [], ...(request.action === 'inspect_write' ? { selection: { supported: true, stable: true, truncated: false, hasSelection: true, isCollapsed: false, selectionIdsValid: true, selectedTagIds: ['selected-one', 'selected-two'], selectionFingerprint } } : {}) } },
+      })
+    }),
   })
   connector.bindBrowserTarget('light-doc-drawing-schema-run', target)
   const endpoint = await connector.start()
@@ -56,18 +61,39 @@ test('advertises and explains the recoverable insert_drawing Mermaid contract', 
     assert.deepEqual(drawingContract.then.properties.payload, {
       type: 'object', additionalProperties: false, required: ['mermaid'],
       properties: {
-        mermaid: { type: 'string', minLength: 1, maxLength: 20000, description: 'Mermaid source, such as flowchart TD.' },
-        position: { enum: ['start', 'end', 'before', 'after'], description: 'Defaults to end; before/after also requires id or index.' },
+        mermaid: { type: 'string', minLength: 1, maxLength: 20000, description: 'Mermaid source; xychart-beta is not verified for this WebEdit target.' },
+        position: { enum: ['start', 'end', 'before', 'after', 'after_selection'], description: 'Defaults to end. before/after require id or index. after_selection requires expectedSelectionFingerprint from light_document_selection_read.' },
         id: { type: 'string', minLength: 1, maxLength: 256 },
         index: { type: 'integer', minimum: 0, maximum: 100000 },
+        expectedSelectionFingerprint: { type: 'string', pattern: '^selection-v4-[0-9a-f]{32}$' },
       },
     })
-    assert.match(preview.description, /payload \{ mermaid, position: "end" \}/)
+    assert.match(preview.description, /position: "after_selection"/)
+    assert.match(preview.description, /rechecks that same selection at commit/)
+    const deleteContract = preview.inputSchema.allOf.find((entry) => entry.if?.properties?.operation?.const === 'blocks_delete')
+    assert.deepEqual(deleteContract.then.properties.payload, {
+      type: 'object', additionalProperties: false, required: ['blocks'],
+      properties: { blocks: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', minLength: 1, maxLength: 256 } } } } },
+    })
 
-    const rejected = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { svg: '<svg />' } }, 2)
+    const selectionPreview = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { mermaid: 'flowchart TD\n开始 --> 结束', position: 'after_selection', expectedSelectionFingerprint: selectionFingerprint } }, 2)
+    assert.equal(selectionPreview.result.structuredContent.action, 'inspect_write')
+    assert.deepEqual(selectionPreview.result.structuredContent.insertion, { position: 'after_selection', selectedTagIds: ['selected-one', 'selected-two'] })
+    assert.equal(received.action, 'inspect_write')
+    assert.equal(received.payload.position, 'after_selection')
+
+    const rejected = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { svg: '<svg />' } }, 3)
     assert.equal(rejected.error.code, -32602)
     assert.match(rejected.error.message, /payload \{ mermaid: "flowchart TD/)
     assert.match(rejected.error.message, /SVG.*not accepted/)
+    const unsupported = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { mermaid: 'xychart-beta\n  x-axis [一月, 二月]' } }, 4)
+    assert.equal(unsupported.error.code, -32602)
+    assert.match(unsupported.error.message, /xychart-beta.*flowchart.*pie/i)
+    const compatible = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { mermaid: 'sequenceDiagram\n甲->>乙: 确认' } }, 5)
+    assert.equal(compatible.result.structuredContent.action, 'inspect_write')
+    const indexedDelete = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_delete', payload: { blocks: [{ index: 7 }] } }, 6)
+    assert.equal(indexedDelete.error.code, -32602)
+    assert.match(indexedDelete.error.message, /blocks_delete.*\{ blocks: \[\{ id \}\] \}.*index.*light_document_read/i)
   } finally {
     await connector.stop()
   }
@@ -130,6 +156,58 @@ test('requires a one-time light-document challenge and returns only a verified w
 
     const replay = await call(endpoint, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'write-1', operation: 'title', payload: { markdown: '写入内容' } }, 4)
     assert.equal(replay.result.isError, true)
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('reports one body-free online-document event for every AI light-document Verified Write', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 31, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/801?id=801' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '新建文档', fingerprint: 'before' }
+  const events = []
+  const connector = new BrowserConnector({
+    reportPrdEvent: async (event) => { events.push(event) },
+    requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+      result: request.action === 'write'
+        ? { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { text: request.payload.markdown, verifiedFragments: [request.payload.markdown], verified: true } }
+        : { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [] } },
+    })),
+    officeDocumentWriteStore: writeStore(),
+  })
+  connector.bindBrowserTarget('accepted-run', target)
+  const endpoint = await connector.start()
+  try {
+    assert.equal(connector.recordPmdPrdReviewAdoption({
+      runId: 'accepted-run', harnessSessionId: 'prd-session', reviewId: 'review-1', resourceId: 'resource-1',
+      displayPath: 'pmd-workspace/spec/REQ_CRM_PRD.md', revision: 'revision-1', fingerprint: 'a'.repeat(64), contentHash: 'b'.repeat(64),
+    }), true)
+    connector.bindBrowserTarget('write-run', target)
+    const identity = { 'io.deepseek.harness/sessionId': 'tool-session', 'io.deepseek.harness/parentSessionId': 'prd-session' }
+    const preview = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '已采纳 PRD' } }, 1, identity)
+    const written = await call(endpoint, 'light_document_write_commit', { challenge: preview.result.structuredContent.challenge }, 2, identity)
+    assert.equal(written.result.structuredContent.status, 'verified_write')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(events.length, 1)
+    assert.deepEqual({ ...events[0], eventId: '<id>', occurredAt: '<time>' }, {
+      eventId: '<id>', eventType: 'document_published', outcome: 'succeeded', occurredAt: '<time>',
+      sessionId: 'prd-session', runId: 'write-run',
+      documentName: 'REQ_CRM_PRD', documentCatalogId: '801', documentUrl: target.url,
+    })
+    assert.match(events[0].eventId, /^document:ai-write:[a-f0-9]{48}$/)
+    for (const forbidden of ['body', 'content', 'userInput', 'comment', 'rewriteReason']) assert.equal(forbidden in events[0], false)
+
+    const secondPreview = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '后续普通编辑' } }, 3, identity)
+    const secondWrite = await call(endpoint, 'light_document_write_commit', { challenge: secondPreview.result.structuredContent.challenge }, 4, identity)
+    assert.equal(secondWrite.result.structuredContent?.status, 'verified_write', JSON.stringify(secondWrite))
+    const otherPreview = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '其他会话编辑' } }, 5, { 'io.deepseek.harness/sessionId': 'other-session' })
+    const otherWrite = await call(endpoint, 'light_document_write_commit', { challenge: otherPreview.result.structuredContent.challenge }, 6, { 'io.deepseek.harness/sessionId': 'other-session' })
+    assert.equal(otherWrite.result.structuredContent?.status, 'verified_write', JSON.stringify(otherWrite))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(events.length, 3)
+    assert.equal(new Set(events.map((event) => event.eventId)).size, 3)
+    assert.equal(events[1].documentName, '新建文档')
+    assert.equal(events[2].sessionId, 'other-session')
   } finally {
     await connector.stop()
   }
@@ -327,7 +405,7 @@ test('persists a timeout checkpoint across connector restart and never repeats t
   try {
     const inspected = await call(restarted, 'light_document_write_preview', { operation: 'title', payload: { markdown: 'x' } })
     const retry = await call(restarted, 'light_document_write_commit', { challenge: inspected.result.structuredContent.challenge, idempotencyIdentity: 'timeout-1', operation: 'title', payload: { markdown: 'x' } }, 2)
-    assert.equal(retry.result.isError, true); assert.match(retry.result.content[0].text, /uncertain/i); assert.equal(writes, 1)
+    assert.equal(retry.result.isError, true); assert.match(retry.result.content[0].text, /uncertain/i); assert.match(retry.result.content[0].text, /light_document_read/); assert.equal(writes, 1)
   } finally { await second.stop() }
 })
 

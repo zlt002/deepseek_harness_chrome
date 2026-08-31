@@ -789,10 +789,14 @@ function lightDocumentArgumentsHint(args) {
       return `light_document_write_preview ${args.operation} requires exactly one of text/markdown/html plus expectedSelectionFingerprint from a prior selection read.`
     }
     if (args.operation === 'insert_drawing' && lightDocumentInsertFragments('insert_drawing', args.payload) === null) {
-      return 'light_document_write_preview insert_drawing requires payload { mermaid: "flowchart TD\\n开始 --> 结束", position: "end" }. Mermaid source is required; SVG, text, image, and unknown payload fields are not accepted.'
+      if (lightDocumentMermaidIsUnsupported(args.payload?.mermaid)) return `light_document_write_preview insert_drawing does not support ${lightDocumentMermaidDirective(args.payload.mermaid)} in this WebEdit target. Use flowchart or pie instead.`
+      return 'light_document_write_preview insert_drawing requires Mermaid source. To insert after the current selected content, first call light_document_selection_read, then use payload { mermaid: "flowchart TD\\n开始 --> 结束", position: "after_selection", expectedSelectionFingerprint }. For document-block insertion, use start/end/before/after; before/after require id or index. SVG, text, image, and unknown payload fields are not accepted.'
     }
     if (args.operation === 'blocks_insert' && lightDocumentInsertFragments('blocks_insert', args.payload) === null) {
       return 'light_document_write_preview blocks_insert requires supported blocks and an optional insertion position.'
+    }
+    if (args.operation === 'blocks_delete' && lightDocumentBatchItems('blocks_delete', args.payload) === null) {
+      return 'light_document_write_preview blocks_delete accepts only payload { blocks: [{ id }] } with one to fifty distinct stable ids. It does not accept index, including { blocks: [{ index: 7 }] }; call light_document_read, then use its current ids.'
     }
     return 'light_document_write_preview requires a supported operation and the exact final payload.'
   }
@@ -947,12 +951,15 @@ function lightDocumentSelectionMarkdown(blocks) {
 function lightDocumentInsertFragments(operation, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
   const position = payload.position === undefined ? 'end' : payload.position
-  if (!['start', 'end', 'before', 'after'].includes(position)) return null
+  if (!['start', 'end', 'before', 'after', 'after_selection'].includes(position)) return null
   if ((position === 'before' || position === 'after') && !(typeof payload.id === 'string' && payload.id) && !Number.isInteger(payload.index)) return null
-  const allowed = operation === 'insert_drawing' ? ['mermaid', 'position', 'id', 'index'] : ['blocks', 'position', 'id', 'index']
+  if (position === 'after_selection' && (typeof payload.expectedSelectionFingerprint !== 'string' || !/^selection-v4-[0-9a-f]{32}$/.test(payload.expectedSelectionFingerprint) || payload.id !== undefined || payload.index !== undefined)) return null
+  if (position !== 'after_selection' && payload.expectedSelectionFingerprint !== undefined) return null
+  const allowed = operation === 'insert_drawing' ? ['mermaid', 'position', 'id', 'index', 'expectedSelectionFingerprint'] : ['blocks', 'position', 'id', 'index']
   if (!Object.keys(payload).every((key) => allowed.includes(key))) return null
   if (operation === 'insert_drawing') {
     if (typeof payload.mermaid !== 'string' || !payload.mermaid.trim() || payload.mermaid.length > 20_000) return null
+    if (lightDocumentMermaidIsUnsupported(payload.mermaid)) return null
     const fragments = distinctiveLightDocumentFragments(payload.mermaid)
     return fragments.length ? { kind: 'mermaid', fragments, position } : null
   }
@@ -960,6 +967,11 @@ function lightDocumentInsertFragments(operation, payload) {
   const fragments = distinctiveLightDocumentFragments(payload.blocks.map(lightDocumentStructuredBlockText).join('\n'))
   return fragments.length ? { kind: 'blocks', fragments, position } : null
 }
+function lightDocumentMermaidDirective(source) {
+  if (typeof source !== 'string') return 'this Mermaid diagram'
+  return source.split(/\r?\n/).map((line) => line.trim()).find((line) => line && !line.startsWith('%%'))?.split(/\s+/)[0] ?? 'this Mermaid diagram'
+}
+function lightDocumentMermaidIsUnsupported(source) { return lightDocumentMermaidDirective(source).toLowerCase() === 'xychart-beta' }
 function selectionInsertFragments(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
   const kinds = ['markdown', 'html', 'text'].filter((key) => typeof payload[key] === 'string')
@@ -1038,7 +1050,15 @@ function verifiedLightDocumentWriteMatches(result, request) {
       && result.observed?.deletedSelectionText === undefined && result.observed?.verifiedTextAfter === undefined
     return partial !== wholeBlocks
   }
-  if (request.operation === 'insert_drawing' || request.operation === 'blocks_insert') return verifiedFragmentEvidence(request, result, lightDocumentInsertFragments(request.operation, request.payload))
+  if (request.operation === 'insert_drawing' || request.operation === 'blocks_insert') {
+    const requested = lightDocumentInsertFragments(request.operation, request.payload)
+    if (!verifiedFragmentEvidence(request, result, requested)) return false
+    if (request.operation !== 'insert_drawing' || requested.position !== 'after_selection') return true
+    const insertion = result.observed?.insertion
+    return insertion?.position === 'after_selection' && Array.isArray(insertion.selectedTagIds) && insertion.selectedTagIds.length > 0
+      && insertion.selectedTagIds.every((id) => typeof id === 'string' && id.length > 0)
+      && insertion.insertedBlock?.type === 'codeblock' && insertion.insertedBlock?.language === 'mermaid'
+  }
   if (!['blocks_delete', 'blocks_format'].includes(request.operation)) return true
   const expected = lightDocumentBatchItems(request.operation, request.payload); const observed = result.observed?.verifiedBlocks
   if (!expected || result.requested?.count !== expected.length || !Array.isArray(observed) || observed.length !== expected.length) return false
@@ -1123,9 +1143,9 @@ const PMD_PRD_MARKERS = [
   '# 二、背景与目标',
   '# 三、整体流程',
   '# 四、功能性需求',
-  '#### 现状',
-  '#### 调整方式',
-  '#### 调整后效果',
+  '## （一）正常业务场景',
+  '## 边界场景',
+  '## （二）异常业务场景',
   '# 五、角色权限',
   '# 六、非功能性需求',
   '# 七、配置与开关',
@@ -1155,6 +1175,82 @@ function orderedMarkdownMarkersMissing(body, markers) {
   }
   return null
 }
+function pmdLocatorTableLineNumbers(lines) {
+  const indexes = new Set()
+  const normalStart = lines.findIndex(line => line.trim() === '## （一）正常业务场景'); const boundaryStart = lines.findIndex((line, index) => index > normalStart && line.trim() === '## 边界场景')
+  if (normalStart < 0 || boundaryStart < 0) return indexes
+  const changes = lines.flatMap((line, index) => index > normalStart && index < boundaryStart && /^###\s+4\.(\d+)\s+改动点：\S/.test(line.trim()) ? [{ index, number: line.trim().match(/^###\s+4\.(\d+)/)?.[1] }] : [])
+  for (let changeIndex = 0; changeIndex < changes.length; changeIndex += 1) {
+    const change = changes[changeIndex]; const end = changes[changeIndex + 1]?.index ?? boundaryStart
+    const children = lines.flatMap((line, index) => index > change.index && index < end && new RegExp(`^####\\s+4\\.${change.number}\\.\\d+\\s+\\S+：\\S`).test(line.trim()) ? [index] : [])
+    for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
+      const childEnd = children[childIndex + 1] ?? end
+      for (let index = children[childIndex] + 1; index < childEnd - 1; index += 1) {
+        if (lines[index].trim() !== '| 定位项 | 位置 |' || !/^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|\s*$/.test(lines[index + 1])) continue
+        indexes.add(index); indexes.add(index + 1)
+        for (let cursor = index + 2; cursor < childEnd && /^\|.*\|\s*$/.test(lines[cursor].trim()); cursor += 1) indexes.add(cursor)
+      }
+    }
+  }
+  return indexes
+}
+function pmdEstimatedPersonDays(lines) {
+  const row = lines.map(line => line.trim().startsWith('|') && line.trim().endsWith('|') ? line.trim().slice(1, -1).split('|').map(cell => cell.trim()) : null).find(cells => cells?.[0] === '产品经理' && cells[2] === '预估人天')
+  const match = row?.[3]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
+  return match ? Number(match[1]) : null
+}
+function pmdHeadingHasContent(lines, start) {
+  const end = lines.findIndex((line, index) => index > start && /^#{1,5}\s+/.test(line.trim()))
+  return lines.slice(start + 1, end < 0 ? lines.length : end).some(line => line.trim() && !/^\|\s*:?-{3,}/.test(line.trim()))
+}
+function pmdDetailedFunctionalFailure(visiblePrd) {
+  const lines = visiblePrd.split('\n'); const normalStart = lines.findIndex(line => line.trim() === '## （一）正常业务场景')
+  const boundaryStart = lines.findIndex((line, index) => index > normalStart && line.trim() === '## 边界场景')
+  const abnormalStart = lines.findIndex((line, index) => index > boundaryStart && line.trim() === '## （二）异常业务场景')
+  if (normalStart < 0 || boundaryStart < 0 || abnormalStart < 0) return 'PRD functional requirements must keep 正常业务场景 → 边界场景 → 异常业务场景'
+  const normal = lines.slice(normalStart + 1, boundaryStart)
+  if (normal.some(line => /^(?:##|###)\s+(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()))) return 'PRD must not add a change overview or locator overview'
+  const changes = normal.flatMap((line, index) => /^###\s+4\.(\d+)\s+改动点：\S/.test(line.trim()) ? [{ index, number: line.trim().match(/^###\s+4\.(\d+)/)?.[1] }] : [])
+  if (!changes.length) return 'PRD normal business scenarios must contain at least one ### 4.x 改动点： heading'
+  for (let index = 0; index < changes.length; index += 1) {
+    const change = changes[index]; const start = change.index; const end = changes[index + 1]?.index ?? normal.length
+    const children = normal.flatMap((line, childIndex) => childIndex > start && childIndex < end && /^####\s+4\.(\d+)\.\d+\s+\S+：\S/.test(line.trim()) ? [childIndex] : [])
+    if (!children.length) return `${normal[start].trim()} must contain at least one specific child item`
+    for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
+      const child = normal.slice(children[childIndex], children[childIndex + 1] ?? end).join('\n'); const heading = normal[children[childIndex]].trim()
+      if (heading.match(/^####\s+4\.(\d+)\./)?.[1] !== change.number) return `${heading} must be numbered under ${normal[start].trim()}`
+      const type = child.match(/^\*\*变更类型：\*\*\s*(改造|新增)\s*$/m)?.[1]
+      if (!type) return `${heading} must declare 变更类型：改造 or 新增`
+      if (!child.includes('| 定位项 | 位置 |')) return `${heading} is missing locator table`
+      for (const locator of ['PC 页面 URL', '前端代码文件', '后端代码文件/接口']) {
+        const value = child.match(new RegExp(`^\\|\\s*${locator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\|\\s*(.*?)\\s*\\|\\s*$`, 'm'))?.[1]
+        if (!value) return `${heading} is missing locator: ${locator}`
+        if (value.includes('[待确认]') && !/（[^）]+）/.test(value)) return `${heading} must explain the impact when locator ${locator} is [待确认]`
+      }
+      if (type === '改造') {
+        const childLines = child.split('\n'); const original = childLines.findIndex(line => line.trim() === '##### 原逻辑'); const updated = childLines.findIndex((line, itemIndex) => itemIndex > original && line.trim() === '##### 调整后逻辑')
+        if (original < 0 || updated < 0) return `${heading} is a 改造 item and must compare 原逻辑 with 调整后逻辑`
+        if (!pmdHeadingHasContent(childLines, original)) return `${heading} 原逻辑 must contain content`
+        if (!pmdHeadingHasContent(childLines, updated)) return `${heading} 调整后逻辑 must contain content`
+      }
+      if (type === '新增') {
+        const childLines = child.split('\n'); const rules = childLines.findIndex(line => line.trim() === '##### 交互与规则')
+        if (childLines.some(line => line.trim() === '##### 原逻辑' || line.trim() === '##### 调整后逻辑')) return `${heading} is a 新增 item and must not retain 原逻辑 or 调整后逻辑 headings`
+        if (rules < 0 || !pmdHeadingHasContent(childLines, rules)) return `${heading} is a 新增 item and must describe applicable rules`
+      }
+    }
+  }
+  const boundary = lines.slice(boundaryStart + 1, abnormalStart).join('\n')
+  const estimatedDays = pmdEstimatedPersonDays(lines); const notApplicable = boundary.includes('不适用（预估人天不超过10人天）')
+  if (!(estimatedDays !== null && estimatedDays <= 10 && notApplicable)) {
+    for (const systemBoundary of ['超时', '并发', '数据量极值']) {
+      const match = boundary.match(new RegExp(`^\\|\\s*${systemBoundary}\\s*\\|\\s*(.*?)\\s*\\|\\s*(.*?)\\s*\\|\\s*$`, 'm'))
+      if (!match || !match[1] || !match[2] || (estimatedDays !== null && match[1].includes('[待确认]'))) return `PRD boundary scenarios must define system behaviour for: ${systemBoundary}`
+      if (estimatedDays === null && (!match[1].includes('[待确认]') || match[2].includes('[待确认]') || match[2].length < 4)) return `PRD boundary scenarios must retain [待确认] and impact for unknown 预估人天: ${systemBoundary}`
+    }
+  }
+  return null
+}
 function pmdBatchTemplateFailure(batchId, items) {
   if (!batchId.startsWith('pmd:')) return null
   if (items.length !== 1) return 'PMD delivery requires exactly one PRD document'
@@ -1166,12 +1262,15 @@ function pmdBatchTemplateFailure(batchId, items) {
   for (const header of ['| 业务需求名称 |', '| 版本 | 日期 |', '| 角色 | 功能/页面 |', '| 指标项 | 目标值 |']) if (!prd.body.includes(header)) return `PRD document is missing required table: ${header}`
   const internalTerm = /\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/
   const visiblePrd = markdownOutsideFences(prd.body)
+  const functionalFailure = pmdDetailedFunctionalFailure(visiblePrd)
+  if (functionalFailure) return functionalFailure
   const prdInternalTerm = visiblePrd.match(internalTerm)
   if (prdInternalTerm) return `PRD document exposes an internal delivery term: ${prdInternalTerm[0]}`
   const fieldLabel = visiblePrd.match(/\[(?:必填|选填|建议填写|涉及多系统交互时必填)\]|【选填】/)
   if (fieldLabel) return `PRD document exposes a field label: ${fieldLabel[0]}`
   if (/AccrUI\s*需求交接附录/.test(visiblePrd)) return 'PRD document appends a non-company-template handoff section'
-  const codeLocator = visiblePrd.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs)\b/m)
+  const visibleLines = visiblePrd.split('\n'); const outsideLocatorTables = visibleLines.filter((_, index) => !pmdLocatorTableLineNumbers(visibleLines).has(index)).join('\n')
+  const codeLocator = outsideLocatorTables.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/im)
   if (codeLocator) return `PRD document contains a code locator: ${codeLocator[0].trim()}`
   return null
 }
@@ -1462,7 +1561,6 @@ export class BrowserConnector {
       this.htmlWorkbenchChallenges.clear()
       this.htmlWorkbenchWriteLocks.clear()
       this.teamKnowledgeBatchChallenges.clear()
-      this.pmdPrdReviewAdoptions.clear()
       this.uncertainSelectionWrite = undefined
     }
     if (registered.targetChanged) this.uncertainSelectionWrite = undefined
@@ -1478,7 +1576,7 @@ export class BrowserConnector {
   /** Store the exact saved PRD accepted in the visual Markdown Review. */
   recordPmdPrdReviewAdoption(adoption) {
     if (!validPmdPrdReviewAdoption(adoption) || this.runTargets.currentRunId !== adoption.runId) return false
-    const key = `${adoption.runId}\u0000${adoption.harnessSessionId}`
+    const key = adoption.harnessSessionId
     if (!this.pmdPrdReviewAdoptions.has(key) && this.pmdPrdReviewAdoptions.size >= MAX_PMD_PRD_REVIEW_ADOPTIONS) {
       this.pmdPrdReviewAdoptions.delete(this.pmdPrdReviewAdoptions.keys().next().value)
     }
@@ -1487,14 +1585,37 @@ export class BrowserConnector {
   }
 
   #authorizePmdPrdPreview(batchId, runId, identity, items) {
-    if (!identity?.sessionId) throw new Error('pmd_prd_review_adoption_session_required')
-    const key = `${runId}\u0000${identity.sessionId}`
+    const key = identity?.parentSessionId ?? identity?.sessionId
+    if (!key) throw new Error('pmd_prd_review_adoption_session_required')
     const adoption = this.pmdPrdReviewAdoptions.get(key)
     if (!adoption) throw new Error('pmd_prd_review_adoption_required')
     if (items.length !== 1 || hash(items[0].body) !== adoption.contentHash) throw new Error('pmd_prd_review_adoption_content_changed')
     if (adoption.batchId !== undefined && adoption.batchId !== batchId) throw new Error('pmd_prd_review_adoption_batch_changed')
     if (adoption.batchId === undefined) this.pmdPrdReviewAdoptions.set(key, Object.freeze({ ...adoption, batchId }))
     return adoption
+  }
+
+  #reportAiLightDocumentWrite(message, runId, browserTarget, result, idempotencyIdentity) {
+    try {
+      const identity = harnessIdentity(message)
+      const sessionId = identity?.parentSessionId ?? identity?.sessionId
+      const catalogId = teamKnowledgeCatalogIdFromBrowserTarget(browserTarget)
+      if (!catalogId) return
+      const adoption = sessionId === undefined ? undefined : this.pmdPrdReviewAdoptions.get(sessionId)
+      const adoptedName = adoption && adoption.batchId === undefined ? adoption.displayPath.split(/[\\/]/).at(-1)?.replace(/\.md$/i, '') : undefined
+      const resourceName = typeof result?.resource?.documentName === 'string' ? result.resource.documentName : undefined
+      const documentName = (adoptedName || resourceName || `在线文档 ${catalogId}`).trim().slice(0, 256)
+      if (!documentName) return
+      if (sessionId !== undefined && adoption && adoption.batchId === undefined) this.pmdPrdReviewAdoptions.delete(sessionId)
+      void Promise.resolve(this.reportPrdEvent({
+        eventId: `document:ai-write:${hash(canonicalJson([runId, idempotencyIdentity, catalogId])).slice(0, 48)}`,
+        eventType: 'document_published', outcome: 'succeeded', occurredAt: new Date().toISOString(),
+        ...(sessionId === undefined ? {} : { sessionId }), runId,
+        documentName, documentCatalogId: catalogId, documentUrl: browserTarget.url,
+      })).catch(() => {})
+    } catch {
+      // Telemetry must never downgrade a successful Verified Write.
+    }
   }
 
   /** Accept one correlated response received from the Extension peer. */
@@ -2317,8 +2438,8 @@ export class BrowserConnector {
       }
       if (!checkpoint.createdNew) {
         this.#toolError(response, message.id, checkpoint.record.state === 'verified'
-          ? 'This idempotency identity was already verified; reread the document before continuing.'
-          : 'This idempotency identity is uncertain after an interrupted write; automatic retry is forbidden. Reread and resolve manually.')
+          ? 'This idempotency identity was already verified; call light_document_read on the same Browser Target before continuing.'
+          : 'This idempotency identity is uncertain after an interrupted write. Do not preview or commit the same payload again. First call light_document_read on the same Browser Target to determine whether it took effect, then resolve manually.')
         return
       }
       const correlation = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'light_document', action: 'write', operation: args.operation, payload: args.payload, resource: grant.resource }
@@ -2329,6 +2450,7 @@ export class BrowserConnector {
         await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'verified')
         if (this.officeDocumentWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentWrites.delete(this.officeDocumentWrites.keys().next().value)
         this.officeDocumentWrites.set(args.idempotencyIdentity, { fingerprint: requestFingerprint, result })
+        this.#reportAiLightDocumentWrite(message, runId, resolved.browserTarget, resolved.result, args.idempotencyIdentity)
         this.#reply(response, lightDocumentToolResponse(message.id, result))
       } catch (error) {
         if (isPeerPreMutationFingerprintMismatch(error)) {
@@ -2356,13 +2478,19 @@ export class BrowserConnector {
           this.#toolError(response, message.id, 'This light document has no public replaceable block (blockCount 0). Call selection then selection_insert, or inspect_write with blocks_insert / insert_drawing to add body content.')
           return
         }
+        const selection = resolved.result.document?.selection
+        if (args.operation === 'insert_drawing' && args.payload?.position === 'after_selection'
+          && (selection?.selectionFingerprint !== args.payload.expectedSelectionFingerprint || selection?.stable !== true || selection?.hasSelection !== true || selection?.isCollapsed || !Array.isArray(selection?.selectedTagIds) || selection.selectedTagIds.length < 1 || selection.selectionIdsValid !== true)) {
+          this.#toolError(response, message.id, 'The current light-document selection is not a stable block selection matching expectedSelectionFingerprint. Select the target content, call light_document_selection_read again, then preview the drawing.')
+          return
+        }
         const challenge = randomBytes(32).toString('base64url')
         for (const [key, candidate] of this.officeDocumentChallenges) if (candidate.expiresAt < Date.now()) this.officeDocumentChallenges.delete(key)
         if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
         const payloadHash = lightDocumentWriteHash(args.operation, args.payload)
         const previewIdentity = hash(canonicalJson([resolved.result.resource.fingerprint, args.operation, args.payload]))
         this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payload: args.payload, payloadHash, idempotencyIdentity: `light-write:${previewIdentity.slice(0, 48)}`, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
-        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, challenge }
+        const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, ...(args.operation === 'insert_drawing' && args.payload?.position === 'after_selection' ? { insertion: { position: 'after_selection', selectedTagIds: selection.selectedTagIds } } : {}), challenge }
         this.#reply(response, lightDocumentToolResponse(message.id, result))
         return
       }
@@ -2486,7 +2614,7 @@ export class BrowserConnector {
             if (itemResult.status === 'verified_write' && !validVerifiedTeamKnowledgeBatchItem(itemResult, document)) throw new Error('Extension peer verified the wrong Team Knowledge batch item')
             await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
             await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: itemResult.status === 'verified_write' ? 'created' : 'failed', catalogId: itemResult.item?.catalogId ?? null, stages: itemResult.stages, error: itemResult.status === 'verified_write' ? null : itemResult.error })
-            if (args.batchId.startsWith('pmd:') && itemResult.status === 'verified_write') {
+            if (itemResult.status === 'verified_write') {
               void Promise.resolve(this.reportPrdEvent({
                 eventId: `document:${hash(args.batchId).slice(0, 48)}:${String(item.index)}:${itemResult.item.catalogId}`,
                 eventType: 'document_published', outcome: 'succeeded', occurredAt: new Date().toISOString(),

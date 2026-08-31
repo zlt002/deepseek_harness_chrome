@@ -348,10 +348,15 @@
     if (type === 'codeblock' || type === 'codeBlock' || type === 'pre') {
       const language = String(item.language || (/\b(flowchart|sequenceDiagram|pie|graph|mindmap|gantt|classDiagram|erDiagram)\b/.test(text) ? 'mermaid' : 'plaintext')).toLowerCase()
       if (!text.trim() || text.length > 20_000 || !/^[a-z0-9_+#.-]+$/.test(language)) return null
+      if (language === 'mermaid' && unsupportedMermaidDiagram(text)) return null
       return `<codeBlock${id} lang="${escapeXml(language)}"><![CDATA[${escapeCdata(text.replace(/^\n+|\n+$/g, ''))}]]></codeBlock>`
     }
     return null
   }
+  const mermaidDirective = (source) => typeof source === 'string'
+    ? source.split(/\r?\n/).map((line) => line.trim()).find((line) => line && !line.startsWith('%%'))?.split(/\s+/)[0] ?? 'this Mermaid diagram'
+    : 'this Mermaid diagram'
+  const unsupportedMermaidDiagram = (source) => mermaidDirective(source).toLowerCase() === 'xychart-beta'
   const blockXml = (payload, preserveId = null) => {
     if (typeof payload?.mermaid === 'string' && payload.mermaid.trim()) return structuredBlockXml({ type: 'codeblock', language: 'mermaid', text: payload.mermaid }, preserveId)
     const items = Array.isArray(payload?.blocks) ? payload.blocks : [payload]
@@ -642,17 +647,37 @@
       writeStrategy: 'full_canvas_patch', verified: true,
     }
   }
-  const insertPosition = (parsed, payload) => {
+  const insertPosition = (parsed, payload, selection) => {
     const position = payload?.position ?? 'end'
-    if (!['start', 'end', 'before', 'after'].includes(position)) return null
+    if (!['start', 'end', 'before', 'after', 'after_selection'].includes(position)) return null
     if (position === 'end') return parsed.inner.length
     if (position === 'start') {
       const title = parsed.all.find((block) => block.tag.toLowerCase() === 'outlinetitle')
       return title ? title.end : 0
     }
+    if (position === 'after_selection') {
+      if (!selection || selection.stable !== true || selection.hasSelection !== true || selection.isCollapsed || selection.selectionIdsValid !== true || selection.selectionFingerprint !== payload?.expectedSelectionFingerprint) return null
+      const selected = selection.selectedTagIds.map((id) => parsed.list.find((block) => block.id === id)).filter(Boolean)
+      if (selected.length !== selection.selectedTagIds.length || selected.length === 0) return null
+      return selected.slice().sort((left, right) => parsed.list.indexOf(left) - parsed.list.indexOf(right)).at(-1).end
+    }
     const target = Number.isInteger(payload?.index) ? parsed.list[payload.index] : parsed.list.find((block) => block.id && block.id === payload?.id)
     if (!target) return null
     return position === 'before' ? target.start : target.end
+  }
+  const verifyDrawingAfterSelection = (beforeXml, afterXml, selection, fragments) => {
+    const before = editableBlocks(beforeXml); const after = editableBlocks(afterXml)
+    if (!before || !after || !selection || selection.selectionIdsValid !== true) return null
+    const selected = selection.selectedTagIds.map((id) => before.list.find((block) => block.id === id)).filter(Boolean)
+    if (selected.length !== selection.selectedTagIds.length || selected.length === 0 || after.list.length !== before.list.length + 1) return null
+    const selectedLastIndex = Math.max(...selected.map((block) => before.list.indexOf(block)))
+    const inserted = after.list[selectedLastIndex + 1]
+    if (!inserted || inserted.tag.toLowerCase() !== 'codeblock' || inserted.language !== 'mermaid' || !fragments.every((fragment) => normalizedSelectionText(inserted.text).includes(normalizedSelectionText(fragment)))) return null
+    const beforePart = after.list.slice(0, selectedLastIndex + 1).map(blockInvariant)
+    const afterPart = after.list.slice(selectedLastIndex + 2).map(blockInvariant)
+    if (!before.list.slice(0, selectedLastIndex + 1).map(blockInvariant).every((block, index) => sameBlockInvariant(block, beforePart[index]))
+      || !before.list.slice(selectedLastIndex + 1).map(blockInvariant).every((block, index) => sameBlockInvariant(block, afterPart[index]))) return null
+    return { position: 'after_selection', selectedTagIds: selected.map((block) => block.id), insertedBlock: { id: inserted.id || `index:${selectedLastIndex + 1}`, type: 'codeblock', language: 'mermaid', text: inserted.text.slice(0, 500) } }
   }
   const batchBlockItems = (operation, payload) => {
     const source = Array.isArray(payload?.blocks) ? payload.blocks
@@ -794,6 +819,22 @@
         selectedColumnCount: containingTable.selected[0].length,
       } : null
       return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, selection: { ...selection, wholeBlockReplaceable: whole, replaceStrategy, containingTable: containingTableScope } } } }
+    }
+    if (input.action === 'inspect_write') {
+      const parsed = editableBlocks(xml)
+      if (input.operation === 'insert_drawing' && unsupportedMermaidDiagram(input.payload?.mermaid)) return fail('invalid_range', `${mermaidDirective(input.payload?.mermaid)} Mermaid diagrams are not supported by this WebEdit target. Use flowchart or pie instead.`)
+      if (['insert_drawing', 'blocks_insert'].includes(input.operation) && ['before', 'after'].includes(input.payload?.position) && !insertPosition(parsed, input.payload, null)) return fail('invalid_range', 'The light-document insertion target is no longer present. Call light_document_read and use an id or index from that latest read.')
+      if (input.operation === 'blocks_delete') {
+        const items = batchBlockItems('blocks_delete', input.payload)
+        if (!items || !parsed || items.some((item) => !parsed.list.some((block) => block.id === item.id))) return fail('invalid_range', 'blocks_delete requires current stable block ids. Call light_document_read and use payload { blocks: [{ id }] }, never index.')
+      }
+    }
+    if (input.action === 'inspect_write' && input.operation === 'insert_drawing' && input.payload?.position === 'after_selection') {
+      const selection = await readSelection(current, 20_000)
+      const parsed = editableBlocks(xml)
+      const selected = selection.selectedTagIds.map((id) => parsed?.list.find((block) => block.id === id)).filter(Boolean)
+      if (!selection.supported || selection.truncated || selection.stable !== true || selection.hasSelection !== true || selection.isCollapsed || selection.selectionIdsValid !== true || selection.selectionFingerprint !== input.payload.expectedSelectionFingerprint || !parsed || selected.length !== selection.selectedTagIds.length || selected.length === 0) return fail('invalid_range', 'insert_drawing after_selection requires the unchanged stable block selection returned by light_document_selection_read')
+      return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, selection } } }
     }
     return { ok: true, result: { status: 'ok', resource, document: documentResult } }
   }
@@ -961,9 +1002,10 @@
       const parsed = editableBlocks(beforeXml)
       if (!parsed) return fail('unsupported', 'WebEdit did not expose editable light-document blocks')
       const xml = input.operation === 'insert_drawing' ? structuredBlockXml({ type: 'codeblock', language: 'mermaid', text: input.payload?.mermaid }, null) : blockXml(input.payload)
-      const offset = insertPosition(parsed, input.payload)
+      const selection = input.payload?.position === 'after_selection' ? await readSelection(current, 20_000) : null
+      const offset = insertPosition(parsed, input.payload, selection)
       if (!xml || offset === null) return fail('invalid_range', input.operation === 'insert_drawing'
-        ? 'insert_drawing requires mermaid source and a start/end/before/after position'
+        ? 'insert_drawing requires Mermaid source and a start/end/before/after position, or after_selection with a matching stable selection fingerprint'
         : 'blocks_insert requires bounded h1-h6/p/blockquote/ul/ol/table/codeblock items and a start/end/before/after position')
       const fragments = distinctiveFragments(input.operation === 'insert_drawing' ? input.payload?.mermaid : (input.payload?.blocks ?? []).map((item) => Array.isArray(item?.items) ? item.items.join('\n') : Array.isArray(item?.rows) ? item.rows.flat().join('\n') : item?.text ?? item?.markdown ?? item?.html ?? '').join('\n'))
       if (!fragments.length) return fail('invalid_range', `${input.operation} requires distinctive readable content for XML readback`)
@@ -971,7 +1013,9 @@
       if (!patched.ok) return patched
       const observed = verifyInsertedFragments(beforeXml, patched.xml, fragments)
       if (!observed) return fail('readback_mismatch', `WebEdit ${input.operation} did not produce matching XML content and structural evidence`)
-      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, verified: true } } }
+      const insertion = input.operation === 'insert_drawing' && input.payload?.position === 'after_selection' ? verifyDrawingAfterSelection(beforeXml, patched.xml, selection, fragments) : null
+      if (input.operation === 'insert_drawing' && input.payload?.position === 'after_selection' && !insertion) return fail('readback_mismatch', 'WebEdit insert_drawing did not remain immediately after the selected blocks')
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, ...(insertion ? { insertion } : {}), verified: true } } }
     }
     if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
     if (input.operation === 'set_title') {

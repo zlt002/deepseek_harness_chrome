@@ -86,7 +86,7 @@ test('Windows CI builds from the recursive upstream submodule and materialized p
   const checksum = workflow.indexOf("$zip = 'release/accr-ui-windows-lite-x64.zip'")
   assert.ok(install < buildProduct && buildProduct < buildExtension && buildExtension < materializeRuntime && materializeRuntime < buildRelease)
   assert.ok(buildRelease < acceptRelease && acceptRelease < checksum)
-  assert.match(workflow, /-ExpectedVersion "\$\{\{ inputs\.version \|\| '1\.1\.92' \}\}"/)
+  assert.match(workflow, /-ExpectedVersion "\$\{\{ inputs\.version \|\| '1\.1\.93' \}\}"/)
   const promotion = workflow.indexOf('- name: Promote exact UAT candidate to published release')
   const candidateUpload = workflow.indexOf('- name: Upload Windows package to draft candidate')
   const publicValidation = workflow.indexOf('- name: Validate public promotion and download exact UAT candidate')

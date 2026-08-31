@@ -7,7 +7,7 @@ async function loadBackground() {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener; let connectListener
-  const created = []; const forwarded = []; const rehydrates = []; const fetches = []; const nativeMessages = []; const storage = { harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }
+  const created = []; const updates = []; const forwarded = []; const rehydrates = []; const fetches = []; const nativeMessages = []; const storage = { harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }
   const page = { id: 42, windowId: 7, url: 'https://docs.example.test/source', title: 'Source' }
   const reviewTab = { id: 91, windowId: 7, url: '', title: 'Markdown Review' }
   const nativeListeners = new Set()
@@ -39,7 +39,7 @@ async function loadBackground() {
       onConnect: { addListener: listener => { connectListener = listener } },
       sendMessage: async message => {
         if (message.type === 'markdown-review-feedback-forward/v1') { forwarded.push(message); return { ok: true, status: 'queued', targetSessionId: 'session-2', targetSessionTitle: '当前会话' } }
-        if (message.type === 'markdown-review-session-action-forward/v1') { forwarded.push(message); return { ok: true, action: message.action, status: message.action === 'rewrite' ? 'draft_ready' : 'processing', targetSessionId: 'session-1', targetSessionTitle: 'PRD 会话' } }
+        if (message.type === 'markdown-review-session-action-forward/v1') { forwarded.push(message); return { ok: true, action: message.action, status: 'draft_ready', targetSessionId: 'session-current', targetSessionTitle: '当前会话' } }
         if (message.type === 'markdown-review-rehydrate-forward/v1') { rehydrates.push(message); return { ok: true, review: { ...openReview, capability: 'fresh-capability' } } }
       },
       connectNative: () => ({
@@ -61,7 +61,7 @@ async function loadBackground() {
       query: async query => query.active ? [page] : [page],
       get: async id => id === 42 ? page : id === 91 ? reviewTab : undefined,
       create: async options => { reviewTab.url = options.url; created.push(options); return reviewTab },
-      update: async () => reviewTab,
+      update: async (id, options) => { updates.push({ id, options }); return id === 42 ? { ...page, ...options } : { ...reviewTab, ...options } },
       onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} },
     },
     sidePanel: { open: async () => {}, close: async () => {}, setOptions: async () => {} },
@@ -84,7 +84,7 @@ async function loadBackground() {
     postMessage: message => responses.push(message), disconnect: () => { for (const listener of disconnectListeners) listener() },
   }
   return {
-    created, fetches, forwarded, rehydrates, responses, nativeMessages,
+    created, updates, fetches, forwarded, rehydrates, responses, nativeMessages,
     open: review => runtimeMessage({ type: 'open-markdown-review/v1', review }, { url: 'chrome-extension://test/sidepanel.html' }),
     connect: () => connectListener(port),
     portMessage: message => { for (const listener of portMessageListeners) listener(message) },
@@ -175,15 +175,48 @@ test('forwards rewrite and accept only to the review-bound session', async () =>
     background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'accept-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'accept' })
     for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'accept-1') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.deepEqual(background.responses.find(message => message.requestId === 'rewrite-1').status, 'draft_ready')
-    assert.deepEqual(background.responses.find(message => message.requestId === 'accept-1').status, 'processing')
+    assert.deepEqual(background.responses.find(message => message.requestId === 'accept-1').status, 'draft_ready')
     const actions = background.forwarded.filter(message => message.type === 'markdown-review-session-action-forward/v1')
     assert.deepEqual(actions.map(message => [message.action, message.review.harnessSessionId, message.review.resourceId, message.review.revision, message.review.fingerprint]), [['rewrite', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1'], ['accept', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1']])
     assert.equal('pmdReviewReceipt' in actions[0].review, false)
     assert.equal('pmdReviewReceipt' in actions[1].review, false)
     const adoption = background.nativeMessages.find(message => message.type === 'record-pmd-prd-review-adoption')
-    assert.equal(adoption.payload.harnessSessionId, 'session-1')
+    assert.equal(adoption.payload.harnessSessionId, 'session-current')
     assert.match(adoption.payload.contentHash, /^[a-f0-9]{64}$/)
   } finally { background.cleanup() }
+})
+
+test('confirmed adoption prepares the bound draft before navigating only its captured Browser Target', async () => {
+  const background = await loadBackground()
+  try {
+    await background.open(openReview); background.connect()
+    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'accept-navigate', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'accept' })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'accept-navigate') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.responses.find(message => message.requestId === 'accept-navigate')?.ok, true)
+    assert.equal(background.forwarded.filter(message => message.type === 'markdown-review-session-action-forward/v1' && message.action === 'accept').length, 1)
+    assert.deepEqual(background.updates.filter(update => update.id === 42 && update.options.url !== undefined), [{ id: 42, options: { url: 'https://doc.midea.com/docs', active: true } }])
+    assert.equal(background.updates.some(update => update.id === 91 && update.options.url === 'https://doc.midea.com/docs'), false)
+  } finally { background.cleanup() }
+})
+
+test('does not navigate when preparing the adoption draft fails', async () => {
+  const background = await loadBackground()
+  const originalSendMessage = globalThis.chrome.runtime.sendMessage
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.chrome.runtime.sendMessage = async message => message.type === 'markdown-review-session-action-forward/v1'
+      ? { ok: false, error: '绑定侧边栏会话不可用' }
+      : originalSendMessage(message)
+    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'accept-forward-fails', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'accept' })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'accept-forward-fails') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.responses.find(message => message.requestId === 'accept-forward-fails')
+    assert.equal(response?.ok, false, JSON.stringify(response))
+    assert.match(response?.error?.message ?? '', /绑定侧边栏会话不可用/)
+    assert.equal(background.updates.some(update => update.options.url === 'https://doc.midea.com/docs'), false)
+  } finally {
+    globalThis.chrome.runtime.sendMessage = originalSendMessage
+    background.cleanup()
+  }
 })
 
 test('does not forward adoption when the saved file version changed after the review snapshot', async () => {

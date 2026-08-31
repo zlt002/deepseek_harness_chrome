@@ -1,6 +1,6 @@
 # `/pmd-prd` 运行绑定、过程状态与恢复合同
 
-本文件是 `/pmd-prd` 在以下分支必须读取的权威参考：需求聚合预检已通过或已结算而启动新 Run、确认资料范围、记录实质性访谈/查询/决策、暂停或失败后恢复、以及部分交付后的重试。主 Skill 只规定顺序；本文件规定持久状态和确认失效条件。空 `/pmd-prd` 不是恢复请求，必须先请用户描述业务需求，不得扫描工作区、读取 manifest 或创建状态。聚合预检未结算时尚未启动 Run，不读取本文件，也不创建或更新任何过程状态。
+本文件是 `/pmd-prd` 在以下分支必须读取的权威参考：需求聚合预检已通过或已结算而启动新 Run、确认资料范围、记录实质性访谈/查询/决策，以及暂停或失败后恢复。主 Skill 只规定顺序；本文件规定持久状态和确认失效条件。空 `/pmd-prd` 不是恢复请求，必须先请用户描述业务需求，不得扫描工作区、读取 manifest 或创建状态。聚合预检未结算时尚未启动 Run，不读取本文件，也不创建或更新任何过程状态。
 
 本文件及其过程文件中的内部状态、运行绑定、事件和过程追踪只用于持久化与恢复，不得作为用户可见进度播报。等待用户决策时，用户输出必须先突出唯一待确认事项；阶段编号、内部标识、状态字段、文件清单和工具调用不能出现在决策之前。
 
@@ -24,11 +24,11 @@
 
 | 入口 | 只记录什么 | 完成/恢复用途 |
 |---|---|---|
-| `manifest.json` | `requirementId`、稳定的 `batchId = pmd:${requirementId}`、项目/工作流绑定、run/session 列表、`active/paused/partial/failed/aborted/completed` 状态和 artifacts | 判断当前 Run、状态和可恢复范围 |
+| `manifest.json` | `requirementId`、项目/工作流绑定、run/session 列表、`active/paused/failed/aborted/completed` 状态和 artifacts | 判断当前 Run、状态和可恢复范围 |
 | `process.md` | 每轮 AI 原理解、产品纠正、最终理解、影响、用户确认、查询摘要、决策摘要、后续独立需求候选和交付状态 | 让产品/研发回看过程，不承载机器生命周期明细；候选不进入当前 PRD 范围 |
 | `domain-model.md` | 已确认或明确标注待确认的标准术语、实现无关定义、关系/边界/不变量及 `_Avoid_` | 保持术语单一，避免后续分析漂移 |
 | `knowledge-sources.md` | 本 Run 实际 scope、查询问题、来源标识/链接、关键证据和失败影响 | 区分授权、实际查询、用户事实、知识依据和 `[待确认]` |
-| `change-impact.md` | 每个直接改动对应的代码证据、关联页面/流程/角色/数据/共用能力、风险、建议处理、回归范围和产品决策状态 | 阻止只复述需求；阶段 3 提问、阶段 4 风险分析和第八章影响范围均从这里投影 |
+| `change-impact.md` | 按“改动点 → 具体子项”记录代码证据、PC 页面 URL、前端代码文件、后端代码文件/接口、改造前后对比或新增规则、关联页面/流程/角色/数据/共用能力、风险、建议处理、回归范围和产品决策状态 | 阻止只复述需求；阶段 3 提问、阶段 4 两层需求展开和第八章影响范围均从这里投影 |
 | `trace-events.jsonl` | 已脱敏的机器事件摘要、runId、序号和时间 | 每行一个独立、合法 JSON 对象；诊断运行，不替代过程或交付正文 |
 | `decisions/` | 只有难以逆转、需要解释且存在真实取舍的 ADR | 恢复时重建决策上下文；普通偏好不制造 ADR |
 
@@ -36,20 +36,19 @@ Run 启动后，每次实质性用户回答或状态转换都在同一轮更新�
 
 ## 4. 规模门、分析产物与确认
 
-阶段 3 逐轮在 `process.md` 记录“AI 原理解、产品纠正、最终理解、影响”，并在 `change-impact.md` 按“需求 → 直接改动 → 关联改动 → 风险 → 建议处理 → 回归范围 → 是否需要产品决策”关联实际资料来源。没有远程证据的代码位置必须标为未知，不得生成仓库、文件、函数或行号；没有证据的联动和风险必须标为 `[待确认]` 并说明影响。每个直接改动至少有一条关联分析，确实不涉及联动时记录原因和代码依据。
+阶段 3 逐轮在 `process.md` 记录“AI 原理解、产品纠正、最终理解、影响”，并在 `change-impact.md` 按“需求 → 改动点 → 具体子项 → 定位证据 → 规则/对比 → 关联改动 → 风险 → 建议处理 → 回归范围 → 是否需要产品决策”关联实际资料来源。没有远程证据的 PC 页面 URL、前端代码文件或后端代码文件/接口必须标为未知，不得生成仓库、文件、函数、URL 或行号；没有证据的联动和风险必须标为 `[待确认]` 并说明影响。每个改动点至少有一个具体子项和一条关联分析，确实不涉及联动时记录原因和代码依据。
 
 `correction_loop` 必须在 `research_settled` 后启动。
 
 `pending` 的远程查询与 `internal_requirement_normalization` 并行，但不阻塞内部整理；pending 期间不得主动询问业务痛点、范围、规则、验收或其他产品问题，也不得在同一回复附问题。它严格阻塞 `correction_loop`、当前实现确认、代码位置、技术建议、最终验收影响、阶段 4 代码计划完成、阶段 5 文档冻结以及后续预览/交付。每项查询仅在完成、明确失败或用户明确跳过后解除自己的门；结算后必须先用证据删除可自行查明的问题，再只问代码与资料无法决定的产品问题，最多 3 题；失败或跳过不等于有代码证据，相关内容仍为 `[待确认]`。
 
-仅为恢复与变更追踪保留内部确认状态：`understanding_confirmed`、`corrections_confirmed`、`business_rules_confirmed`、`impact_analysis_settled`、`risk_decisions_confirmed`、`code_plan_confirmed`、`acceptance_confirmed`、`prd_review_accepted`、`prd_sync_pending`。任一必需状态为否，保持在当前阶段；这些名称不得写入 PRD。`impact_analysis_settled` 只有在每个直接改动都有证据化的关联影响、风险、建议和回归范围时成立；`risk_decisions_confirmed` 只约束真正需要产品取舍的风险。用户选择“全部按推荐”只确认当前轮建议，不能使无来源数字、代码事实或风险推断变成已确认事实。左侧 Markdown Review“采纳”写入 `prd_review_accepted` 和 `prd_sync_pending`，并由后台记录当前 Run、会话、文件版本和正文 hash；目标在线文档位置尚未就绪时保留这两个状态，目标就绪后直接继续同步，不需要再次采纳。正文、文件身份或 Run 变化时后台授权失效。
+仅为恢复与变更追踪保留内部确认状态：`understanding_confirmed`、`corrections_confirmed`、`business_rules_confirmed`、`impact_analysis_settled`、`risk_decisions_confirmed`、`code_plan_confirmed`、`acceptance_confirmed`、`prd_review_accepted`、`prd_sync_pending`。任一必需状态为否，保持在当前阶段；这些名称不得写入 PRD。`impact_analysis_settled` 只有在每个直接改动都有证据化的关联影响、风险、建议和回归范围时成立；`risk_decisions_confirmed` 只约束真正需要产品取舍的风险。用户选择“全部按推荐”只确认当前轮建议，不能使无来源数字、代码事实或风险推断变成已确认事实。左侧 Markdown Review“采纳”经确认后，以当前编辑器正文准备并替换右侧当前会话中的待执行指令，不切换到来源会话；未保存草稿先走保存和回读。用户手动发送执行指令时，当前 Browser Target 必须重新核对为可写空白轻文档。
 
 ## 5. 恢复与确认生命周期
 
-- 恢复只能从当前 Harness 运行绑定和已校验 manifest 找到原需求。恢复前向用户回显业务需求摘要、当前阶段、PRD 状态和父目录状态；内部标识只供运行状态关联，不要求用户输入。
-- **旧确认在恢复后失效**：旧 Run 的 scope 确认、阶段 3 最终理解确认、阶段 4 代码计划/验收确认、父目录确认和旧 challenge 不能直接复用。恢复必须重新取得当前 Run 所需的确认；目标位置或权限变化会使未完成写入暂停。已记录的 `prd_sync_pending` 保留，目标重新就绪后直接继续，不要求再次采纳。
-- 阶段 5 确认正文快照是唯一交付正文：这里的确认就是左侧 Markdown Review 的“采纳”。恢复只能使用该已保存正文；不得用 `process.md`、`domain-model.md`、`knowledge-sources.md`、`trace-events.jsonl` 或其他本地文件重建正文。内容无法完整恢复时回到阶段 5，重新生成并在左侧审核。
-- 阶段 6 的父目录确认与线上创建严格分离：`team_knowledge_batch_preview` 内部只检查父节点并冻结目标与正文，不产生线上写入；左侧 Markdown Review 的“采纳”已经是本轮创建授权，预览成功后立即进入阶段 7，不再请求第二次确认。
-- 部分交付恢复时保留 PRD 的 catalogId、幂等身份和回读证据。恢复前必须用同一 `batchId` 和已采纳的 PRD 重新 preview，然后直接继续创建；已成功项不能重复创建。
-- 阶段 7 不显示页面确认卡。正文写入后自动进行同目标持久化回读；目标变化、写入失败或回读不一致才保持未完成并报告真实原因。
-- 只有一份 PRD 在父节点下创建成功，并完成名称、父节点、正文的同目标回读，manifest/batch 状态才可进入 `completed`；否则保留 `paused`、`failed` 或 `partial` 的真实状态和下一步。
+- 恢复只能从当前 Harness 运行绑定和已校验 manifest 找到原需求。恢复前向用户回显业务需求摘要、当前阶段、PRD 状态和待执行指令状态；内部标识只供运行状态关联，不要求用户输入。
+- **旧确认在恢复后失效**：旧 Run 的 scope 确认、阶段 3 最终理解确认、阶段 4 代码计划/验收确认和旧 challenge 不能直接复用。恢复必须重新取得当前 Run 所需的确认；重新读取当前 PRD 文件和 Browser Target。右侧当前会话输入框中不存在待执行指令时，重新打开左侧审核后再采纳。
+- 阶段 5 确认正文来自左侧 Markdown Review 当前编辑器；未保存草稿先保存并回读。执行时必须重新读取该 PRD 文件，不能用 `process.md`、`domain-model.md`、`knowledge-sources.md`、`trace-events.jsonl` 或其他本地文件重建正文。内容无法完整恢复时回到阶段 5，重新生成并在左侧审核。
+- 阶段 6 由用户在当前 Browser Target 选择或新建空白轻文档；模型不能选择或打开标签。非空、不可写或非轻文档时停止，不覆盖。
+- 阶段 7 的用户手动发送执行指令是唯一写入确认：按 `light_document_read → preview → commit → readback` 在同一目标完成，Preview challenge 仍一次性且不能跨目标复用。
+- 写入或回读失败时保留真实失败原因；只有同一目标的 Verified Write 与正文回读都成功才进入 `completed`。

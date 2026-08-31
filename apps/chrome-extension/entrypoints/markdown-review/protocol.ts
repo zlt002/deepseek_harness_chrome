@@ -187,7 +187,7 @@ export interface SessionActionResponse {
   action?: 'rewrite' | 'accept'
   targetSessionId?: string
   targetSessionTitle?: string
-  status?: 'draft_ready' | 'queued' | 'processing'
+  status?: 'draft_ready'
   error?: MarkdownReviewError
 }
 
@@ -457,7 +457,7 @@ export function isMarkdownReviewPortResponse(value: unknown): value is MarkdownR
     return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'action', 'targetSessionId', 'targetSessionTitle', 'status', 'error'].includes(key))
       && (value.ok
         ? (value.action === 'rewrite' || value.action === 'accept') && isMarkdownReviewId(value.targetSessionId) && boundedText(value.targetSessionTitle, MAX_PATH_LENGTH)
-          && (value.action === 'rewrite' ? value.status === 'draft_ready' : value.status === 'queued' || value.status === 'processing') && value.error === undefined
+          && value.status === 'draft_ready' && value.error === undefined
         : isMarkdownReviewError(value.error) && value.action === undefined && value.targetSessionId === undefined && value.targetSessionTitle === undefined && value.status === undefined)
   }
   if (value.type === 'markdown-review-proposals-response') {

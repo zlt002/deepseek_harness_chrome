@@ -63,7 +63,7 @@ export function normalizePrdTrackingEvent(value) {
   if (!eventId || !eventType || !['prd_generated', 'markdown_review_rewrite', 'markdown_review_accept', 'online_document_verified_write'].includes(eventType) || !outcome || !['success', 'failure', 'timeout'].includes(outcome) || Number.isNaN(Date.parse(occurredAt))) return undefined
   if ((eventType === 'prd_generated' || eventType === 'markdown_review_rewrite' || eventType === 'markdown_review_accept') && !sessionId) return undefined
   if (eventType === 'prd_generated' && outcome !== 'success') return undefined
-  if (eventType === 'online_document_verified_write' && (outcome !== 'success' || !runId || !batchId?.startsWith('pmd:') || itemIndex === undefined || !documentName || !documentCatalogId || !documentUrl)) return undefined
+  if (eventType === 'online_document_verified_write' && (outcome !== 'success' || !runId || !documentName || !documentCatalogId || !documentUrl)) return undefined
   const validStatus = status === undefined
     || (eventType === 'markdown_review_rewrite' && outcome === 'success' && status === 'draft_ready')
     || (eventType === 'markdown_review_accept' && outcome === 'success' && REVIEW_STATUSES.has(status) && status !== 'draft_ready')

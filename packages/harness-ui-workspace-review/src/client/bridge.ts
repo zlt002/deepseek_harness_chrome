@@ -85,7 +85,7 @@ export interface WorkspaceReviewSessionActionDelivery {
   readonly action: 'rewrite' | 'accept'
   readonly targetSessionId: string
   readonly targetSessionTitle: string
-  readonly status: 'draft_ready' | 'queued' | 'processing'
+  readonly status: 'draft_ready'
 }
 
 export function feedbackMessage(event: MessageEvent, parent: Window, config: WorkspaceReviewBridgeConfig): MarkdownReviewFeedback | undefined {
