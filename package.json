@@ -27,7 +27,7 @@
     "typecheck:plugins": "node scripts/run-product-plugin-command.mjs typecheck",
     "test:plugins": "node scripts/run-product-plugin-command.mjs test",
     "pretest": "node scripts/prepare-test-runtime.mjs",
-    "test": "node --test --test-concurrency=1 test/*.test.mjs && pnpm test:plugins",
+    "test": "node --test test/*.test.mjs && pnpm test:plugins",
     "register-native-host": "node scripts/register-native-host.mjs",
     "dev:restart": "node scripts/restart-dev.mjs",
     "dev:watch": "node scripts/watch-dev.mjs",

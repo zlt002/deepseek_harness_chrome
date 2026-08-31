@@ -147,9 +147,10 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
         reject(new Error('runtime message did not keep its response channel open'))
       }
     }),
-    activateTab: (tabId) => {
+    activateTab: async (tabId) => {
       currentActiveTab = tabsById[tabId] ?? currentActiveTab
       activatedListener({ tabId })
+      await new Promise(resolve => setTimeout(resolve, 0))
     },
     createTab: (tab) => createdListener(tab),
     updateActiveTab: (changeInfo, tab) => {
@@ -484,7 +485,7 @@ test('manual tab activation updates only the next-Run candidate and never transf
   })
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
-    background.activateTab(43)
+    await background.activateTab(43)
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some((message) => message.type === 'connector_response' && message.requestId === 'wb-turn'); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
@@ -512,7 +513,7 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
     // This is deliberately the target carried by the submission, not a later
     // active-tab lookup. Switch first to prove the lock retains the submitted
     // Browser Target.
-    background.activateTab(43)
+    await background.activateTab(43)
     assert.deepEqual(await background.sendRuntimeMessage({
       type: 'lock-browser-target/v1', sessionId: 'session-follow', submissionId: 'follow-1', browserTarget: baiduTarget,
     }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true, locked: true })
@@ -578,7 +579,7 @@ test('follow-active-tab permits concurrent sessions on the same frozen Browser T
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-c', submissionId: 'submission-c', browserTarget: targetB }, sender), { ok: false, error: '另一个对话正在运行，结束后再试。' })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b' }, sender), { ok: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), { ok: true })
-    background.activateTab(b.id)
+    await background.activateTab(b.id)
     background.emitNative({ type: 'connector_request', requestId: 'after-last-unlock', runId: 'run-follow', generation: 'generation-a', browserTarget: targetA, tool: 'list_work_tabs' })
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock').result.pageIdentity.url, b.url, 'follow mode returns only after the last owner releases')
@@ -696,7 +697,7 @@ test('the sidepanel can recover only the active current-Run Browser Target lock 
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender), { ok: true, locked: true })
-    background.activateTab(b.id)
+    await background.activateTab(b.id)
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
       ok: true, lock: { sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA },
     })
@@ -718,7 +719,7 @@ test('a late same-session reconciliation removes only its own completed Run lock
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender), { ok: true, locked: true })
     background.emitNative({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-b' } })
-    background.activateTab(b.id)
+    await background.activateTab(b.id)
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-b', browserTarget: targetB }, sender), { ok: true, locked: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
@@ -753,7 +754,7 @@ test('an accepted follow lock ignores the initial idle reconciliation window so 
       await background.sendRuntimeMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a', submissionId: 'submission-a' }, { url: 'chrome-extension://test/sidepanel.html' })
     }
 
-    background.activateTab(b.id)
+    await background.activateTab(b.id)
     background.emitNative({
       type: 'connector_request', requestId: 'read-after-b-activation', runId: 'run-follow', generation: 'generation-a',
       tool: 'read_work_tab', tab: 1, browserTarget: targetA, browserTargets: [targetA],
@@ -810,7 +811,7 @@ test('follow lock can bind a Run started with none mode and an unlock before tra
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-follow', submissionId: 'first' }, sender), { ok: true })
     transferGate.resolve()
     assert.deepEqual(await locking, { ok: true, locked: false })
-    background.activateTab(43)
+    await background.activateTab(43)
     background.emitNative({ type: 'connector_request', requestId: 'after-unlock', runId: 'run-follow', generation: 'generation-1', browserTarget: firstTarget, tool: 'list_work_tabs' })
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-unlock')
@@ -914,7 +915,7 @@ test('Team Knowledge create keeps its confirmed Browser Target when the user act
   })
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
-    background.activateTab(43)
+    await background.activateTab(43)
     await new Promise((resolve) => setTimeout(resolve, 0))
     background.emitNative({
       type: 'connector_request', requestId: 'team-knowledge-confirmed-create', runId: 'run-follow', generation: 'generation-1',
@@ -950,7 +951,7 @@ test('Team Knowledge create fails closed when its confirmed Browser Target close
       })
       try {
         await background.sendRuntimeMessage({ type: 'ensure-harness' })
-        background.activateTab(43)
+        await background.activateTab(43)
         await new Promise((resolve) => setTimeout(resolve, 0))
         const requestId = `team-knowledge-confirmed-create-${name}`
         background.emitNative({
@@ -998,7 +999,7 @@ test('Team Knowledge retry preview keeps the original batch tab after a partial 
       tool: 'team_knowledge_batch', action: 'create', batchId: 'batch-partial', lease: 'reuse', parent, kind: 'light_document', name: 'Confirmed child', body: '# Confirmed child', idempotencyIdentity: 'team-batch:partial:0', userConfirmation: { itemIndex: 1, totalItems: 1 },
     })
     assert.equal((await responseFor('batch-partial-create')).result.status, 'partial_delivery')
-    background.activateTab(43)
+    await background.activateTab(43)
     await new Promise((resolve) => setTimeout(resolve, 0))
     background.emitNative({ type: 'connector_request', requestId: 'batch-retry-preview', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-partial', lease: 'reuse' })
     assert.deepEqual((await responseFor('batch-retry-preview')).browserTarget, confirmedTarget)
@@ -1028,7 +1029,7 @@ test('Team Knowledge completed batch release restores the configured follow targ
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     background.emitNative({ type: 'connector_request', requestId: 'batch-acquire', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: 'batch-release', lease: 'acquire' })
     await responseFor('batch-acquire')
-    background.activateTab(43)
+    await background.activateTab(43)
     await new Promise((resolve) => setTimeout(resolve, 0))
     background.emitNative({ type: 'connector_request', requestId: 'batch-release', runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'release', batchId: 'batch-release', lease: 'release', parent })
     const released = await responseFor('batch-release')
@@ -1099,7 +1100,7 @@ test('Team Knowledge batch lease fails closed when its tab closes or navigates',
       })
       try {
         await background.sendRuntimeMessage({ type: 'ensure-harness' })
-        background.activateTab(43)
+        await background.activateTab(43)
         await new Promise((resolve) => setTimeout(resolve, 0))
         const requestId = `lease-${name}`
         background.emitNative({ type: 'connector_request', requestId, runId: 'run-follow', generation: 'generation-1', browserTarget: confirmedTarget, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: `batch-${name}`, lease: 'reuse' })
@@ -1177,7 +1178,7 @@ test('candidate updates serialize with settings saves without overwriting mode, 
     },
   })
   try {
-    background.activateTab(43)
+    await background.activateTab(43)
     await candidateSetStarted
     const saving = background.sendRuntimeMessage({
       type: 'save-browser-target-settings',
