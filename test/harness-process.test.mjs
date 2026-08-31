@@ -34,14 +34,14 @@ test('uses DSH_ROOT as the default Harness working directory', () => {
 
 test('puts the Native Host Node runtime first while preserving an existing PATH', () => {
   assert.deepEqual(
-    withProductNodeOnPath({ PATH: '/usr/bin:/opt/tools', KEEP: 'value' }, '/product/runtime/bin/node'),
+    withProductNodeOnPath({ PATH: '/usr/bin:/opt/tools', KEEP: 'value' }, '/product/runtime/bin/node', 'linux'),
     { PATH: '/product/runtime/bin:/usr/bin:/opt/tools', KEEP: 'value' },
   )
 })
 
 test('creates a PATH from the Native Host Node runtime when Chrome supplies none', () => {
   assert.deepEqual(
-    withProductNodeOnPath({ KEEP: 'value' }, '/product/runtime/bin/node'),
+    withProductNodeOnPath({ KEEP: 'value' }, '/product/runtime/bin/node', 'linux'),
     { KEEP: 'value', PATH: '/product/runtime/bin' },
   )
 })
