@@ -6,6 +6,10 @@ import { join } from 'node:path'
 import { PrdEventTracker, normalizePrdTrackingEvent } from '../apps/native-server/src/prd-event-tracker.mjs'
 
 test('PRD telemetry accepts only bounded structured metadata', () => {
+  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:generated', eventType: 'review_generated', outcome: 'succeeded', occurredAt: '2026-08-31T07:59:00Z', sessionId: 'session-1' }), {
+    eventId: 'review:generated', eventType: 'prd_generated', outcome: 'success', occurredAt: '2026-08-31T07:59:00.000Z', sessionId: 'session-1',
+  })
+  assert.equal(normalizePrdTrackingEvent({ eventId: 'review:failed', eventType: 'review_generated', outcome: 'failed', occurredAt: '2026-08-31T07:59:00Z', sessionId: 'session-1' }), undefined)
   assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:1', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'accept', status: 'queued', rawInput: 'must not pass' }), {
     eventId: 'review:1', eventType: 'markdown_review_accept', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', status: 'queued',
   })

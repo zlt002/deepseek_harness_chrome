@@ -90,6 +90,7 @@ test('a produced workspace Markdown chip emits the Markdown Review open event', 
       get: (name) => name === 'chatFileMentions' ? registry : name === 'toolFileLinks' ? toolFileLinks : {},
       effect: (callback) => callback(),
       slots: { inject: () => {} },
+      conversationEvents: { register: () => () => {} },
     })
 
     const hostOpen = []

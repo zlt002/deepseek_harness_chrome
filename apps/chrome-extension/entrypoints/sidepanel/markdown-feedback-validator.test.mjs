@@ -72,10 +72,12 @@ test('Markdown feedback rejects invalid ranges and bounded visual block data wit
   if (!range.ok) assert.match(range.error, /visual positions and editorRevision/)
 })
 
-test('review actions reject mixed or extra resource fields', () => {
-  const action = { action: 'rewrite', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md' }
+test('review actions bind a complete resource version and reject mixed fields', () => {
+  const action = { action: 'rewrite', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'revision-1', fingerprint: 'fingerprint-1' }
   assert.equal(validateWorkspaceMarkdownReviewAction(action).ok, true)
-  assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, fingerprint: 'must-not-forward' }).ok, false)
+  const { fingerprint: _fingerprint, ...missingFingerprint } = action
+  assert.equal(validateWorkspaceMarkdownReviewAction(missingFingerprint).ok, false)
+  assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, capability: 'must-not-forward' }).ok, false)
   assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, action: 'send' }).ok, false)
 })
 

@@ -76,6 +76,9 @@ export function apply(ctx: ClientContext): void {
   const postUnlock = (sessionId: string, submissionId: string): void => {
     window.parent.postMessage({ type: 'browser-target-unlock/v1', nonce: config.nonce, sessionId, submissionId }, config.parentOrigin)
   }
+  const postReconcile = (sessionId: string, submissionId: string): void => {
+    window.parent.postMessage({ type: 'browser-target-reconcile/v1', nonce: config.nonce, sessionId, submissionId }, config.parentOrigin)
+  }
   const releaseLifecycleLock = (sessionId: string, submissionId?: string): void => {
     const lock = lifecycleLocks.get(sessionId)
     if (lock !== undefined && (submissionId === undefined || lock.state.submissionId === submissionId)) {
@@ -84,6 +87,15 @@ export function apply(ctx: ClientContext): void {
     }
     if (submissionId === undefined && lock === undefined) return
     postUnlock(sessionId, submissionId ?? lock!.state.submissionId)
+  }
+  const restoreProjectedLifecycle = (): void => {
+    const projected = bridge.source.getSnapshot()?.activeRunLock
+    if (projected === undefined || lifecycleLocks.has(projected.sessionId)) return
+    const session = ctx.sessions.binding(projected.sessionId as SessionId)?.session
+    if (session === undefined) return
+    const state = new BrowserTargetSessionRunLock(projected.submissionId)
+    state.accept(session.getSnapshot())
+    lifecycleLocks.set(projected.sessionId, { state })
   }
   const lockSubmission = (sessionId: string, submissionId: string, browserTarget: { browser: 'chrome'; windowId: number; tabId: number; url: string }): Promise<boolean> => {
     return new Promise((resolve, reject) => {
@@ -162,8 +174,10 @@ export function apply(ctx: ClientContext): void {
     const sessionSubscriptions = new Map<string, () => void>()
     const reconcile = (sessionId: string, session: SessionFace): void => {
       const snapshot = session.getSnapshot()
-      if (shouldReconcileSessionRunTarget(snapshot, lifecycleLocks.get(sessionId)?.state)) {
-        window.parent.postMessage({ type: 'browser-target-reconcile/v1', nonce: config.nonce, sessionId }, config.parentOrigin)
+      const lifecycle = lifecycleLocks.get(sessionId)
+      if (lifecycle !== undefined && shouldReconcileSessionRunTarget(snapshot, lifecycle.state)) {
+        lifecycleLocks.delete(sessionId)
+        postReconcile(sessionId, lifecycle.state.submissionId)
       }
     }
     const syncSessionSubscriptions = (): void => {
@@ -174,6 +188,7 @@ export function apply(ctx: ClientContext): void {
         if (sessionSubscriptions.has(id)) continue
         const session = ctx.sessions.binding(sessionId)?.session
         if (session === undefined) continue
+        restoreProjectedLifecycle()
         const onSnapshot = (): void => { reconcile(id, session) }
         sessionSubscriptions.set(id, session.subscribe(onSnapshot))
         onSnapshot()
@@ -191,6 +206,10 @@ export function apply(ctx: ClientContext): void {
       for (const unsubscribe of sessionSubscriptions.values()) unsubscribe()
     }
   }, 'accrui-browser-target: reconcile stale idle locks')
+  ctx.effect(() => {
+    restoreProjectedLifecycle()
+    return bridge.source.subscribe(restoreProjectedLifecycle)
+  }, 'accrui-browser-target: restore remounted Run lock lifecycle')
   const injected = (): BrowserTargetInjected => ({
     hooks: { browserTarget: bridge.source, browserTargetPanel: panel },
     onBrowserTargetCommand: command => {

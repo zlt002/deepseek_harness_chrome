@@ -100,6 +100,7 @@ test('real Tool rows route workspace Markdown to Review and keep other files on 
       workspaces: {},
       chatFileMentions: { register: () => () => {} },
       conversation: { input: { for: () => ({ notify: (...notice) => notices.push(notice) }) } },
+      conversationEvents: { register: () => () => {} },
     }
     services.set('reviewFeedback', ctx.reviewFeedback)
     services.set('sessions', ctx.sessions)

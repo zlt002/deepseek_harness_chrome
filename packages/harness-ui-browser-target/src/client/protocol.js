@@ -12,6 +12,12 @@ function tab(value) {
   return target(value) && typeof value.title === 'string'
     && (value.favIconUrl === undefined || typeof value.favIconUrl === 'string')
 }
+function activeRunLock(value) {
+  return value !== null && typeof value === 'object'
+    && typeof value.sessionId === 'string' && value.sessionId.length > 0
+    && typeof value.submissionId === 'string' && value.submissionId.length > 0
+    && tab(value.target)
+}
 
 function snapshotMessage(value) {
   return value !== null && typeof value === 'object'
@@ -25,6 +31,7 @@ function snapshotMessage(value) {
     && Array.isArray(value.tabs) && value.tabs.every(tab)
     && (value.activeTab === undefined || tab(value.activeTab))
     && (value.lockedRunTarget === undefined || tab(value.lockedRunTarget))
+    && (value.activeRunLock === undefined || activeRunLock(value.activeRunLock))
     && (value.error === undefined || typeof value.error === 'string')
 }
 
@@ -43,6 +50,7 @@ export function createBrowserTargetProtocol({ createStore, nonce, parentOrigin }
         tabs: event.data.tabs,
         ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }),
         ...(event.data.lockedRunTarget === undefined ? {} : { lockedRunTarget: event.data.lockedRunTarget }),
+        ...(event.data.activeRunLock === undefined ? {} : { activeRunLock: event.data.activeRunLock }),
         ...(event.data.error === undefined ? {} : { error: event.data.error }),
       })
       return true

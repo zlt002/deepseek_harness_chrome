@@ -7,7 +7,17 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 
 先 `list_work_tabs` 确认工作标签和 `documentIdentity.kind`。要读勾选名单里某一页的正文，用 `mcp__chrome__read_work_tab({ tab })`，`tab` 是该列表 `pages` 的序号（从 1 开始），不能传 tabId。写仍然只写主目标。
 
-主目标轻文档也可用 `mcp__chrome__light_document_read({})` 了解正文和稳定块；它是只读，不会改文档。
+主目标轻文档先用 `mcp__chrome__light_document_read({})` 了解正文、`blockCount` 和公开的稳定块 ID；它是只读，不会改文档。
+
+## 按文档状态选写入路径
+
+只在已读到的目标上选一条路径：
+
+- **空白文档（`blockCount=0`）**：结构化正文用 `blocks_insert`，payload `{ position: "end", blocks: [...] }`；Mermaid 用 `insert_drawing`，payload `{ mermaid, position: "end" }`；只在光标处写纯正文时，先读取当前选区（下方 `selection_read`），再用 `selection_insert`，payload 为恰好一个 `text`、`markdown` 或 `html`，并带该次读取的 `expectedSelectionFingerprint`。
+- **已有正文的小范围更新**：只改已读到的稳定旧块。单块使用 `replace` / `blocks_replace`，多块使用 `blocks_batch_replace`；后者 payload 只能是 `{ replacements: [{ id, ... }] }`，最多 50 个 replacement，`id` 必须来自这次读取的旧块；它不能接受 `{ blocks: [...] }`，也不能用来重建整篇文档。删除完整稳定块用 `blocks_delete` 的公开 `id`；只改标题用 `set_title`。
+- **已有正文的全文重写**：先读取正文，再用选区读取确认用户选中了精确、稳定、非折叠的全文，且 `replaceStrategy` 支持替换；只走下方的选区 preview/commit 路线。不能形成受支持的精确全文选区，或返回 `editor not ready` 时，停止并请用户刷新页面、重新绑定 Browser Target 后再读取；此全文/选区替换分支不得猜测 `blocks_delete`、`blocks_insert` 或其他补救 payload。
+
+每条写入路径都必须是 `preview → 用户确认 → commit → 同一 Browser Target 回读`。只有 commit 返回 verified write 且回读符合预期，才能说已完成。
 
 ## 选区优化
 
@@ -25,35 +35,13 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 
 ## 契约
 
-非选区变更走 `mcp__chrome__light_document_write_preview({ operation, payload })`，用户确认后再把 challenge 交给 `mcp__chrome__light_document_write_commit({ challenge })`。空文档 `blockCount=0` 时禁止 `replace` / `blocks_replace` / `blocks_batch_edit`。
-
-## 空文档写正文
-
-优先结构化插入，不要把整篇 PRD 压成一段 markdown。
-
-- 流程图 / 时序图 / 饼图：`insert_drawing`，payload `{ mermaid, position: "end" }`。源码用 `flowchart TD`、`sequenceDiagram` 或 `pie`，不要先渲成图片。
-- 标题、段落、列表、表格、代码块：`blocks_insert`，payload `{ position: "end", blocks: [...] }`。
-- 只在光标处补一段纯文本/markdown 时：先 `selection`，再 `selection_insert`，payload 必须带 `expectedSelectionFingerprint`。
-
-`blocks` 项：
-
-- `{ type: "h1"|"h2"|"h3"|"p"|"blockquote", text }`
-- `{ type: "ul"|"ol", items: ["…"] }`
-- `{ type: "table", rows: [["表头"], ["单元格"]] }`
-- `{ type: "codeblock", language: "mermaid"|"javascript"|…, text }`
-
-## 已有正文
-
-- 改当前选中内容：使用上方三步选区优化流程。
-- 改已读到的稳定块：`replace` / `blocks_replace` / `blocks_batch_edit`，用公开 `id`。
-- 删除已读到的完整稳定块：`blocks_delete`，payload 使用公开 `id`；没有稳定 id 不删除。
-- 只改标题：`set_title`。
+非选区变更走 `mcp__chrome__light_document_write_preview({ operation, payload })`，用户确认后再把 challenge 交给 `mcp__chrome__light_document_write_commit({ challenge })`。空文档按上面的三条受支持路线写正文。
 
 ## 不要做
 
 - 不要把流程图写成普通段落或静态图。
 - 不要对空文档猜隐藏段落 id。
 - 不要复用 challenge，也不要 inspect 一份 payload、write 另一份。
-- 不要在选区优化失败后改走旧选区 payload 或 `blocks_batch_edit`。
+- 全文或选区替换失败后，不要猜 `blocks_delete`、`blocks_insert` 或其他补救 payload；`editor not ready` 时停止，刷新并重新绑定 Browser Target 后再读取。
 - 不要把批量子文档创建的暂态失败改成手工写正文或反复选区替换；保留同一批次和幂等标识，等待 Connector 返回可恢复结果。
 - 不要调用未开放的图片/导出/高亮操作。

@@ -37,11 +37,41 @@ interface HostContext {
 }
 
 interface ProposeEditArgs { review_id: string; selection_id: string; replacement_markdown: string; summary?: string }
+interface OpenWorkspaceMarkdownReviewArgs { path: string }
 interface ToolExecutionContext { agent?: { id: string } }
 
 /** Same-origin session-intake routes and bearer background routes deliberately have separate guards. */
 export function apply(ctx: HostContext): void {
   const reviews = new WorkspaceReviewRuntime()
+  ctx.tools.register({
+    name: 'open_workspace_markdown_review',
+    description: 'Open one existing workspace Markdown file in the visual Markdown Review after the caller has finished validating its content. The path must belong to the current Harness session workspace.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['path'], properties: {
+        path: { type: 'string', description: 'Workspace-relative .md or .markdown path to review.' },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false, required: ['status', 'path', 'fingerprint'], properties: {
+          status: { type: 'string', const: 'ready' },
+          path: { type: 'string' },
+          fingerprint: { type: 'string' },
+        },
+      },
+      render: (_args: unknown, value: { path: string }) => [{ type: 'text', text: 'Markdown Review is ready for ' + value.path + '.' }],
+    },
+    async execute(args: unknown, exec: ToolExecutionContext) {
+      if (exec.agent === undefined) throw new Error('open_workspace_markdown_review requires an owning Harness session')
+      const parsed = openWorkspaceMarkdownReviewArgs(args)
+      const sessionId = String(exec.agent.id)
+      const session = ctx.sessions.get(sessionId)
+      if (session?.header.cwd === undefined) throw new Error('open_workspace_markdown_review requires the current Harness session workspace')
+      const review = await reviews.open(sessionId, session.header.cwd, parsed.path)
+      return { status: 'ready', path: review.displayPath, fingerprint: review.fingerprint }
+    },
+    presentCall: () => ({ card: 'generic', title: '打开 Markdown 审阅', kind: 'read' }),
+  })
   ctx.tools.register({
     name: 'propose_workspace_markdown_edit',
     description: 'Return an AI edit proposal to the open visual Markdown Review Tab. Use this when workspace_markdown_annotations includes review_id and selection_id. This queues a reviewable visual diff and never writes the file.',
@@ -176,6 +206,12 @@ function proposeEditArgs(value: unknown): ProposeEditArgs {
   if (typeof item.review_id !== 'string' || typeof item.selection_id !== 'string' || typeof item.replacement_markdown !== 'string'
     || (item.summary !== undefined && typeof item.summary !== 'string')) throw new Error('propose_workspace_markdown_edit arguments are invalid')
   return { review_id: item.review_id, selection_id: item.selection_id, replacement_markdown: item.replacement_markdown, ...(typeof item.summary === 'string' ? { summary: item.summary } : {}) }
+}
+function openWorkspaceMarkdownReviewArgs(value: unknown): OpenWorkspaceMarkdownReviewArgs {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || typeof (value as Record<string, unknown>).path !== 'string') {
+    throw new Error('open_workspace_markdown_review requires a path')
+  }
+  return { path: (value as Record<string, string>).path }
 }
 function header(req: IncomingMessage, name: string): string | undefined { const value = req.headers[name]; return typeof value === 'string' ? value : undefined }
 function bearer(req: IncomingMessage): string | undefined { const value = header(req, 'authorization'); return value?.startsWith('Bearer ') === true ? value.slice(7) : undefined }

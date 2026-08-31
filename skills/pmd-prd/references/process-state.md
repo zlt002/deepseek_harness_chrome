@@ -42,12 +42,12 @@ Run 启动后，每次实质性用户回答或状态转换都在同一轮更新�
 
 `pending` 的远程查询与 `internal_requirement_normalization` 并行，但不阻塞内部整理；pending 期间不得主动询问业务痛点、范围、规则、验收或其他产品问题，也不得在同一回复附问题。它严格阻塞 `correction_loop`、当前实现确认、代码位置、技术建议、最终验收影响、阶段 4 代码计划完成、阶段 5 文档冻结以及后续预览/交付。每项查询仅在完成、明确失败或用户明确跳过后解除自己的门；结算后必须先用证据删除可自行查明的问题，再只问代码与资料无法决定的产品问题，最多 3 题；失败或跳过不等于有代码证据，相关内容仍为 `[待确认]`。
 
-仅为恢复与变更追踪保留内部确认状态：`understanding_confirmed`、`corrections_confirmed`、`business_rules_confirmed`、`impact_analysis_settled`、`risk_decisions_confirmed`、`code_plan_confirmed`、`acceptance_confirmed`。任一必需状态为否，保持在当前阶段；这些名称不得写入 PRD。`impact_analysis_settled` 只有在每个直接改动都有证据化的关联影响、风险、建议和回归范围时成立；`risk_decisions_confirmed` 只约束真正需要产品取舍的风险。用户选择“全部按推荐”只确认当前轮建议，不能使无来源数字、代码事实或风险推断变成已确认事实。
+仅为恢复与变更追踪保留内部确认状态：`understanding_confirmed`、`corrections_confirmed`、`business_rules_confirmed`、`impact_analysis_settled`、`risk_decisions_confirmed`、`code_plan_confirmed`、`acceptance_confirmed`、`prd_review_accepted`。任一必需状态为否，保持在当前阶段；这些名称不得写入 PRD。`impact_analysis_settled` 只有在每个直接改动都有证据化的关联影响、风险、建议和回归范围时成立；`risk_decisions_confirmed` 只约束真正需要产品取舍的风险。用户选择“全部按推荐”只确认当前轮建议，不能使无来源数字、代码事实或风险推断变成已确认事实。`prd_review_accepted` 只能由当前冻结文件的 Markdown Review“采纳”写入；任一正文、fingerprint 或 hash 变化立即使它失效，阶段 6 因此重新受阻。
 
 ## 5. 恢复与确认生命周期
 
 - 恢复只能从当前 Harness 运行绑定和已校验 manifest 找到原需求。恢复前向用户回显业务需求摘要、当前阶段、PRD 状态和父目录状态；内部标识只供运行状态关联，不要求用户输入。
-- **旧确认在恢复后失效**：旧 Run 的 scope 确认、阶段 3 最终理解确认、阶段 4 代码计划/验收确认、阶段 5 正文确认、阶段 6 父目录确认和旧 challenge 不能直接复用。恢复必须重新取得当前 Run 所需的确认；scope 变更、正文变化、父节点 fingerprint/Browser Target 变化、权限变化或 challenge 过期也会使相关确认失效。
+- **旧确认在恢复后失效**：旧 Run 的 scope 确认、阶段 3 最终理解确认、阶段 4 代码计划/验收确认、阶段 5 Markdown Review 采纳、阶段 6 父目录确认和旧 challenge 不能直接复用。恢复必须重新取得当前 Run 所需的确认；scope 变更、正文变化、父节点 fingerprint/Browser Target 变化、权限变化或 challenge 过期也会使相关确认失效。
 - 阶段 5 确认正文快照是唯一交付正文。恢复可读取已冻结快照和它的 content hash；不得用 `process.md`、`domain-model.md`、`knowledge-sources.md`、`trace-events.jsonl` 或其他本地文件重建正文。内容无法完整恢复时回到阶段 5，重新生成、预览和确认。
 - 阶段 6 的父目录确认与线上创建严格分离：`team_knowledge_batch_preview` 内部只检查父节点并冻结目标与正文，不产生线上写入；只有当前父目录预览成功、用户在看到目标后明确确认，才进入阶段 7 的 `team_knowledge_batch_create`。
 - 部分交付恢复时保留 PRD 的 catalogId、幂等身份和回读证据。恢复前必须用同一 `batchId` 和一份冻结 PRD 重新 preview 并取得新确认/challenge；旧确认不能授权重试，已成功项不能重复创建。

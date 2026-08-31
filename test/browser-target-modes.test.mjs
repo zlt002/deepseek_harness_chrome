@@ -552,6 +552,46 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
   }
 })
 
+test('a follow lock keeps its send-moment Browser Target while an in-flight settings save switches to none', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  let markNoneWriteStarted
+  let releaseNoneWrite
+  const noneWriteStarted = new Promise(resolve => { markNoneWriteStarted = resolve })
+  const noneWriteReleased = new Promise(resolve => { releaseNoneWrite = resolve })
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a },
+    onStorageSet: async (value) => {
+      if (value.harnessBrowserTargetSettings?.mode === 'none') {
+        markNoneWriteStarted()
+        await noneWriteReleased
+      }
+    },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    const changingPolicy = background.sendRuntimeMessage({ type: 'save-browser-target-settings', settings: { mode: 'none', pinnedTabs: [] } })
+    await noneWriteStarted
+    const locking = background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'session-follow', submissionId: 'send-moment-a', browserTarget: targetA,
+    }, { url: 'chrome-extension://test/sidepanel.html' })
+    releaseNoneWrite()
+    await changingPolicy
+    assert.deepEqual(await locking, { ok: true, locked: true })
+
+    background.emitNative({ type: 'connector_request', requestId: 'still-a', runId: 'run-follow', generation: 'generation-a', browserTarget: targetA, tool: 'list_work_tabs' })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'still-a'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'still-a').result.pageIdentity.url, a.url)
+
+    await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-follow', submissionId: 'send-moment-a' }, { url: 'chrome-extension://test/sidepanel.html' })
+    background.emitNative({ type: 'connector_request', requestId: 'after-unlock-none', runId: 'run-follow', generation: 'generation-a', browserTarget: targetA, tool: 'list_work_tabs' })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-unlock-none'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.match(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-unlock-none').error, /disabled/i)
+  } finally {
+    background.cleanup()
+  }
+})
+
 test('the sidepanel can recover only the active current-Run Browser Target lock after it is recreated', async () => {
   const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
   const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
@@ -567,6 +607,28 @@ test('the sidepanel can recover only the active current-Run Browser Target lock 
     })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), { ok: true })
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('a late same-session reconciliation removes only its own completed Run lock', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const targetB = { browser: 'chrome', windowId: 7, tabId: b.id, url: b.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a, 43: b } })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender), { ok: true, locked: true })
+    background.emitNative({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-b' } })
+    background.activateTab(b.id)
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-b', browserTarget: targetB }, sender), { ok: true, locked: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
+      ok: true, lock: { sessionId: 'session-a', submissionId: 'submission-b', browserTarget: targetB },
+    })
   } finally {
     background.cleanup()
   }
@@ -593,7 +655,7 @@ test('an accepted follow lock ignores the initial idle reconciliation window so 
     const initialIdleMayReconcile = shouldReconcileSessionRunTarget(initialIdle, lifecycle)
     assert.equal(initialIdleMayReconcile, false, 'the acknowledged lock remains until this Run was actually observed')
     if (initialIdleMayReconcile) {
-      await background.sendRuntimeMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a' }, { url: 'chrome-extension://test/sidepanel.html' })
+      await background.sendRuntimeMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a', submissionId: 'submission-a' }, { url: 'chrome-extension://test/sidepanel.html' })
     }
 
     background.activateTab(b.id)
@@ -661,21 +723,18 @@ test('follow lock can bind a Run started with none mode and an unlock before tra
   } finally { background.cleanup() }
 })
 
-test('fixed and unbound Browser Target modes ignore the transient follow lock', async () => {
+test('fixed and unbound Browser Target policies apply when no follow-mode client lock was sent', async () => {
   const active = { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' }
   const fixed = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/fixed' }
   const fixedTab = { id: 52, windowId: 7, url: fixed.url, title: 'Fixed' }
   const switched = { id: 43, windowId: 7, url: 'https://docs.example.test/switched', title: 'Switched' }
-  const sender = { url: 'chrome-extension://test/sidepanel.html' }
   const pinned = await loadBackground({
     settings: { mode: 'pinned-tabs', pinnedTabs: [fixed], primaryTabId: 52 }, activeTab: active,
     tabsById: { 42: active, 43: switched, 52: fixedTab },
   })
   try {
     await pinned.sendRuntimeMessage({ type: 'ensure-harness' })
-    assert.deepEqual(await pinned.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-fixed', submissionId: 'fixed-1', browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: active.url } }, sender), { ok: true, locked: false })
     pinned.activateTab(43)
-    await pinned.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-fixed', submissionId: 'fixed-1' }, sender)
     pinned.emitNative({ type: 'connector_request', requestId: 'fixed-after-complete', runId: 'run-follow', generation: 'generation-1', browserTarget: fixed, tool: 'list_work_tabs' })
     for (let attempt = 0; attempt < 20 && !pinned.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'fixed-after-complete'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     const fixedResponse = pinned.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'fixed-after-complete')
@@ -685,7 +744,6 @@ test('fixed and unbound Browser Target modes ignore the transient follow lock', 
   const unbound = await loadBackground({ settings: { mode: 'none', pinnedTabs: [] }, activeTab: active, tabsById: { 42: active } })
   try {
     await unbound.sendRuntimeMessage({ type: 'ensure-harness' })
-    assert.deepEqual(await unbound.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-none', submissionId: 'none-1', browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: active.url } }, sender), { ok: true, locked: false })
     unbound.emitNative({ type: 'connector_request', requestId: 'none-after-complete', runId: 'run-follow', generation: 'generation-1', browserTarget: { browser: 'chrome', windowId: 7, tabId: 42, url: active.url }, tool: 'list_work_tabs' })
     for (let attempt = 0; attempt < 20 && !unbound.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'none-after-complete'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     const noneResponse = unbound.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'none-after-complete')

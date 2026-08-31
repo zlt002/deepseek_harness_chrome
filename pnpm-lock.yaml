@@ -111,7 +111,17 @@ importers:
 
   packages/harness-ui-html-workbench: {}
 
-  packages/harness-ui-knowledge-scope: {}
+  packages/harness-ui-knowledge-scope:
+    devDependencies:
+      jsdom:
+        specifier: 26.1.0
+        version: 26.1.0
+      react:
+        specifier: ^19.2.1
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.2.1
+        version: 19.2.8(react@19.2.8)
 
   packages/harness-ui-message-annotations: {}
 

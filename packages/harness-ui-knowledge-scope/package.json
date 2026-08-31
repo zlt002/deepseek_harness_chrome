@@ -30,5 +30,10 @@
     "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-knowledge-scope",
     "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-knowledge-scope",
     "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
   }
 }

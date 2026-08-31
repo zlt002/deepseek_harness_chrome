@@ -47,7 +47,7 @@ test('returns awaited feedback delivery status with a bounded concrete error', (
 })
 
 test('accepts only a bounded session action and acknowledges its bound session', () => {
-  const action = { action: 'rewrite', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md' }
+  const action = { action: 'rewrite', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'revision-1', fingerprint: 'fingerprint-1' }
   assert.deepEqual(JSON.parse(JSON.stringify(sessionActionMessage({ data: { type: 'markdown-review-session-action/v1', nonce: 'nonce-1', requestId: 'request-1', action }, source: parent, origin: config.parentOrigin }, parent, config))), { requestId: 'request-1', action })
   assert.equal(sessionActionMessage({ data: { type: 'markdown-review-session-action/v1', nonce: 'nonce-1', requestId: 'request-1', action: { ...action, capability: 'must-not-cross' } }, source: parent, origin: config.parentOrigin }, parent, config), undefined)
   const messages = []

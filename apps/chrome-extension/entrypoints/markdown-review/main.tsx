@@ -15,7 +15,7 @@ import {
   type PreparedWrite,
 } from './protocol'
 import { reduceReviewState, type ReviewState } from './review-state'
-import { beginCommit, isCurrentCommit, settleCommit, shouldProtectLocalReviewWork, type CommitAttempt } from './review-state-safety'
+import { adoptionBlockedReason, beginCommit, isCurrentCommit, settleCommit, shouldProtectLocalReviewWork, type CommitAttempt } from './review-state-safety'
 import { VisualMarkdownEditor, type VisualMarkdownEditorHandle, type VisualReviewAnnotation } from './visual-markdown-editor'
 import type { VisualSelection } from './visual-selection'
 import { MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS } from './delivery-timeouts'
@@ -449,6 +449,15 @@ function App(): React.JSX.Element {
     setProposalNotice(undefined)
   }
   const dirty = snapshot !== undefined && draft !== snapshot.content
+  const acceptBlockedReason = adoptionBlockedReason({
+    snapshotContent: snapshot?.content,
+    editorMarkdown: draft,
+    annotationCount: annotations.length,
+    candidateReviewActive,
+    preparedWrite: preparedWrite !== undefined,
+    committing,
+    externalUpdatePending,
+  })
   const onMarkdownChange = useCallback((markdown: string) => {
     draftRef.current = markdown
     setDraft(markdown)
@@ -491,10 +500,22 @@ function App(): React.JSX.Element {
   const runSessionAction = useCallback((action: 'rewrite' | 'accept') => {
     const activeSnapshot = snapshotRef.current
     if (activeSnapshot === undefined || reviewId === undefined || sessionActionPending !== undefined) return
+    if (action === 'accept') {
+      const blocked = adoptionBlockedReason({
+        snapshotContent: activeSnapshot.content,
+        editorMarkdown: syncEditorMarkdown(),
+        annotationCount: annotationsRef.current.length,
+        candidateReviewActive: candidateReviewActiveRef.current,
+        preparedWrite: preparedWriteRef.current !== undefined,
+        committing: commitRef.current !== undefined,
+        externalUpdatePending,
+      })
+      if (blocked !== undefined) { setProposalNotice(blocked); return }
+    }
     const request = requestId()
     pendingRef.current.set(request, { kind: 'session-action', action })
     setSessionActionPending(action)
-    if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-session-action-request', requestId: request, reviewId, harnessSessionId: activeSnapshot.harnessSessionId, resourceId: activeSnapshot.resource.resourceId, displayPath: activeSnapshot.resource.displayPath, action })) {
+    if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-session-action-request', requestId: request, reviewId, harnessSessionId: activeSnapshot.harnessSessionId, resourceId: activeSnapshot.resource.resourceId, displayPath: activeSnapshot.resource.displayPath, revision: activeSnapshot.resource.revision, fingerprint: activeSnapshot.resource.fingerprint, action })) {
       pendingRef.current.delete(request)
       setSessionActionPending(undefined)
       dispatch({ type: 'port-disconnected' })
@@ -509,7 +530,7 @@ function App(): React.JSX.Element {
       setProposalNotice(`${action === 'rewrite' ? '重写准备' : '采纳'}未在 20 秒内确认，请重试。`)
     }, MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS)
     deliveryTimeoutsRef.current.set(request, timeout)
-  }, [post, reviewId, sessionActionPending])
+  }, [externalUpdatePending, post, reviewId, sessionActionPending, syncEditorMarkdown])
 
   const submitAnnotation = useCallback((selection: VisualSelection, comment: string): boolean => {
     const activeSnapshot = snapshotRef.current
@@ -636,7 +657,7 @@ function App(): React.JSX.Element {
         {snapshot?.truncated === true && <span className="status truncated" title="文件快照已截断，不能安全保存或发送完整文档">内容已截断</span>}
         <span className="history-actions" role="group" aria-label="编辑历史"><button type="button" className="secondary icon-button" title="撤销（Ctrl+Z）" aria-label="撤销（Ctrl+Z）" onClick={() => { if (editorRef.current?.undo() === true) syncEditorMarkdown() }}>↶</button><button type="button" className="secondary icon-button" title="重做（Ctrl+Y）" aria-label="重做（Ctrl+Y）" onClick={() => { if (editorRef.current?.redo() === true) syncEditorMarkdown() }}>↷</button></span>
         <button type="button" className="review-session-action is-rewrite" onClick={() => runSessionAction('rewrite')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中准备重写提示">↺ 重写</button>
-        <button type="button" className="review-session-action is-accept" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中采纳并继续 Skill">✓ 采纳</button>
+        <button type="button" className="review-session-action is-accept" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required' || acceptBlockedReason !== undefined} title={acceptBlockedReason ?? '在绑定会话中采纳并继续 Skill'}>✓ 采纳</button>
         {dirty && snapshot?.truncated !== true && <button type="button" onClick={prepareSave} disabled={preparedWrite !== undefined || committing || state.status === 'reopen-required'}>保存草稿</button>}
         <button className="secondary icon-button" type="button" title="重新读取" aria-label="重新读取" onClick={requestSnapshotReload} disabled={state.status === 'loading' || state.status === 'reopen-required'}>↻</button>
       </div>

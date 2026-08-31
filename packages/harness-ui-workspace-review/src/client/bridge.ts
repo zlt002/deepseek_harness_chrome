@@ -77,6 +77,8 @@ export interface WorkspaceReviewSessionAction {
   readonly harnessSessionId: string
   readonly resourceId: string
   readonly displayPath: string
+  readonly revision: string
+  readonly fingerprint: string
 }
 
 export interface WorkspaceReviewSessionActionDelivery {
@@ -177,9 +179,9 @@ function boundedId(value: unknown): value is string {
 function sessionAction(value: unknown): value is WorkspaceReviewSessionAction {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const item = value as Record<string, unknown>
-  return Object.keys(item).length === 5 && Object.keys(item).every(key => ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath'].includes(key))
+  return Object.keys(item).length === 7 && Object.keys(item).every(key => ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'revision', 'fingerprint'].includes(key))
     && (item.action === 'rewrite' || item.action === 'accept')
-    && ['reviewId', 'harnessSessionId', 'resourceId'].every(key => boundedId(item[key]))
+    && ['reviewId', 'harnessSessionId', 'resourceId', 'revision', 'fingerprint'].every(key => boundedId(item[key]))
     && typeof item.displayPath === 'string' && item.displayPath.trim() !== '' && item.displayPath.length <= 2_048
 }
 

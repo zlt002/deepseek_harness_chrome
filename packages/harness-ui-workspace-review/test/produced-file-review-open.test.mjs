@@ -64,6 +64,7 @@ test('a produced Markdown chip opens Markdown Review through the active Cordis r
     ctx.provide('sessions', {})
     ctx.provide('workspaces', {})
     ctx.provide('toolFileLinks', { register: () => () => {} })
+    ctx.provide('conversationEvents', { register: () => () => {} })
     const mentions = {
       providers: [],
       register(provider) { this.providers.push(provider); return () => { this.providers = this.providers.filter(value => value !== provider) } },

@@ -1,7 +1,8 @@
 import type { ClientContext, ISessions, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatFileMentions, IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolFileLinkProvider } from '@deepseek-ai/dsh-client-ui-tool/client'
-import { createElement, useSyncExternalStore } from 'react'
+import { createElement, useEffect, useRef, useSyncExternalStore } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { feedbackMessage, rehydrateMessage, requestOpenReview, respondFeedback, respondRehydrate, respondSessionAction, sessionActionMessage, type MarkdownReviewFeedback, type WorkspaceReviewFeedbackDelivery, type WorkspaceReviewSessionAction, type WorkspaceReviewSessionActionDelivery, workspaceReviewBridgeConfig } from './bridge.ts'
 import { openWorkspaceMarkdown, rehydrateWorkspaceMarkdown } from './api.ts'
@@ -10,6 +11,7 @@ import { WorkspaceReviewDirectoryActions } from './WorkspaceReviewDirectoryActio
 import { WorkspaceReviewTree } from './WorkspaceReviewTree.tsx'
 import { workspaceFilePath } from './workspace-file-path.mjs'
 import { workspaceMarkdownLink } from './workspace-markdown-link.mjs'
+import { createWorkspaceMarkdownReviewOpenDefinition, latestWorkspaceMarkdownReviewOpen, nextWorkspaceMarkdownReviewOpenAction } from './workspace-markdown-review-open.ts'
 import type { WorkspacePickerDirectoryActionsProps, WorkspacePickerDirectoryProps } from './directory-slot.ts'
 import { sameWorkspaceCwd, selectReadyWorkspaceDirectorySession, workspacePathForDirectory } from './directory-session.ts'
 
@@ -35,12 +37,36 @@ function rewriteDraft(action: WorkspaceReviewSessionAction): string {
 }
 
 function acceptPrompt(action: WorkspaceReviewSessionAction): string {
-  return `/pmd-prd 我已采纳当前审阅的 PRD（${action.displayPath}）。请继续执行“同步到远程 doc 文档”步骤；如涉及远程文档写入，仍须先预览目标和变更、取得确认、写入后回读验证。`
+  return `/pmd-prd 我已采纳当前审阅的 PRD（${action.displayPath}）。该文件就是本次唯一已确认的冻结 PRD 正文。accepted_revision=${action.revision}; accepted_fingerprint=${action.fingerprint}。请继续执行“同步到远程 doc 文档”步骤；进入远程预览前必须重新读取该文件、运行 PRD 校验并确认当前 fingerprint/hash 与 accepted_fingerprint 一致；否则旧采纳失效，重新打开左侧审核。这不是恢复历史任务：只使用当前会话的绑定；若当前会话尚未绑定，请只围绕该文件新建本轮交付状态，禁止扫描、匹配或复用任何其他历史 Run/manifest。远程写入仍须按“预览目标与变更 → 我确认 → 写入 → 同目标回读验证”执行。`
 }
 
 interface ProducedFileFact {
   readonly seq: number
   readonly path: string
+}
+
+interface AutoOpenFrozenPmdPrdInjected {
+  readonly sessionId: string
+  readonly open: (path: string) => void
+}
+
+type AutoOpenFrozenPmdPrdProps = PropsRuntime<'conversation.input.overlay'> & AutoOpenFrozenPmdPrdInjected
+
+/** The first session snapshot establishes history; only a later Host result may open review. */
+function AutoOpenFrozenPmdPrd({ sessionId, open, useSession }: AutoOpenFrozenPmdPrdProps) {
+  const review = useSession(snapshot => latestWorkspaceMarkdownReviewOpen(snapshot.chat.timeline))
+  const baseline = useRef<{ readonly sessionId: string; readonly resultSeq: number } | undefined>()
+  useEffect(() => {
+    const previous = baseline.current
+    if (previous === undefined || previous.sessionId !== sessionId) {
+      baseline.current = { sessionId, resultSeq: review?.resultSeq ?? 0 }
+      return
+    }
+    const action = nextWorkspaceMarkdownReviewOpenAction(previous.resultSeq, review)
+    baseline.current = { sessionId, resultSeq: action.baseline }
+    if (action.open !== undefined) open(action.open.path)
+  }, [open, review, sessionId])
+  return null
 }
 
 /** Preserve the unique full path behind a basename shown in closing prose. */
@@ -61,17 +87,28 @@ function producedMarkdownMention(owner: Parameters<ChatFileMentions['forClosing'
 // Conversation and Tool UI own the composable resolver registries. Both are
 // hard dependencies: an optional one-shot lookup would silently skip a route
 // when this product plugin starts before its registry is provided.
-export const inject = ['slots', 'reviewFeedback', 'sessions', 'workspaces', 'chatFileMentions', 'toolFileLinks']
+export const inject = ['slots', 'reviewFeedback', 'sessions', 'workspaces', 'chatFileMentions', 'toolFileLinks', 'conversationEvents']
 
 /** File discovery is same-origin; pending composer feedback belongs to the shared reviewFeedback service. */
 export function apply(ctx: ClientContext): void {
   const bridge = workspaceReviewBridgeConfig(); const reviewFeedback = ctx.get('reviewFeedback') as ReviewFeedback
+  ctx.conversationEvents.register(createWorkspaceMarkdownReviewOpenDefinition())
   const notifyOpenFailure = (sessionId: string, message: string): void => {
     const conversation = ctx.get('conversation') as IConversation | undefined
     const sessions = ctx.get('sessions') as ISessions | undefined
     const binding = sessions?.binding(sessionId as SessionId)
     if (conversation === undefined || binding === undefined) return
     try { conversation.input.for(binding.ctx).notify('error', message) } catch { /* the session may have closed while opening */ }
+  }
+  const openWorkspaceMarkdownReview = (sessionId: string, displayPath: string): void => {
+    if (bridge === undefined) return
+    void openWorkspaceMarkdown(sessionId, displayPath)
+      .then(review => { requestOpenReview(window.parent, bridge, review) })
+      .catch(error => {
+        const message = error instanceof Error ? error.message : String(error)
+        notifyOpenFailure(sessionId, message)
+        console.warn('workspace Markdown review open rejected:', error)
+      })
   }
   const resolveWorkspaceMarkdown = (sessionId: string, cwd: string | undefined, value: string) => {
     if (bridge === undefined) return undefined
@@ -85,15 +122,7 @@ export function apply(ctx: ClientContext): void {
     return {
       label,
       title: label,
-      open: () => {
-        void openWorkspaceMarkdown(sessionId, displayPath)
-          .then(review => { requestOpenReview(window.parent, bridge, review) })
-          .catch(error => {
-            const message = error instanceof Error ? error.message : String(error)
-            notifyOpenFailure(sessionId, message)
-            console.warn('workspace Markdown link open rejected:', error)
-          })
-      },
+      open: () => { openWorkspaceMarkdownReview(sessionId, displayPath) },
     }
   }
   const conversationMarkdown: ChatFileMentions = {
@@ -113,6 +142,13 @@ export function apply(ctx: ClientContext): void {
   }
   ctx.effect(() => ctx.get('chatFileMentions')?.register(conversationMarkdown) ?? (() => {}), 'accrui-workspace-review: conversation Markdown links')
   ctx.effect(() => ctx.get('toolFileLinks')?.register(toolMarkdown) ?? (() => {}), 'accrui-workspace-review: Tool Markdown links')
+  if (bridge !== undefined) ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
+    name: 'conversation.input.overlay', id: 'accrui-workspace-review-auto-open', order: -10,
+    inject: (sessionId: SessionId): AutoOpenFrozenPmdPrdInjected => ({
+      sessionId: String(sessionId),
+      open: (displayPath: string) => { openWorkspaceMarkdownReview(String(sessionId), displayPath) },
+    }),
+  }, AutoOpenFrozenPmdPrd))
   if (bridge !== undefined) ctx.effect(() => {
     const receive = (event: MessageEvent): void => {
       const feedback = feedbackMessage(event, window.parent, bridge)

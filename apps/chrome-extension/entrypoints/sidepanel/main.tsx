@@ -109,9 +109,15 @@ export class BrowserTargetRunLockProjection {
     return this.#current
   }
 
-  reconcile(sessionId: string): LockedRunTarget | undefined {
-    for (const [submissionId, pending] of this.#pendingBySubmission) if (pending.sessionId === sessionId) this.#pendingBySubmission.delete(submissionId)
-    if (this.#current?.sessionId === sessionId) this.#current = undefined
+  reconcile(sessionId: string, submissionId: string): LockedRunTarget | undefined {
+    if (this.#pendingBySubmission.get(submissionId)?.sessionId === sessionId) this.#pendingBySubmission.delete(submissionId)
+    if (this.#current?.sessionId === sessionId && this.#current.submissionId === submissionId) this.#current = undefined
+    return this.#current
+  }
+
+  reset(): LockedRunTarget | undefined {
+    this.#pendingBySubmission.clear()
+    this.#current = undefined
     return this.#current
   }
 
@@ -485,16 +491,23 @@ function App(): React.JSX.Element {
   useEffect(() => { availableTabsRef.current = availableTabs }, [availableTabs])
   useEffect(() => { activeTabRef.current = activeTab }, [activeTab])
 
+  const clearBrowserTargetLockProjection = useCallback(() => {
+    lockProjectionVersionRef.current += 1
+    lockHydrationRequestRef.current += 1
+    setLockedRunTarget(runTargetLockProjectionRef.current.reset())
+  }, [])
+
   const connect = useCallback(async () => {
     // Reconnecting unmounts and recreates the Harness iframe, whose command
     // sequence starts again at 1 even if the reused URL keeps the same nonce.
+    clearBrowserTargetLockProjection()
     knowledgeCommandSequenceRef.current = 0
     knowledgeRequestSequenceBySessionRef.current.clear()
     setStatus('starting'); setError(undefined)
     const response = await requestHarness()
     if (response.ok && response.url !== undefined) { setUrl(response.url); setStatus('ready'); return }
     setStatus('error'); setError(response.error ?? 'Unable to start the ACCRUI native server.')
-  }, [])
+  }, [clearBrowserTargetLockProjection])
 
   const loadTargetSettings = useCallback(async () => {
     const response = await requestTargetSettings({ type: 'get-browser-target-settings' })
@@ -698,6 +711,7 @@ function App(): React.JSX.Element {
       type: 'browser-target-snapshot/v1', nonce: frameNonce, sequence: bridgeSequenceRef.current,
       settings: targetSettings, tabs: availableTabs, activeTab: activeTab?.tab,
       ...(lockedRunTarget === undefined ? {} : { lockedRunTarget: lockedRunTarget.target }),
+      ...(lockedRunTarget === undefined ? {} : { activeRunLock: lockedRunTarget }),
       ...(capturingTabId === undefined ? {} : { capturingDesignReferenceTabId: capturingTabId }), ...(capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress }), error: targetError,
     }, frameOrigin)
   }, [activeTab, availableTabs, capturingDesignReferenceProgress, frameNonce, frameOrigin, lockedRunTarget, targetError, targetSettings])
@@ -994,10 +1008,10 @@ function App(): React.JSX.Element {
         void chrome.runtime.sendMessage({ type: 'unlock-browser-target/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
         return
       }
-      if (value.type === 'browser-target-reconcile/v1' && isHarnessSessionIdentity(value.sessionId)) {
+      if (value.type === 'browser-target-reconcile/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId)) {
         lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
-        setLockedRunTarget(runTargetLockProjectionRef.current.reconcile(value.sessionId))
-        void chrome.runtime.sendMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: value.sessionId }).catch(() => {})
+        setLockedRunTarget(runTargetLockProjectionRef.current.reconcile(value.sessionId, value.submissionId))
+        void chrome.runtime.sendMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
         return
       }
       if (value.type === 'session-handoff-applied/v1' && value.sessionId === sidePanelHandoff.sessionId && surface === 'sidepanel' && sidePanelHandoff.tabId !== undefined) {

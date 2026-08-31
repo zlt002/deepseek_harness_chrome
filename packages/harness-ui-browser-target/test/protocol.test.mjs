@@ -71,6 +71,18 @@ test('projects an acknowledged follow-mode Run target until it is cleared, witho
   assert.equal(browserTargetTriggerTab({ ...pinned, lockedRunTarget: undefined, settings: { mode: 'none', pinnedTabs: [] } }), undefined, 'initial none remains unbound')
 })
 
+test('projects the active Run identity with its locked target for lifecycle recovery', async () => {
+  const { createBrowserTargetBridge } = await activeBridge()
+  const a = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://a.example.test', title: 'A' }
+  const bridge = createBrowserTargetBridge('nonce', 'chrome-extension://abc')
+  const parent = {}
+  const activeRunLock = { sessionId: 'session-a', submissionId: 'submission-a', target: a }
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, lockedRunTarget: a, activeRunLock } }, parent), true)
+  assert.deepEqual(bridge.source.getSnapshot().activeRunLock, activeRunLock)
+  const invalid = createBrowserTargetBridge('nonce', 'chrome-extension://abc')
+  assert.equal(invalid.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, activeRunLock: { sessionId: 'session-a', submissionId: '', target: a } } }, parent), false)
+})
+
 test('requires an exact chrome extension parent origin in the opt-in bridge URL', () => {
   assert.deepEqual(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabc')), { nonce: 'n', parentOrigin: 'chrome-extension://abc', surface: 'sidepanel' })
   assert.deepEqual(browserTargetBridgeConfig(new URL('https://loopback.test/?dshBrowserTargetBridge=1&dshBrowserTargetNonce=n&dshBrowserTargetParentOrigin=chrome-extension%3A%2F%2Fabc&dshBrowserTargetSurface=fullscreen-tab&dshHarnessSessionId=session-current')), { nonce: 'n', parentOrigin: 'chrome-extension://abc', surface: 'fullscreen-tab', sessionId: 'session-current' })

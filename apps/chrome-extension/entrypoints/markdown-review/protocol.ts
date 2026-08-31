@@ -124,6 +124,8 @@ export interface SessionActionRequest {
   harnessSessionId: string
   resourceId: string
   displayPath: string
+  revision: string
+  fingerprint: string
   action: 'rewrite' | 'accept'
 }
 
@@ -368,8 +370,8 @@ export function isMarkdownReviewPortRequest(value: unknown): value is MarkdownRe
   if (value.type === 'markdown-review-commit-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'approval', 'idempotencyKey', 'content'].includes(key))
     && isMarkdownReviewId(value.approval) && isMarkdownReviewId(value.idempotencyKey)
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
-  if (value.type === 'markdown-review-session-action-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'action'].includes(key))
-    && isMarkdownReviewId(value.harnessSessionId) && isMarkdownReviewId(value.resourceId) && boundedText(value.displayPath, MAX_PATH_LENGTH) && (value.action === 'rewrite' || value.action === 'accept')
+  if (value.type === 'markdown-review-session-action-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'action'].includes(key))
+    && isMarkdownReviewId(value.harnessSessionId) && isMarkdownReviewId(value.resourceId) && isMarkdownReviewId(value.revision) && isMarkdownReviewId(value.fingerprint) && boundedText(value.displayPath, MAX_PATH_LENGTH) && (value.action === 'rewrite' || value.action === 'accept')
   return value.type === 'markdown-review-deliver-request'
     && Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'deliveryId', 'annotation'].includes(key))
     && isMarkdownReviewId(value.harnessSessionId)

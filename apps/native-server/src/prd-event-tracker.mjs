@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT_MS = 5_000
 const MAX_OUTBOX_EVENTS = 1_000
 const MAX_ATTEMPTS = 12
 
-const EVENT_TYPES = new Set(['review_action', 'document_published'])
+const EVENT_TYPES = new Set(['review_generated', 'review_action', 'document_published'])
 const REVIEW_ACTIONS = new Set(['rewrite', 'accept'])
 const OUTCOMES = new Set(['succeeded', 'failed', 'timeout'])
 const REVIEW_STATUSES = new Set(['draft_ready', 'queued', 'processing'])
@@ -55,12 +55,14 @@ export function normalizePrdTrackingEvent(value) {
   const documentName = text(value.documentName ?? value.name, 256)
   const documentCatalogId = text(value.documentCatalogId ?? value.catalogId, 256)
   const documentUrl = text(value.documentUrl ?? value.url, 2_048)
-  const eventType = rawEventType === 'review_action' && action === 'rewrite' ? 'markdown_review_rewrite'
+  const eventType = rawEventType === 'review_generated' ? 'prd_generated'
+    : rawEventType === 'review_action' && action === 'rewrite' ? 'markdown_review_rewrite'
     : rawEventType === 'review_action' && action === 'accept' ? 'markdown_review_accept'
       : rawEventType === 'document_published' ? 'online_document_verified_write' : rawEventType
   const outcome = rawOutcome === 'succeeded' ? 'success' : rawOutcome === 'failed' ? 'failure' : rawOutcome
-  if (!eventId || !eventType || !['markdown_review_rewrite', 'markdown_review_accept', 'online_document_verified_write'].includes(eventType) || !outcome || !['success', 'failure', 'timeout'].includes(outcome) || Number.isNaN(Date.parse(occurredAt))) return undefined
-  if ((eventType === 'markdown_review_rewrite' || eventType === 'markdown_review_accept') && !sessionId) return undefined
+  if (!eventId || !eventType || !['prd_generated', 'markdown_review_rewrite', 'markdown_review_accept', 'online_document_verified_write'].includes(eventType) || !outcome || !['success', 'failure', 'timeout'].includes(outcome) || Number.isNaN(Date.parse(occurredAt))) return undefined
+  if ((eventType === 'prd_generated' || eventType === 'markdown_review_rewrite' || eventType === 'markdown_review_accept') && !sessionId) return undefined
+  if (eventType === 'prd_generated' && outcome !== 'success') return undefined
   if (eventType === 'online_document_verified_write' && (outcome !== 'success' || !runId || !batchId?.startsWith('pmd:') || itemIndex === undefined || !documentName || !documentCatalogId || !documentUrl)) return undefined
   const validStatus = status === undefined
     || (eventType === 'markdown_review_rewrite' && outcome === 'success' && status === 'draft_ready')

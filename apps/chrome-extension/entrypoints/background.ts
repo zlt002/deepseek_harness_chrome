@@ -2078,7 +2078,6 @@ async function lockFollowBrowserTarget(sessionId: string, submissionId: string, 
       try {
         await browserTargetRuntime.settled()
         if (lock.canceled || cancelledBrowserTargetSubmissions.delete(submissionId)) { runBrowserTargetLocks.delete(runId); resolve(false); return }
-        if ((await readBrowserTargetSettings()).mode !== 'follow-active-tab') { runBrowserTargetLocks.delete(runId); resolve(false); return }
         lock.binding = await submittedBrowserTarget(browserTarget)
         if (nativePort !== port || currentNativeRunId !== runId) throw new Error('Harness Run changed before the Browser Target lock was confirmed.')
         const current = boundBrowserTargets.get(runId)
@@ -4569,6 +4568,7 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
         await chrome.tabs.update?.(existing.tabId, { active: true })
         markdownReviewPorts.get(existing.tabId)?.postMessage({ v: 1, type: 'markdown-review-target-updated', requestId: crypto.randomUUID(), reviewId: review.reviewId })
         await persistMarkdownReview(updated)
+        reportPrdReviewGenerated(updated)
         return updated
       }
     } catch { /* stale registry entry; create a replacement below */ }
@@ -4590,6 +4590,7 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
   markdownReviews.set(record.reviewId, record)
   markdownReviewKeys.set(key, record.reviewId)
   await persistMarkdownReview(record)
+  reportPrdReviewGenerated(record)
   return record
 }
 
@@ -4810,8 +4811,12 @@ function markdownReviewSessionActionDelivery(value: unknown, action: 'rewrite' |
     : undefined
 }
 
-async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, request: { harnessSessionId: string; resourceId: string; displayPath: string; action: 'rewrite' | 'accept' }): Promise<MarkdownReviewSessionActionDelivery> {
+async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, request: { harnessSessionId: string; resourceId: string; displayPath: string; revision: string; fingerprint: string; action: 'rewrite' | 'accept' }): Promise<MarkdownReviewSessionActionDelivery> {
   if (request.harnessSessionId !== record.harnessSessionId || request.resourceId !== record.resourceId || request.displayPath !== record.displayPath) throw new Error('Markdown review action does not match its bound Harness session and resource.')
+  const snapshot = await workspaceReviewSnapshot(record)
+  if (request.revision !== snapshot.resource.revision || request.fingerprint !== snapshot.resource.fingerprint) {
+    throw new Error('Markdown file changed since this review. Re-read and review the current saved file before adopting it.')
+  }
   let response: unknown
   try {
     response = await chrome.runtime.sendMessage({
@@ -4822,6 +4827,8 @@ async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, 
         harnessSessionId: record.harnessSessionId,
         resourceId: record.resourceId,
         displayPath: record.displayPath,
+        revision: snapshot.resource.revision,
+        fingerprint: snapshot.resource.fingerprint,
       },
     })
   } catch (error) {
@@ -4849,6 +4856,22 @@ function reportPrdReviewAction(record: MarkdownReviewRecord, requestId: string, 
       },
     })
   } catch { /* Telemetry must never change the review action result. */ }
+}
+
+function reportPrdReviewGenerated(record: MarkdownReviewRecord): void {
+  try {
+    const port = nativePort ?? connectNativePort()
+    port.postMessage({
+      type: 'report-prd-event',
+      payload: {
+        eventId: `review:${record.reviewId}:generated`,
+        eventType: 'review_generated',
+        outcome: 'succeeded',
+        occurredAt: new Date().toISOString(),
+        sessionId: record.harnessSessionId,
+      },
+    })
+  } catch { /* Telemetry must never change the review open result. */ }
 }
 
 export default defineBackground(() => {
@@ -5495,8 +5518,8 @@ export default defineBackground(() => {
     }
     if (request.type === 'reconcile-browser-target-lock/v1') {
       const keys = Object.keys(request)
-      if (!isSidePanelSender(sender) || keys.length !== 2 || !keys.every(key => ['type', 'sessionId'].includes(key)) || !validSessionIdentity(request.sessionId)) { sendResponse({ ok: false, error: 'Browser Target reconciliation request is invalid.' }); return false }
-      for (const [runId, lock] of runBrowserTargetLocks) if (lock.sessionId === request.sessionId && lock.state === 'active') runBrowserTargetLocks.delete(runId)
+      if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'sessionId', 'submissionId'].includes(key)) || !validSessionIdentity(request.sessionId) || !validSessionIdentity(request.submissionId)) { sendResponse({ ok: false, error: 'Browser Target reconciliation request is invalid.' }); return false }
+      for (const [runId, lock] of runBrowserTargetLocks) if (lock.sessionId === request.sessionId && lock.submissionId === request.submissionId && lock.state === 'active') runBrowserTargetLocks.delete(runId)
       sendResponse({ ok: true })
       return false
     }

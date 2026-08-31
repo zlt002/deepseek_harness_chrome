@@ -90,15 +90,17 @@ Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel�
 
 本阶段开始前，所有已启动的远程检索必须已完成、明确失败或被用户明确跳过；后台仍在运行时不得冻结文档、预览或交付。随后完整读取 [`references/templates.md`](references/templates.md) 的全部内容；它是唯一最终 PRD 的权威正文结构。[`templates.md`](templates.md) 只负责导航，不能替代正文读取。PRD 必须保留基本信息（包括需求编号及链接、优先级、产品经理、预估人天）、修订记录、九个主章节及原始顺序；最终标题和正文不得显示 `[必填]`、`[选填]`、`[建议填写]` 等字段标签。第四章保留“正常业务场景、边界场景、异常业务场景”：每个功能依次写“现状、调整方式、输入/输出规则、调整后效果”，每项输入和输出规则按权威模板填写，缺少用户输入字段时也必须明确说明。第八章“影响范围分析”必须写入阶段 4 的直接改动、关联影响、风险、建议处理、是否需要产品决策和回归范围；使用产品能理解的业务语言，不展示代码路径或函数名。第八章还要保留独立的“异常场景关注点”，并新增正常、异常、边界、权限、兼容五类“验收清单”，三者不得互相替换。
 
-填写时把已确认结论写入对应位置；缺失事实写 `[待确认]` 并说明影响，不适用内容写“不适用（原因）”。不得编造代码事实或无依据数字。展示一个规范文件名、章节摘要和待确认数量，请求用户确认 PRD 内容。
+填写时把已确认结论写入对应位置；缺失事实写 `[待确认]` 并说明影响，不适用内容写“不适用（原因）”。不得编造代码事实或无依据数字。展示一个规范文件名、章节摘要和待确认数量；不要在对话侧边栏要求用户确认，最终内容由左侧 Markdown Review 审核。
 
-用户确认前，将一份**完整冻结 PRD 正文**原样写入 manifest 记录的当前需求冻结产物目录，文件名固定为 `{需求标识}_{主题}_PRD.md`。随后运行确定性门禁：
+交给审核前，将一份**完整冻结 PRD 正文**原样写入 manifest 记录的当前需求冻结产物目录，文件名固定为 `{需求标识}_{主题}_PRD.md`。随后运行确定性门禁：
 
 ```sh
 node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs --prd <prd-frozen-path>
 ```
 
-只有该命令以 0 退出，才可把冻结文件正文作为恰好一项 `{name, body}` 传给 `mcp__chrome__team_knowledge_batch_preview`；`name` 使用同一规范文件名去掉 `.md`，`body` 逐字来自冻结文件。校验失败时停止在阶段 5，修正文档并重新冻结、校验和确认；不从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。内容变化必须重新预览并重新确认。此阶段不绑定父节点、不写远程。完成条件：一份完整正文快照、规范文件名和校验结果均冻结，用户内容确认有效。
+只有该命令以 0 退出，才调用 `open_workspace_markdown_review({ path: <prd-frozen-relative-path> })`；`path` 必须是相对当前 Harness 会话 cwd 的冻结产物 `.md` 路径，不能传绝对路径、`..` 或其他文件类型。该工具会自动在左侧打开同一份冻结 `.md` 的现有 Markdown Review，并绑定当前 `/pmd-prd` 会话；只复用其中已有的“采纳、重写、局部优化、接受/拒绝修改”，不在侧边栏新增审核操作。用户点击 Markdown Review 的“采纳”后，原会话才收到继续交付的意图；在此之前不得进入阶段 6、绑定父节点或写远程。
+
+重写或局部优化始终回到同一 `/pmd-prd` 会话：更新同一冻结 PRD 文件，再次运行校验，成功后再次调用 `open_workspace_markdown_review` 刷新左侧审核。Markdown Review 的采纳会附带 `accepted_revision` 和 `accepted_fingerprint`；阶段 6 前必须重新读取同一冻结文件、再次运行校验，并确认当前 fingerprint/hash 与该采纳值一致。任一正文、fingerprint 或 hash 变化都会使旧采纳失效；不得把旧采纳用于阶段 6。校验失败或版本不一致时停止在阶段 5，修正文档并重新冻结、校验和审核；不从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。完成条件：一份完整正文快照、规范文件名和校验结果均冻结，且当前 fingerprint/hash 已在 Markdown Review 中被采纳。
 
 ### 阶段 6：PRD 预览与父节点确认
 
@@ -110,14 +112,7 @@ node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs --prd <prd-frozen-pa
 
 ### 阶段 8：生成不对时选中再改
 
-阶段 7 完成后，先请用户看页面：有没有生成、生成对不对。用户说不对时，请他在当前轻文档里选中要改的那段，再改这段，不要整篇重写，也不要再走批量创建。
-
-1. 用 `mcp__chrome__list_work_tabs` 确认当前页还是刚写的那份轻文档。
-2. `mcp__chrome__light_document_selection_read({})` 读出选中内容。
-3. `mcp__chrome__light_document_selection_replace_preview({ blocks })` 预览替换。
-4. 用户确认后，只把 challenge 交给 `mcp__chrome__light_document_selection_replace_commit({ challenge })`。
-
-选区不稳定、没选中、或页面已经换到别的文档时停止，不要猜位置写，也不要改走其他写入路径。
+阶段 7 完成后，先请用户看页面：有没有生成、生成对不对。需要修改时，先读取并执行 [轻文档 Verified Write](../webedit-light-document/SKILL.md) 的“按文档状态选写入路径”；它是阶段 8 唯一的写入规则来源。局部修改由用户选中该段；全文重写只有在用户选中精确稳定的全文并通过该 Skill 的选区能力检查时才允许。不能形成受支持选区、编辑器未就绪或页面已换目标时停止，请用户刷新并重新绑定 Browser Target；不再走批量创建，也不猜其他写入操作。
 
 ## 安全约束
 
@@ -126,4 +121,4 @@ node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs --prd <prd-frozen-pa
 - 轻文档和表格是不同能力；本流程只创建轻文档。表格只可 `read_work_tab` 看一眼，不要改格子、不要下载。
 - 不从本地 `process.md`、`prd.md` 或其他文件重建已确认正文；唯一正文来源是阶段 5 快照。
 - 模板完整性校验失败时停止，不删除或压缩章节。
-- 交付失败时保留 `partial_delivery` 并用同一 `batchId` 续传；交付正文只走 `team_knowledge_batch_preview` / `team_knowledge_batch_create`。阶段 7 完成前不要改去手工补写；阶段 8 只改用户选中的那段。
+- 交付失败时保留 `partial_delivery` 并用同一 `batchId` 续传；交付正文只走 `team_knowledge_batch_preview` / `team_knowledge_batch_create`。阶段 7 完成前不要改去手工补写；阶段 8 遵循轻文档 Verified Write 的路径选择。

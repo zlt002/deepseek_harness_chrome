@@ -7,6 +7,20 @@ async function skill(name) {
   return readFile(new URL(`../skills/${name}/SKILL.md`, import.meta.url), 'utf8')
 }
 
+test('light-document skill separates blank, bounded-block, and whole-document writes by the supported contract', async () => {
+  const source = await skill('webedit-light-document')
+  assert.match(source, /空白文档[\s\S]*blocks_insert[\s\S]*\{ position: "end", blocks: \[\.\.\.\] \}/)
+  assert.match(source, /Mermaid[\s\S]*insert_drawing[\s\S]*\{ mermaid, position: "end" \}/)
+  assert.match(source, /光标处写纯正文[\s\S]*读取当前选区[\s\S]*selection_insert[\s\S]*text.*markdown.*html[\s\S]*expectedSelectionFingerprint/)
+  assert.match(source, /稳定旧块[\s\S]*blocks_batch_replace[\s\S]*\{ replacements: \[\{ id, \.\.\. \}\] \}[\s\S]*最多 50/)
+  assert.match(source, /删除完整稳定块用 `blocks_delete` 的公开 `id`；只改标题用 `set_title`/)
+  assert.match(source, /不能接受 `\{ blocks: \[\.\.\.\] \}`[\s\S]*不能用来重建整篇文档/)
+  assert.match(source, /全文重写[\s\S]*精确、稳定、非折叠的全文[\s\S]*replaceStrategy[\s\S]*选区 preview\/commit/)
+  assert.match(source, /全文\/选区替换分支不得猜测 `blocks_delete`、`blocks_insert`/)
+  assert.match(source, /editor not ready[\s\S]*刷新页面、重新绑定 Browser Target/)
+  assert.match(source, /preview → 用户确认 → commit → 同一 Browser Target 回读/)
+})
+
 test('online spreadsheet skill routes by Browser Target and exposes the complete verified-write gate', async () => {
   const source = await skill('webedit-spreadsheet')
   assert.match(source, /documentIdentity\.kind=webedit_spreadsheet/)

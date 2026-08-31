@@ -50,6 +50,8 @@ export interface WorkspaceMarkdownReviewAction {
   harnessSessionId: string
   resourceId: string
   displayPath: string
+  revision: string
+  fingerprint: string
 }
 
 export type MarkdownFeedbackValidation =
@@ -129,13 +131,13 @@ export function isWorkspaceMarkdownFeedback(value: unknown): value is WorkspaceM
   return validateWorkspaceMarkdownFeedback(value).ok
 }
 
-/** Session actions carry only the review identity, never its document body or capability. */
+/** Session actions carry review identity plus the accepted resource version, never body or capability. */
 export function validateWorkspaceMarkdownReviewAction(value: unknown): { ok: true; action: WorkspaceMarkdownReviewAction } | { ok: false; error: string } {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'Invalid Markdown review action: action must be an object.' }
   const item = value as Record<string, unknown>
-  const keys = ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath']
+  const keys = ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'revision', 'fingerprint']
   if (!hasExactKeys(item, keys) || (item.action !== 'rewrite' && item.action !== 'accept')) return { ok: false, error: 'Invalid Markdown review action: unexpected, missing, or mixed fields.' }
-  if (!['reviewId', 'harnessSessionId', 'resourceId'].every(key => boundedString(item[key], 160)) || !boundedString(item.displayPath, 2_048)) {
+  if (!['reviewId', 'harnessSessionId', 'resourceId', 'revision', 'fingerprint'].every(key => boundedString(item[key], 160)) || !boundedString(item.displayPath, 2_048)) {
     return { ok: false, error: 'Invalid Markdown review action: identity fields are invalid.' }
   }
   return { ok: true, action: item as unknown as WorkspaceMarkdownReviewAction }

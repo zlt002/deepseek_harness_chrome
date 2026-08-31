@@ -7,7 +7,7 @@ async function loadBackground() {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener; let connectListener
-  const created = []; const forwarded = []; const rehydrates = []; const fetches = []; const storage = { harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }
+  const created = []; const forwarded = []; const rehydrates = []; const fetches = []; const nativeMessages = []; const storage = { harnessBrowserTargetSettings: { mode: 'follow-active-tab', pinnedTabs: [] } }
   const page = { id: 42, windowId: 7, url: 'https://docs.example.test/source', title: 'Source' }
   const reviewTab = { id: 91, windowId: 7, url: '', title: 'Markdown Review' }
   const nativeListeners = new Set()
@@ -45,7 +45,7 @@ async function loadBackground() {
       connectNative: () => ({
         onDisconnect: { addListener: () => {}, removeListener: () => {} },
         onMessage: { addListener: listener => nativeListeners.add(listener), removeListener: listener => nativeListeners.delete(listener) },
-        postMessage: message => { if (message.type === 'start') queueMicrotask(() => { for (const listener of nativeListeners) listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-review' } }) }) },
+        postMessage: message => { nativeMessages.push(message); if (message.type === 'start') queueMicrotask(() => { for (const listener of nativeListeners) listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-review' } }) }) },
         disconnect: () => {},
       }),
     },
@@ -78,7 +78,7 @@ async function loadBackground() {
     postMessage: message => responses.push(message), disconnect: () => { for (const listener of disconnectListeners) listener() },
   }
   return {
-    created, fetches, forwarded, rehydrates, responses,
+    created, fetches, forwarded, rehydrates, responses, nativeMessages,
     open: review => runtimeMessage({ type: 'open-markdown-review/v1', review }, { url: 'chrome-extension://test/sidepanel.html' }),
     connect: () => connectListener(port),
     portMessage: message => { for (const listener of portMessageListeners) listener(message) },
@@ -93,6 +93,11 @@ test('opens a capability-free review URL, proxies a bounded snapshot, and delive
   try {
     assert.equal((await background.open(openReview)).ok, true)
     assert.equal(background.created.length, 1)
+    assert.deepEqual(background.nativeMessages.filter(message => message.type === 'report-prd-event').map(message => message.payload), [{
+      eventId: 'review:review-1:generated', eventType: 'review_generated', outcome: 'succeeded',
+      occurredAt: background.nativeMessages.find(message => message.type === 'report-prd-event').payload.occurredAt,
+      sessionId: 'session-1',
+    }])
     assert.match(background.created[0].url, /markdown-review\.html\?reviewId=review-1$/)
     assert.doesNotMatch(background.created[0].url, /capability|session-1|resource-1/)
     background.connect()
@@ -160,14 +165,38 @@ test('forwards rewrite and accept only to the review-bound session', async () =>
   const background = await loadBackground()
   try {
     await background.open(openReview); background.connect()
-    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'rewrite-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', action: 'rewrite' })
-    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'accept-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', action: 'accept' })
+    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'rewrite-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'rewrite' })
+    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'accept-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'accept' })
     await new Promise(resolve => setTimeout(resolve, 0))
     assert.deepEqual(background.responses.find(message => message.requestId === 'rewrite-1').status, 'draft_ready')
     assert.deepEqual(background.responses.find(message => message.requestId === 'accept-1').status, 'processing')
     const actions = background.forwarded.filter(message => message.type === 'markdown-review-session-action-forward/v1')
-    assert.deepEqual(actions.map(message => [message.action, message.review.harnessSessionId, message.review.resourceId]), [['rewrite', 'session-1', 'resource-1'], ['accept', 'session-1', 'resource-1']])
+    assert.deepEqual(actions.map(message => [message.action, message.review.harnessSessionId, message.review.resourceId, message.review.revision, message.review.fingerprint]), [['rewrite', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1'], ['accept', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1']])
   } finally { background.cleanup() }
+})
+
+test('does not forward adoption when the saved file version changed after the review snapshot', async () => {
+  const background = await loadBackground()
+  const originalFetch = globalThis.fetch
+  try {
+    await background.open(openReview); background.connect()
+    globalThis.fetch = async (url, init) => new URL(String(url)).pathname.endsWith('/snapshot')
+      ? new Response(JSON.stringify({
+        v: 1, type: 'markdown-review-snapshot', reviewId: 'review-1',
+        resource: { resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-2', fingerprint: 'fingerprint-2' },
+        content: '# Changed', truncated: false, readOnly: true,
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+      : originalFetch(url, init)
+    background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'stale-accept', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'accept' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.responses.find(message => message.requestId === 'stale-accept')
+    assert.equal(response?.ok, false, JSON.stringify(response))
+    assert.match(response?.error?.message ?? '', /changed since this review/)
+    assert.equal(background.forwarded.some(message => message.type === 'markdown-review-session-action-forward\/v1'), false)
+  } finally {
+    globalThis.fetch = originalFetch
+    background.cleanup()
+  }
 })
 
 test('rehydrates one expired capability then retries the original request once', async () => {
