@@ -131,6 +131,8 @@ test('Windows acceptance exercises the detached online-update handoff and waits 
   assert.match(acceptance, /\@\(\$legacyAccrUiNativeHostNames \+ \$deprecatedNativeHostNames\)/)
   assert.match(acceptance, /\@\(\$nativeHostNames \+ \$legacyAccrUiNativeHostNames \+ \$deprecatedNativeHostNames\)/)
   assert.match(acceptance, /Acceptance cleanup warning: could not remove Native Messaging registration/)
+  assert.match(acceptance, /\$\{nativeHostName\}:/)
+  assert.doesNotMatch(acceptance, /\$(?!env:)[A-Za-z_][A-Za-z0-9_]*:/)
   assert.match(acceptance, /Online updater did not stop the orphan process holding the installed runtime/)
   const candidateFailure = acceptance.slice(acceptance.indexOf('function Assert-CandidateRegistrationFailureRollsBack'), acceptance.indexOf('$respawnSupervisor = $null'))
   assert.ok(candidateFailure.indexOf('Start-CandidateRegistrationFailureSupervisor') < candidateFailure.indexOf('release-update-handoff-smoke.mjs'), 'Windows acceptance must start the candidate runtime lock before the injected update handoff')

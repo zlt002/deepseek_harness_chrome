@@ -763,7 +763,7 @@ try {
       try {
         $key = Join-Path $registryRoot $nativeHostName
         if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop }
-      } catch { Write-Host "Acceptance cleanup warning: could not remove Native Messaging registration $nativeHostName: $($_.Exception.Message)" }
+      } catch { Write-Host "Acceptance cleanup warning: could not remove Native Messaging registration ${nativeHostName}: $($_.Exception.Message)" }
     }
   }
   try {
