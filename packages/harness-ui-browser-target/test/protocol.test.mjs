@@ -25,6 +25,20 @@ test('accepts only the configured parent origin, nonce, and increasing snapshot 
   assert.equal(bridge.source.value.activeTab.title, 'Example')
 })
 
+test('validates a bounded, unambiguous active Run owner array while accepting legacy snapshots', () => {
+  const parent = {}
+  const a = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://a.example.test', title: 'A' }
+  const first = { sessionId: 'session-a', submissionId: 'submission-a', target: a }
+  const second = { sessionId: 'session-b', submissionId: 'submission-b', target: a }
+  const bridge = createBrowserTargetProtocol({ createStore: store, nonce: 'nonce', parentOrigin: 'chrome-extension://abc' })
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, activeRunLocks: [first, second], activeRunLock: first } }, parent), true)
+  assert.deepEqual(bridge.source.value.activeRunLocks, [first, second])
+  const invalid = createBrowserTargetProtocol({ createStore: store, nonce: 'nonce', parentOrigin: 'chrome-extension://abc' })
+  assert.equal(invalid.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, activeRunLocks: [first, first] } }, parent), false)
+  const conflicting = createBrowserTargetProtocol({ createStore: store, nonce: 'nonce', parentOrigin: 'chrome-extension://abc' })
+  assert.equal(conflicting.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, activeRunLocks: [first, { ...second, target: { ...a, tabId: 3 } }] } }, parent), false)
+})
+
 test('emits extension commands with its own increasing sequence', () => {
   const bridge = createBrowserTargetProtocol({ createStore: store, nonce: 'nonce', parentOrigin: 'chrome-extension://abc' })
   const sent = []
@@ -71,16 +85,20 @@ test('projects an acknowledged follow-mode Run target until it is cleared, witho
   assert.equal(browserTargetTriggerTab({ ...pinned, lockedRunTarget: undefined, settings: { mode: 'none', pinnedTabs: [] } }), undefined, 'initial none remains unbound')
 })
 
-test('projects the active Run identity with its locked target for lifecycle recovery', async () => {
+test('projects every active Run identity with its locked target for lifecycle recovery', async () => {
   const { createBrowserTargetBridge } = await activeBridge()
   const a = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://a.example.test', title: 'A' }
   const bridge = createBrowserTargetBridge('nonce', 'chrome-extension://abc')
   const parent = {}
   const activeRunLock = { sessionId: 'session-a', submissionId: 'submission-a', target: a }
-  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, lockedRunTarget: a, activeRunLock } }, parent), true)
+  const activeRunLocks = [activeRunLock, { sessionId: 'session-b', submissionId: 'submission-b', target: a }]
+  assert.equal(bridge.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, lockedRunTarget: a, activeRunLock, activeRunLocks } }, parent), true)
   assert.deepEqual(bridge.source.getSnapshot().activeRunLock, activeRunLock)
+  assert.deepEqual(bridge.source.getSnapshot().activeRunLocks, activeRunLocks)
   const invalid = createBrowserTargetBridge('nonce', 'chrome-extension://abc')
   assert.equal(invalid.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 1, ...snapshot, activeRunLock: { sessionId: 'session-a', submissionId: '', target: a } } }, parent), false)
+  assert.equal(invalid.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 2, ...snapshot, activeRunLocks: [activeRunLock, activeRunLock] } }, parent), false, 'duplicate submissions cannot produce ambiguous lifecycle recovery')
+  assert.equal(invalid.accept({ source: parent, origin: 'chrome-extension://abc', data: { type: 'browser-target-snapshot/v1', nonce: 'nonce', sequence: 3, ...snapshot, activeRunLocks: [activeRunLock, { sessionId: 'session-b', submissionId: 'submission-b', target: { ...a, url: 'https://other.example.test' } }] } }, parent), false, 'all active owners must share one Browser Target')
 })
 
 test('requires an exact chrome extension parent origin in the opt-in bridge URL', () => {

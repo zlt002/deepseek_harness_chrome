@@ -89,13 +89,16 @@ export function apply(ctx: ClientContext): void {
     postUnlock(sessionId, submissionId ?? lock!.state.submissionId)
   }
   const restoreProjectedLifecycle = (): void => {
-    const projected = bridge.source.getSnapshot()?.activeRunLock
-    if (projected === undefined || lifecycleLocks.has(projected.sessionId)) return
-    const session = ctx.sessions.binding(projected.sessionId as SessionId)?.session
-    if (session === undefined) return
-    const state = new BrowserTargetSessionRunLock(projected.submissionId)
-    state.accept(session.getSnapshot())
-    lifecycleLocks.set(projected.sessionId, { state })
+    const snapshot = bridge.source.getSnapshot()
+    const projectedLocks = snapshot?.activeRunLocks ?? (snapshot?.activeRunLock === undefined ? [] : [snapshot.activeRunLock])
+    for (const projected of projectedLocks) {
+      if (lifecycleLocks.has(projected.sessionId)) continue
+      const session = ctx.sessions.binding(projected.sessionId as SessionId)?.session
+      if (session === undefined) continue
+      const state = new BrowserTargetSessionRunLock(projected.submissionId)
+      state.accept(session.getSnapshot())
+      lifecycleLocks.set(projected.sessionId, { state })
+    }
   }
   const lockSubmission = (sessionId: string, submissionId: string, browserTarget: { browser: 'chrome'; windowId: number; tabId: number; url: string }): Promise<boolean> => {
     return new Promise((resolve, reject) => {
@@ -197,6 +200,7 @@ export function apply(ctx: ClientContext): void {
         if (expected.has(sessionId)) continue
         unsubscribe()
         sessionSubscriptions.delete(sessionId)
+        releaseLifecycleLock(sessionId)
       }
     }
     const unsubscribeList = ctx.sessions.list.subscribe(syncSessionSubscriptions)

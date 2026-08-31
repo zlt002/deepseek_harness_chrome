@@ -39,12 +39,13 @@ test('changing the observed session refreshes recent prototypes without reconnec
   assert.doesNotMatch(source, /void connect\(\); void loadTargetSettings\(\); void loadRecentPrototypes\(\)/, 'session-scoped recent projects must not share the Harness initialization effect')
 })
 
-test('projects only the acknowledged Browser Target lock and clears it with the matching submission', async () => {
+test('projects all acknowledged Browser Target locks and clears only the matching submission', async () => {
   const source = await readFile(new URL('./main.tsx', import.meta.url), 'utf8')
 
-  assert.match(source, /const \[lockedRunTarget, setLockedRunTarget\] = useState/)
-  assert.match(source, /lockedRunTarget: lockedRunTarget\.target/)
-  assert.match(source, /activeRunLock: lockedRunTarget/)
+  assert.match(source, /const \[lockedRunTargets, setLockedRunTargets\] = useState/)
+  assert.match(source, /lockedRunTarget: lockedRunTargets\[0\]\.target/)
+  assert.match(source, /activeRunLock: lockedRunTargets\[0\]/)
+  assert.match(source, /activeRunLocks: lockedRunTargets/)
   assert.match(source, /response\?\.ok === true && response\?\.locked === true/)
   assert.match(source, /runTargetLockProjectionRef\.current\.unlock\(value\.sessionId, value\.submissionId\)/)
   assert.match(source, /runTargetLockProjectionRef\.current\.acknowledge\(sessionId, submissionId, locked\)/)
@@ -59,26 +60,27 @@ test('isolates pending and current Browser Target locks by session and submissio
   const projection = new BrowserTargetRunLockProjection()
   projection.start('session-a', 'a1', a)
   projection.reconcile('session-b', 'b1')
-  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), { sessionId: 'session-a', submissionId: 'a1', target: a }, 'an unrelated session must not invalidate A pending ACK')
+  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a }], 'an unrelated session must not invalidate A pending ACK')
 
   projection.start('session-a', 'a2', a2)
-  assert.deepEqual(projection.acknowledge('session-a', 'a2', true), { sessionId: 'session-a', submissionId: 'a2', target: a2 })
-  assert.deepEqual(projection.unlock('session-a', 'a1'), { sessionId: 'session-a', submissionId: 'a2', target: a2 }, 'old A1 unlock must not clear current A2')
-  assert.deepEqual(projection.reconcile('session-a', 'a1'), { sessionId: 'session-a', submissionId: 'a2', target: a2 }, 'late A1 reconciliation must not clear current A2')
+  assert.deepEqual(projection.acknowledge('session-a', 'a2', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a }, { sessionId: 'session-a', submissionId: 'a2', target: a2 }])
+  assert.deepEqual(projection.unlock('session-a', 'a1'), [{ sessionId: 'session-a', submissionId: 'a2', target: a2 }], 'old A1 unlock must not clear current A2')
+  assert.deepEqual(projection.reconcile('session-a', 'a1'), [{ sessionId: 'session-a', submissionId: 'a2', target: a2 }], 'late A1 reconciliation must not clear current A2')
 
   const first = new BrowserTargetRunLockProjection()
   first.start('session-a', 'a3', a)
   first.start('session-a', 'a4', a2)
-  assert.equal(first.acknowledge('session-a', 'a4', false), undefined)
-  assert.deepEqual(first.acknowledge('session-a', 'a3', true), { sessionId: 'session-a', submissionId: 'a3', target: a }, 'a rejected peer request must not erase the first pending lock')
+  assert.deepEqual(first.acknowledge('session-a', 'a4', false), [])
+  assert.deepEqual(first.acknowledge('session-a', 'a3', true), [{ sessionId: 'session-a', submissionId: 'a3', target: a }], 'a rejected peer request must not erase the first pending lock')
 })
 
-test('hydrates the authoritative active Run lock after sidepanel reconstruction', async () => {
+test('hydrates every authoritative active Run owner after sidepanel reconstruction', async () => {
   const { BrowserTargetRunLockProjection } = await runTargetLockProjection()
   const a = { browser: 'chrome', windowId: 1, tabId: 1, url: 'https://a.example.test', title: 'A' }
   const projection = new BrowserTargetRunLockProjection()
-  assert.deepEqual(projection.hydrate({ sessionId: 'session-a', submissionId: 'a1', target: a }), { sessionId: 'session-a', submissionId: 'a1', target: a })
-  assert.equal(projection.hydrate(undefined), undefined, 'a later authoritative empty response clears the recovered lock')
+  const b = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://b.example.test', title: 'B' }
+  assert.deepEqual(projection.hydrate([{ sessionId: 'session-a', submissionId: 'a1', target: a }, { sessionId: 'session-b', submissionId: 'b1', target: b }]), [{ sessionId: 'session-a', submissionId: 'a1', target: a }, { sessionId: 'session-b', submissionId: 'b1', target: b }])
+  assert.deepEqual(projection.hydrate([]), [], 'a later authoritative empty response clears every recovered lock')
 })
 
 test('reconnect clears stale Browser Target state before ready hydrates the authority again', async () => {
@@ -87,8 +89,8 @@ test('reconnect clears stale Browser Target state before ready hydrates the auth
   const a = { browser: 'chrome', windowId: 1, tabId: 1, url: 'https://a.example.test', title: 'A' }
   const projection = new BrowserTargetRunLockProjection()
   projection.start('session-a', 'a1', a)
-  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), { sessionId: 'session-a', submissionId: 'a1', target: a })
-  assert.equal(projection.reset(), undefined, 'a reconnect drops pending and acknowledged locks from the disconnected Harness')
+  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a }])
+  assert.deepEqual(projection.reset(), [], 'a reconnect drops pending and acknowledged locks from the disconnected Harness')
   assert.match(source, /const connect = useCallback\(async \(\) => \{[\s\S]*?clearBrowserTargetLockProjection\(\)/)
   assert.match(source, /value\.type === 'browser-target-ready\/v1'[\s\S]*?hydrateActiveBrowserTargetLock\(\)/)
 })

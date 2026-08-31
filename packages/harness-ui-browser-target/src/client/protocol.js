@@ -18,6 +18,14 @@ function activeRunLock(value) {
     && typeof value.submissionId === 'string' && value.submissionId.length > 0
     && tab(value.target)
 }
+function sameRunTarget(left, right) {
+  return left.browser === right.browser && left.windowId === right.windowId && left.tabId === right.tabId && left.url === right.url
+}
+function activeRunLocks(value) {
+  return Array.isArray(value) && value.length <= 32 && value.every(activeRunLock)
+    && new Set(value.map(lock => lock.submissionId)).size === value.length
+    && (value.length === 0 || value.every(lock => sameRunTarget(lock.target, value[0].target)))
+}
 
 function snapshotMessage(value) {
   return value !== null && typeof value === 'object'
@@ -31,6 +39,7 @@ function snapshotMessage(value) {
     && Array.isArray(value.tabs) && value.tabs.every(tab)
     && (value.activeTab === undefined || tab(value.activeTab))
     && (value.lockedRunTarget === undefined || tab(value.lockedRunTarget))
+    && (value.activeRunLocks === undefined || activeRunLocks(value.activeRunLocks))
     && (value.activeRunLock === undefined || activeRunLock(value.activeRunLock))
     && (value.error === undefined || typeof value.error === 'string')
 }
@@ -50,6 +59,7 @@ export function createBrowserTargetProtocol({ createStore, nonce, parentOrigin }
         tabs: event.data.tabs,
         ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }),
         ...(event.data.lockedRunTarget === undefined ? {} : { lockedRunTarget: event.data.lockedRunTarget }),
+        ...(event.data.activeRunLocks === undefined ? {} : { activeRunLocks: event.data.activeRunLocks }),
         ...(event.data.activeRunLock === undefined ? {} : { activeRunLock: event.data.activeRunLock }),
         ...(event.data.error === undefined ? {} : { error: event.data.error }),
       })

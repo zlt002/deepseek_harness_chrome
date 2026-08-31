@@ -49,10 +49,7 @@ async function loadBackground() {
           nativeMessages.push(message)
           if (message.type === 'start') queueMicrotask(() => { for (const listener of nativeListeners) listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-review' } }) })
           if (message.type === 'record-pmd-prd-review-adoption') queueMicrotask(() => {
-            for (const listener of nativeListeners) listener({
-              type: 'pmd_prd_review_adoption_recorded', requestId: message.requestId,
-              receipt: 'r'.repeat(32), expiresAt: Date.now() + 60_000,
-            })
+            for (const listener of nativeListeners) listener({ type: 'pmd_prd_review_adoption_recorded', requestId: message.requestId })
           })
         },
         disconnect: () => {},
@@ -181,8 +178,11 @@ test('forwards rewrite and accept only to the review-bound session', async () =>
     assert.deepEqual(background.responses.find(message => message.requestId === 'accept-1').status, 'processing')
     const actions = background.forwarded.filter(message => message.type === 'markdown-review-session-action-forward/v1')
     assert.deepEqual(actions.map(message => [message.action, message.review.harnessSessionId, message.review.resourceId, message.review.revision, message.review.fingerprint]), [['rewrite', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1'], ['accept', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1']])
-    assert.equal(actions[0].review.pmdReviewReceipt, undefined)
-    assert.equal(actions[1].review.pmdReviewReceipt, 'r'.repeat(32))
+    assert.equal('pmdReviewReceipt' in actions[0].review, false)
+    assert.equal('pmdReviewReceipt' in actions[1].review, false)
+    const adoption = background.nativeMessages.find(message => message.type === 'record-pmd-prd-review-adoption')
+    assert.equal(adoption.payload.harnessSessionId, 'session-1')
+    assert.match(adoption.payload.contentHash, /^[a-f0-9]{64}$/)
   } finally { background.cleanup() }
 })
 

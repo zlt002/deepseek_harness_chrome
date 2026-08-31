@@ -37,7 +37,7 @@ function rewriteDraft(action: WorkspaceReviewSessionAction): string {
 }
 
 function acceptPrompt(action: WorkspaceReviewSessionAction): string {
-  return `/pmd-prd 我已采纳当前审阅的 PRD（${action.displayPath}）。该文件就是本次唯一已确认的冻结 PRD 正文。accepted_revision=${action.revision}; accepted_fingerprint=${action.fingerprint}。请继续执行“同步到远程 doc 文档”步骤；进入远程预览前必须重新读取该文件、运行 PRD 校验并确认当前 fingerprint/hash 与 accepted_fingerprint 一致；否则旧采纳失效，重新打开左侧审核。这不是恢复历史任务：只使用当前会话的绑定；若当前会话尚未绑定，请只围绕该文件新建本轮交付状态，禁止扫描、匹配或复用任何其他历史 Run/manifest。调用 team_knowledge_batch_preview 时必须原样提供 pmdReviewReceipt=${action.pmdReviewReceipt ?? '缺失'}；该一次性凭据绑定当前会话、当前工作区文件版本和正文哈希，过期、重放、换会话或改正文都会被拒绝。远程写入仍须按“预览目标与变更 → 我确认 → 写入 → 同目标回读验证”执行。`
+  return `/pmd-prd 我已采纳左侧 Markdown Review 中已保存的 PRD（${action.displayPath}）。请保留这次采纳意图：如果当前已打开可创建的远程在线文档位置，立即执行 team_knowledge_batch_preview，再立即执行 team_knowledge_batch_create，不再向我请求第二次创建确认；如果尚未打开目标位置，只用通俗的话提示我打开目标在线文档所在的目录标签并选中它。用户选好目标后的下一次继续操作，自动继续同步，无需再点击采纳。仅在目标已变化、写入失败或同一在线文档的回读失败时才停止并说明原因。这不是恢复历史任务：只使用当前会话的绑定；若当前会话尚未绑定，请只围绕该文件新建本轮交付状态，禁止扫描、匹配或复用任何其他历史 Run/manifest。`
 }
 
 interface ProducedFileFact {

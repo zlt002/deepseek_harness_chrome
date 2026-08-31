@@ -552,6 +552,100 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
   }
 })
 
+test('follow-active-tab permits concurrent sessions on the same frozen Browser Target', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const targetB = { browser: 'chrome', windowId: 7, tabId: b.id, url: b.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a, 43: b } })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender), { ok: true, locked: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetA }, sender), { ok: true, locked: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
+      ok: true,
+      lock: { sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA },
+      locks: [
+        { sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA },
+        { sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetA },
+      ],
+    })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
+      ok: true, lock: { sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetA },
+    })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-c', submissionId: 'submission-c', browserTarget: targetB }, sender), { ok: false, error: '另一个对话正在运行，结束后再试。' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b' }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), { ok: true })
+    background.activateTab(b.id)
+    background.emitNative({ type: 'connector_request', requestId: 'after-last-unlock', runId: 'run-follow', generation: 'generation-a', browserTarget: targetA, tool: 'list_work_tabs' })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock').result.pageIdentity.url, b.url, 'follow mode returns only after the last owner releases')
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('concurrent first locks for one Browser Target share a single Native transfer', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const transferGate = Promise.withResolvers()
+  const background = await loadBackground({
+    settings: { mode: 'none', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a }, waitForTransferAck: transferGate.promise,
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    const first = background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender)
+    const second = background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetA }, sender)
+    for (let attempt = 0; attempt < 20; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.nativeMessages.filter(message => message.type === 'transfer-browser-target').length, 1, 'same-target owners must share the in-flight transfer')
+    transferGate.resolve()
+    assert.deepEqual(await Promise.all([first, second]), [{ ok: true, locked: true }, { ok: true, locked: true }])
+  } finally {
+    transferGate.resolve()
+    background.cleanup()
+  }
+})
+
+test('follow-active-tab caps concurrent Browser Target owners at the snapshot protocol limit', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a } })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    for (let index = 0; index < 32; index += 1) {
+      assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: `session-${index}`, submissionId: `submission-${index}`, browserTarget: targetA }, sender), { ok: true, locked: true })
+    }
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-32', submissionId: 'submission-32', browserTarget: targetA }, sender), {
+      ok: false, error: '同时运行的对话过多，请等待一个对话结束后再试。',
+    })
+    const active = await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender)
+    assert.equal(active.locks.length, 32)
+  } finally {
+    background.cleanup()
+  }
+})
+
+test('releasing a disappeared session lock lets the next session lock the same Run', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const targetB = { browser: 'chrome', windowId: 7, tabId: b.id, url: b.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a, 43: b } })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender), { ok: true, locked: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetB }, sender), { ok: true, locked: true })
+  } finally {
+    background.cleanup()
+  }
+})
+
 test('a follow lock keeps its send-moment Browser Target while an in-flight settings save switches to none', async () => {
   const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
   const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }

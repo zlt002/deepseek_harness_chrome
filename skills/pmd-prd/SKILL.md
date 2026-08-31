@@ -7,7 +7,7 @@ user-invocable: true
 
 # `/pmd-prd` Harness-native workflow
 
-Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel，也不要求用户填写内部 ID、Cookie 或工具 payload。最终只允许创建一份美的 Team Knowledge 轻文档：`{需求标识}_{主题}_PRD`。`process.md`、`trace-events.jsonl` 等内部恢复文件可以保留，但不得生成可见的“需求分析与研发交付”文档。
+Harness Workspace 是唯一用户界面；本 Skill 不复制 AccrUI sidepanel，也不要求用户填写内部 ID、Cookie 或工具 payload。最终只允许创建一份美的 Team Knowledge 轻文档：`{需求标识}_{主题}_PRD`。`process.md`、`domain-model.md`、`trace-events.jsonl` 等内部恢复文件可以保留，但不得生成可见的“需求分析与研发交付”文档。
 
 ## 状态机与确认门
 
@@ -100,15 +100,15 @@ node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs --prd <prd-frozen-pa
 
 只有该命令以 0 退出，才调用 `open_workspace_markdown_review({ path: <prd-frozen-relative-path> })`；`path` 必须是相对当前 Harness 会话 cwd 的冻结产物 `.md` 路径，不能传绝对路径、`..` 或其他文件类型。该工具会自动在左侧打开同一份冻结 `.md` 的现有 Markdown Review，并绑定当前 `/pmd-prd` 会话；只复用其中已有的“采纳、重写、局部优化、接受/拒绝修改”，不在侧边栏新增审核操作。用户点击 Markdown Review 的“采纳”后，原会话才收到继续交付的意图；在此之前不得进入阶段 6、绑定父节点或写远程。
 
-重写或局部优化始终回到同一 `/pmd-prd` 会话：更新同一冻结 PRD 文件，再次运行校验，成功后再次调用 `open_workspace_markdown_review` 刷新左侧审核。Markdown Review 的采纳会附带 `accepted_revision`、`accepted_fingerprint` 和 Native Host 签发的短时一次性 `pmdReviewReceipt`；阶段 6 前必须重新读取同一冻结文件、再次运行校验，并确认当前 fingerprint/hash 与该采纳值一致。调用 `team_knowledge_batch_preview` 的 `pmd:` 批次时，必须传入该 `pmdReviewReceipt`，由 Host 核验同一 Harness 会话、同一工作区资源、revision、fingerprint 与正文 hash；只靠 `/pmd-prd` 文本、正则、手输相同正文或历史采纳都不能通过。正文变化、过期、重放或跨会话都会使旧采纳失效。校验失败或版本不一致时停止在阶段 5，修正文档并重新冻结、校验和审核；不从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。完成条件：一份完整正文快照、规范文件名和校验结果均冻结，且当前 fingerprint/hash 已在 Markdown Review 中被采纳。
+重写或局部优化始终回到同一 `/pmd-prd` 会话：更新同一冻结 PRD 文件，再次运行校验，成功后再次调用 `open_workspace_markdown_review` 刷新左侧审核。用户在左侧点击“采纳”即确认该编辑器中已保存的这份 PRD；随后直接进入远程交付，不再要求用户二次确认或操作采纳凭据。系统会在后台把采纳绑定到当前 Run、当前会话、文件身份、revision、fingerprint 和正文 hash；远程预览前自动重新读取同一文件校验，正文变化、换会话、换文件或改用另一批次都会被拒绝并要求重新审核。完成条件：一份完整正文快照、规范文件名和初始校验结果均已通过左侧审核。
 
 ### 阶段 6：PRD 预览与父节点确认
 
-请用户在 Chrome 手动打开目标目录或可创建子项的轻文档父级。运行时依据内部 `requirementId` 生成并持久化稳定的 `batchId`，其值严格为 `pmd:${requirementId}`（`requirementId` 最长 64 字符，因此 `batchId` 最长 68 字符）；用户不得填写，所有恢复和重试沿用它。调用 `mcp__chrome__team_knowledge_batch_preview`，只传该 `batchId`、阶段 5 冻结的恰好一项 PRD（`{name, body}`）以及本次采纳得到的 `pmdReviewReceipt`；正文只能来自已确认快照。Preview 会检查当前 Browser Target 和可创建父节点，冻结父 fingerprint、Target/content fingerprints 和 content hash，并返回一次性 `challenge` 与 `expiresAt`；此步骤不创建或修改线上文档。Preview 成功后只询问一次是否在回显的父节点下创建该 PRD；用户拒绝、父节点不一致、权限不足或检查失败时停止。完成条件：PRD preview 成功，且用户完成这一次创建确认。
+用户点击左侧“采纳”后，持久记录本次“待同步”意图。若当前已打开的是可创建的目标在线文档位置，立即继续；若尚未打开目标位置，只提示用户“请打开目标在线文档所在的目录标签，并在顶部选中该标签；选好后继续当前对话，我会自动同步，无需再次采纳。”不得要求再次点击采纳，也不得显示内部字段。目标就绪后的下一次 continuation 沿用这份已采纳 PRD 自动继续。运行时依据内部 `requirementId` 生成并持久化稳定的 `batchId`，其值严格为 `pmd:${requirementId}`（`requirementId` 最长 64 字符，因此 `batchId` 最长 68 字符）；用户不得填写，所有恢复和重试沿用它。调用 `mcp__chrome__team_knowledge_batch_preview`，只传该 `batchId` 和阶段 5 已采纳的恰好一项 PRD（`{name, body}`），不得传采纳凭据。Connector 会使用后台采纳记录核对当前会话、稳定 batchId 和精确正文，并让 Extension 回读同一文件版本；校验不一致时必须停止。Preview 只在内部检查目标在线文档位置、可创建父节点及写入前提，并返回一次性 `challenge`；此步骤不创建或修改线上文档。Preview 成功后不得再询问创建确认，立即进入阶段 7。
 
 ### 阶段 7：创建与回读
 
-按 `preview → approval → create → 页面确认` 执行。用户完成创建确认后立即调用 `mcp__chrome__team_knowledge_batch_create`，且参数只能是 `{ batchId, challenge }`；不得传入 `items`、正文、`requirementId` 或父节点参数。正文由 Connector 持有的 ephemeral preview plan 提供，create 不重发正文。PRD 写入并完成当前页面 XML 回读后，Browser Target 必须停留在该文档并显示确认卡；让用户检查正文完整性与页面保存状态，只有用户点击“已确认并继续”后才允许离开、重开做持久化回读。未确认、超时、页面离开或用户选择停止时保留当前页面，返回 `partial_delivery`，不得报告完成。确认并通过持久化回读后，以 `team_knowledge_batch_create` 返回的 batch 状态为准。若 challenge 过期、已消费或 ephemeral plan 缺失，停止 create，使用同一份冻结 PRD 重新 preview，取得新 challenge，并重新完成这一次用户确认。完成条件：PRD 已由用户确认，batch 状态为 `completed`，有 catalogId、完整 stages 和同目标持久化回读证据。
+按 `preview → create → 同目标回读` 执行。Preview 成功后立即调用 `mcp__chrome__team_knowledge_batch_create`，且参数只能是 `{ batchId, challenge }`；不得传入 `items`、正文、`requirementId` 或父节点参数。正文由 Connector 持有的临时预览计划提供，create 不重发正文。PMD 交付不显示第二次创建确认或页面确认卡：写入后自动回到同一远程文档进行持久化回读。若 challenge 过期、已消费或 ephemeral plan 缺失，重新 preview，取得新 challenge 后直接继续；这只恢复执行，不要求再次点击左侧“采纳”。旧流程所说“重新 preview，取得新 challenge，并重新完成这一次用户确认”只适用于普通批次，不适用于 `pmd:`。若写入或回读失败，保留 `partial_delivery` 并说明真实原因；若目标变了，停止并请用户重新打开正确目标。以 `team_knowledge_batch_create` 返回的 batch 状态为准。完成条件：batch 状态为 `completed`，有 catalogId、完整 stages 和同目标持久化回读证据。
 
 ### 阶段 8：生成不对时选中再改
 

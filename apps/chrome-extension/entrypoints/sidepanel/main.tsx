@@ -19,7 +19,7 @@ interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: s
 interface LockedRunTarget { sessionId: string; submissionId: string; target: BrowserTargetTab }
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
 interface BrowserTargetSettingsResponse { ok: boolean; settings?: BrowserTargetSettings; tabs?: BrowserTargetTab[]; error?: string }
-interface ActiveBrowserTargetLockResponse { ok: boolean; lock?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown }; error?: string }
+interface ActiveBrowserTargetLockResponse { ok: boolean; lock?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown }; locks?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown }[]; error?: string }
 interface DesignReferenceCaptureResponse { ok: boolean; referenceId?: string; error?: string }
 interface RecentPrototypeStudio { projectId: string; referenceId: string; referenceTitle?: string; referenceUrl?: string; projectName?: string; currentRevisionId?: string; revisionCount?: number; updatedAt: number; authorizationActive: boolean; boundToCurrentSession?: boolean }
 interface RecentPrototypeStudiosResponse { ok: boolean; projects?: RecentPrototypeStudio[]; error?: string }
@@ -88,43 +88,47 @@ function browserTargetTabForLock(target: BrowserTarget, activeTab: ActiveTab | u
 /** Keeps pending acknowledgements isolated so another Harness session cannot cancel this Run's target projection. */
 export class BrowserTargetRunLockProjection {
   #pendingBySubmission = new Map<string, LockedRunTarget>()
-  #current: LockedRunTarget | undefined
+  #currentBySubmission = new Map<string, LockedRunTarget>()
+
+  #current(): LockedRunTarget[] {
+    return [...this.#currentBySubmission.values()]
+  }
 
   start(sessionId: string, submissionId: string, target: BrowserTargetTab): void {
     this.#pendingBySubmission.set(submissionId, { sessionId, submissionId, target })
   }
 
-  acknowledge(sessionId: string, submissionId: string, locked: boolean): LockedRunTarget | undefined {
+  acknowledge(sessionId: string, submissionId: string, locked: boolean): LockedRunTarget[] {
     const pending = this.#pendingBySubmission.get(submissionId)
-    if (pending?.sessionId !== sessionId) return this.#current
+    if (pending?.sessionId !== sessionId) return this.#current()
     this.#pendingBySubmission.delete(submissionId)
-    if (locked) this.#current = pending
-    else if (this.#current?.sessionId === sessionId && this.#current.submissionId === submissionId) this.#current = undefined
-    return this.#current
+    if (locked) this.#currentBySubmission.set(submissionId, pending)
+    else if (this.#currentBySubmission.get(submissionId)?.sessionId === sessionId) this.#currentBySubmission.delete(submissionId)
+    return this.#current()
   }
 
-  unlock(sessionId: string, submissionId: string): LockedRunTarget | undefined {
+  unlock(sessionId: string, submissionId: string): LockedRunTarget[] {
     if (this.#pendingBySubmission.get(submissionId)?.sessionId === sessionId) this.#pendingBySubmission.delete(submissionId)
-    if (this.#current?.sessionId === sessionId && this.#current.submissionId === submissionId) this.#current = undefined
-    return this.#current
+    if (this.#currentBySubmission.get(submissionId)?.sessionId === sessionId) this.#currentBySubmission.delete(submissionId)
+    return this.#current()
   }
 
-  reconcile(sessionId: string, submissionId: string): LockedRunTarget | undefined {
+  reconcile(sessionId: string, submissionId: string): LockedRunTarget[] {
     if (this.#pendingBySubmission.get(submissionId)?.sessionId === sessionId) this.#pendingBySubmission.delete(submissionId)
-    if (this.#current?.sessionId === sessionId && this.#current.submissionId === submissionId) this.#current = undefined
-    return this.#current
+    if (this.#currentBySubmission.get(submissionId)?.sessionId === sessionId) this.#currentBySubmission.delete(submissionId)
+    return this.#current()
   }
 
-  reset(): LockedRunTarget | undefined {
+  reset(): LockedRunTarget[] {
     this.#pendingBySubmission.clear()
-    this.#current = undefined
-    return this.#current
+    this.#currentBySubmission.clear()
+    return this.#current()
   }
 
-  hydrate(lock: LockedRunTarget | undefined): LockedRunTarget | undefined {
-    this.#current = lock
-    if (lock !== undefined) this.#pendingBySubmission.delete(lock.submissionId)
-    return this.#current
+  hydrate(locks: readonly LockedRunTarget[]): LockedRunTarget[] {
+    this.#currentBySubmission = new Map(locks.map(lock => [lock.submissionId, lock]))
+    for (const lock of locks) this.#pendingBySubmission.delete(lock.submissionId)
+    return this.#current()
   }
 }
 
@@ -420,7 +424,7 @@ function App(): React.JSX.Element {
   const [recentProjectNameDraft, setRecentProjectNameDraft] = useState('')
   const [deletingRecentProjectId, setDeletingRecentProjectId] = useState<string>()
   const [activeTab, setActiveTab] = useState<{ epoch: string; sequence: number; tab: ActiveTab }>()
-  const [lockedRunTarget, setLockedRunTarget] = useState<LockedRunTarget>()
+  const [lockedRunTargets, setLockedRunTargets] = useState<LockedRunTarget[]>([])
   const frameRef = useRef<HTMLIFrameElement>(null)
   const frameReadyRef = useRef(false)
   const workspaceReviewBridgeReadyRef = useRef(false)
@@ -494,7 +498,7 @@ function App(): React.JSX.Element {
   const clearBrowserTargetLockProjection = useCallback(() => {
     lockProjectionVersionRef.current += 1
     lockHydrationRequestRef.current += 1
-    setLockedRunTarget(runTargetLockProjectionRef.current.reset())
+    setLockedRunTargets(runTargetLockProjectionRef.current.reset())
   }, [])
 
   const connect = useCallback(async () => {
@@ -520,16 +524,17 @@ function App(): React.JSX.Element {
     const version = lockProjectionVersionRef.current
     const response = await requestActiveBrowserTargetLock()
     if (requestId !== lockHydrationRequestRef.current || version !== lockProjectionVersionRef.current || !response.ok) return
-    const rawLock = response.lock
-    let lock: LockedRunTarget | undefined
-    if (rawLock !== undefined) {
+    const rawLocks = response.locks ?? (response.lock === undefined ? [] : [response.lock])
+    const locks: LockedRunTarget[] = []
+    for (const rawLock of rawLocks) {
       const sessionId = rawLock.sessionId
       const submissionId = rawLock.submissionId
       const browserTarget = rawLock.browserTarget
       if (!isHarnessSessionIdentity(sessionId) || !isHarnessSessionIdentity(submissionId) || !isBrowserTarget(browserTarget)) return
-      lock = { sessionId, submissionId, target: browserTargetTabForLock(browserTarget, activeTabRef.current?.tab, availableTabsRef.current) }
+      if (locks.some(lock => lock.submissionId === submissionId)) return
+      locks.push({ sessionId, submissionId, target: browserTargetTabForLock(browserTarget, activeTabRef.current?.tab, availableTabsRef.current) })
     }
-    setLockedRunTarget(runTargetLockProjectionRef.current.hydrate(lock))
+    setLockedRunTargets(runTargetLockProjectionRef.current.hydrate(locks))
   }, [])
 
   const loadRecentPrototypes = useCallback(async () => {
@@ -710,11 +715,12 @@ function App(): React.JSX.Element {
     target.postMessage({
       type: 'browser-target-snapshot/v1', nonce: frameNonce, sequence: bridgeSequenceRef.current,
       settings: targetSettings, tabs: availableTabs, activeTab: activeTab?.tab,
-      ...(lockedRunTarget === undefined ? {} : { lockedRunTarget: lockedRunTarget.target }),
-      ...(lockedRunTarget === undefined ? {} : { activeRunLock: lockedRunTarget }),
+      ...(lockedRunTargets[0] === undefined ? {} : { lockedRunTarget: lockedRunTargets[0].target }),
+      ...(lockedRunTargets[0] === undefined ? {} : { activeRunLock: lockedRunTargets[0] }),
+      activeRunLocks: lockedRunTargets,
       ...(capturingTabId === undefined ? {} : { capturingDesignReferenceTabId: capturingTabId }), ...(capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress }), error: targetError,
     }, frameOrigin)
-  }, [activeTab, availableTabs, capturingDesignReferenceProgress, frameNonce, frameOrigin, lockedRunTarget, targetError, targetSettings])
+  }, [activeTab, availableTabs, capturingDesignReferenceProgress, frameNonce, frameOrigin, lockedRunTargets, targetError, targetSettings])
 
   const sendBrowserTargetSnapshot = useCallback(() => {
     projectBrowserTargetSnapshot(capturingDesignReferenceTabId)
@@ -985,7 +991,7 @@ function App(): React.JSX.Element {
           .then((response: { ok?: unknown; locked?: unknown; error?: unknown } | undefined) => {
             const locked = response?.ok === true && response?.locked === true
             lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
-            setLockedRunTarget(runTargetLockProjectionRef.current.acknowledge(sessionId, submissionId, locked))
+            setLockedRunTargets(runTargetLockProjectionRef.current.acknowledge(sessionId, submissionId, locked))
             frameRef.current?.contentWindow?.postMessage({
               type: 'browser-target-lock-ack/v1', nonce: frameNonce, sessionId, submissionId,
               ok: response?.ok === true, locked,
@@ -994,7 +1000,7 @@ function App(): React.JSX.Element {
           })
           .catch((error: unknown) => {
             lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
-            setLockedRunTarget(runTargetLockProjectionRef.current.acknowledge(sessionId, submissionId, false))
+            setLockedRunTargets(runTargetLockProjectionRef.current.acknowledge(sessionId, submissionId, false))
             frameRef.current?.contentWindow?.postMessage({
               type: 'browser-target-lock-ack/v1', nonce: frameNonce, sessionId, submissionId, ok: false, locked: false,
               error: error instanceof Error ? error.message : String(error),
@@ -1004,13 +1010,13 @@ function App(): React.JSX.Element {
       }
       if (value.type === 'browser-target-unlock/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId)) {
         lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
-        setLockedRunTarget(runTargetLockProjectionRef.current.unlock(value.sessionId, value.submissionId))
+        setLockedRunTargets(runTargetLockProjectionRef.current.unlock(value.sessionId, value.submissionId))
         void chrome.runtime.sendMessage({ type: 'unlock-browser-target/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
         return
       }
       if (value.type === 'browser-target-reconcile/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId)) {
         lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
-        setLockedRunTarget(runTargetLockProjectionRef.current.reconcile(value.sessionId, value.submissionId))
+        setLockedRunTargets(runTargetLockProjectionRef.current.reconcile(value.sessionId, value.submissionId))
         void chrome.runtime.sendMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
         return
       }

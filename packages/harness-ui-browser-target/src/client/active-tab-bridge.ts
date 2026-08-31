@@ -33,6 +33,9 @@ export interface BrowserTargetSnapshot {
   activeTab?: BrowserTargetTab
   /** The acknowledged target for an in-flight follow-mode Harness Run. */
   lockedRunTarget?: BrowserTargetTab
+  /** Every active owner of the shared in-flight Browser Target. */
+  activeRunLocks?: BrowserTargetActiveRunLock[]
+  /** Legacy single-owner projection retained for older side panels. */
   activeRunLock?: BrowserTargetActiveRunLock
   capturingDesignReferenceTabId?: number
   capturingDesignReferenceProgress?: { current: number; total: number }
@@ -103,6 +106,16 @@ function isActiveRunLock(value: unknown): value is BrowserTargetActiveRunLock {
     && isBrowserTargetTab((value as BrowserTargetActiveRunLock).target)
 }
 
+function isSameRunTarget(left: BrowserTargetTab, right: BrowserTargetTab): boolean {
+  return left.browser === right.browser && left.windowId === right.windowId && left.tabId === right.tabId && left.url === right.url
+}
+
+function isActiveRunLocks(value: unknown): value is BrowserTargetActiveRunLock[] {
+  return Array.isArray(value) && value.length <= 32 && value.every(isActiveRunLock)
+    && new Set(value.map(lock => lock.submissionId)).size === value.length
+    && (value.length === 0 || value.every(lock => isSameRunTarget(lock.target, value[0]!.target)))
+}
+
 function isBrowserTargetSnapshotMessage(value: unknown): value is BrowserTargetSnapshotMessage {
   return typeof value === 'object' && value !== null
     && (value as BrowserTargetSnapshotMessage).type === 'browser-target-snapshot/v1'
@@ -113,6 +126,7 @@ function isBrowserTargetSnapshotMessage(value: unknown): value is BrowserTargetS
     && (value as BrowserTargetSnapshotMessage).tabs.every(isBrowserTargetTab)
     && ((value as BrowserTargetSnapshotMessage).activeTab === undefined || isBrowserTargetTab((value as BrowserTargetSnapshotMessage).activeTab))
     && ((value as BrowserTargetSnapshotMessage).lockedRunTarget === undefined || isBrowserTargetTab((value as BrowserTargetSnapshotMessage).lockedRunTarget))
+    && ((value as BrowserTargetSnapshotMessage).activeRunLocks === undefined || isActiveRunLocks((value as BrowserTargetSnapshotMessage).activeRunLocks))
     && ((value as BrowserTargetSnapshotMessage).activeRunLock === undefined || isActiveRunLock((value as BrowserTargetSnapshotMessage).activeRunLock))
     && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId === undefined || isBoundedTabId((value as BrowserTargetSnapshotMessage).capturingDesignReferenceTabId))
     && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress === undefined || (typeof (value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress === 'object' && (value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress !== null && Number.isInteger((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current) && Number.isInteger((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.total) && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current ?? 0) >= 1 && ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.total ?? 0) >= ((value as BrowserTargetSnapshotMessage).capturingDesignReferenceProgress?.current ?? 0)))
@@ -137,7 +151,7 @@ export function createBrowserTargetBridge(nonce: string, parentOrigin: string): 
       if (event.source !== parent || event.origin !== parentOrigin) return false
       if (!isBrowserTargetSnapshotMessage(event.data) || event.data.nonce !== nonce || event.data.sequence <= incomingSequence) return false
       incomingSequence = event.data.sequence
-      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.lockedRunTarget === undefined ? {} : { lockedRunTarget: event.data.lockedRunTarget }), ...(event.data.activeRunLock === undefined ? {} : { activeRunLock: event.data.activeRunLock }), ...(event.data.capturingDesignReferenceTabId === undefined ? {} : { capturingDesignReferenceTabId: event.data.capturingDesignReferenceTabId }), ...(event.data.capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress: event.data.capturingDesignReferenceProgress }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
+      source.set({ settings: event.data.settings, tabs: event.data.tabs, ...(event.data.activeTab === undefined ? {} : { activeTab: event.data.activeTab }), ...(event.data.lockedRunTarget === undefined ? {} : { lockedRunTarget: event.data.lockedRunTarget }), ...(event.data.activeRunLocks === undefined ? {} : { activeRunLocks: event.data.activeRunLocks }), ...(event.data.activeRunLock === undefined ? {} : { activeRunLock: event.data.activeRunLock }), ...(event.data.capturingDesignReferenceTabId === undefined ? {} : { capturingDesignReferenceTabId: event.data.capturingDesignReferenceTabId }), ...(event.data.capturingDesignReferenceProgress === undefined ? {} : { capturingDesignReferenceProgress: event.data.capturingDesignReferenceProgress }), ...(event.data.error === undefined ? {} : { error: event.data.error }) })
       return true
     },
     send(command, parent): void {

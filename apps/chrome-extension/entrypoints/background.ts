@@ -392,12 +392,37 @@ interface BrowserTargetRunLock {
   canceled: boolean
   resolve: (locked: boolean) => void
   reject: (error: Error) => void
+  promise: Promise<boolean>
 }
-const runBrowserTargetLocks = new Map<string, BrowserTargetRunLock>()
+const runBrowserTargetLocks = new Map<string, Map<string, BrowserTargetRunLock>>()
 const cancelledBrowserTargetSubmissions = new Set<string>()
+const pendingRunBrowserTargetTransfers = new Map<string, { browserTarget: BrowserTarget; promise: Promise<void> }>()
+const MAX_ACTIVE_BROWSER_TARGET_LOCKS = 32
+
+function locksForRun(runId: string): Map<string, BrowserTargetRunLock> {
+  let locks = runBrowserTargetLocks.get(runId)
+  if (locks === undefined) {
+    locks = new Map()
+    runBrowserTargetLocks.set(runId, locks)
+  }
+  return locks
+}
+
+function removeRunBrowserTargetLock(runId: string, submissionId: string): void {
+  const locks = runBrowserTargetLocks.get(runId)
+  if (locks === undefined) return
+  locks.delete(submissionId)
+  if (locks.size === 0) runBrowserTargetLocks.delete(runId)
+}
+
+function activeRunBrowserTargetLocks(runId: string | undefined): BrowserTargetRunLock[] {
+  if (runId === undefined) return []
+  return [...(runBrowserTargetLocks.get(runId)?.values() ?? [])]
+    .filter(lock => lock.state === 'active' && !lock.canceled && lock.port === nativePort)
+}
 
 function rejectBrowserTargetRunLocks(error: Error): void {
-  for (const lock of runBrowserTargetLocks.values()) lock.reject(error)
+  for (const locks of runBrowserTargetLocks.values()) for (const lock of locks.values()) lock.reject(error)
   runBrowserTargetLocks.clear()
 }
 interface PresentationFrameBinding {
@@ -418,7 +443,7 @@ interface PrototypeRecoverySignature {
   signature: string
 }
 const pendingPrototypeRecoverySignatures = new Map<string, { resolve: (value: PrototypeRecoverySignature) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
-const pendingPmdPrdReviewReceipts = new Map<string, { resolve: (value: string) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
+const pendingPmdPrdReviewAdoptions = new Map<string, { resolve: () => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
 let prototypeStudioRecoveryMutation: Promise<void> = Promise.resolve()
 // A project lifecycle operation may rotate the Host capability, read its
 // snapshot, or promote a session-only candidate. Keep these operations on one
@@ -484,15 +509,15 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
-async function requestPmdPrdReviewReceipt(review: { harnessSessionId: string; reviewId: string; resourceId: string; displayPath: string; revision: string; fingerprint: string }, content: string): Promise<string> {
+async function recordPmdPrdReviewAdoption(review: { harnessSessionId: string; reviewId: string; resourceId: string; displayPath: string; revision: string; fingerprint: string }, content: string): Promise<void> {
   const port = nativePort ?? connectNativePort()
   const requestId = crypto.randomUUID()
   const contentHash = await sha256Hex(content)
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => { pendingPmdPrdReviewReceipts.delete(requestId); reject(new Error('PRD 采纳凭据签发超时；请重试。')) }, 5_000)
-    pendingPmdPrdReviewReceipts.set(requestId, { resolve, reject, timeout })
+    const timeout = setTimeout(() => { pendingPmdPrdReviewAdoptions.delete(requestId); reject(new Error('PRD 采纳记录超时；请重试。')) }, 5_000)
+    pendingPmdPrdReviewAdoptions.set(requestId, { resolve, reject, timeout })
     try { port.postMessage({ type: 'record-pmd-prd-review-adoption', requestId, payload: { ...review, contentHash } }) }
-    catch (error) { clearTimeout(timeout); pendingPmdPrdReviewReceipts.delete(requestId); reject(error instanceof Error ? error : new Error(asError(error))) }
+    catch (error) { clearTimeout(timeout); pendingPmdPrdReviewAdoptions.delete(requestId); reject(error instanceof Error ? error : new Error(asError(error))) }
   })
 }
 
@@ -2053,7 +2078,8 @@ async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<Br
   // Tab-update candidate persistence and Connector dispatch can arrive in the
   // same event turn. Read settings only after that serialized update settles.
   await browserTargetRuntime.settled()
-  const locked = runBrowserTargetLocks.get(request.runId)
+  const locked = [...(runBrowserTargetLocks.get(request.runId)?.values() ?? [])]
+    .find(lock => !lock.canceled && (lock.state === 'active' || lock.state === 'pending'))
   if (locked !== undefined) {
     const tab = await chrome.tabs.get(locked.binding.browserTarget.tabId).catch(() => undefined)
     const live = tab === undefined ? undefined : targetFromActionTab(tab)
@@ -2089,39 +2115,67 @@ async function submittedBrowserTarget(browserTarget: BrowserTarget): Promise<Bro
   return bindingForTarget(verified)
 }
 
+async function ensureRunBrowserTargetTransferred(runId: string, binding: BrowserTargetBinding): Promise<void> {
+  const current = boundBrowserTargets.get(runId)
+  if (current !== undefined && sameBrowserTarget(current.browserTarget, binding.browserTarget)) return
+  const pending = pendingRunBrowserTargetTransfers.get(runId)
+  if (pending !== undefined) {
+    if (!sameBrowserTarget(pending.browserTarget, binding.browserTarget)) throw new Error('另一个对话正在运行，结束后再试。')
+    await pending.promise
+    return
+  }
+  const promise = transferBrowserTarget(runId, binding)
+  pendingRunBrowserTargetTransfers.set(runId, { browserTarget: binding.browserTarget, promise })
+  try {
+    await promise
+  } finally {
+    if (pendingRunBrowserTargetTransfers.get(runId)?.promise === promise) pendingRunBrowserTargetTransfers.delete(runId)
+  }
+}
+
 async function lockFollowBrowserTarget(sessionId: string, submissionId: string, browserTarget: BrowserTarget): Promise<boolean> {
   const runId = currentNativeRunId
   const port = nativePort
   if (runId === undefined || port === undefined) throw new Error('Harness is not connected; the Browser Target cannot be locked.')
   if (cancelledBrowserTargetSubmissions.delete(submissionId)) return false
-  return new Promise<boolean>((resolve, reject) => {
-    const existing = runBrowserTargetLocks.get(runId)
-    if (existing !== undefined && existing.submissionId !== submissionId) {
-      reject(new Error('另一个对话正在运行，结束后再试。'))
-      return
+  const locks = locksForRun(runId)
+  const existing = locks.get(submissionId)
+  if (existing !== undefined) {
+    if (existing.sessionId !== sessionId || !sameBrowserTarget(existing.binding.browserTarget, browserTarget)) {
+      throw new Error('另一个对话正在运行，结束后再试。')
     }
-    const lock: BrowserTargetRunLock = { sessionId, submissionId, binding: bindingForTarget(browserTarget), port, state: 'pending', canceled: false, resolve, reject }
-    runBrowserTargetLocks.set(runId, lock)
-    void (async () => {
-      try {
-        await browserTargetRuntime.settled()
-        if (lock.canceled || cancelledBrowserTargetSubmissions.delete(submissionId)) { runBrowserTargetLocks.delete(runId); resolve(false); return }
-        lock.binding = await submittedBrowserTarget(browserTarget)
-        if (nativePort !== port || currentNativeRunId !== runId) throw new Error('Harness Run changed before the Browser Target lock was confirmed.')
-        const current = boundBrowserTargets.get(runId)
-        if (current === undefined || !sameBrowserTarget(current.browserTarget, lock.binding.browserTarget)) await transferBrowserTarget(runId, lock.binding)
-        if (lock.canceled || nativePort !== port || currentNativeRunId !== runId) { runBrowserTargetLocks.delete(runId); resolve(false); return }
-        lock.state = 'active'; resolve(true)
-      } catch (error) { runBrowserTargetLocks.delete(runId); reject(new Error(asError(error))) }
-    })()
-  })
+    return existing.promise
+  }
+  if ([...locks.values()].some(lock => !sameBrowserTarget(lock.binding.browserTarget, browserTarget))) {
+    throw new Error('另一个对话正在运行，结束后再试。')
+  }
+  if (locks.size >= MAX_ACTIVE_BROWSER_TARGET_LOCKS) throw new Error('同时运行的对话过多，请等待一个对话结束后再试。')
+  let resolve!: (locked: boolean) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<boolean>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise })
+  const lock: BrowserTargetRunLock = { sessionId, submissionId, binding: bindingForTarget(browserTarget), port, state: 'pending', canceled: false, resolve, reject, promise }
+  locks.set(submissionId, lock)
+  void (async () => {
+    try {
+      await browserTargetRuntime.settled()
+      if (lock.canceled || cancelledBrowserTargetSubmissions.delete(submissionId)) { removeRunBrowserTargetLock(runId, submissionId); resolve(false); return }
+      lock.binding = await submittedBrowserTarget(browserTarget)
+      if (nativePort !== port || currentNativeRunId !== runId) throw new Error('Harness Run changed before the Browser Target lock was confirmed.')
+      if ([...(runBrowserTargetLocks.get(runId)?.values() ?? [])].some(other => other !== lock && !sameBrowserTarget(other.binding.browserTarget, lock.binding.browserTarget))) throw new Error('另一个对话正在运行，结束后再试。')
+      await ensureRunBrowserTargetTransferred(runId, lock.binding)
+      if (lock.canceled || nativePort !== port || currentNativeRunId !== runId) { removeRunBrowserTargetLock(runId, submissionId); resolve(false); return }
+      lock.state = 'active'; resolve(true)
+    } catch (error) { removeRunBrowserTargetLock(runId, submissionId); reject(new Error(asError(error))) }
+  })()
+  return promise
 }
 
 function unlockFollowBrowserTarget(sessionId: string, submissionId: string): void {
-  for (const [runId, lock] of runBrowserTargetLocks) {
-    if (lock.sessionId !== sessionId || lock.submissionId !== submissionId) continue
+  for (const [runId, locks] of runBrowserTargetLocks) {
+    const lock = locks.get(submissionId)
+    if (lock?.sessionId !== sessionId) continue
     lock.canceled = true
-    if (lock.state === 'active') runBrowserTargetLocks.delete(runId)
+    if (lock.state === 'active') removeRunBrowserTargetLock(runId, submissionId)
     return
   }
   cancelledBrowserTargetSubmissions.add(submissionId)
@@ -4246,7 +4300,7 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   rejectPrototypeRecoverySignatures(new Error(error))
   for (const pending of pendingReleaseUpdates.values()) { clearTimeout(pending.timer); pending.resolve({ ok: false, error }) }
   pendingReleaseUpdates.clear()
-  for (const [requestId, pending] of pendingPmdPrdReviewReceipts) { clearTimeout(pending.timeout); pending.reject(new Error(error)); pendingPmdPrdReviewReceipts.delete(requestId) }
+  for (const [requestId, pending] of pendingPmdPrdReviewAdoptions) { clearTimeout(pending.timeout); pending.reject(new Error(error)); pendingPmdPrdReviewAdoptions.delete(requestId) }
   void chrome.runtime.sendMessage({
     type: 'harness-disconnected',
     error,
@@ -4260,12 +4314,11 @@ function connectNativePort(): chrome.runtime.Port {
   port.onMessage.addListener((message: NativeMessage) => {
     if (message.type === 'pmd_prd_review_adoption_recorded' || message.type === 'pmd_prd_review_adoption_failed') {
       const requestId = typeof message.requestId === 'string' ? message.requestId : undefined
-      const pending = requestId === undefined ? undefined : pendingPmdPrdReviewReceipts.get(requestId)
+      const pending = requestId === undefined ? undefined : pendingPmdPrdReviewAdoptions.get(requestId)
       if (pending !== undefined && requestId !== undefined) {
-        pendingPmdPrdReviewReceipts.delete(requestId); clearTimeout(pending.timeout)
-        const receipt = (message as { receipt?: unknown }).receipt
-        if (message.type === 'pmd_prd_review_adoption_recorded' && typeof receipt === 'string' && /^[A-Za-z0-9_-]{16,256}$/.test(receipt)) pending.resolve(receipt)
-        else pending.reject(new Error(typeof message.error === 'string' ? message.error : 'PRD 采纳凭据签发失败。'))
+        pendingPmdPrdReviewAdoptions.delete(requestId); clearTimeout(pending.timeout)
+        if (message.type === 'pmd_prd_review_adoption_recorded') pending.resolve()
+        else pending.reject(new Error(typeof message.error === 'string' ? message.error : 'PRD 采纳记录失败。'))
       }
       return
     }
@@ -4696,10 +4749,10 @@ async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ 
 
 async function verifyPmdReviewAdoption(adoption: NonNullable<TeamKnowledgeItemRequest['pmdReviewAdoption']>): Promise<void> {
   const record = markdownReviews.get(adoption.reviewId)
-  if (record === undefined || record.harnessSessionId !== adoption.harnessSessionId || record.resourceId !== adoption.resourceId || record.displayPath !== adoption.displayPath) throw new Error('pmd_prd_review_receipt_workspace_changed')
+  if (record === undefined || record.harnessSessionId !== adoption.harnessSessionId || record.resourceId !== adoption.resourceId || record.displayPath !== adoption.displayPath) throw new Error('pmd_prd_review_adoption_workspace_changed')
   const snapshot = await retryExpiredWorkspaceReviewCapability(record, () => workspaceReviewSnapshot(record))
-  if (snapshot.truncated) throw new Error('pmd_prd_review_receipt_snapshot_truncated')
-  if (snapshot.resource.revision !== adoption.revision || snapshot.resource.fingerprint !== adoption.fingerprint || await sha256Hex(snapshot.content) !== adoption.contentHash) throw new Error('pmd_prd_review_receipt_source_changed')
+  if (snapshot.truncated) throw new Error('pmd_prd_review_adoption_snapshot_truncated')
+  if (snapshot.resource.revision !== adoption.revision || snapshot.resource.fingerprint !== adoption.fingerprint || await sha256Hex(snapshot.content) !== adoption.contentHash) throw new Error('pmd_prd_review_adoption_source_changed')
 }
 
 async function workspaceReviewProposals(record: MarkdownReviewRecord, afterSequence: number): Promise<Record<string, unknown>> {
@@ -4867,9 +4920,9 @@ async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, 
   if (request.revision !== snapshot.resource.revision || request.fingerprint !== snapshot.resource.fingerprint) {
     throw new Error('Markdown file changed since this review. Re-read and review the current saved file before adopting it.')
   }
-  const pmdReviewReceipt = request.action === 'accept'
-    ? await requestPmdPrdReviewReceipt({ harnessSessionId: record.harnessSessionId, reviewId: record.reviewId, resourceId: record.resourceId, displayPath: record.displayPath, revision: snapshot.resource.revision, fingerprint: snapshot.resource.fingerprint }, snapshot.content)
-    : undefined
+  if (request.action === 'accept') {
+    await recordPmdPrdReviewAdoption({ harnessSessionId: record.harnessSessionId, reviewId: record.reviewId, resourceId: record.resourceId, displayPath: record.displayPath, revision: snapshot.resource.revision, fingerprint: snapshot.resource.fingerprint }, snapshot.content)
+  }
   let response: unknown
   try {
     response = await chrome.runtime.sendMessage({
@@ -4882,7 +4935,6 @@ async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, 
         displayPath: record.displayPath,
         revision: snapshot.resource.revision,
         fingerprint: snapshot.resource.fingerprint,
-        ...(pmdReviewReceipt === undefined ? {} : { pmdReviewReceipt }),
       },
     })
   } catch (error) {
@@ -5551,13 +5603,17 @@ export default defineBackground(() => {
         sendResponse({ ok: false, error: 'Browser Target lock query is invalid.' })
         return false
       }
-      const runId = currentNativeRunId
-      const lock = runId === undefined ? undefined : runBrowserTargetLocks.get(runId)
-      if (lock === undefined || lock.state !== 'active' || lock.canceled || lock.port !== nativePort) {
+      const locks = activeRunBrowserTargetLocks(currentNativeRunId)
+      if (locks.length === 0) {
         sendResponse({ ok: true })
         return true
       }
-      sendResponse({ ok: true, lock: { sessionId: lock.sessionId, submissionId: lock.submissionId, browserTarget: lock.binding.browserTarget } })
+      const projectedLocks = locks.map(lock => ({ sessionId: lock.sessionId, submissionId: lock.submissionId, browserTarget: lock.binding.browserTarget }))
+      if (projectedLocks.length === 1) {
+        sendResponse({ ok: true, lock: projectedLocks[0] })
+        return true
+      }
+      sendResponse({ ok: true, lock: projectedLocks[0], locks: projectedLocks })
       return true
     }
     if (request.type === 'unlock-browser-target/v1') {
@@ -5573,7 +5629,10 @@ export default defineBackground(() => {
     if (request.type === 'reconcile-browser-target-lock/v1') {
       const keys = Object.keys(request)
       if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'sessionId', 'submissionId'].includes(key)) || !validSessionIdentity(request.sessionId) || !validSessionIdentity(request.submissionId)) { sendResponse({ ok: false, error: 'Browser Target reconciliation request is invalid.' }); return false }
-      for (const [runId, lock] of runBrowserTargetLocks) if (lock.sessionId === request.sessionId && lock.submissionId === request.submissionId && lock.state === 'active') runBrowserTargetLocks.delete(runId)
+      for (const [runId, locks] of runBrowserTargetLocks) {
+        const lock = locks.get(request.submissionId)
+        if (lock?.sessionId === request.sessionId && lock.state === 'active') removeRunBrowserTargetLock(runId, request.submissionId)
+      }
       sendResponse({ ok: true })
       return false
     }

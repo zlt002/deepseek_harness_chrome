@@ -274,16 +274,16 @@ export class NativeHost {
 
   recordPmdPrdReviewAdoption(requestId, payload) {
     const fail = (error) => { this.send({ type: 'pmd_prd_review_adoption_failed', requestId, error }); return false }
-    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160 || this.currentRunId === undefined || this.connector === undefined) return fail('PRD adoption receipt requires the active Native Harness Run.')
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 7) return fail('PRD adoption receipt payload is invalid.')
+    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160 || this.currentRunId === undefined || this.connector === undefined) return fail('PRD adoption requires the active Native Harness Run.')
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 7) return fail('PRD adoption payload is invalid.')
     const { harnessSessionId, reviewId, resourceId, displayPath, revision, fingerprint, contentHash } = payload
     if (![harnessSessionId, reviewId, resourceId, revision].every(value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value))
       || typeof displayPath !== 'string' || displayPath.length < 1 || displayPath.length > 2048
       || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(fingerprint)
-      || typeof contentHash !== 'string' || !/^[a-f0-9]{64}$/i.test(contentHash)) return fail('PRD adoption receipt payload is invalid.')
-    const issued = this.connector.recordPmdPrdReviewAdoption({ runId: this.currentRunId, harnessSessionId, reviewId, resourceId, displayPath, revision, fingerprint, contentHash })
-    if (issued === undefined) return fail('PRD adoption receipt does not match the active Native Harness Run.')
-    this.send({ type: 'pmd_prd_review_adoption_recorded', requestId, receipt: issued.receipt, expiresAt: issued.expiresAt })
+      || typeof contentHash !== 'string' || !/^[a-f0-9]{64}$/i.test(contentHash)) return fail('PRD adoption payload is invalid.')
+    const recorded = this.connector.recordPmdPrdReviewAdoption({ runId: this.currentRunId, harnessSessionId, reviewId, resourceId, displayPath, revision, fingerprint, contentHash })
+    if (!recorded) return fail('PRD adoption does not match the active Native Harness Run.')
+    this.send({ type: 'pmd_prd_review_adoption_recorded', requestId })
     return true
   }
 
