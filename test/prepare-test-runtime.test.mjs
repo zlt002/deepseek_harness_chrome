@@ -5,7 +5,6 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
-import { pathToFileURL } from 'node:url'
 import { acquireTestRuntimeLock, freshnessLayers, planTestRuntimePreparation, runtimeFreshnessMatches } from '../scripts/prepare-test-runtime.mjs'
 
 test('standalone test preparation materializes only missing runtime layers', () => {
@@ -130,7 +129,7 @@ test('test-runtime lock recovers aged empty and malformed owner files', async ()
 
 test('test-runtime preparation lock serializes two processes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-test-runtime-lock-'))
-  const moduleUrl = pathToFileURL(new URL('../scripts/prepare-test-runtime.mjs', import.meta.url).pathname).href
+  const moduleUrl = new URL('../scripts/prepare-test-runtime.mjs', import.meta.url).href
   const child = (label, holdMs) => spawn(process.execPath, ['--input-type=module', '--eval', `import { acquireTestRuntimeLock } from ${JSON.stringify(moduleUrl)}; const lock = await acquireTestRuntimeLock(process.argv[1], { pollMs: 10, waitMs: 2_000 }); console.log(${JSON.stringify(label + ':acquired')}); await new Promise(resolve => setTimeout(resolve, ${holdMs})); await lock.release(); console.log(${JSON.stringify(label + ':released')});`, directory], { stdio: ['ignore', 'pipe', 'pipe'] })
   try {
     const first = child('first', 120)

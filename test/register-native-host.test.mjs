@@ -31,6 +31,12 @@ function platformPaths(home) {
   return { appData: undefined, manifestPaths: [join(home, '.config/google-chrome/NativeMessagingHosts', nativeHostManifestFilename())] }
 }
 
+function installRoot(home) {
+  if (platform() === 'darwin') return join(home, 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY)
+  if (platform() === 'win32') return join(platformPaths(home).appData, ACCRUI_INSTALL_DIRECTORY)
+  return join(home, '.local/share', ACCRUI_INSTALL_DIRECTORY)
+}
+
 function runRegister(home, overrides = {}, args = []) {
   return new Promise((resolvePromise, reject) => {
     const { appData } = platformPaths(home)
@@ -53,7 +59,7 @@ function runRegister(home, overrides = {}, args = []) {
 
 test('registers only the AccrUI-owned native host, install root, profile, and requested origins', async () => {
   const home = await mkdtemp(join(tmpdir(), 'accrui-harness-home-'))
-  const installRoot = join(home, 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY)
+  const expectedInstallRoot = installRoot(home)
   try {
     const result = await runRegister(home, {
       DSH_ROOT: '/must-not-be-inherited',
@@ -62,13 +68,13 @@ test('registers only the AccrUI-owned native host, install root, profile, and re
       DEEPSEEK_HARNESS_EXTENSION_ID: `${extensionId},${devExtensionId}`,
     })
     assert.equal(result.code, 0, result.stderr)
-    await stat(join(installRoot, ACCRUI_NATIVE_HOST_NAME))
+    await stat(join(expectedInstallRoot, ACCRUI_NATIVE_HOST_NAME))
     for (const manifestPath of platformPaths(home).manifestPaths) {
       const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
       assert.deepEqual(manifest, {
         name: ACCRUI_NATIVE_HOST_NAME,
         description: 'AccrUI Harness Native Messaging host',
-        path: join(installRoot, ACCRUI_NATIVE_HOST_NAME),
+        path: join(expectedInstallRoot, ACCRUI_NATIVE_HOST_NAME),
         type: 'stdio',
         allowed_origins: [
           `chrome-extension://${extensionId}/`,
@@ -76,9 +82,9 @@ test('registers only the AccrUI-owned native host, install root, profile, and re
         ],
       })
     }
-    const launcher = await readFile(join(installRoot, ACCRUI_NATIVE_HOST_NAME), 'utf8')
+    const launcher = await readFile(join(expectedInstallRoot, ACCRUI_NATIVE_HOST_NAME), 'utf8')
     assert.match(launcher, new RegExp(`export DSH_ROOT='${resolve(projectRoot, '.generated/harness-product').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
-    assert.match(launcher, new RegExp(`export DSH_HOME='${join(installRoot, 'profile').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
+    assert.match(launcher, new RegExp(`export DSH_HOME='${join(expectedInstallRoot, 'profile').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
     assert.doesNotMatch(launcher, /must-not-be-inherited/)
   } finally {
     await rm(home, { recursive: true, force: true })
@@ -118,12 +124,7 @@ test('check command rejects a missing requested AccrUI origin', async () => {
 
 test('check command rejects a forged host identity, launcher path, type, or profile export', async () => {
   const home = await mkdtemp(join(tmpdir(), 'accrui-harness-home-'))
-  const installRoot = platform() === 'darwin'
-    ? join(home, 'Library/Application Support', ACCRUI_INSTALL_DIRECTORY)
-    : platform() === 'win32'
-      ? join(platformPaths(home).appData, ACCRUI_INSTALL_DIRECTORY)
-      : join(home, '.local/share', ACCRUI_INSTALL_DIRECTORY)
-  const launcherPath = join(installRoot, ACCRUI_NATIVE_HOST_NAME)
+  const launcherPath = join(installRoot(home), ACCRUI_NATIVE_HOST_NAME)
   try {
     const registered = await runRegister(home)
     assert.equal(registered.code, 0, registered.stderr)
