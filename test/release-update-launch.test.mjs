@@ -263,7 +263,11 @@ test('detached updater stops the handshake timeout before slowly committing go',
         installRoot: join(root, 'install-root'),
         nativePid: 1234,
         platform: 'win32',
-        handshakeTimeoutMs: 100,
+        // Windows CI can take hundreds of milliseconds to schedule the spawned
+        // cmd process and its first filesystem poll. This test exercises timeout
+        // cancellation after the ready handshake, so give that setup a realistic
+        // window and then wait past it while committing go is intentionally held.
+        handshakeTimeoutMs: 1_000,
         writeFileImpl,
         spawnImpl: (...args) => { invocation = args; return child },
       },
@@ -272,7 +276,7 @@ test('detached updater stops the handshake timeout before slowly committing go',
     child.emit('spawn')
     await writeFile(join(dirname(invocation[1].at(-1)), 'ready'), 'ready', 'utf8')
     await goWriteStarted
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 130))
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 1_100))
     const handoffRoot = dirname(invocation[1].at(-1))
     await assert.rejects(access(join(handoffRoot, 'cancel')))
     releaseGo()
