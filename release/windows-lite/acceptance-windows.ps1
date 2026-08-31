@@ -664,10 +664,14 @@ try {
   Assert-FailedReleaseUpdateHandoffStatus
   Assert-CandidateRegistrationFailureRollsBack
   Assert-CandidateStartupFailureRollsBack
+  # Establish the browser-style respawn lease while the legacy AccrUI
+  # registration still exists. The supervisor treats a missing key as the
+  # installer suspension signal, so removing it before this point prevents the
+  # child from ever writing its ready marker.
+  $respawnSupervisor = Start-NativeHostRespawnSupervisor
   # Reproduce the field failure: the extension bundle still requests its prior
   # Native Messaging name, but its registry key has already disappeared.
   Remove-LegacyAccrUiNativeHostRegistration
-  $respawnSupervisor = Start-NativeHostRespawnSupervisor
   $orphanRuntimeLockHolder = Start-OrphanRuntimeLockHolder
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
   Invoke-ReleaseUpdateHandoff
