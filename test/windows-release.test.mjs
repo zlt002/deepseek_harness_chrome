@@ -12,6 +12,7 @@ import {
   ACCR_UI_EXTENSION_MANIFEST_KEY,
   ACCR_UI_WINDOWS_PACKAGE_NAME,
   HARNESS_RUNTIME_MARKER,
+  LEGACY_ACCRUI_NATIVE_HOST_NAME,
   NATIVE_HOST_NAME,
   assertAccrUiReplacementVersion,
   buildWindowsRelease,
@@ -122,8 +123,10 @@ test('Windows acceptance exercises the detached online-update handoff and waits 
   assert.match(acceptance, /Injected candidate registration failure after Chrome Native Messaging was published\./)
   assert.match(acceptance, /Failed candidate registration stopped the new runtime, restored the old release, and retained the original error\./)
   assert.match(acceptance, /Candidate Native Host startup failure did not restore the previous version/)
+  assert.match(acceptance, /Legacy AccrUI Native Messaging registration was not retained during the extension migration/)
+  assert.match(acceptance, /Deprecated Native Messaging registration survived the upgrade/)
+  assert.match(acceptance, /function Remove-LegacyAccrUiNativeHostRegistration/)
   assert.match(acceptance, /Online updater did not stop the orphan process holding the installed runtime/)
-  assert.match(acceptance, /Assert-CandidateRegistrationFailureRollsBack\r?\n\s+Assert-CandidateStartupFailureRollsBack\r?\n\s+\$respawnSupervisor = Start-NativeHostRespawnSupervisor/)
   const candidateFailure = acceptance.slice(acceptance.indexOf('function Assert-CandidateRegistrationFailureRollsBack'), acceptance.indexOf('$respawnSupervisor = $null'))
   assert.ok(candidateFailure.indexOf('Start-CandidateRegistrationFailureSupervisor') < candidateFailure.indexOf('release-update-handoff-smoke.mjs'), 'Windows acceptance must start the candidate runtime lock before the injected update handoff')
   assert.ok(candidateFailure.indexOf("$status.state -ne 'failed'") < candidateFailure.indexOf("Assert-Equal (Read-Version $installRoot) '1.1.62'"), 'Windows acceptance must wait for the failed update before checking rollback')
@@ -133,7 +136,8 @@ test('Windows acceptance exercises the detached online-update handoff and waits 
   assert.match(startupFailure, /Native Host 启动检查失败/)
   const upgrade = acceptance.slice(acceptance.indexOf('$respawnSupervisor = Start-NativeHostRespawnSupervisor'), acceptance.indexOf('$respawnSupervisor.Process.Refresh()', acceptance.indexOf('$respawnSupervisor = Start-NativeHostRespawnSupervisor')))
   assert.match(upgrade, /Invoke-ReleaseUpdateHandoff/)
-  assert.match(acceptance, /Assert-FailedReleaseUpdateHandoffStatus\r?\n\s+Assert-CandidateRegistrationFailureRollsBack\r?\n\s+Assert-CandidateStartupFailureRollsBack\r?\n\s+\$respawnSupervisor = Start-NativeHostRespawnSupervisor/)
+  assert.ok(acceptance.lastIndexOf('Remove-LegacyAccrUiNativeHostRegistration') < acceptance.indexOf('$respawnSupervisor = Start-NativeHostRespawnSupervisor'), 'Windows acceptance must remove the old host registration before the recovery upgrade')
+  assert.match(acceptance, /Assert-FailedReleaseUpdateHandoffStatus\r?\n\s+Assert-CandidateRegistrationFailureRollsBack\r?\n\s+Assert-CandidateStartupFailureRollsBack[\s\S]*?\r?\n\s+Remove-LegacyAccrUiNativeHostRegistration\r?\n\s+\$respawnSupervisor = Start-NativeHostRespawnSupervisor/)
   assert.doesNotMatch(upgrade, /cscript\.exe \/\/NoLogo \$installLauncher/)
   assert.match(helper, /launchPreparedUpdate/)
   assert.match(helper, /nativePid:\s*process\.pid/)
@@ -396,7 +400,7 @@ test('release validation rejects a build whose manifest still references a delet
   )
 })
 
-test('the in-place updater start script re-registers the AccrUI native host through one Node-gated script', async () => {
+test('the in-place updater retains the prior AccrUI Native Messaging name while the extension bundle migrates', async () => {
   const fixture = await createFixture()
   const result = await buildWindowsRelease({ ...fixture, releaseDir: path.join(fixture.root, 'release') })
   const payloadZip = path.join(result.packageDir, 'payload.zip')
@@ -407,6 +411,7 @@ test('the in-place updater start script re-registers the AccrUI native host thro
     'runtime/register-native-host.ps1',
     'runtime/native-message-smoke.mjs',
     `runtime/${NATIVE_HOST_NAME}.json`,
+    `runtime/${LEGACY_ACCRUI_NATIVE_HOST_NAME}.json`,
   ]) assert.ok(payloadEntries.includes(requiredPath))
   const startScript = readZipUtf16Le(payloadZip, 'runtime/start.vbs')
   const registerScript = readZip(payloadZip, 'runtime/register-native-host.ps1', 'utf8')
@@ -415,7 +420,9 @@ test('the in-place updater start script re-registers the AccrUI native host thro
   assert.match(startScript, /register-native-host\.ps1/)
   assert.match(startScript, / 0, False/)
   assert.match(registerScript, new RegExp(NATIVE_HOST_NAME.replaceAll('.', '\\.')))
-  assert.doesNotMatch(registerScript, /com\.deepseek\.harness\.chrome|com\.chromemcp\.nativehost/)
+  assert.match(registerScript, new RegExp(LEGACY_ACCRUI_NATIVE_HOST_NAME.replaceAll('.', '\\.')))
+  assert.match(registerScript, new RegExp(`\\$nativeHostNames = @\\('${NATIVE_HOST_NAME.replaceAll('.', '\\.')}', '${LEGACY_ACCRUI_NATIVE_HOST_NAME.replaceAll('.', '\\.')}'\\)`))
+  assert.doesNotMatch(registerScript, /com\.chromemcp\.nativehost/)
   assert.match(registerScript, /HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts/)
   assert.match(registerScript, /HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts/)
   assert.match(registerScript, /-lt 22/)
@@ -437,6 +444,11 @@ test('the in-place updater start script re-registers the AccrUI native host thro
   assert.match(installer, /if \(\$Interactive\) \{ Read-Host/)
   assert.match(installer, /Register-ReleaseTree \$installRoot/)
   assert.match(installer, /function Migrate-AccrUiRoamingProfile/)
+  assert.doesNotMatch(installer, /IncludeLegacyAccrUiHost|Has-SuspendedLegacyAccrUiNativeHost/)
+  const installerPrepare = installer.slice(installer.indexOf('function Prepare-ReleaseTree'), installer.indexOf('function Assert-NativeHostStartup'))
+  assert.match(installerPrepare, /-PrepareOnly/)
+  const installerReadback = installer.slice(installer.indexOf('function Assert-NativeHostRegistrationReadback'), installer.indexOf('function Migrate-AccrUiRoamingProfile'))
+  assert.match(installerReadback, /\$registeredHostNames = @\(\$nativeHostNames \+ \$legacyAccrUiNativeHostNames\)/)
   assert.match(installer, /Get-ChildItem -LiteralPath \$legacyProfile -Recurse -File -Force/)
   assert.match(installer, /if \(-not \(Test-Path -LiteralPath \$destinationPath\)\)/)
   assert.match(installer, /Copy-Item -LiteralPath \$file\.FullName -Destination \$destinationPath/)

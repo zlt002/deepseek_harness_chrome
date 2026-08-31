@@ -27,7 +27,8 @@ $managedNames = @('extension', 'runtime', 'release.json')
 $swappableManagedNames = @('runtime', 'release.json')
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
 $nativeHostNames = @('com.accrui.harness.chrome')
-$legacyNativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
+$legacyAccrUiNativeHostNames = @('com.deepseek.harness.chrome')
+$deprecatedNativeHostNames = @('com.chromemcp.nativehost')
 $nativeHostRegistryRoots = @(
   'HKCU:\Software\Google\Chrome\NativeMessagingHosts',
   'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts'
@@ -46,11 +47,11 @@ function Write-InstallProgress([int]$Percent, [string]$State, [string]$Detail = 
   )
 }
 
-function Get-AccrUiLegacyNativeHostRegistrations {
+function Get-AccrUiLegacyNativeHostRegistrations([string[]]$Names = $legacyAccrUiNativeHostNames) {
   $matches = @()
   $expectedLauncher = (Join-Path $installRoot 'runtime\run_native_host.bat')
   foreach ($registryRoot in $nativeHostRegistryRoots) {
-    foreach ($nativeHostName in $legacyNativeHostNames) {
+    foreach ($nativeHostName in $Names) {
       $key = Join-Path $registryRoot $nativeHostName
       if (-not (Test-Path -LiteralPath $key)) { continue }
       $manifestPath = (Get-Item -LiteralPath $key).GetValue('')
@@ -82,6 +83,10 @@ function Suspend-NativeHostRegistration {
     $captured += $registration
     Remove-Item -LiteralPath $registration.Path -Recurse -Force
   }
+  foreach ($registration in @(Get-AccrUiLegacyNativeHostRegistrations $deprecatedNativeHostNames)) {
+    $captured += $registration
+    Remove-Item -LiteralPath $registration.Path -Recurse -Force
+  }
   $script:suspendedNativeHostRegistrations = $captured
   $script:nativeHostRegistrationSuspended = $true
   Write-Host '已暂停 Chrome 和 Edge 自动重启旧 Harness UI。'
@@ -97,6 +102,9 @@ function Suspend-NewNativeHostRegistration {
       $key = Join-Path $registryRoot $nativeHostName
       if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop }
     }
+  }
+  foreach ($registration in @(Get-AccrUiLegacyNativeHostRegistrations)) {
+    Remove-Item -LiteralPath $registration.Path -Recurse -Force -ErrorAction Stop
   }
   Write-Host '已暂停部分注册的新 Harness UI。'
 }
@@ -381,8 +389,9 @@ function Assert-NativeHostStartup([string]$Root) {
 function Assert-NativeHostRegistrationReadback([string]$Root) {
   $launcher = Join-Path $Root 'runtime\run_native_host.bat'
   $manifestRoot = Join-Path $Root 'native-messaging'
+  $registeredHostNames = @($nativeHostNames + $legacyAccrUiNativeHostNames)
   foreach ($registryRoot in $nativeHostRegistryRoots) {
-    foreach ($nativeHostName in $nativeHostNames) {
+    foreach ($nativeHostName in $registeredHostNames) {
       $registryKey = Join-Path $registryRoot $nativeHostName
       if (-not (Test-Path -LiteralPath $registryKey)) { throw "Native Messaging 注册缺失：$registryKey" }
       $actualManifestPath = (Get-Item -LiteralPath $registryKey).GetValue('')

@@ -24,6 +24,11 @@ export const ACCR_UI_EXTENSION_MANIFEST_KEY =
 export const ACCR_UI_EXTENSION_ID = 'cmgjacoohdgjedoekbdbhbelpmboankg'
 export const ACCR_UI_REPLACEMENT_MIN_VERSION = '1.1.63'
 export const NATIVE_HOST_NAME = ACCRUI_NATIVE_HOST_NAME
+// Existing Windows installations can still run the pre-identity-migration
+// extension bundle, including after its old registry entry was lost. Keep this
+// one AccrUI-owned name registered by this transition package; its manifest
+// remains restricted to the fixed AccrUI extension origin.
+export const LEGACY_ACCRUI_NATIVE_HOST_NAME = 'com.deepseek.harness.chrome'
 export const HARNESS_RUNTIME_MARKER = 'harness-runtime.json'
 
 const REQUIRED_HARNESS_PATHS = [
@@ -173,6 +178,7 @@ $runtimeDir = $PSScriptRoot
 $launcher = Join-Path $runtimeDir 'run_native_host.bat'
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $manifestDir = Join-Path $InstallRoot 'native-messaging'
+$nativeHostNames = @('${NATIVE_HOST_NAME}', '${LEGACY_ACCRUI_NATIVE_HOST_NAME}')
 $registryRoots = @(
   'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts',
   'HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts'
@@ -189,7 +195,7 @@ if (-not $PublishOnly) {
   $nodePathFile = Join-Path $runtimeDir 'node-path.txt'
   [System.IO.File]::WriteAllText($nodePathFile, $nodePath + [Environment]::NewLine, $utf8NoBom)
   New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
-  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}')) {
+  foreach ($nativeHostName in $nativeHostNames) {
     $templatePath = Join-Path $runtimeDir ($nativeHostName + '.json')
     if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) { throw "缺少 Native Host manifest 模板：$templatePath" }
     $manifest = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json
@@ -206,7 +212,7 @@ if (-not $PrepareOnly -and -not $PublishOnly) {
   if ($LASTEXITCODE -ne 0) { throw 'Native Host 启动检查失败；尚未发布 Native Messaging 注册。' }
 }
 if (-not $PrepareOnly) {
-  foreach ($nativeHostName in @('${NATIVE_HOST_NAME}')) {
+  foreach ($nativeHostName in $nativeHostNames) {
     $installedManifestPath = Join-Path $manifestDir ($nativeHostName + '.json')
     if (-not (Test-Path -LiteralPath $installedManifestPath -PathType Leaf)) { throw "缺少已准备的 Native Host manifest：$installedManifestPath" }
     $manifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
@@ -398,6 +404,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   const startEntry = 'runtime/start.vbs'
   const nativeManifestEntries = [
     `runtime/${NATIVE_HOST_NAME}.json`,
+    `runtime/${LEGACY_ACCRUI_NATIVE_HOST_NAME}.json`,
   ]
   const productSkillEntries = [
     'runtime/skills/product-prototype/SKILL.md',
@@ -439,6 +446,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     const registerScript = readZipText(payloadZipPath, registerNativeHostEntry)
     for (const requiredText of [
       NATIVE_HOST_NAME,
+      LEGACY_ACCRUI_NATIVE_HOST_NAME,
       'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts',
       'HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts',
       'Set-Item -Path $registryKey -Value $installedManifestPath',
@@ -464,7 +472,10 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       errors.push('runtime/start.vbs does not silently re-register the Native Host')
     }
   }
-  for (const [nativeHostName, entry] of [[NATIVE_HOST_NAME, nativeManifestEntries[0]]]) {
+  for (const [nativeHostName, entry] of [
+    [NATIVE_HOST_NAME, nativeManifestEntries[0]],
+    [LEGACY_ACCRUI_NATIVE_HOST_NAME, nativeManifestEntries[1]],
+  ]) {
     if (!payloadEntries.includes(entry)) continue
     const nativeManifest = JSON.parse(readZipText(payloadZipPath, entry))
     if (nativeManifest.name !== nativeHostName || nativeManifest.path !== '__REGISTERED_NATIVE_HOST_LAUNCHER__' || nativeManifest.type !== 'stdio') {
@@ -601,6 +612,7 @@ export async function buildWindowsRelease({
   await writeFile(path.join(runtimeDir, 'register-native-host.ps1'), utf8Bom(registerNativeHostPs1()))
   await writeFile(path.join(runtimeDir, 'start.vbs'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(startVbs(), 'utf16le')]))
   await writeFile(path.join(runtimeDir, `${NATIVE_HOST_NAME}.json`), nativeHostManifest(NATIVE_HOST_NAME), 'utf8')
+  await writeFile(path.join(runtimeDir, `${LEGACY_ACCRUI_NATIVE_HOST_NAME}.json`), nativeHostManifest(LEGACY_ACCRUI_NATIVE_HOST_NAME), 'utf8')
   await writeFile(path.join(payloadDir, 'guide-state.json'), '{\n  "completed": false\n}\n', 'utf8')
   await writeFile(path.join(payloadDir, 'release.json'), `${JSON.stringify({
     format: 'accr-ui-windows-lite-v1',

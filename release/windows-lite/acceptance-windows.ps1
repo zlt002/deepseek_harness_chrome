@@ -22,7 +22,8 @@ $installRoot = Join-Path $env:LOCALAPPDATA 'accr-ui-harness'
 $seedRoot = Join-Path $acceptanceRoot 'previous-release'
 $productKey = 'HKCU:\Software\accr-ui\Lite'
 $nativeHostNames = @('com.accrui.harness.chrome')
-$legacyNativeHostNames = @('com.deepseek.harness.chrome', 'com.chromemcp.nativehost')
+$legacyAccrUiNativeHostNames = @('com.deepseek.harness.chrome')
+$deprecatedNativeHostNames = @('com.chromemcp.nativehost')
 $registryRoots = @(
   'HKCU:\Software\Google\Chrome\NativeMessagingHosts',
   'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts'
@@ -98,6 +99,15 @@ foreach ($nativeHostName in @('com.deepseek.harness.chrome', 'com.chromemcp.nati
   [System.IO.File]::WriteAllText((Join-Path $runtimeRoot 'register-native-host.ps1'), $legacyRegisterScript, [System.Text.UTF8Encoding]::new($true))
   if (Test-Path -LiteralPath $smokeScript -PathType Leaf) { throw 'Seed release still contains the new Native Host smoke script.' }
   if ((Get-Content -LiteralPath (Join-Path $runtimeRoot 'register-native-host.ps1') -Raw) -match 'PrepareOnly|PublishOnly') { throw 'Seed release still supports the new Native Host registration protocol.' }
+}
+
+function Remove-LegacyAccrUiNativeHostRegistration {
+  foreach ($registryRoot in $registryRoots) {
+    foreach ($nativeHostName in $legacyAccrUiNativeHostNames) {
+      $registryKey = Join-Path $registryRoot $nativeHostName
+      if (Test-Path -LiteralPath $registryKey) { Remove-Item -LiteralPath $registryKey -Recurse -Force }
+    }
+  }
 }
 
 function Invoke-NativeMessageSmoke {
@@ -321,7 +331,7 @@ function Assert-LockedExtensionUpgradeFailsSafely {
       throw 'Locked unpacked extension upgrade did not retain the old runnable runtime.'
     }
     foreach ($registryRoot in $registryRoots) {
-      foreach ($nativeHostName in $legacyNativeHostNames) {
+      foreach ($nativeHostName in @($legacyAccrUiNativeHostNames + $deprecatedNativeHostNames)) {
         $registryKey = Join-Path $registryRoot $nativeHostName
         if (-not (Test-Path -LiteralPath $registryKey)) { throw "Locked unpacked extension upgrade did not restore Native Messaging registration: $registryKey" }
         $manifestPath = (Get-Item -LiteralPath $registryKey).GetValue('')
@@ -654,6 +664,9 @@ try {
   Assert-FailedReleaseUpdateHandoffStatus
   Assert-CandidateRegistrationFailureRollsBack
   Assert-CandidateStartupFailureRollsBack
+  # Reproduce the field failure: the extension bundle still requests its prior
+  # Native Messaging name, but its registry key has already disappeared.
+  Remove-LegacyAccrUiNativeHostRegistration
   $respawnSupervisor = Start-NativeHostRespawnSupervisor
   $orphanRuntimeLockHolder = Start-OrphanRuntimeLockHolder
   $env:DSH_INSTALL_NONINTERACTIVE = '1'
@@ -682,9 +695,17 @@ try {
       Assert-Equal $manifest.name $nativeHostName 'Native Messaging manifest name mismatch.'
       Assert-Equal $manifest.path (Join-Path $installRoot 'runtime\run_native_host.bat') 'Native Messaging launcher path mismatch.'
     }
-    foreach ($legacyNativeHostName in $legacyNativeHostNames) {
+    foreach ($legacyNativeHostName in $legacyAccrUiNativeHostNames) {
       $legacyKey = Join-Path $registryRoot $legacyNativeHostName
-      if (Test-Path -LiteralPath $legacyKey) { throw "Owned legacy Native Messaging registration survived the upgrade: $legacyKey" }
+      if (-not (Test-Path -LiteralPath $legacyKey)) { throw "Legacy AccrUI Native Messaging registration was not retained during the extension migration: $legacyKey" }
+      $legacyManifestPath = (Get-Item -LiteralPath $legacyKey).GetValue('')
+      $legacyManifest = Get-Content -LiteralPath $legacyManifestPath -Raw | ConvertFrom-Json
+      Assert-Equal $legacyManifest.name $legacyNativeHostName 'Legacy AccrUI Native Messaging manifest name mismatch.'
+      Assert-Equal $legacyManifest.path (Join-Path $installRoot 'runtime\run_native_host.bat') 'Legacy AccrUI Native Messaging launcher path mismatch.'
+    }
+    foreach ($deprecatedNativeHostName in $deprecatedNativeHostNames) {
+      $deprecatedKey = Join-Path $registryRoot $deprecatedNativeHostName
+      if (Test-Path -LiteralPath $deprecatedKey) { throw "Deprecated Native Messaging registration survived the upgrade: $deprecatedKey" }
     }
   }
   $productSkill = Join-Path $installRoot 'runtime\skills\pmd-prd\SKILL.md'
