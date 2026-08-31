@@ -57,7 +57,12 @@ test('keeps one product Node directory and normalizes Windows Path casing', () =
   )
 })
 
-test('spawns Harness with its Node runtime available despite Chrome-like PATH', async (t) => {
+test('spawns Harness with its Node runtime available despite Chrome-like PATH', {
+  // Windows PATH semantics are covered by the helper contract above. A Node
+  // child hosting an HTTP server cannot be terminated portably from this test
+  // on GitHub's Windows runner and would keep the whole test process alive.
+  skip: process.platform === 'win32',
+}, async (t) => {
   const root = await mkdtemp(resolve(tmpdir(), 'harness-node-path-test-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const cliPath = join(root, 'fake-harness-cli.mjs')

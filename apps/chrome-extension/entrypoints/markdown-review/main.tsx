@@ -15,7 +15,7 @@ import {
   type PreparedWrite,
 } from './protocol'
 import { reduceReviewState, type ReviewState } from './review-state'
-import { adoptionBlockedReason, beginCommit, isCurrentCommit, pendingAnnotationCount, settleCommit, shouldProtectLocalReviewWork, type CommitAttempt } from './review-state-safety'
+import { adoptionBlockedReason, beginCommit, canUpdateAnnotationDeliveryStatus, failUnsettledAnnotations, isCurrentCommit, pendingAnnotationCount, reviewSaveBlockedReason, reviewSelectionProposal, settleCommit, shouldProtectLocalReviewWork, updateAnnotationDeliveryStatus, verifiedWriteCleanupAllowed, type CommitAttempt } from './review-state-safety'
 import { VisualMarkdownEditor, type VisualMarkdownEditorHandle, type VisualReviewAnnotation } from './visual-markdown-editor'
 import type { VisualSelection } from './visual-selection'
 import { MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS } from './delivery-timeouts'
@@ -145,6 +145,22 @@ function App(): React.JSX.Element {
     })
   }, [])
 
+  /** A candidate only exists after Milkdown has mounted its review diff. */
+  const setProposalDeliveryStatus = useCallback((selectionId: string, deliveryStatus: 'candidate' | 'failed', lastError?: string) => {
+    if (!canUpdateAnnotationDeliveryStatus(annotationsRef.current, selectionId)) return false
+    const update = (items: LocalAnnotation[]) => updateAnnotationDeliveryStatus(items, selectionId, deliveryStatus, lastError)
+    // runSessionAction reads this ref synchronously. Update it before React
+    // schedules a render so a mounted candidate can never briefly bypass the
+    // adoption gate.
+    annotationsRef.current = update(annotationsRef.current)
+    setAnnotations((items) => {
+      const next = update(items)
+      annotationsRef.current = next
+      return next
+    })
+    return true
+  }, [])
+
   const loadSnapshot = useCallback((options: { discardLocalWork?: boolean } = {}) => {
     if (reviewId === undefined) return
     const id = requestId()
@@ -159,35 +175,46 @@ function App(): React.JSX.Element {
   const applyQueuedProposal = useCallback(() => {
     const editor = editorRef.current
     const snapshot = snapshotRef.current
-    if (editor === null || !editor.isReady() || snapshot === undefined || editor.isCandidateReviewActive()) return
+    if (editor === null || !editor.isReady() || snapshot === undefined || editor.isCandidateReviewActive() || preparedWriteRef.current !== undefined || commitRef.current !== undefined) return
     const proposal = proposalQueueRef.current.shift()
     if (proposal === undefined) return
+    if (!canUpdateAnnotationDeliveryStatus(annotationsRef.current, proposal.selectionId)) return
     if (proposal.baseFingerprint !== snapshot.resource.fingerprint) {
+      setProposalDeliveryStatus(proposal.selectionId, 'failed', '文件已在外部变化，请重新读取后重新选择并发送。')
       setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：文件已在外部变化，请重新读取后再请求。`)
       return
     }
     if (proposal.kind === 'document') {
       if (draftRef.current !== snapshot.content) {
+        setProposalDeliveryStatus(proposal.selectionId, 'failed', '本地草稿已变化，请重新选择并发送。')
         setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：本地草稿已变化。重新选择后再请求。`)
       } else if (editor.reviewCandidateMarkdown(proposal.candidateMarkdown)) {
+        if (!setProposalDeliveryStatus(proposal.selectionId, 'candidate')) { editor.rejectCandidate(); return }
         activeCandidateSelectionIdRef.current = proposal.selectionId
         setActiveDiff({ before: snapshot.content, after: proposal.candidateMarkdown })
         setProposalNotice(`AI 候选待审阅：${proposal.summary}`)
       }
-      else setProposalNotice(`AI 候选“${proposal.summary}”无法进入审阅；当前编辑器正忙。`)
+      else {
+        setProposalDeliveryStatus(proposal.selectionId, 'failed', '编辑器无法挂载审阅差异，请重新选择并发送。')
+        setProposalNotice(`AI 候选“${proposal.summary}”无法进入审阅；当前编辑器正忙。`)
+      }
       return
     }
     const saved = annotationSelectionsRef.current.get(proposal.selectionId)
-    if (saved === undefined || saved.editorRevision !== proposal.editorRevision || saved.from !== proposal.from || saved.to !== proposal.to) {
+    const reviewResult = reviewSelectionProposal(saved, proposal, () => saved !== undefined && editor.reviewSelectionReplacement(saved, proposal.replacementMarkdown))
+    if (reviewResult === 'selection-changed') {
+      setProposalDeliveryStatus(proposal.selectionId, 'failed', '选区已变化，请重新选择并发送。')
       setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：选区已变化，请重新选择后再请求。`)
-    } else if (editor.reviewSelectionReplacement(saved, proposal.replacementMarkdown)) {
+    } else if (reviewResult === 'candidate') {
+      if (!setProposalDeliveryStatus(proposal.selectionId, 'candidate')) { editor.rejectCandidate(); return }
       activeCandidateSelectionIdRef.current = proposal.selectionId
-      setActiveDiff({ before: reviewQuoteFor(saved), after: proposal.replacementMarkdown })
+      setActiveDiff({ before: reviewQuoteFor(saved!), after: proposal.replacementMarkdown })
       setProposalNotice(`AI 针对当前选区的候选待审阅：${proposal.summary}`)
     } else {
+      setProposalDeliveryStatus(proposal.selectionId, 'failed', '编辑版本、范围或选中文本已变化，请重新选择并发送。')
       setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：编辑版本、范围或选中文本已变化。`)
     }
-  }, [])
+  }, [setProposalDeliveryStatus])
 
   useEffect(() => {
     if (reviewId === undefined || typeof chrome === 'undefined' || chrome.runtime?.connect === undefined) {
@@ -259,12 +286,6 @@ function App(): React.JSX.Element {
             proposalQueueRef.current.push(proposal)
           }
           if (message.proposals.length > 0) {
-            const candidateSelectionIds = new Set(message.proposals.map(proposal => proposal.selectionId))
-            setAnnotations((items) => {
-              const next = items.map((item) => candidateSelectionIds.has(item.id) ? { ...item, deliveryStatus: 'candidate' as const, lastError: undefined } : item)
-              annotationsRef.current = next
-              return next
-            })
             setProposalNotice('AI 候选已返回，等待你审阅。')
           }
           applyQueuedProposal()
@@ -362,14 +383,47 @@ function App(): React.JSX.Element {
           draftRef.current = expected.content
           setDraft(expected.content)
           dispatch({ type: 'snapshot-loaded', snapshot: next })
-          setAnnotations([])
-          annotationsRef.current = []
-          setActiveDiff(undefined)
-          annotationSelectionsRef.current.clear()
+          const mayClearReview = verifiedWriteCleanupAllowed({
+            annotationCount: pendingAnnotationCount(annotationsRef.current),
+            candidateReviewActive: candidateReviewActiveRef.current,
+          })
+          if (mayClearReview) {
+            setAnnotations([])
+            annotationsRef.current = []
+            setActiveDiff(undefined)
+            annotationSelectionsRef.current.clear()
+          } else {
+            const recoveryReason = '草稿已写入，原局部优化未能安全应用。请重新发送或放弃本次优化。'
+            const unresolvedIds = new Set(annotationsRef.current.filter((item) => item.deliveryStatus !== 'settled').map((item) => item.id))
+            for (const [request, pending] of pendingRef.current) {
+              if (pending.kind !== 'deliver' || !unresolvedIds.has(pending.annotationId)) continue
+              pendingRef.current.delete(request)
+              const timeout = deliveryTimeoutsRef.current.get(request)
+              if (timeout !== undefined) window.clearTimeout(timeout)
+              deliveryTimeoutsRef.current.delete(request)
+            }
+            proposalQueueRef.current = proposalQueueRef.current.filter((proposal) => !unresolvedIds.has(proposal.selectionId))
+            const retry = sidePanelStartupRetryRef.current
+            if (retry !== undefined && unresolvedIds.has(retry.annotationId)) {
+              if (retry.timer !== undefined) window.clearTimeout(retry.timer)
+              sidePanelStartupRetryRef.current = undefined
+            }
+            if (candidateReviewActiveRef.current) editorRef.current?.rejectCandidate()
+            activeCandidateSelectionIdRef.current = undefined
+            candidateReviewActiveRef.current = false
+            setCandidateReviewActive(false)
+            setActiveDiff(undefined)
+            const failed = failUnsettledAnnotations(annotationsRef.current, recoveryReason)
+            annotationsRef.current = failed
+            setAnnotations(() => failed)
+            showSaveNotice('草稿已保存，但仍有局部优化需要重新发送或放弃。')
+          }
           setExternalUpdatePending(false)
-          const verifiedNoticeToken = requestId()
-          verifiedSaveNoticeTokenRef.current = verifiedNoticeToken
-          setVerifiedSaveNoticeToken(verifiedNoticeToken); showSaveNotice(VERIFIED_SAVE_NOTICE)
+          if (mayClearReview) {
+            const verifiedNoticeToken = requestId()
+            verifiedSaveNoticeTokenRef.current = verifiedNoticeToken
+            setVerifiedSaveNoticeToken(verifiedNoticeToken); showSaveNotice(VERIFIED_SAVE_NOTICE)
+          }
         } else if (message.result.status === 'conflict') {
           showSaveNotice('文件已被外部修改，未覆盖任何内容。请重新读取后合并。')
         } else {
@@ -453,6 +507,9 @@ function App(): React.JSX.Element {
     setProposalNotice(undefined)
   }
   const dirty = snapshot !== undefined && draft !== snapshot.content
+  const failedAnnotations = annotations.filter((annotation) => annotation.deliveryStatus === 'failed')
+  const failedAnnotation = failedAnnotations[0]
+  const saveBlockedReason = reviewSaveBlockedReason({ annotationCount: pendingAnnotationCount(annotations), candidateReviewActive })
   const acceptBlockedReason = adoptionBlockedReason({
     snapshotContent: snapshot?.content,
     editorMarkdown: draft,
@@ -552,6 +609,39 @@ function App(): React.JSX.Element {
     deliverAnnotation(annotation)
     return true
   }, [deliverAnnotation, reviewId])
+  const settleFailedAnnotation = useCallback((annotationId: string) => {
+    if (annotationsRef.current.find((item) => item.id === annotationId)?.deliveryStatus !== 'failed') return
+    for (const [request, pending] of pendingRef.current) {
+      if (pending.kind !== 'deliver' || pending.annotationId !== annotationId) continue
+      pendingRef.current.delete(request)
+      const timeout = deliveryTimeoutsRef.current.get(request)
+      if (timeout !== undefined) window.clearTimeout(timeout)
+      deliveryTimeoutsRef.current.delete(request)
+    }
+    proposalQueueRef.current = proposalQueueRef.current.filter((proposal) => proposal.selectionId !== annotationId)
+    annotationSelectionsRef.current.delete(annotationId)
+    const retry = sidePanelStartupRetryRef.current
+    if (retry?.annotationId === annotationId) {
+      if (retry.timer !== undefined) window.clearTimeout(retry.timer)
+      sidePanelStartupRetryRef.current = undefined
+    }
+    setSidePanelRecoveryAnnotation((current) => current === annotationId ? undefined : current)
+    if (activeCandidateSelectionIdRef.current === annotationId) {
+      editorRef.current?.rejectCandidate()
+      activeCandidateSelectionIdRef.current = undefined
+      candidateReviewActiveRef.current = false
+      setCandidateReviewActive(false)
+      setActiveDiff(undefined)
+    }
+    const settle = (items: LocalAnnotation[]) => updateAnnotationDeliveryStatus(items, annotationId, 'settled')
+    annotationsRef.current = settle(annotationsRef.current)
+    setAnnotations((items) => {
+      const next = settle(items)
+      annotationsRef.current = next
+      return next
+    })
+    setProposalNotice('已放弃本次局部优化，可以继续审核或采纳当前版本。')
+  }, [])
   const openSidePanelAndRetry = useCallback(async () => {
     const annotationId = sidePanelRecoveryAnnotation
     const annotation = annotationId === undefined ? undefined : annotationsRef.current.find((item) => item.id === annotationId)
@@ -621,6 +711,8 @@ function App(): React.JSX.Element {
   }
   const prepareSave = () => {
     if (snapshot === undefined || reviewId === undefined || snapshot.truncated || !dirty || preparedWriteRef.current !== undefined || commitRef.current !== undefined) return
+    const blocked = reviewSaveBlockedReason({ annotationCount: pendingAnnotationCount(annotationsRef.current), candidateReviewActive: candidateReviewActiveRef.current })
+    if (blocked !== undefined) { setProposalNotice(blocked); return }
     const request = requestId()
     const content = syncEditorMarkdown()
     pendingRef.current.set(request, { kind: 'prepare', content })
@@ -633,6 +725,13 @@ function App(): React.JSX.Element {
   const commitSave = () => {
     const currentPreparedWrite = preparedWriteRef.current
     if (snapshot === undefined || reviewId === undefined || currentPreparedWrite === undefined) return
+    const blocked = reviewSaveBlockedReason({ annotationCount: pendingAnnotationCount(annotationsRef.current), candidateReviewActive: candidateReviewActiveRef.current })
+    if (blocked !== undefined) {
+      preparedWriteRef.current = undefined
+      setPreparedWrite(undefined)
+      showSaveNotice(`${blocked} 已取消本次保存确认。`)
+      return
+    }
     if (syncEditorMarkdown() !== currentPreparedWrite.content) {
       preparedWriteRef.current = undefined
       setPreparedWrite(undefined); showSaveNotice('草稿在确认前已改变，请重新保存并确认。'); return
@@ -678,7 +777,7 @@ function App(): React.JSX.Element {
         <span className="history-actions" role="group" aria-label="编辑历史"><button type="button" className="secondary icon-button" title="撤销（Ctrl+Z）" aria-label="撤销（Ctrl+Z）" onClick={() => { if (editorRef.current?.undo() === true) syncEditorMarkdown() }}>↶</button><button type="button" className="secondary icon-button" title="重做（Ctrl+Y）" aria-label="重做（Ctrl+Y）" onClick={() => { if (editorRef.current?.redo() === true) syncEditorMarkdown() }}>↷</button></span>
         <button type="button" className="review-session-action is-rewrite" onClick={() => runSessionAction('rewrite')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中准备重写提示">↺ 重写</button>
         <button type="button" className="review-session-action is-accept" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required' || acceptBlockedReason !== undefined} title={acceptBlockedReason ?? '在绑定会话中采纳并继续 Skill'}>✓ 采纳</button>
-        {dirty && snapshot?.truncated !== true && <button type="button" onClick={prepareSave} disabled={preparedWrite !== undefined || committing || state.status === 'reopen-required'}>保存草稿</button>}
+        {dirty && snapshot?.truncated !== true && <button type="button" onClick={prepareSave} disabled={preparedWrite !== undefined || committing || state.status === 'reopen-required' || saveBlockedReason !== undefined} title={saveBlockedReason ?? '保存当前草稿'}>保存草稿</button>}
         <button className="secondary icon-button" type="button" title="重新读取" aria-label="重新读取" onClick={requestSnapshotReload} disabled={state.status === 'loading' || state.status === 'reopen-required'}>↻</button>
       </div>
     </header>
@@ -704,7 +803,11 @@ function App(): React.JSX.Element {
       {state.error !== undefined && state.status !== 'reopen-required' && <button className="secondary" type="button" onClick={state.error.code === 'sidepanel_unavailable' ? () => { void openSidePanelAndRetry() } : requestSnapshotReload}>{state.error.code === 'sidepanel_unavailable' ? '打开侧边栏后重试' : '重试'}</button>}
     </section> : <section className="review-main">
       <section className="document-workspace" aria-label="Markdown 文档" title="在排版后的正文中直接编辑；标题、段落、列表、表格、代码块和跨块选区都可作为 AI 上下文。HTML 保留为安全文本；Mermaid 仅在本地安全渲染。">
-        <div className="document-canvas"><VisualMarkdownEditor ref={editorRef} key={editorEpoch} initialMarkdown={snapshot.content} readOnly={false} annotations={annotations} canAnnotate={!snapshot.truncated && state.status !== 'reopen-required'} onSubmitAnnotation={submitAnnotation} onRetryAnnotation={(annotationId) => { const annotation = annotations.find((item) => item.id === annotationId); if (annotation !== undefined) deliverAnnotation(annotation) }} /* Host readOnly means no direct disk capability; local drafts stay editable. */ onMarkdownChange={onMarkdownChange} onReady={applyQueuedProposal} onCandidateReviewChange={(active) => { setCandidateReviewActive(active); candidateReviewActiveRef.current = active; if (!active) queueMicrotask(() => { syncEditorMarkdown(); applyQueuedProposal() }) }} /></div>
+        {failedAnnotation !== undefined && <section className="annotation-recovery-bar" role="status" aria-label="未结算失败批注">
+          <span>有 {failedAnnotations.length} 项局部优化未结算；当前批注：{failedAnnotation.comment}</span>
+          <footer><button type="button" className="secondary" onClick={() => settleFailedAnnotation(failedAnnotation.id)}>放弃本次优化</button><button type="button" onClick={() => deliverAnnotation(failedAnnotation)}>重新发送</button></footer>
+        </section>}
+        <div className="document-canvas"><VisualMarkdownEditor ref={editorRef} key={editorEpoch} initialMarkdown={snapshot.content} readOnly={false} annotations={annotations} canAnnotate={!snapshot.truncated && state.status !== 'reopen-required'} onSubmitAnnotation={submitAnnotation} onRetryAnnotation={(annotationId) => { const annotation = annotations.find((item) => item.id === annotationId); if (annotation !== undefined) deliverAnnotation(annotation) }} onSettleAnnotation={settleFailedAnnotation} /* Host readOnly means no direct disk capability; local drafts stay editable. */ onMarkdownChange={onMarkdownChange} onReady={applyQueuedProposal} onCandidateReviewChange={(active) => { setCandidateReviewActive(active); candidateReviewActiveRef.current = active; if (!active) queueMicrotask(() => { syncEditorMarkdown(); applyQueuedProposal() }) }} /></div>
         {candidateReviewActive && activeDiff !== undefined && <section className="diff-review-dock" aria-label="AI 修改前后对比">
           <div><strong>修改前</strong><pre>{activeDiff.before}</pre></div><div><strong>修改后</strong><pre>{activeDiff.after}</pre></div>
           <footer><button type="button" onClick={rejectCandidate} className="secondary">拒绝修改</button><button type="button" onClick={acceptCandidate}>接受修改</button></footer>

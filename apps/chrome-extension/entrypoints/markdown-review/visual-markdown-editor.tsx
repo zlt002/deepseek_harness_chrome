@@ -196,6 +196,7 @@ export interface VisualMarkdownEditorProps {
   canAnnotate: boolean
   onSubmitAnnotation: (selection: VisualSelection, comment: string) => boolean
   onRetryAnnotation: (annotationId: string) => void
+  onSettleAnnotation: (annotationId: string) => void
   onMarkdownChange: (markdown: string) => void
   onSelectionChange?: (selection: VisualSelection | undefined) => void
   onCandidateReviewChange?: (active: boolean) => void
@@ -261,7 +262,7 @@ function currentVisualSelection(view: EditorView): Selection {
 }
 
 /** A Markdown-first WYSIWYG surface. It never receives a Host disk capability. */
-export const VisualMarkdownEditor = forwardRef<VisualMarkdownEditorHandle, VisualMarkdownEditorProps>(function VisualMarkdownEditor({ initialMarkdown, readOnly, annotations, canAnnotate, onSubmitAnnotation, onRetryAnnotation, onMarkdownChange, onSelectionChange, onCandidateReviewChange, onReady }, ref): React.JSX.Element {
+export const VisualMarkdownEditor = forwardRef<VisualMarkdownEditorHandle, VisualMarkdownEditorProps>(function VisualMarkdownEditor({ initialMarkdown, readOnly, annotations, canAnnotate, onSubmitAnnotation, onRetryAnnotation, onSettleAnnotation, onMarkdownChange, onSelectionChange, onCandidateReviewChange, onReady }, ref): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const crepeRef = useRef<Crepe | undefined>(undefined)
   const lifecycleRef = useRef<Promise<void>>(Promise.resolve())
@@ -524,7 +525,7 @@ export const VisualMarkdownEditor = forwardRef<VisualMarkdownEditorHandle, Visua
     {annotationStatus !== undefined && statusAnnotation !== undefined && <aside className={`annotation-status-popover is-${statusAnnotation.deliveryStatus}`} style={{ top: annotationStatus.top, left: annotationStatus.left }} aria-label="批注详情">
       <header><strong>AI 批注</strong><span>{deliveryLabel(statusAnnotation)}</span><button type="button" className="secondary" aria-label="关闭批注详情" onClick={() => setAnnotationStatus(undefined)}>×</button></header>
       {statusAnnotation.comment !== undefined && <p>{statusAnnotation.comment}</p>}
-      {statusAnnotation.deliveryStatus === 'failed' && <footer><button type="button" onClick={() => onRetryAnnotation(statusAnnotation.id)}>重新发送</button></footer>}
+      {statusAnnotation.deliveryStatus === 'failed' && <footer><button type="button" className="secondary" onClick={() => onSettleAnnotation(statusAnnotation.id)}>放弃本次优化</button><button type="button" onClick={() => onRetryAnnotation(statusAnnotation.id)}>重新发送</button></footer>}
     </aside>}
   </div>
 })

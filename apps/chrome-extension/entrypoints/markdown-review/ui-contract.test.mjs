@@ -140,6 +140,41 @@ test('dirty visual drafts use a captured selection and explicit verified-write c
   assert.match(main, /不会自动重试/)
 })
 
+test('the same unresolved-review guard protects save preparation, commit, and its button', () => {
+  assert.match(main, /const saveBlockedReason = reviewSaveBlockedReason\(\{ annotationCount: pendingAnnotationCount\(annotations\), candidateReviewActive \}\)/)
+  const prepare = main.match(/const prepareSave = \(\) => \{([\s\S]*?)\n  \}/)?.[1]
+  const commit = main.match(/const commitSave = \(\) => \{([\s\S]*?)\n  \}/)?.[1]
+  assert.notEqual(prepare, undefined)
+  assert.notEqual(commit, undefined)
+  assert.match(prepare, /reviewSaveBlockedReason\(\{ annotationCount: pendingAnnotationCount\(annotationsRef\.current\), candidateReviewActive: candidateReviewActiveRef\.current \}\)/)
+  assert.match(commit, /reviewSaveBlockedReason\(\{ annotationCount: pendingAnnotationCount\(annotationsRef\.current\), candidateReviewActive: candidateReviewActiveRef\.current \}\)/)
+  assert.match(commit, /setPreparedWrite\(undefined\)/)
+  assert.match(main, /disabled=\{preparedWrite !== undefined \|\| committing \|\| state\.status === 'reopen-required' \|\| saveBlockedReason !== undefined\}/)
+  assert.match(main, /title=\{saveBlockedReason \?\? '保存当前草稿'\}/)
+})
+
+test('commit responses retain unresolved review state instead of erasing it', () => {
+  assert.match(main, /preparedWriteRef\.current !== undefined \|\| commitRef\.current !== undefined/)
+  assert.match(main, /canUpdateAnnotationDeliveryStatus\(annotationsRef\.current, proposal\.selectionId\)/)
+  assert.match(main, /const mayClearReview = verifiedWriteCleanupAllowed\(\{[\s\S]*annotationCount: pendingAnnotationCount\(annotationsRef\.current\),[\s\S]*candidateReviewActive: candidateReviewActiveRef\.current/)
+  assert.match(main, /if \(mayClearReview\) \{[\s\S]*setAnnotations\(\[\]\)[\s\S]*annotationSelectionsRef\.current\.clear\(\)/)
+  assert.match(main, /const failed = failUnsettledAnnotations\(annotationsRef\.current, recoveryReason\)/)
+  assert.match(main, /proposalQueueRef\.current = proposalQueueRef\.current\.filter/)
+  assert.match(main, /activeCandidateSelectionIdRef\.current = undefined/)
+})
+
+test('a local proposal becomes a candidate only after its visual diff is mounted', () => {
+  assert.doesNotMatch(main, /candidateSelectionIds/)
+  const selectionDiffStart = main.indexOf('editor.reviewSelectionReplacement(saved, proposal.replacementMarkdown)')
+  assert.match(main, /reviewSelectionProposal\(saved, proposal, \(\) => saved !== undefined && editor\.reviewSelectionReplacement\(saved, proposal\.replacementMarkdown\)\)/)
+  const selectionCandidateStart = main.indexOf("setProposalDeliveryStatus(proposal.selectionId, 'candidate')", selectionDiffStart)
+  assert.ok(selectionDiffStart >= 0)
+  assert.ok(selectionCandidateStart > selectionDiffStart)
+  assert.match(main, /annotationsRef\.current = update\(annotationsRef\.current\)/)
+  assert.match(main, /setProposalDeliveryStatus\(proposal\.selectionId, 'failed', '编辑版本、范围或选中文本已变化，请重新选择并发送。'\)/)
+  assert.match(main, /setProposalDeliveryStatus\(proposal\.selectionId, 'failed', '选区已变化，请重新选择并发送。'\)/)
+})
+
 test('external updates preserve local review work and a write confirmation cannot double-commit', () => {
   assert.match(main, /hasLocalReviewWork\(\)/)
   assert.match(main, /外部文件已更新/)
@@ -215,8 +250,25 @@ test('saved annotations stay highlighted in the document and expose their delive
   assert.match(editor, /批注详情/)
   assert.match(editor, /statusAnnotation\.comment/)
   assert.match(editor, /重新发送/)
+  assert.match(editor, /放弃本次优化/)
+  assert.match(editor, /onSettleAnnotation/)
+  assert.match(main, /const settleFailedAnnotation/)
+  assert.match(main, /annotationSelectionsRef\.current\.delete\(annotationId\)/)
+  assert.match(main, /proposalQueueRef\.current = proposalQueueRef\.current\.filter/)
+  assert.match(main, /onSettleAnnotation=\{settleFailedAnnotation\}/)
   assert.match(style, /\.annotation-status-popover p/)
   assert.match(editor, /已提交给 AI|正在提交给 AI|提交给 AI 失败/)
+})
+
+test('failed annotations remain recoverable without a surviving document decoration', () => {
+  assert.match(main, /const failedAnnotations = annotations\.filter\(\(annotation\) => annotation\.deliveryStatus === 'failed'\)/)
+  const recoveryBar = main.match(/failedAnnotation !== undefined && <section className="annotation-recovery-bar"[\s\S]*?<\/section>/)?.[0]
+  assert.notEqual(recoveryBar, undefined)
+  assert.match(recoveryBar, /failedAnnotations\.length/)
+  assert.match(recoveryBar, /deliverAnnotation\(failedAnnotation\)/)
+  assert.match(recoveryBar, /settleFailedAnnotation\(failedAnnotation\.id\)/)
+  assert.doesNotMatch(recoveryBar, /activityNotice|data-review-annotation-id|Decoration/)
+  assert.match(style, /\.annotation-recovery-bar/)
 })
 
 test('annotation delivery survives editor startup and reports a disconnected send', () => {
