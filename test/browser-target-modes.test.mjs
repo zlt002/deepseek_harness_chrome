@@ -22,7 +22,7 @@ test('composer keeps the draft and surfaces Browser Target preparation failures'
   assert.ok(commit > preparationFailure, 'the draft is committed only after every submission guard succeeds')
 })
 
-async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, reload, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion, runtimeGetUrl, backgroundFetch } = {}) {
+async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, reload, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion, runtimeGetUrl, backgroundFetch, runtimeResponseTimeoutMs = 100 } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
@@ -137,7 +137,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
     createdUrls,
     removedTabs,
     sendRuntimeMessage: (message, sender = {}) => new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('runtime response timeout')), 100)
+      const timeout = setTimeout(() => reject(new Error('runtime response timeout')), runtimeResponseTimeoutMs)
       const keepChannelOpen = runtimeListener(message, sender, (response) => {
         clearTimeout(timeout)
         resolve(response)
@@ -594,6 +594,7 @@ test('concurrent first locks for one Browser Target share a single Native transf
   const transferGate = Promise.withResolvers()
   const background = await loadBackground({
     settings: { mode: 'none', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a }, waitForTransferAck: transferGate.promise,
+    runtimeResponseTimeoutMs: 1_000,
   })
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
