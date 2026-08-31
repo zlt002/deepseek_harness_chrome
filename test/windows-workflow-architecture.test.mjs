@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const workflowPath = resolve(projectRoot, '.github/workflows/build-windows-lite.yml')
+
+test('root tests run serially so the Windows release runner does not exhaust memory', async () => {
+  const packageJson = JSON.parse(await readFile(resolve(projectRoot, 'package.json'), 'utf8'))
+  assert.match(packageJson.scripts.test, /node --test --test-concurrency=1 test\/\*\.test\.mjs/)
+})
+
 test('Windows CI builds from the recursive upstream submodule and materialized product tree', async () => {
   const workflow = (await readFile(workflowPath, 'utf8')).replaceAll('\r\n', '\n')
 

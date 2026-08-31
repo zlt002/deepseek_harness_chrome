@@ -91,7 +91,7 @@ test('product plugin manifest drives portable client builds and root quality com
   assert.equal(rootManifest.scripts['typecheck:plugins'], 'node scripts/run-product-plugin-command.mjs typecheck')
   assert.equal(rootManifest.scripts['test:plugins'], 'node scripts/run-product-plugin-command.mjs test')
   assert.equal(rootManifest.scripts.pretest, 'node scripts/prepare-test-runtime.mjs')
-  assert.equal(rootManifest.scripts.test, 'node --test test/*.test.mjs && pnpm test:plugins')
+  assert.equal(rootManifest.scripts.test, 'node --test --test-concurrency=1 test/*.test.mjs && pnpm test:plugins')
 
   assert.deepEqual(PRODUCT_UI_PLUGIN_DIRECTORIES, [
     'harness-ui-agent-preset',
