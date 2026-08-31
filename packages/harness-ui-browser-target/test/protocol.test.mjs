@@ -65,8 +65,10 @@ test('projects an acknowledged follow-mode Run target until it is cleared, witho
   assert.deepEqual(browserTargetTriggerTab({ ...followLocked, lockedRunTarget: undefined }), b, 'the next idle snapshot returns to the active tab')
 
   const pinned = { settings: { mode: 'pinned-tabs', pinnedTabs: [a], primaryTabId: a.tabId }, tabs: [a, b], activeTab: b, lockedRunTarget: b }
-  assert.deepEqual(browserTargetTriggerTab(pinned), a, 'a follow-mode lock never overrides the pinned primary target')
-  assert.equal(browserTargetTriggerTab({ ...pinned, settings: { mode: 'none', pinnedTabs: [] } }), undefined, 'none remains unbound')
+  assert.deepEqual(browserTargetTriggerTab(pinned), b, 'an in-flight Run lock overrides the next-Run pinned policy')
+  assert.deepEqual(browserTargetTriggerTab({ ...pinned, settings: { mode: 'none', pinnedTabs: [] } }), b, 'an in-flight Run lock overrides the next-Run none policy')
+  assert.deepEqual(browserTargetTriggerTab({ ...pinned, lockedRunTarget: undefined }), a, 'an initial pinned policy still selects its primary target')
+  assert.equal(browserTargetTriggerTab({ ...pinned, lockedRunTarget: undefined, settings: { mode: 'none', pinnedTabs: [] } }), undefined, 'initial none remains unbound')
 })
 
 test('requires an exact chrome extension parent origin in the opt-in bridge URL', () => {

@@ -35,7 +35,7 @@ function rewriteDraft(action: WorkspaceReviewSessionAction): string {
 }
 
 function acceptPrompt(action: WorkspaceReviewSessionAction): string {
-  return `我已采纳当前审阅的 PRD（${action.displayPath}）。请按/pmd-prd Skill 的同步到远程doc文档这个步骤继续；如涉及远程文档写入，仍须先预览目标和变更、取得确认、写入后回读验证。`
+  return `/pmd-prd 我已采纳当前审阅的 PRD（${action.displayPath}）。请继续执行“同步到远程 doc 文档”步骤；如涉及远程文档写入，仍须先预览目标和变更、取得确认、写入后回读验证。`
 }
 
 interface ProducedFileFact {

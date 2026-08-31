@@ -19,7 +19,7 @@ function line(value) { return `${JSON.stringify(value)}\n` }
 test('keeps the established Claude import registry path across upgrades', () => {
   const environment = { ACCRUI_CONNECTOR_STATE_DIR: '/accrui/state', DSH_CONNECTOR_STATE_DIR: '/other-harness/state' }
   assert.equal(defaultRegistryPath(environment, 'darwin', '/Users/test'), '/Users/test/Library/Application Support/DeepSeekHarness/claude-code-imports.json')
-  assert.equal(defaultRegistryPath(environment, 'win32', 'C:\\Users\\test'), path.join('C:\\Users\\test', 'DeepSeekHarness', 'claude-code-imports.json'))
+  assert.equal(defaultRegistryPath(environment, 'win32', 'C:\\Users\\test'), path.win32.join('C:\\Users\\test', 'DeepSeekHarness', 'claude-code-imports.json'))
   assert.equal(defaultRegistryPath(environment, 'linux', '/home/test'), '/home/test/.local/share/DeepSeekHarness/claude-code-imports.json')
 })
 

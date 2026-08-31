@@ -37,8 +37,9 @@ export interface BrowserTargetSnapshot {
   error?: string
 }
 
-/** Resolve the Browser Target displayed beside the composer without weakening pinned or none modes. */
+/** An in-flight Run wins over the policy selected for the next Run. */
 export function browserTargetTriggerTab(snapshot: BrowserTargetSnapshot): BrowserTargetTab | undefined {
+  if (snapshot.lockedRunTarget !== undefined) return snapshot.lockedRunTarget
   if (snapshot.settings.mode === 'follow-active-tab') return snapshot.lockedRunTarget ?? snapshot.activeTab
   if (snapshot.settings.mode === 'none') return undefined
   const byId = new Map(snapshot.tabs.map(tab => [tab.tabId, tab]))

@@ -618,9 +618,9 @@ async function readPrefix(file, bytes) {
 }
 function stableSourceKey(sourceRoot, projectKey, sessionId, workspacePath) { return createHash('sha256').update(`${sourceRoot}\0${projectKey}\0${sessionId}\0${path.resolve(workspacePath)}`).digest('hex') }
 export function defaultRegistryPath(environment = process.env, currentPlatform = platform(), home = homedir()) {
-  if (currentPlatform === 'darwin') return path.join(home, 'Library', 'Application Support', 'DeepSeekHarness', 'claude-code-imports.json')
-  if (currentPlatform === 'win32') return path.join(environment.APPDATA ?? home, 'DeepSeekHarness', 'claude-code-imports.json')
-  return path.join(environment.XDG_DATA_HOME ?? path.join(home, '.local', 'share'), 'DeepSeekHarness', 'claude-code-imports.json')
+  if (currentPlatform === 'darwin') return path.posix.join(home, 'Library', 'Application Support', 'DeepSeekHarness', 'claude-code-imports.json')
+  if (currentPlatform === 'win32') return path.win32.join(environment.APPDATA ?? home, 'DeepSeekHarness', 'claude-code-imports.json')
+  return path.posix.join(environment.XDG_DATA_HOME ?? path.posix.join(home, '.local', 'share'), 'DeepSeekHarness', 'claude-code-imports.json')
 }
 
 async function sourceRevision(file, info, signal) {

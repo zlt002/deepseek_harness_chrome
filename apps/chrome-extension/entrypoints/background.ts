@@ -5468,6 +5468,21 @@ export default defineBackground(() => {
         .catch((error: unknown) => sendResponse({ ok: false, error: asError(error) }))
       return true
     }
+    if (request.type === 'get-active-browser-target-lock/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 1 || keys[0] !== 'type') {
+        sendResponse({ ok: false, error: 'Browser Target lock query is invalid.' })
+        return false
+      }
+      const runId = currentNativeRunId
+      const lock = runId === undefined ? undefined : runBrowserTargetLocks.get(runId)
+      if (lock === undefined || lock.state !== 'active' || lock.canceled || lock.port !== nativePort) {
+        sendResponse({ ok: true })
+        return true
+      }
+      sendResponse({ ok: true, lock: { sessionId: lock.sessionId, submissionId: lock.submissionId, browserTarget: lock.binding.browserTarget } })
+      return true
+    }
     if (request.type === 'unlock-browser-target/v1') {
       const keys = Object.keys(request)
       if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'sessionId', 'submissionId'].includes(key)) || !validSessionIdentity(request.sessionId) || !validSessionIdentity(request.submissionId)) {

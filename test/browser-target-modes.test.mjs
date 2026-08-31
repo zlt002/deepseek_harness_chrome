@@ -552,6 +552,26 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
   }
 })
 
+test('the sidepanel can recover only the active current-Run Browser Target lock after it is recreated', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a, 43: b } })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender), { ok: true, locked: true })
+    background.activateTab(b.id)
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
+      ok: true, lock: { sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA },
+    })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), { ok: true })
+  } finally {
+    background.cleanup()
+  }
+})
+
 test('an accepted follow lock ignores the initial idle reconciliation window so read_work_tab remains on A after B activates', async () => {
   const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
   const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
@@ -594,6 +614,24 @@ test('an accepted follow lock ignores the initial idle reconciliation window so 
   } finally {
     background.cleanup()
   }
+})
+
+test('queue activity releases an accepted Browser Target lock after idle, including activity observed before accept', async () => {
+  const { BrowserTargetSessionRunLock, shouldReconcileSessionRunTarget } = await loadSessionRunLock()
+  const idle = { running: false, queue: [] }
+  const queued = { running: false, queue: [{ id: 'queued-prompt' }] }
+
+  const afterAccept = new BrowserTargetSessionRunLock('after-accept')
+  assert.equal(afterAccept.accept(idle), false, 'initial idle is not a completion')
+  assert.equal(shouldReconcileSessionRunTarget(queued, afterAccept), false, 'queue activity itself is not yet idle completion')
+  assert.equal(shouldReconcileSessionRunTarget(idle, afterAccept), true, 'queue activity followed by idle releases the accepted lock')
+
+  const beforeAccept = new BrowserTargetSessionRunLock('before-accept')
+  assert.equal(shouldReconcileSessionRunTarget(queued, beforeAccept), false, 'activity may arrive before the composer acknowledgement')
+  assert.equal(beforeAccept.accept(idle), true, 'an already-idle acknowledgement releases a lock whose queue activity was observed')
+
+  const neverActive = new BrowserTargetSessionRunLock('never-active')
+  assert.equal(neverActive.accept(idle), false, 'initial idle without any Run activity remains protected')
 })
 
 test('follow lock can bind a Run started with none mode and an unlock before transfer confirmation cancels it', async () => {

@@ -70,3 +70,11 @@ test('isolates pending and current Browser Target locks by session and submissio
   assert.equal(first.acknowledge('session-a', 'a4', false), undefined)
   assert.deepEqual(first.acknowledge('session-a', 'a3', true), { sessionId: 'session-a', submissionId: 'a3', target: a }, 'a rejected peer request must not erase the first pending lock')
 })
+
+test('hydrates the authoritative active Run lock after sidepanel reconstruction', async () => {
+  const { BrowserTargetRunLockProjection } = await runTargetLockProjection()
+  const a = { browser: 'chrome', windowId: 1, tabId: 1, url: 'https://a.example.test', title: 'A' }
+  const projection = new BrowserTargetRunLockProjection()
+  assert.deepEqual(projection.hydrate({ sessionId: 'session-a', submissionId: 'a1', target: a }), { sessionId: 'session-a', submissionId: 'a1', target: a })
+  assert.equal(projection.hydrate(undefined), undefined, 'a later authoritative empty response clears the recovered lock')
+})

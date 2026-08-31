@@ -19,6 +19,7 @@ interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: s
 interface LockedRunTarget { sessionId: string; submissionId: string; target: BrowserTargetTab }
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
 interface BrowserTargetSettingsResponse { ok: boolean; settings?: BrowserTargetSettings; tabs?: BrowserTargetTab[]; error?: string }
+interface ActiveBrowserTargetLockResponse { ok: boolean; lock?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown }; error?: string }
 interface DesignReferenceCaptureResponse { ok: boolean; referenceId?: string; error?: string }
 interface RecentPrototypeStudio { projectId: string; referenceId: string; referenceTitle?: string; referenceUrl?: string; projectName?: string; currentRevisionId?: string; revisionCount?: number; updatedAt: number; authorizationActive: boolean; boundToCurrentSession?: boolean }
 interface RecentPrototypeStudiosResponse { ok: boolean; projects?: RecentPrototypeStudio[]; error?: string }
@@ -113,6 +114,12 @@ export class BrowserTargetRunLockProjection {
     if (this.#current?.sessionId === sessionId) this.#current = undefined
     return this.#current
   }
+
+  hydrate(lock: LockedRunTarget | undefined): LockedRunTarget | undefined {
+    this.#current = lock
+    if (lock !== undefined) this.#pendingBySubmission.delete(lock.submissionId)
+    return this.#current
+  }
 }
 
 function isBrowserTargetCommand(value: unknown): value is BrowserTargetCommand {
@@ -188,6 +195,15 @@ function requestTargetSettings(message: unknown): Promise<BrowserTargetSettingsR
     chrome.runtime.sendMessage(message, (response: BrowserTargetSettingsResponse | undefined) => {
       const runtimeError = chrome.runtime.lastError
       resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return target settings.' } : { ok: false, error: runtimeError.message })
+    })
+  })
+}
+
+function requestActiveBrowserTargetLock(): Promise<ActiveBrowserTargetLockResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'get-active-browser-target-lock/v1' }, (response: ActiveBrowserTargetLockResponse | undefined) => {
+      const runtimeError = chrome.runtime.lastError
+      resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Background did not return the active Browser Target lock.' } : { ok: false, error: runtimeError.message })
     })
   })
 }
@@ -407,6 +423,8 @@ function App(): React.JSX.Element {
   const availableTabsRef = useRef(availableTabs)
   const activeTabRef = useRef(activeTab)
   const runTargetLockProjectionRef = useRef(new BrowserTargetRunLockProjection())
+  const lockProjectionVersionRef = useRef(0)
+  const lockHydrationRequestRef = useRef(0)
   const designReferenceCaptureRef = useRef<number | undefined>(undefined)
   const commandSequenceRef = useRef(0)
   const knowledgeCommandSequenceRef = useRef(0)
@@ -484,6 +502,23 @@ function App(): React.JSX.Element {
     setTargetSettings(response.settings); setAvailableTabs(response.tabs ?? []); setTargetError(undefined)
   }, [])
 
+  const hydrateActiveBrowserTargetLock = useCallback(async () => {
+    const requestId = lockHydrationRequestRef.current += 1
+    const version = lockProjectionVersionRef.current
+    const response = await requestActiveBrowserTargetLock()
+    if (requestId !== lockHydrationRequestRef.current || version !== lockProjectionVersionRef.current || !response.ok) return
+    const rawLock = response.lock
+    let lock: LockedRunTarget | undefined
+    if (rawLock !== undefined) {
+      const sessionId = rawLock.sessionId
+      const submissionId = rawLock.submissionId
+      const browserTarget = rawLock.browserTarget
+      if (!isHarnessSessionIdentity(sessionId) || !isHarnessSessionIdentity(submissionId) || !isBrowserTarget(browserTarget)) return
+      lock = { sessionId, submissionId, target: browserTargetTabForLock(browserTarget, activeTabRef.current?.tab, availableTabsRef.current) }
+    }
+    setLockedRunTarget(runTargetLockProjectionRef.current.hydrate(lock))
+  }, [])
+
   const loadRecentPrototypes = useCallback(async () => {
     const response = await requestRecentPrototypeStudios(activeHarnessSessionId)
     if (!response.ok) { setRecentPrototypeError(response.error ?? '无法读取最近原型。'); return }
@@ -499,8 +534,8 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!sidePanelHandoff.ready) return
-    void connect(); void loadTargetSettings()
-  }, [connect, loadTargetSettings, sidePanelHandoff.ready])
+    void connect(); void loadTargetSettings(); void hydrateActiveBrowserTargetLock()
+  }, [connect, hydrateActiveBrowserTargetLock, loadTargetSettings, sidePanelHandoff.ready])
 
   useEffect(() => {
     if (!sidePanelHandoff.ready) return
@@ -930,10 +965,12 @@ function App(): React.JSX.Element {
         const sessionId = value.sessionId
         const submissionId = value.submissionId
         const target = browserTargetTabForLock(value.browserTarget, activeTabRef.current?.tab, availableTabsRef.current)
+        lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
         runTargetLockProjectionRef.current.start(sessionId, submissionId, target)
         void chrome.runtime.sendMessage({ type: 'lock-browser-target/v1', sessionId, submissionId, browserTarget: value.browserTarget })
           .then((response: { ok?: unknown; locked?: unknown; error?: unknown } | undefined) => {
             const locked = response?.ok === true && response?.locked === true
+            lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
             setLockedRunTarget(runTargetLockProjectionRef.current.acknowledge(sessionId, submissionId, locked))
             frameRef.current?.contentWindow?.postMessage({
               type: 'browser-target-lock-ack/v1', nonce: frameNonce, sessionId, submissionId,
@@ -942,6 +979,7 @@ function App(): React.JSX.Element {
             }, frameOrigin)
           })
           .catch((error: unknown) => {
+            lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
             setLockedRunTarget(runTargetLockProjectionRef.current.acknowledge(sessionId, submissionId, false))
             frameRef.current?.contentWindow?.postMessage({
               type: 'browser-target-lock-ack/v1', nonce: frameNonce, sessionId, submissionId, ok: false, locked: false,
@@ -951,11 +989,13 @@ function App(): React.JSX.Element {
         return
       }
       if (value.type === 'browser-target-unlock/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId)) {
+        lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
         setLockedRunTarget(runTargetLockProjectionRef.current.unlock(value.sessionId, value.submissionId))
         void chrome.runtime.sendMessage({ type: 'unlock-browser-target/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
         return
       }
       if (value.type === 'browser-target-reconcile/v1' && isHarnessSessionIdentity(value.sessionId)) {
+        lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
         setLockedRunTarget(runTargetLockProjectionRef.current.reconcile(value.sessionId))
         void chrome.runtime.sendMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: value.sessionId }).catch(() => {})
         return
@@ -970,6 +1010,7 @@ function App(): React.JSX.Element {
         frameReadyRef.current = true
         commandSequenceRef.current = 0
         sendBrowserTargetSnapshot()
+        void hydrateActiveBrowserTargetLock()
         replaySearchProgress()
         return
       }
@@ -1009,7 +1050,7 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, loadRecentPrototypes, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
+  }, [activeHarnessSessionId, connect, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, hydrateActiveBrowserTargetLock, loadRecentPrototypes, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (
