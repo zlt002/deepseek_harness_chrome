@@ -11,7 +11,7 @@ import { WorkspaceReviewDirectoryActions } from './WorkspaceReviewDirectoryActio
 import { WorkspaceReviewTree } from './WorkspaceReviewTree.tsx'
 import { workspaceFilePath } from './workspace-file-path.mjs'
 import { workspaceMarkdownLink } from './workspace-markdown-link.mjs'
-import { createWorkspaceMarkdownReviewOpenDefinition, latestWorkspaceMarkdownReviewOpen, nextWorkspaceMarkdownReviewOpenAction } from './workspace-markdown-review-open.ts'
+import { createWorkspaceMarkdownReviewOpenDefinition, latestWorkspaceMarkdownReviewOpen, WorkspaceMarkdownReviewOpenTracker } from './workspace-markdown-review-open.ts'
 import type { WorkspacePickerDirectoryActionsProps, WorkspacePickerDirectoryProps } from './directory-slot.ts'
 import { sameWorkspaceCwd, selectReadyWorkspaceDirectorySession, workspacePathForDirectory } from './directory-session.ts'
 
@@ -37,7 +37,7 @@ function rewriteDraft(action: WorkspaceReviewSessionAction): string {
 }
 
 function acceptPrompt(action: WorkspaceReviewSessionAction): string {
-  return `/pmd-prd 我已采纳当前审阅的 PRD（${action.displayPath}）。该文件就是本次唯一已确认的冻结 PRD 正文。accepted_revision=${action.revision}; accepted_fingerprint=${action.fingerprint}。请继续执行“同步到远程 doc 文档”步骤；进入远程预览前必须重新读取该文件、运行 PRD 校验并确认当前 fingerprint/hash 与 accepted_fingerprint 一致；否则旧采纳失效，重新打开左侧审核。这不是恢复历史任务：只使用当前会话的绑定；若当前会话尚未绑定，请只围绕该文件新建本轮交付状态，禁止扫描、匹配或复用任何其他历史 Run/manifest。远程写入仍须按“预览目标与变更 → 我确认 → 写入 → 同目标回读验证”执行。`
+  return `/pmd-prd 我已采纳当前审阅的 PRD（${action.displayPath}）。该文件就是本次唯一已确认的冻结 PRD 正文。accepted_revision=${action.revision}; accepted_fingerprint=${action.fingerprint}。请继续执行“同步到远程 doc 文档”步骤；进入远程预览前必须重新读取该文件、运行 PRD 校验并确认当前 fingerprint/hash 与 accepted_fingerprint 一致；否则旧采纳失效，重新打开左侧审核。这不是恢复历史任务：只使用当前会话的绑定；若当前会话尚未绑定，请只围绕该文件新建本轮交付状态，禁止扫描、匹配或复用任何其他历史 Run/manifest。调用 team_knowledge_batch_preview 时必须原样提供 pmdReviewReceipt=${action.pmdReviewReceipt ?? '缺失'}；该一次性凭据绑定当前会话、当前工作区文件版本和正文哈希，过期、重放、换会话或改正文都会被拒绝。远程写入仍须按“预览目标与变更 → 我确认 → 写入 → 同目标回读验证”执行。`
 }
 
 interface ProducedFileFact {
@@ -55,19 +55,15 @@ type AutoOpenFrozenPmdPrdProps = PropsRuntime<'conversation.input.overlay'> & Au
 /** The first session snapshot establishes history; only a later Host result may open review. */
 function AutoOpenFrozenPmdPrd({ sessionId, open, useSession }: AutoOpenFrozenPmdPrdProps) {
   const review = useSession(snapshot => latestWorkspaceMarkdownReviewOpen(snapshot.chat.timeline))
-  const baseline = useRef<{ readonly sessionId: string; readonly resultSeq: number } | undefined>()
+  const tracker = useRef(autoOpenTracker)
   useEffect(() => {
-    const previous = baseline.current
-    if (previous === undefined || previous.sessionId !== sessionId) {
-      baseline.current = { sessionId, resultSeq: review?.resultSeq ?? 0 }
-      return
-    }
-    const action = nextWorkspaceMarkdownReviewOpenAction(previous.resultSeq, review)
-    baseline.current = { sessionId, resultSeq: action.baseline }
+    const action = tracker.current.next(sessionId, review)
     if (action.open !== undefined) open(action.open.path)
   }, [open, review, sessionId])
   return null
 }
+
+const autoOpenTracker = new WorkspaceMarkdownReviewOpenTracker()
 
 /** Preserve the unique full path behind a basename shown in closing prose. */
 function producedMarkdownMention(owner: Parameters<ChatFileMentions['forClosing']>[0], value: string): string | undefined {

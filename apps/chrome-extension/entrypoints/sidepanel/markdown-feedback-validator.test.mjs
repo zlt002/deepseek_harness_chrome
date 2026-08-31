@@ -79,6 +79,8 @@ test('review actions bind a complete resource version and reject mixed fields', 
   assert.equal(validateWorkspaceMarkdownReviewAction(missingFingerprint).ok, false)
   assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, capability: 'must-not-forward' }).ok, false)
   assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, action: 'send' }).ok, false)
+  assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, action: 'accept' }).ok, false)
+  assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, action: 'accept', pmdReviewReceipt: 'a'.repeat(32) }).ok, true)
 })
 
 test('side panel returns the bounded Harness delivery error instead of replacing it', async () => {

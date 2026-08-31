@@ -418,6 +418,7 @@ interface PrototypeRecoverySignature {
   signature: string
 }
 const pendingPrototypeRecoverySignatures = new Map<string, { resolve: (value: PrototypeRecoverySignature) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
+const pendingPmdPrdReviewReceipts = new Map<string, { resolve: (value: string) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>()
 let prototypeStudioRecoveryMutation: Promise<void> = Promise.resolve()
 // A project lifecycle operation may rotate the Host capability, read its
 // snapshot, or promote a session-only candidate. Keep these operations on one
@@ -478,6 +479,23 @@ function asError(value: unknown): string {
   return String(value)
 }
 
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function requestPmdPrdReviewReceipt(review: { harnessSessionId: string; reviewId: string; resourceId: string; displayPath: string; revision: string; fingerprint: string }, content: string): Promise<string> {
+  const port = nativePort ?? connectNativePort()
+  const requestId = crypto.randomUUID()
+  const contentHash = await sha256Hex(content)
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { pendingPmdPrdReviewReceipts.delete(requestId); reject(new Error('PRD 采纳凭据签发超时；请重试。')) }, 5_000)
+    pendingPmdPrdReviewReceipts.set(requestId, { resolve, reject, timeout })
+    try { port.postMessage({ type: 'record-pmd-prd-review-adoption', requestId, payload: { ...review, contentHash } }) }
+    catch (error) { clearTimeout(timeout); pendingPmdPrdReviewReceipts.delete(requestId); reject(error instanceof Error ? error : new Error(asError(error))) }
+  })
+}
+
 /** Read-only Chrome tab metadata shown by the embedded Harness composer. */
 interface ActiveTabSnapshot {
   windowId: number
@@ -528,6 +546,7 @@ interface TeamKnowledgeItemRequest extends ConnectorCorrelation {
   userConfirmation?: TeamKnowledgeUserConfirmation
   batchId?: string
   lease?: TeamKnowledgeBatchLeaseAction
+  pmdReviewAdoption?: { harnessSessionId: string; reviewId: string; resourceId: string; displayPath: string; revision: string; fingerprint: string; contentHash: string }
 }
 
 interface TeamKnowledgeBatchLease {
@@ -604,6 +623,7 @@ function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnow
   if ((candidate.batchId !== undefined || candidate.lease !== undefined) && !hasBatchLease) return false
   if (candidate.action === 'release') return hasBatchLease && candidate.lease === 'release' && isTeamKnowledgeParent(candidate.parent)
   if (candidate.action === 'inspect_parent') return candidate.parent === undefined && candidate.kind === undefined && candidate.name === undefined && candidate.body === undefined && candidate.catalogId === undefined && candidate.userConfirmation === undefined
+    && (candidate.pmdReviewAdoption === undefined || isPmdReviewAdoption(candidate.pmdReviewAdoption))
     && (!hasBatchLease || candidate.lease === 'acquire' || candidate.lease === 'reuse')
   if (candidate.action === 'readback') return candidate.kind === 'light_document' && typeof candidate.catalogId === 'string' && /^\d+$/.test(candidate.catalogId) && candidate.userConfirmation === undefined
   const recovery = candidate.recovery
@@ -616,6 +636,14 @@ function isTeamKnowledgeItemRequest(message: NativeMessage): message is TeamKnow
       && Number.isSafeInteger(candidate.userConfirmation.itemIndex) && candidate.userConfirmation.itemIndex >= 1
       && Number.isSafeInteger(candidate.userConfirmation.totalItems) && candidate.userConfirmation.totalItems >= candidate.userConfirmation.itemIndex))
     && (!hasBatchLease || candidate.lease === 'reuse')
+}
+
+function isPmdReviewAdoption(value: unknown): value is NonNullable<TeamKnowledgeItemRequest['pmdReviewAdoption']> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const item = value as Record<string, unknown>
+  return Object.keys(item).length === 7 && ['harnessSessionId', 'reviewId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'contentHash'].every(key => key in item)
+    && ['harnessSessionId', 'reviewId', 'resourceId', 'revision'].every(key => reviewId(item[key]))
+    && boundedReviewText(item.displayPath, 2_048) && /^[a-f0-9]{64}$/i.test(String(item.fingerprint)) && /^[a-f0-9]{64}$/i.test(String(item.contentHash))
 }
 
 function isKnowledgeQueryRequest(message: NativeMessage): message is KnowledgeQueryRequest {
@@ -4106,6 +4134,7 @@ async function runTeamKnowledgeItemRequest(request: TeamKnowledgeItemRequest): P
 function respondToTeamKnowledgeItem(port: chrome.runtime.Port, request: TeamKnowledgeItemRequest): void {
   void queueNativeLifecycle(async () => {
     if (nativePort !== port) throw new Error('Team Knowledge item request belongs to a stale Native connection.')
+    if (request.action === 'inspect_parent' && request.pmdReviewAdoption !== undefined) await verifyPmdReviewAdoption(request.pmdReviewAdoption)
     if (request.action === 'release') {
       if (request.batchId === undefined || request.lease !== 'release' || request.parent === undefined) throw new Error('team_knowledge_batch_lease_release_invalid')
       await releaseTeamKnowledgeBatchLease(request.runId, request.batchId, request.parent.fingerprint)
@@ -4217,6 +4246,7 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   rejectPrototypeRecoverySignatures(new Error(error))
   for (const pending of pendingReleaseUpdates.values()) { clearTimeout(pending.timer); pending.resolve({ ok: false, error }) }
   pendingReleaseUpdates.clear()
+  for (const [requestId, pending] of pendingPmdPrdReviewReceipts) { clearTimeout(pending.timeout); pending.reject(new Error(error)); pendingPmdPrdReviewReceipts.delete(requestId) }
   void chrome.runtime.sendMessage({
     type: 'harness-disconnected',
     error,
@@ -4228,6 +4258,17 @@ function connectNativePort(): chrome.runtime.Port {
   const port = chrome.runtime.connectNative(NATIVE_HOST_NAME)
   port.onDisconnect.addListener(() => disconnectNativePort(port))
   port.onMessage.addListener((message: NativeMessage) => {
+    if (message.type === 'pmd_prd_review_adoption_recorded' || message.type === 'pmd_prd_review_adoption_failed') {
+      const requestId = typeof message.requestId === 'string' ? message.requestId : undefined
+      const pending = requestId === undefined ? undefined : pendingPmdPrdReviewReceipts.get(requestId)
+      if (pending !== undefined && requestId !== undefined) {
+        pendingPmdPrdReviewReceipts.delete(requestId); clearTimeout(pending.timeout)
+        const receipt = (message as { receipt?: unknown }).receipt
+        if (message.type === 'pmd_prd_review_adoption_recorded' && typeof receipt === 'string' && /^[A-Za-z0-9_-]{16,256}$/.test(receipt)) pending.resolve(receipt)
+        else pending.reject(new Error(typeof message.error === 'string' ? message.error : 'PRD 采纳凭据签发失败。'))
+      }
+      return
+    }
     if (message.type === 'release_update_checked' || message.type === 'release_update_prepared' || message.type === 'release_update_failed') {
       const requestId = typeof message.requestId === 'string' ? message.requestId : undefined
       const pending = requestId === undefined ? undefined : pendingReleaseUpdates.get(requestId)
@@ -4653,6 +4694,14 @@ async function workspaceReviewSnapshot(record: MarkdownReviewRecord): Promise<{ 
   }
 }
 
+async function verifyPmdReviewAdoption(adoption: NonNullable<TeamKnowledgeItemRequest['pmdReviewAdoption']>): Promise<void> {
+  const record = markdownReviews.get(adoption.reviewId)
+  if (record === undefined || record.harnessSessionId !== adoption.harnessSessionId || record.resourceId !== adoption.resourceId || record.displayPath !== adoption.displayPath) throw new Error('pmd_prd_review_receipt_workspace_changed')
+  const snapshot = await retryExpiredWorkspaceReviewCapability(record, () => workspaceReviewSnapshot(record))
+  if (snapshot.truncated) throw new Error('pmd_prd_review_receipt_snapshot_truncated')
+  if (snapshot.resource.revision !== adoption.revision || snapshot.resource.fingerprint !== adoption.fingerprint || await sha256Hex(snapshot.content) !== adoption.contentHash) throw new Error('pmd_prd_review_receipt_source_changed')
+}
+
 async function workspaceReviewProposals(record: MarkdownReviewRecord, afterSequence: number): Promise<Record<string, unknown>> {
   const payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_PROPOSALS_PATH, { afterSequence }, 'proposal read')
   if (payload.v !== 1 || payload.reviewId !== record.reviewId || !Array.isArray(payload.proposals) || payload.proposals.length > 20) throw new Error('Harness returned invalid Markdown proposals.')
@@ -4814,9 +4863,13 @@ function markdownReviewSessionActionDelivery(value: unknown, action: 'rewrite' |
 async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, request: { harnessSessionId: string; resourceId: string; displayPath: string; revision: string; fingerprint: string; action: 'rewrite' | 'accept' }): Promise<MarkdownReviewSessionActionDelivery> {
   if (request.harnessSessionId !== record.harnessSessionId || request.resourceId !== record.resourceId || request.displayPath !== record.displayPath) throw new Error('Markdown review action does not match its bound Harness session and resource.')
   const snapshot = await workspaceReviewSnapshot(record)
+  if (request.action === 'accept' && snapshot.truncated) throw new Error('Markdown file snapshot is truncated; reopen a complete PRD before adopting it.')
   if (request.revision !== snapshot.resource.revision || request.fingerprint !== snapshot.resource.fingerprint) {
     throw new Error('Markdown file changed since this review. Re-read and review the current saved file before adopting it.')
   }
+  const pmdReviewReceipt = request.action === 'accept'
+    ? await requestPmdPrdReviewReceipt({ harnessSessionId: record.harnessSessionId, reviewId: record.reviewId, resourceId: record.resourceId, displayPath: record.displayPath, revision: snapshot.resource.revision, fingerprint: snapshot.resource.fingerprint }, snapshot.content)
+    : undefined
   let response: unknown
   try {
     response = await chrome.runtime.sendMessage({
@@ -4829,6 +4882,7 @@ async function deliverMarkdownReviewSessionAction(record: MarkdownReviewRecord, 
         displayPath: record.displayPath,
         revision: snapshot.resource.revision,
         fingerprint: snapshot.resource.fingerprint,
+        ...(pmdReviewReceipt === undefined ? {} : { pmdReviewReceipt }),
       },
     })
   } catch (error) {

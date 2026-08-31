@@ -51,6 +51,17 @@ export function nextWorkspaceMarkdownReviewOpenAction(
   return { baseline: resultSeq, open: review }
 }
 
+/** Retain activation baselines so hidden-session results are not mistaken for history. */
+export class WorkspaceMarkdownReviewOpenTracker {
+  readonly #baselines = new Map<string, number>()
+
+  next(sessionId: string, review: WorkspaceMarkdownReviewOpenTurnData | undefined): { readonly baseline: number; readonly open?: WorkspaceMarkdownReviewOpenTurnData } {
+    const action = nextWorkspaceMarkdownReviewOpenAction(this.#baselines.get(sessionId), review)
+    this.#baselines.set(sessionId, action.baseline)
+    return action
+  }
+}
+
 /** Records successful Host commands by turn; the session-scoped controller decides whether one is live. */
 export function createWorkspaceMarkdownReviewOpenDefinition(): ConversationNodeDefinition<WorkspaceMarkdownReviewOpenState> {
   return {

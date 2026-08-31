@@ -50,7 +50,7 @@ test('renders through the picker child slot and desktop header action without a 
   assert.match(client, /conversation\.input\.overlay/)
   assert.match(client, /accrui-workspace-review-auto-open/)
   assert.match(client, /latestWorkspaceMarkdownReviewOpen/)
-  assert.match(client, /nextWorkspaceMarkdownReviewOpenAction/)
+  assert.match(client, /WorkspaceMarkdownReviewOpenTracker/)
   assert.doesNotMatch(client, /conversation\.chat\.turnTail[\s\S]*AutoOpenFrozenPmdPrd/)
   assert.doesNotMatch(tree, /treeToolbar|在资源管理器中打开工作区|刷新文件树/, 'the tree must not duplicate compact pane-header actions')
   assert.match(tree, /generation\.current\.isCurrent\(requestedGeneration\)/)

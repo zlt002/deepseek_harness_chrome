@@ -45,7 +45,16 @@ async function loadBackground() {
       connectNative: () => ({
         onDisconnect: { addListener: () => {}, removeListener: () => {} },
         onMessage: { addListener: listener => nativeListeners.add(listener), removeListener: listener => nativeListeners.delete(listener) },
-        postMessage: message => { nativeMessages.push(message); if (message.type === 'start') queueMicrotask(() => { for (const listener of nativeListeners) listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-review' } }) }) },
+        postMessage: message => {
+          nativeMessages.push(message)
+          if (message.type === 'start') queueMicrotask(() => { for (const listener of nativeListeners) listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-review' } }) })
+          if (message.type === 'record-pmd-prd-review-adoption') queueMicrotask(() => {
+            for (const listener of nativeListeners) listener({
+              type: 'pmd_prd_review_adoption_recorded', requestId: message.requestId,
+              receipt: 'r'.repeat(32), expiresAt: Date.now() + 60_000,
+            })
+          })
+        },
         disconnect: () => {},
       }),
     },
@@ -167,11 +176,13 @@ test('forwards rewrite and accept only to the review-bound session', async () =>
     await background.open(openReview); background.connect()
     background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'rewrite-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'rewrite' })
     background.portMessage({ v: 1, type: 'markdown-review-session-action-request', requestId: 'accept-1', reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', action: 'accept' })
-    await new Promise(resolve => setTimeout(resolve, 0))
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'accept-1') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.deepEqual(background.responses.find(message => message.requestId === 'rewrite-1').status, 'draft_ready')
     assert.deepEqual(background.responses.find(message => message.requestId === 'accept-1').status, 'processing')
     const actions = background.forwarded.filter(message => message.type === 'markdown-review-session-action-forward/v1')
     assert.deepEqual(actions.map(message => [message.action, message.review.harnessSessionId, message.review.resourceId, message.review.revision, message.review.fingerprint]), [['rewrite', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1'], ['accept', 'session-1', 'resource-1', 'rev-1', 'fingerprint-1']])
+    assert.equal(actions[0].review.pmdReviewReceipt, undefined)
+    assert.equal(actions[1].review.pmdReviewReceipt, 'r'.repeat(32))
   } finally { background.cleanup() }
 })
 

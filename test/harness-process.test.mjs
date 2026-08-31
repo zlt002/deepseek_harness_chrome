@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { claudeSkillsPatch, defaultWorkspacePatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveDefaultWorkspacePlugin, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome } from '../apps/native-server/src/harness-process.mjs'
-import { mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
+import { HarnessWebProcess, claudeSkillsPatch, defaultWorkspacePatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveDefaultWorkspacePlugin, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome, withProductNodeOnPath } from '../apps/native-server/src/harness-process.mjs'
+import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +30,62 @@ test('uses DSH_ROOT as the default Harness working directory', () => {
     resolveHarnessCwd({ DSH_ROOT: harnessRoot }),
     resolve(harnessRoot),
   )
+})
+
+test('puts the Native Host Node runtime first while preserving an existing PATH', () => {
+  assert.deepEqual(
+    withProductNodeOnPath({ PATH: '/usr/bin:/opt/tools', KEEP: 'value' }, '/product/runtime/bin/node'),
+    { PATH: '/product/runtime/bin:/usr/bin:/opt/tools', KEEP: 'value' },
+  )
+})
+
+test('creates a PATH from the Native Host Node runtime when Chrome supplies none', () => {
+  assert.deepEqual(
+    withProductNodeOnPath({ KEEP: 'value' }, '/product/runtime/bin/node'),
+    { KEEP: 'value', PATH: '/product/runtime/bin' },
+  )
+})
+
+test('keeps one product Node directory and normalizes Windows Path casing', () => {
+  assert.deepEqual(
+    withProductNodeOnPath(
+      { Path: 'C:\\Windows\\System32;C:\\PRODUCT\\Runtime\\Bin;C:\\Tools', PATH: 'ignored-on-windows', KEEP: 'value' },
+      'C:\\Product\\Runtime\\Bin\\node.exe',
+      'win32',
+    ),
+    { Path: 'C:\\Product\\Runtime\\Bin;C:\\Windows\\System32;C:\\Tools', KEEP: 'value' },
+  )
+})
+
+test('spawns Harness with its Node runtime available despite Chrome-like PATH', async (t) => {
+  const root = await mkdtemp(resolve(tmpdir(), 'harness-node-path-test-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const cliPath = join(root, 'fake-harness-cli.mjs')
+  const resultPath = join(root, 'bash-result.json')
+  await writeFile(cliPath, `
+import { spawnSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+const node = spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' })
+writeFileSync(process.env.PATH_RESULT_PATH, JSON.stringify({ path: process.env.PATH, status: node.status, stdout: node.stdout, stderr: node.stderr }))
+const server = createServer((_request, response) => response.end('ok'))
+server.listen(0, '127.0.0.1', () => {
+  const address = server.address()
+  console.log(\`dsh web: http://127.0.0.1:\${address.port}\`)
+})
+process.once('SIGTERM', () => server.close(() => process.exit(0)))
+`)
+  const harness = new HarnessWebProcess({
+    cliPath,
+    cwd: root,
+    env: { DSH_HOME: join(root, 'dsh-home'), PATH: '/bin', PATH_RESULT_PATH: resultPath },
+  })
+  t.after(() => harness.stop())
+  await harness.start()
+  const result = JSON.parse(await readFile(resultPath, 'utf8'))
+  assert.equal(result.status, 0)
+  assert.equal(resolve(result.stdout.trim()), resolve(process.execPath))
+  assert.equal(result.path.split(process.platform === 'win32' ? ';' : ':')[0], dirname(process.execPath))
 })
 
 test('resolves the CLI from DSH_ROOT when no explicit CLI path is set', () => {

@@ -20,7 +20,7 @@ export type AnnotationDeliveryStatus = 'sending' | 'queued' | 'processing' | 'ca
 export interface VisualReviewAnnotation {
   id: string
   selection: VisualSelection
-  deliveryStatus: AnnotationDeliveryStatus
+  deliveryStatus: AnnotationDeliveryStatus | 'settled'
   comment?: string
   lastError?: string
 }
@@ -33,6 +33,7 @@ function deliveryLabel(annotation: VisualReviewAnnotation): string {
   if (annotation.deliveryStatus === 'queued') return '已排队，等待当前会话完成'
   if (annotation.deliveryStatus === 'processing') return 'AI 正在处理'
   if (annotation.deliveryStatus === 'candidate') return 'AI 候选已返回，等待审阅'
+  if (annotation.deliveryStatus === 'settled') return '本次局部优化已结算'
   if (annotation.deliveryStatus === 'failed') return `提交给 AI 失败${annotation.lastError === undefined ? '' : `：${annotation.lastError}`}`
   return '已提交给 AI'
 }

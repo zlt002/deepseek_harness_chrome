@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
 import { redactSensitiveDiagnostic } from './redact.mjs'
@@ -57,6 +57,31 @@ export function resolveHarnessCwd(env = process.env) {
   const root = env.DSH_ROOT?.trim()
   if (root) return resolve(root)
   return resolve(THIS_DIR, '../../..')
+}
+
+/**
+ * Add the Native Host's own Node runtime to the child Harness PATH. Native
+ * Messaging launches inherit Chrome's sparse environment, which often omits
+ * the directory containing the Node executable that already runs this Host.
+ * The model-facing bash tool inherits this value through the subprocess seam.
+ * @param {NodeJS.ProcessEnv} env - Native Host environment.
+ * @param {string} nodeExecutable - executable currently running the Native Host.
+ * @param {NodeJS.Platform} platform - target platform for PATH semantics.
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function withProductNodeOnPath(env = process.env, nodeExecutable = process.execPath, platform = process.platform) {
+  const isWindows = platform === 'win32'
+  const nodeDirectory = isWindows ? win32.dirname(nodeExecutable) : dirname(nodeExecutable)
+  const pathEntries = Object.entries(env).filter(([key]) => !isWindows || key.toUpperCase() !== 'PATH')
+  const existingPath = Object.entries(env).find(([key]) => isWindows ? key.toUpperCase() === 'PATH' : key === 'PATH')?.[1] ?? ''
+  const delimiter = isWindows ? ';' : ':'
+  const normalize = (value) => isWindows ? value.toLowerCase() : value
+  const inheritedDirectories = existingPath.split(delimiter)
+    .filter((directory) => directory.length > 0 && normalize(directory) !== normalize(nodeDirectory))
+  const pathKey = isWindows
+    ? Object.keys(env).find((key) => key.toUpperCase() === 'PATH') ?? 'Path'
+    : 'PATH'
+  return Object.fromEntries([...pathEntries, [pathKey, [nodeDirectory, ...inheritedDirectories].join(delimiter)]])
 }
 
 /** Resolve the product-owned AccrUI tracking plugin in source and packages. */
@@ -398,7 +423,7 @@ export class HarnessWebProcess {
     const child = spawn(process.execPath, [this.cliPath, ...harnessArgs(this.port, patchPath, this.extraPatchPaths)], {
       cwd: this.cwd,
       env: {
-        ...this.env,
+        ...withProductNodeOnPath(this.env),
         // Native stdout is reserved for framed messages. The child is piped,
         // but disabling telemetry keeps the development process deterministic.
         DSH_TELEMETRY_DISABLED: this.env.DSH_TELEMETRY_DISABLED ?? '1',

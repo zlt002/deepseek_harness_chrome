@@ -16,6 +16,28 @@ test('forwards only validated PRD events to the durable tracker', async () => {
   tracker.stop()
 })
 
+test('issues a PMD review receipt only through the active Connector Run', () => {
+  const messages = []
+  const host = new NativeHost({ exit: () => {} })
+  host.send = (message) => messages.push(message)
+  host.currentRunId = 'run-review-1'
+  host.connector = {
+    recordPmdPrdReviewAdoption: (payload) => payload.runId === 'run-review-1'
+      ? { receipt: 'r'.repeat(32), expiresAt: Date.now() + 60_000 }
+      : undefined,
+  }
+  const payload = {
+    harnessSessionId: 'session-1', reviewId: 'review-1', resourceId: 'resource-1',
+    displayPath: 'pmd-workspace/spec/REQ_PRD.md', revision: 'revision-1',
+    fingerprint: 'a'.repeat(64), contentHash: 'b'.repeat(64),
+  }
+  assert.equal(host.recordPmdPrdReviewAdoption('request-review-1', payload), true)
+  assert.equal(messages.at(-1).type, 'pmd_prd_review_adoption_recorded')
+  assert.equal(messages.at(-1).receipt, 'r'.repeat(32))
+  assert.equal(host.recordPmdPrdReviewAdoption('short', payload), false)
+  assert.equal(messages.at(-1).type, 'pmd_prd_review_adoption_failed')
+})
+
 test('signs only an exact, short-lived Prototype Studio recovery assertion with a Host-private key', () => {
   const host = new NativeHost({
     processFactory: () => ({ start: async () => 'http://127.0.0.1:48127', stop: async () => {} }),
@@ -42,6 +64,22 @@ test('signs only an exact, short-lived Prototype Studio recovery assertion with 
   assert.equal(verify(null, bytes, key, Buffer.from(signed.signature, 'base64url')), true)
   assert.equal(host.signPrototypeRecovery('request-recovery-2', { ...payload, expectedRecoveryEpoch: -1 }), false)
   assert.equal(messages.at(-1).type, 'prototype_recovery_sign_failed')
+})
+
+test('records only a bounded current-run Markdown Review adoption receipt', async () => {
+  const recorded = []
+  const host = new NativeHost({ exit: () => {} })
+  host.currentRunId = 'run-adoption'
+  host.connector = { recordPmdPrdReviewAdoption(value) { recorded.push(value); return { receipt: 'r'.repeat(32), expiresAt: Date.now() + 60_000 } } }
+  const messages = []
+  host.send = (message) => messages.push(message)
+  await host.handle({ type: 'record-pmd-prd-review-adoption', requestId: 'request-adoption-1', payload: {
+    harnessSessionId: 'session-1', reviewId: 'review-1', resourceId: 'resource-1', displayPath: 'pmd/REQ_PRD.md', revision: 'revision-1', fingerprint: 'a'.repeat(64), contentHash: 'b'.repeat(64),
+  } })
+  assert.deepEqual(recorded, [{ runId: 'run-adoption', harnessSessionId: 'session-1', reviewId: 'review-1', resourceId: 'resource-1', displayPath: 'pmd/REQ_PRD.md', revision: 'revision-1', fingerprint: 'a'.repeat(64), contentHash: 'b'.repeat(64) }])
+  assert.equal(messages.at(-1).type, 'pmd_prd_review_adoption_recorded')
+  await host.handle({ type: 'record-pmd-prd-review-adoption', requestId: 'request-adoption-2', payload: { bad: true } })
+  assert.equal(messages.at(-1).type, 'pmd_prd_review_adoption_failed')
 })
 
 test('returns the Harness Web URL for repeated start requests and exits on close', async () => {

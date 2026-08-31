@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 import { TeamDocRecordStore } from '../apps/native-server/src/team-doc-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from '../apps/native-server/src/team-knowledge-batch-record-store.mjs'
@@ -85,7 +86,7 @@ async function open(responder, responseTarget = (request) => request.browserTarg
   } })
   connector.bindBrowserTarget('batch-run', target)
   const endpoint = await connector.start()
-  const callTool = async (name, id, arguments_) => (await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_ } }), signal: AbortSignal.timeout(5_000) })).json()
+  const callTool = async (name, id, arguments_, meta) => (await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_, ...(meta === undefined ? {} : { _meta: meta }) } }), signal: AbortSignal.timeout(5_000) })).json()
   const call = (id, arguments_) => {
     const { action, parentFingerprint: _parentFingerprint, ...toolArguments } = arguments_
     const name = action === 'preview' ? 'team_knowledge_batch_preview' : action === 'create' ? 'team_knowledge_batch_create' : `team_knowledge_batch_${String(action)}`
@@ -96,6 +97,15 @@ async function open(responder, responseTarget = (request) => request.browserTarg
 
 async function preview(harness, batchId, items = documents, id = 1) { return harness.call(id, { action: 'preview', batchId, items }) }
 async function create(harness, batchId, challenge, id = 2) { return harness.call(id, { action: 'create', batchId, challenge }) }
+function issuePmdReviewReceipt(harness, body, sessionId = 'pmd-session') {
+  const issued = harness.connector.recordPmdPrdReviewAdoption({
+    runId: 'batch-run', harnessSessionId: sessionId, reviewId: 'review-1', resourceId: 'resource-1',
+    displayPath: 'pmd-workspace/spec/req-crm/REQ_CRM_PRD.md', revision: 'revision-1',
+    fingerprint: 'a'.repeat(64), contentHash: createHash('sha256').update(body).digest('hex'),
+  })
+  assert.equal(typeof issued?.receipt, 'string')
+  return issued.receipt
+}
 
 test('publishes, creates, reports status, and stores a body-free batch of light documents', async () => {
   let creates = 0
@@ -107,7 +117,7 @@ test('publishes, creates, reports status, and stores a body-free batch of light 
     const createTool = tools.find((candidate) => candidate.name === 'team_knowledge_batch_create')
     assert.equal(tools.some((candidate) => candidate.name === 'team_knowledge_batch'), false)
     assert.equal(tools.some((candidate) => candidate.name === 'team_knowledge_batch_status'), false)
-    assert.deepEqual(harnessProjectedArguments(previewTool.inputSchema), { required: ['batchId', 'items'], properties: ['batchId', 'items'] })
+    assert.deepEqual(harnessProjectedArguments(previewTool.inputSchema), { required: ['batchId', 'items'], properties: ['batchId', 'items', 'pmdReviewReceipt'] })
     assert.deepEqual(previewTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
     assert.equal(previewTool.inputSchema.properties.items.maxItems, 10)
     assert.deepEqual(harnessProjectedArguments(createTool.inputSchema), { required: ['batchId', 'challenge'], properties: ['batchId', 'challenge'] })
@@ -357,10 +367,47 @@ test('accepts a PMD batch only when the single PRD structure is complete', async
   let inspections = 0
   const harness = await open((request) => { inspections += 1; return request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1') })
   try {
-    const response = await preview(harness, 'pmd:req-crm-valid', [{ name: 'req_crm_PRD', body: prdBody }])
+    const items = [{ name: 'req_crm_PRD', body: prdBody }]
+    const missing = await preview(harness, 'pmd:req-crm-valid', items)
+    assert.equal(missing.result.isError, true)
+    assert.match(missing.result.content[0].text, /pmd_prd_review_receipt_required/)
+    const receipt = issuePmdReviewReceipt(harness, prdBody)
+    const response = await harness.callTool('team_knowledge_batch_preview', 2, { batchId: 'pmd:req-crm-valid', items, pmdReviewReceipt: receipt }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
     assert.equal(response.result.isError, undefined)
     assert.equal(typeof response.result.structuredContent.challenge, 'string')
     assert.equal(inspections, 1)
+    const inspection = harness.requests.find((request) => request.action === 'inspect_parent' && request.batchId === 'pmd:req-crm-valid')
+    assert.deepEqual(inspection.pmdReviewAdoption, {
+      harnessSessionId: 'pmd-session', reviewId: 'review-1', resourceId: 'resource-1', displayPath: 'pmd-workspace/spec/req-crm/REQ_CRM_PRD.md', revision: 'revision-1', fingerprint: 'a'.repeat(64), contentHash: createHash('sha256').update(prdBody).digest('hex'),
+    })
+    const replay = await harness.callTool('team_knowledge_batch_preview', 3, { batchId: 'pmd:req-crm-valid', items, pmdReviewReceipt: receipt }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
+    assert.equal(replay.result.isError, true)
+    assert.match(replay.result.content[0].text, /missing_or_already_used/)
+  } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
+})
+
+test('rejects a PMD receipt when the adopted body or Harness session changes', async () => {
+  const prdBody = await authoritativePmdBody()
+  const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
+  try {
+    const changed = await harness.callTool('team_knowledge_batch_preview', 1, {
+      batchId: 'pmd:receipt-content-change', items: [{ name: 'REQ_PRD', body: `${prdBody}\n` }], pmdReviewReceipt: issuePmdReviewReceipt(harness, prdBody),
+    }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
+    assert.equal(changed.result.isError, true)
+    assert.match(changed.result.content[0].text, /pmd_prd_review_receipt_content_changed/)
+    const crossSession = await harness.callTool('team_knowledge_batch_preview', 2, {
+      batchId: 'pmd:receipt-session-change', items: [{ name: 'REQ_PRD', body: prdBody }], pmdReviewReceipt: issuePmdReviewReceipt(harness, prdBody),
+    }, { 'io.deepseek.harness/sessionId': 'another-session' })
+    assert.equal(crossSession.result.isError, true)
+    assert.match(crossSession.result.content[0].text, /pmd_prd_review_receipt_session_changed/)
+    const expiredReceipt = issuePmdReviewReceipt(harness, prdBody)
+    const expiredGrant = harness.connector.pmdPrdReviewReceipts.get(expiredReceipt)
+    harness.connector.pmdPrdReviewReceipts.set(expiredReceipt, { ...expiredGrant, expiresAt: Date.now() - 1 })
+    const expired = await harness.callTool('team_knowledge_batch_preview', 3, {
+      batchId: 'pmd:receipt-expired', items: [{ name: 'REQ_PRD', body: prdBody }], pmdReviewReceipt: expiredReceipt,
+    }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
+    assert.equal(expired.result.isError, true)
+    assert.match(expired.result.content[0].text, /pmd_prd_review_receipt_expired/)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
@@ -373,7 +420,9 @@ test('reports a body-free online-document event only after a PMD Verified Write'
     { reportPrdEvent: async (event) => { events.push(event) } },
   )
   try {
-    const plan = await preview(harness, 'pmd:req-telemetry', [{ name: 'REQ_CRM_PRD', body: prdBody }])
+    const items = [{ name: 'REQ_CRM_PRD', body: prdBody }]
+    const receipt = issuePmdReviewReceipt(harness, prdBody)
+    const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'pmd:req-telemetry', items, pmdReviewReceipt: receipt }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
     const result = await create(harness, 'pmd:req-telemetry', plan.result.structuredContent.challenge)
     assert.equal(result.result.structuredContent.status, 'verified_write', JSON.stringify(result))
     assert.equal(events.length, 1)

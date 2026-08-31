@@ -1098,10 +1098,20 @@ function validTeamKnowledgeBatchItems(items) {
 function validTeamKnowledgeBatchArguments(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.action !== 'string') return false
   const keys = Object.keys(args)
-  if (args.action === 'preview') return (keys.length === 3 || keys.length === 4) && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
+  if (args.action === 'preview') return (keys.length === 3 || keys.length === 4 || keys.length === 5) && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
     && (args.parentFingerprint === undefined || typeof args.parentFingerprint === 'string' && args.parentFingerprint.length > 0 && args.parentFingerprint.length <= 256) && validTeamKnowledgeBatchItems(args.items)
+    && (args.pmdReviewReceipt === undefined || typeof args.pmdReviewReceipt === 'string' && /^[A-Za-z0-9_-]{16,256}$/.test(args.pmdReviewReceipt))
   return args.action === 'create' && keys.length === 3 && typeof args.batchId === 'string' && args.batchId.trim().length > 0 && args.batchId.length <= 128
     && typeof args.challenge === 'string' && args.challenge.length > 0 && args.challenge.length <= 256
+}
+const PMD_PRD_REVIEW_RECEIPT_TTL_MS = 5 * 60 * 1000
+function validPmdPrdReviewAdoption(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && ['runId', 'harnessSessionId', 'reviewId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'contentHash'].every(key => typeof value[key] === 'string')
+    && /^[A-Za-z0-9._:-]{1,160}$/.test(value.runId) && /^[A-Za-z0-9._:-]{1,160}$/.test(value.harnessSessionId)
+    && /^[A-Za-z0-9._:-]{1,160}$/.test(value.reviewId) && /^[A-Za-z0-9._:-]{1,160}$/.test(value.resourceId)
+    && typeof value.displayPath === 'string' && value.displayPath.length > 0 && value.displayPath.length <= 2048
+    && /^[A-Za-z0-9._:-]{1,160}$/.test(value.revision) && /^[a-f0-9]{64}$/i.test(value.fingerprint) && /^[a-f0-9]{64}$/i.test(value.contentHash)
 }
 function teamKnowledgeBatchFingerprint(items) {
   return hash(JSON.stringify(items.map((item) => ({ name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
@@ -1367,6 +1377,7 @@ export class BrowserConnector {
     this.teamDocStore = options.teamDocStore ?? new TeamDocRecordStore()
     this.teamKnowledgeBatchStore = options.teamKnowledgeBatchStore ?? new TeamKnowledgeBatchRecordStore()
     this.teamKnowledgeBatchChallenges = new Map()
+    this.pmdPrdReviewReceipts = new Map()
     this.teamKnowledgeBatchLocks = new Map()
     this.officeDocumentChallenges = new Map()
     this.spreadsheetChallenges = new Map()
@@ -1427,6 +1438,7 @@ export class BrowserConnector {
     this.htmlWorkbenchWriteLocks.clear()
     this.uncertainSelectionWrite = undefined
     this.teamKnowledgeBatchChallenges.clear()
+    this.pmdPrdReviewReceipts.clear()
     this.runTargets.clear()
     const server = this.server
     this.server = undefined
@@ -1451,6 +1463,7 @@ export class BrowserConnector {
       this.htmlWorkbenchChallenges.clear()
       this.htmlWorkbenchWriteLocks.clear()
       this.teamKnowledgeBatchChallenges.clear()
+      this.pmdPrdReviewReceipts.clear()
       this.uncertainSelectionWrite = undefined
     }
     if (registered.targetChanged) this.uncertainSelectionWrite = undefined
@@ -1461,6 +1474,27 @@ export class BrowserConnector {
   bindBrowserTarget(runId, browserTarget, browserTargets, unavailableBrowserTargets) {
     if (!validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowserTargets)) return false
     return this.registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+  }
+
+  /** Store authority emitted only after the visual Markdown Review has re-read the adopted file. */
+  recordPmdPrdReviewAdoption(adoption) {
+    if (!validPmdPrdReviewAdoption(adoption) || this.runTargets.currentRunId !== adoption.runId) return undefined
+    for (const [receipt, value] of this.pmdPrdReviewReceipts) if (value.expiresAt < Date.now()) this.pmdPrdReviewReceipts.delete(receipt)
+    const receipt = randomBytes(32).toString('base64url')
+    const expiresAt = Date.now() + PMD_PRD_REVIEW_RECEIPT_TTL_MS
+    this.pmdPrdReviewReceipts.set(receipt, Object.freeze({ ...adoption, receipt, expiresAt }))
+    return { receipt, expiresAt }
+  }
+
+  #consumePmdPrdReviewReceipt(receipt, runId, identity, items) {
+    if (typeof receipt !== 'string') throw new Error('pmd_prd_review_receipt_required')
+    const grant = this.pmdPrdReviewReceipts.get(receipt)
+    if (!grant) throw new Error('pmd_prd_review_receipt_missing_or_already_used')
+    if (grant.expiresAt < Date.now()) { this.pmdPrdReviewReceipts.delete(receipt); throw new Error('pmd_prd_review_receipt_expired') }
+    if (grant.runId !== runId || identity?.sessionId !== grant.harnessSessionId) throw new Error('pmd_prd_review_receipt_session_changed')
+    if (items.length !== 1 || hash(items[0].body) !== grant.contentHash) throw new Error('pmd_prd_review_receipt_content_changed')
+    this.pmdPrdReviewReceipts.delete(receipt)
+    return grant
   }
 
   /** Accept one correlated response received from the Extension peer. */
@@ -2373,8 +2407,9 @@ export class BrowserConnector {
     if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
     const existingBatch = await this.teamKnowledgeBatchStore.load(args.batchId)
     const lease = existingBatch && existingBatch.status !== 'completed' ? 'reuse' : 'acquire'
+    let pmdReviewAdoption
     const inspectParent = async () => {
-      const request = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: args.batchId, lease }
+      const request = { type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget: target, tool: 'team_knowledge_batch', action: 'inspect_parent', batchId: args.batchId, lease, ...(pmdReviewAdoption === undefined ? {} : { pmdReviewAdoption }) }
       const resolved = await this.#requestExtension(request); const result = resolved.teamKnowledgeItem
       if (validTeamKnowledgeItemResult(result) && result.status === 'partial_delivery' && result.failedAt === 'inspect') throw new Error(teamDocInspectFailureText(result))
       if (!validTeamKnowledgeItemResult(result) || result.status !== 'ok' || !validTeamKnowledgeParent(result.parent)) throw new Error('Extension peer returned an invalid Team Knowledge batch parent')
@@ -2385,6 +2420,10 @@ export class BrowserConnector {
       if (args.action === 'preview') {
         const templateFailure = pmdBatchTemplateFailure(args.batchId, args.items)
         if (templateFailure) throw new Error(`pmd_prd_template_invalid: ${templateFailure}`)
+        if (args.batchId.startsWith('pmd:')) {
+          const grant = this.#consumePmdPrdReviewReceipt(args.pmdReviewReceipt, runId, identity, args.items)
+          pmdReviewAdoption = { harnessSessionId: grant.harnessSessionId, reviewId: grant.reviewId, resourceId: grant.resourceId, displayPath: grant.displayPath, revision: grant.revision, fingerprint: grant.fingerprint, contentHash: grant.contentHash }
+        }
         const contentFingerprint = teamKnowledgeBatchFingerprint(args.items)
         const inspected = await inspectParent(); const parent = inspected.result.parent
         if (args.parentFingerprint !== undefined && parent.fingerprint !== args.parentFingerprint) throw new Error('Team Knowledge parent changed; inspect and confirm the directory again.')

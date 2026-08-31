@@ -15,7 +15,7 @@ import {
   type PreparedWrite,
 } from './protocol'
 import { reduceReviewState, type ReviewState } from './review-state'
-import { adoptionBlockedReason, beginCommit, isCurrentCommit, settleCommit, shouldProtectLocalReviewWork, type CommitAttempt } from './review-state-safety'
+import { adoptionBlockedReason, beginCommit, isCurrentCommit, pendingAnnotationCount, settleCommit, shouldProtectLocalReviewWork, type CommitAttempt } from './review-state-safety'
 import { VisualMarkdownEditor, type VisualMarkdownEditorHandle, type VisualReviewAnnotation } from './visual-markdown-editor'
 import type { VisualSelection } from './visual-selection'
 import { MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS } from './delivery-timeouts'
@@ -86,6 +86,7 @@ function App(): React.JSX.Element {
   const annotationSelectionsRef = useRef(new Map<string, VisualSelection>())
   const annotationsRef = useRef<LocalAnnotation[]>([])
   const candidateReviewActiveRef = useRef(false)
+  const activeCandidateSelectionIdRef = useRef<string | undefined>(undefined)
   const preparedWriteRef = useRef<PreparedWriteState | undefined>(undefined)
   const commitRef = useRef<CommitAttempt | undefined>(undefined)
   const sidePanelWindowIdRef = useRef<number | undefined>(undefined)
@@ -169,6 +170,7 @@ function App(): React.JSX.Element {
       if (draftRef.current !== snapshot.content) {
         setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：本地草稿已变化。重新选择后再请求。`)
       } else if (editor.reviewCandidateMarkdown(proposal.candidateMarkdown)) {
+        activeCandidateSelectionIdRef.current = proposal.selectionId
         setActiveDiff({ before: snapshot.content, after: proposal.candidateMarkdown })
         setProposalNotice(`AI 候选待审阅：${proposal.summary}`)
       }
@@ -179,6 +181,7 @@ function App(): React.JSX.Element {
     if (saved === undefined || saved.editorRevision !== proposal.editorRevision || saved.from !== proposal.from || saved.to !== proposal.to) {
       setProposalNotice(`AI 候选“${proposal.summary}”未覆盖：选区已变化，请重新选择后再请求。`)
     } else if (editor.reviewSelectionReplacement(saved, proposal.replacementMarkdown)) {
+      activeCandidateSelectionIdRef.current = proposal.selectionId
       setActiveDiff({ before: reviewQuoteFor(saved), after: proposal.replacementMarkdown })
       setProposalNotice(`AI 针对当前选区的候选待审阅：${proposal.summary}`)
     } else {
@@ -236,6 +239,7 @@ function App(): React.JSX.Element {
           annotationSelectionsRef.current.clear()
           setCandidateReviewActive(false)
           candidateReviewActiveRef.current = false
+          activeCandidateSelectionIdRef.current = undefined
           setAnnotations([])
           annotationsRef.current = []
           setActiveDiff(undefined)
@@ -452,11 +456,12 @@ function App(): React.JSX.Element {
   const acceptBlockedReason = adoptionBlockedReason({
     snapshotContent: snapshot?.content,
     editorMarkdown: draft,
-    annotationCount: annotations.length,
+    annotationCount: pendingAnnotationCount(annotations),
     candidateReviewActive,
     preparedWrite: preparedWrite !== undefined,
     committing,
     externalUpdatePending,
+    truncated: snapshot?.truncated === true,
   })
   const onMarkdownChange = useCallback((markdown: string) => {
     draftRef.current = markdown
@@ -504,11 +509,12 @@ function App(): React.JSX.Element {
       const blocked = adoptionBlockedReason({
         snapshotContent: activeSnapshot.content,
         editorMarkdown: syncEditorMarkdown(),
-        annotationCount: annotationsRef.current.length,
+        annotationCount: pendingAnnotationCount(annotationsRef.current),
         candidateReviewActive: candidateReviewActiveRef.current,
         preparedWrite: preparedWriteRef.current !== undefined,
         committing: commitRef.current !== undefined,
         externalUpdatePending,
+        truncated: activeSnapshot.truncated,
       })
       if (blocked !== undefined) { setProposalNotice(blocked); return }
     }
@@ -583,6 +589,13 @@ function App(): React.JSX.Element {
     syncEditorMarkdown()
     setCandidateReviewActive(false)
     candidateReviewActiveRef.current = false
+    const selectionId = activeCandidateSelectionIdRef.current
+    activeCandidateSelectionIdRef.current = undefined
+    if (selectionId !== undefined) setAnnotations((items) => {
+      const next = items.map(item => item.id === selectionId ? { ...item, deliveryStatus: 'settled' as const, lastError: undefined } : item)
+      annotationsRef.current = next
+      return next
+    })
     setActiveDiff(undefined)
     setProposalNotice('已接受 AI 修改；当前内容仍是本地草稿，尚未写入文件。')
     queueMicrotask(applyQueuedProposal)
@@ -595,6 +608,13 @@ function App(): React.JSX.Element {
     syncEditorMarkdown()
     setCandidateReviewActive(false)
     candidateReviewActiveRef.current = false
+    const selectionId = activeCandidateSelectionIdRef.current
+    activeCandidateSelectionIdRef.current = undefined
+    if (selectionId !== undefined) setAnnotations((items) => {
+      const next = items.map(item => item.id === selectionId ? { ...item, deliveryStatus: 'settled' as const, lastError: undefined } : item)
+      annotationsRef.current = next
+      return next
+    })
     setActiveDiff(undefined)
     setProposalNotice('已拒绝 AI 修改。')
     queueMicrotask(applyQueuedProposal)

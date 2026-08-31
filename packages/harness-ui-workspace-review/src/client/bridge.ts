@@ -79,6 +79,7 @@ export interface WorkspaceReviewSessionAction {
   readonly displayPath: string
   readonly revision: string
   readonly fingerprint: string
+  readonly pmdReviewReceipt?: string
 }
 
 export interface WorkspaceReviewSessionActionDelivery {
@@ -179,10 +180,11 @@ function boundedId(value: unknown): value is string {
 function sessionAction(value: unknown): value is WorkspaceReviewSessionAction {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const item = value as Record<string, unknown>
-  return Object.keys(item).length === 7 && Object.keys(item).every(key => ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'revision', 'fingerprint'].includes(key))
+  return Object.keys(item).length >= 7 && Object.keys(item).length <= 8 && Object.keys(item).every(key => ['action', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'pmdReviewReceipt'].includes(key))
     && (item.action === 'rewrite' || item.action === 'accept')
     && ['reviewId', 'harnessSessionId', 'resourceId', 'revision', 'fingerprint'].every(key => boundedId(item[key]))
     && typeof item.displayPath === 'string' && item.displayPath.trim() !== '' && item.displayPath.length <= 2_048
+    && (item.action === 'rewrite' ? item.pmdReviewReceipt === undefined : boundedId(item.pmdReviewReceipt))
 }
 
 function visualTable(value: unknown): value is VisualMarkdownReviewTableContext {

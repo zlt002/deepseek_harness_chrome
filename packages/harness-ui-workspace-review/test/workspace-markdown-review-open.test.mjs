@@ -17,12 +17,23 @@ vm.runInNewContext(compiled, {
 const {
   createWorkspaceMarkdownReviewOpenDefinition,
   nextWorkspaceMarkdownReviewOpenAction,
+  WorkspaceMarkdownReviewOpenTracker,
 } = module.exports
 const turnStart = { type: 'turn/start', seq: 9, time: 89, data: { turn: 3 } }
 const call = { type: 'tool/call', seq: 10, time: 90, data: { turn: 3, callId: 'open-1', name: 'open_workspace_markdown_review', arguments: JSON.stringify({ path: 'pmd-workspace/spec/req-1/req-1_PRD.md' }) } }
 const successfulResult = (time, surfaceOp = 'append') => ({
   type: 'tool/result', seq: 11, time, surfaceOp,
   data: { turn: 3, message: { source: { callId: 'open-1' }, content: [{ isError: false }] } },
+})
+
+test('an activated session opens a late result once after returning, while cold history stays closed', () => {
+  const tracker = new WorkspaceMarkdownReviewOpenTracker()
+  const old = { path: 'spec/old.md', resultSeq: 10 }
+  const late = { path: 'spec/late.md', resultSeq: 20 }
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-a', old))), { baseline: 10 })
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-b', { path: 'spec/history.md', resultSeq: 99 }))), { baseline: 99 })
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-a', late))), { baseline: 20, open: late })
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-b', { path: 'spec/history.md', resultSeq: 99 }))), { baseline: 99 })
 })
 
 test('a successful review-open command publishes the automatic review marker', () => {

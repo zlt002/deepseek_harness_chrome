@@ -100,11 +100,11 @@ node <pmd-prd-skill-root>/scripts/validate-deliverables.mjs --prd <prd-frozen-pa
 
 只有该命令以 0 退出，才调用 `open_workspace_markdown_review({ path: <prd-frozen-relative-path> })`；`path` 必须是相对当前 Harness 会话 cwd 的冻结产物 `.md` 路径，不能传绝对路径、`..` 或其他文件类型。该工具会自动在左侧打开同一份冻结 `.md` 的现有 Markdown Review，并绑定当前 `/pmd-prd` 会话；只复用其中已有的“采纳、重写、局部优化、接受/拒绝修改”，不在侧边栏新增审核操作。用户点击 Markdown Review 的“采纳”后，原会话才收到继续交付的意图；在此之前不得进入阶段 6、绑定父节点或写远程。
 
-重写或局部优化始终回到同一 `/pmd-prd` 会话：更新同一冻结 PRD 文件，再次运行校验，成功后再次调用 `open_workspace_markdown_review` 刷新左侧审核。Markdown Review 的采纳会附带 `accepted_revision` 和 `accepted_fingerprint`；阶段 6 前必须重新读取同一冻结文件、再次运行校验，并确认当前 fingerprint/hash 与该采纳值一致。任一正文、fingerprint 或 hash 变化都会使旧采纳失效；不得把旧采纳用于阶段 6。校验失败或版本不一致时停止在阶段 5，修正文档并重新冻结、校验和审核；不从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。完成条件：一份完整正文快照、规范文件名和校验结果均冻结，且当前 fingerprint/hash 已在 Markdown Review 中被采纳。
+重写或局部优化始终回到同一 `/pmd-prd` 会话：更新同一冻结 PRD 文件，再次运行校验，成功后再次调用 `open_workspace_markdown_review` 刷新左侧审核。Markdown Review 的采纳会附带 `accepted_revision`、`accepted_fingerprint` 和 Native Host 签发的短时一次性 `pmdReviewReceipt`；阶段 6 前必须重新读取同一冻结文件、再次运行校验，并确认当前 fingerprint/hash 与该采纳值一致。调用 `team_knowledge_batch_preview` 的 `pmd:` 批次时，必须传入该 `pmdReviewReceipt`，由 Host 核验同一 Harness 会话、同一工作区资源、revision、fingerprint 与正文 hash；只靠 `/pmd-prd` 文本、正则、手输相同正文或历史采纳都不能通过。正文变化、过期、重放或跨会话都会使旧采纳失效。校验失败或版本不一致时停止在阶段 5，修正文档并重新冻结、校验和审核；不从 `process.md`、`domain-model.md`、`knowledge-sources.md`、trace 或其他本地 Markdown 重新拼接。完成条件：一份完整正文快照、规范文件名和校验结果均冻结，且当前 fingerprint/hash 已在 Markdown Review 中被采纳。
 
 ### 阶段 6：PRD 预览与父节点确认
 
-请用户在 Chrome 手动打开目标目录或可创建子项的轻文档父级。运行时依据内部 `requirementId` 生成并持久化稳定的 `batchId`，其值严格为 `pmd:${requirementId}`（`requirementId` 最长 64 字符，因此 `batchId` 最长 68 字符）；用户不得填写，所有恢复和重试沿用它。调用 `mcp__chrome__team_knowledge_batch_preview`，只传该 `batchId` 与阶段 5 冻结的恰好一项 PRD（`{name, body}`）；正文只能来自已确认快照。Preview 会检查当前 Browser Target 和可创建父节点，冻结父 fingerprint、Target/content fingerprints 和 content hash，并返回一次性 `challenge` 与 `expiresAt`；此步骤不创建或修改线上文档。Preview 成功后只询问一次是否在回显的父节点下创建该 PRD；用户拒绝、父节点不一致、权限不足或检查失败时停止。完成条件：PRD preview 成功，且用户完成这一次创建确认。
+请用户在 Chrome 手动打开目标目录或可创建子项的轻文档父级。运行时依据内部 `requirementId` 生成并持久化稳定的 `batchId`，其值严格为 `pmd:${requirementId}`（`requirementId` 最长 64 字符，因此 `batchId` 最长 68 字符）；用户不得填写，所有恢复和重试沿用它。调用 `mcp__chrome__team_knowledge_batch_preview`，只传该 `batchId`、阶段 5 冻结的恰好一项 PRD（`{name, body}`）以及本次采纳得到的 `pmdReviewReceipt`；正文只能来自已确认快照。Preview 会检查当前 Browser Target 和可创建父节点，冻结父 fingerprint、Target/content fingerprints 和 content hash，并返回一次性 `challenge` 与 `expiresAt`；此步骤不创建或修改线上文档。Preview 成功后只询问一次是否在回显的父节点下创建该 PRD；用户拒绝、父节点不一致、权限不足或检查失败时停止。完成条件：PRD preview 成功，且用户完成这一次创建确认。
 
 ### 阶段 7：创建与回读
 
