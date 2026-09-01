@@ -3,12 +3,24 @@ export interface SessionRunSnapshot {
   queue: readonly unknown[]
 }
 
+export interface RestoredSessionRunLifecycle {
+  observedActivity: boolean
+}
+
 /** Product-side state for one Browser Target captured before a session starts running. */
 export class BrowserTargetSessionRunLock {
   accepted = false
   observedActivity = false
 
   constructor(readonly submissionId: string) {}
+
+  /** Recreate an acknowledged lock without mistaking an initial idle snapshot for completion. */
+  static restore(submissionId: string, lifecycle: RestoredSessionRunLifecycle): BrowserTargetSessionRunLock {
+    const lock = new BrowserTargetSessionRunLock(submissionId)
+    lock.accepted = true
+    lock.observedActivity = lifecycle.observedActivity
+    return lock
+  }
 
   accept(snapshot: SessionRunSnapshot): boolean {
     this.accepted = true

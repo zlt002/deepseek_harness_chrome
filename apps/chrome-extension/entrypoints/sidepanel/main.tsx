@@ -16,10 +16,10 @@ interface HarnessResponse { ok: boolean; url?: string; error?: string }
 interface SidePanelHandoffResponse { ok: boolean; sessionId?: string; tabId?: number; nonce?: string; error?: string }
 interface BrowserTarget { browser: 'chrome'; windowId: number; tabId: number; url: string }
 interface BrowserTargetTab extends BrowserTarget { title: string; favIconUrl?: string }
-interface LockedRunTarget { sessionId: string; submissionId: string; target: BrowserTargetTab }
+interface LockedRunTarget { sessionId: string; submissionId: string; target: BrowserTargetTab; observedActivity: boolean }
 interface BrowserTargetSettings { mode: BrowserTargetMode; pinnedTabs: BrowserTarget[]; primaryTabId?: number }
 interface BrowserTargetSettingsResponse { ok: boolean; settings?: BrowserTargetSettings; tabs?: BrowserTargetTab[]; error?: string }
-interface ActiveBrowserTargetLockResponse { ok: boolean; lock?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown }; locks?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown }[]; error?: string }
+interface ActiveBrowserTargetLockResponse { ok: boolean; lock?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown; observedActivity?: unknown }; locks?: { sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown; observedActivity?: unknown }[]; error?: string }
 interface DesignReferenceCaptureResponse { ok: boolean; referenceId?: string; error?: string }
 interface RecentPrototypeStudio { projectId: string; referenceId: string; referenceTitle?: string; referenceUrl?: string; projectName?: string; currentRevisionId?: string; revisionCount?: number; updatedAt: number; authorizationActive: boolean; boundToCurrentSession?: boolean }
 interface RecentPrototypeStudiosResponse { ok: boolean; projects?: RecentPrototypeStudio[]; error?: string }
@@ -95,7 +95,7 @@ export class BrowserTargetRunLockProjection {
   }
 
   start(sessionId: string, submissionId: string, target: BrowserTargetTab): void {
-    this.#pendingBySubmission.set(submissionId, { sessionId, submissionId, target })
+    this.#pendingBySubmission.set(submissionId, { sessionId, submissionId, target, observedActivity: false })
   }
 
   acknowledge(sessionId: string, submissionId: string, locked: boolean): LockedRunTarget[] {
@@ -116,6 +116,12 @@ export class BrowserTargetRunLockProjection {
   reconcile(sessionId: string, submissionId: string): LockedRunTarget[] {
     if (this.#pendingBySubmission.get(submissionId)?.sessionId === sessionId) this.#pendingBySubmission.delete(submissionId)
     if (this.#currentBySubmission.get(submissionId)?.sessionId === sessionId) this.#currentBySubmission.delete(submissionId)
+    return this.#current()
+  }
+
+  observe(sessionId: string, submissionId: string): LockedRunTarget[] {
+    const lock = this.#currentBySubmission.get(submissionId)
+    if (lock?.sessionId === sessionId) this.#currentBySubmission.set(submissionId, { ...lock, observedActivity: true })
     return this.#current()
   }
 
@@ -532,7 +538,7 @@ function App(): React.JSX.Element {
       const browserTarget = rawLock.browserTarget
       if (!isHarnessSessionIdentity(sessionId) || !isHarnessSessionIdentity(submissionId) || !isBrowserTarget(browserTarget)) return
       if (locks.some(lock => lock.submissionId === submissionId)) return
-      locks.push({ sessionId, submissionId, target: browserTargetTabForLock(browserTarget, activeTabRef.current?.tab, availableTabsRef.current) })
+      locks.push({ sessionId, submissionId, target: browserTargetTabForLock(browserTarget, activeTabRef.current?.tab, availableTabsRef.current), observedActivity: rawLock.observedActivity === true })
     }
     setLockedRunTargets(runTargetLockProjectionRef.current.hydrate(locks))
   }, [])
@@ -1012,6 +1018,12 @@ function App(): React.JSX.Element {
         lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
         setLockedRunTargets(runTargetLockProjectionRef.current.unlock(value.sessionId, value.submissionId))
         void chrome.runtime.sendMessage({ type: 'unlock-browser-target/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
+        return
+      }
+      if (value.type === 'browser-target-observed/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId)) {
+        lockProjectionVersionRef.current += 1; lockHydrationRequestRef.current += 1
+        setLockedRunTargets(runTargetLockProjectionRef.current.observe(value.sessionId, value.submissionId))
+        void chrome.runtime.sendMessage({ type: 'observe-browser-target-lock/v1', sessionId: value.sessionId, submissionId: value.submissionId }).catch(() => {})
         return
       }
       if (value.type === 'browser-target-reconcile/v1' && isHarnessSessionIdentity(value.sessionId) && isHarnessSessionIdentity(value.submissionId)) {

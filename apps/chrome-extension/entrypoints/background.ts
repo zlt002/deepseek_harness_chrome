@@ -389,6 +389,7 @@ interface BrowserTargetRunLock {
   binding: BrowserTargetBinding
   port: chrome.runtime.Port
   state: 'pending' | 'active'
+  observedActivity: boolean
   canceled: boolean
   resolve: (locked: boolean) => void
   reject: (error: Error) => void
@@ -2153,7 +2154,7 @@ async function lockFollowBrowserTarget(sessionId: string, submissionId: string, 
   let resolve!: (locked: boolean) => void
   let reject!: (error: Error) => void
   const promise = new Promise<boolean>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise })
-  const lock: BrowserTargetRunLock = { sessionId, submissionId, binding: bindingForTarget(browserTarget), port, state: 'pending', canceled: false, resolve, reject, promise }
+  const lock: BrowserTargetRunLock = { sessionId, submissionId, binding: bindingForTarget(browserTarget), port, state: 'pending', observedActivity: false, canceled: false, resolve, reject, promise }
   locks.set(submissionId, lock)
   void (async () => {
     try {
@@ -2179,6 +2180,15 @@ function unlockFollowBrowserTarget(sessionId: string, submissionId: string): voi
     return
   }
   cancelledBrowserTargetSubmissions.add(submissionId)
+}
+
+function observeFollowBrowserTarget(sessionId: string, submissionId: string): void {
+  for (const locks of runBrowserTargetLocks.values()) {
+    const lock = locks.get(submissionId)
+    if (lock?.sessionId !== sessionId || lock.state !== 'active') continue
+    lock.observedActivity = true
+    return
+  }
 }
 
 const WORK_TAB_CONTENT_LIMIT = 12_000
@@ -5619,7 +5629,7 @@ export default defineBackground(() => {
         sendResponse({ ok: true })
         return true
       }
-      const projectedLocks = locks.map(lock => ({ sessionId: lock.sessionId, submissionId: lock.submissionId, browserTarget: lock.binding.browserTarget }))
+      const projectedLocks = locks.map(lock => ({ sessionId: lock.sessionId, submissionId: lock.submissionId, browserTarget: lock.binding.browserTarget, ...(lock.observedActivity ? { observedActivity: true } : {}) }))
       if (projectedLocks.length === 1) {
         sendResponse({ ok: true, lock: projectedLocks[0] })
         return true
@@ -5634,6 +5644,16 @@ export default defineBackground(() => {
         return false
       }
       unlockFollowBrowserTarget(request.sessionId, request.submissionId)
+      sendResponse({ ok: true })
+      return false
+    }
+    if (request.type === 'observe-browser-target-lock/v1') {
+      const keys = Object.keys(request)
+      if (!isSidePanelSender(sender) || keys.length !== 3 || !keys.every(key => ['type', 'sessionId', 'submissionId'].includes(key)) || !validSessionIdentity(request.sessionId) || !validSessionIdentity(request.submissionId)) {
+        sendResponse({ ok: false, error: 'Browser Target lifecycle observation is invalid.' })
+        return false
+      }
+      observeFollowBrowserTarget(request.sessionId, request.submissionId)
       sendResponse({ ok: true })
       return false
     }

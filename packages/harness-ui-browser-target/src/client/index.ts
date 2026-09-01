@@ -79,6 +79,9 @@ export function apply(ctx: ClientContext): void {
   const postReconcile = (sessionId: string, submissionId: string): void => {
     window.parent.postMessage({ type: 'browser-target-reconcile/v1', nonce: config.nonce, sessionId, submissionId }, config.parentOrigin)
   }
+  const postObservedActivity = (sessionId: string, submissionId: string): void => {
+    window.parent.postMessage({ type: 'browser-target-observed/v1', nonce: config.nonce, sessionId, submissionId }, config.parentOrigin)
+  }
   const releaseLifecycleLock = (sessionId: string, submissionId?: string): void => {
     const lock = lifecycleLocks.get(sessionId)
     if (lock !== undefined && (submissionId === undefined || lock.state.submissionId === submissionId)) {
@@ -95,9 +98,15 @@ export function apply(ctx: ClientContext): void {
       if (lifecycleLocks.has(projected.sessionId)) continue
       const session = ctx.sessions.binding(projected.sessionId as SessionId)?.session
       if (session === undefined) continue
-      const state = new BrowserTargetSessionRunLock(projected.submissionId)
-      state.accept(session.getSnapshot())
+      const state = BrowserTargetSessionRunLock.restore(projected.submissionId, { observedActivity: projected.observedActivity === true })
       lifecycleLocks.set(projected.sessionId, { state })
+      const hadObservedActivity = state.observedActivity
+      if (shouldReconcileSessionRunTarget(session.getSnapshot(), state)) {
+        lifecycleLocks.delete(projected.sessionId)
+        postReconcile(projected.sessionId, projected.submissionId)
+      } else if (!hadObservedActivity && state.observedActivity) {
+        postObservedActivity(projected.sessionId, projected.submissionId)
+      }
     }
   }
   const lockSubmission = (sessionId: string, submissionId: string, browserTarget: { browser: 'chrome'; windowId: number; tabId: number; url: string }): Promise<boolean> => {
@@ -143,10 +152,13 @@ export function apply(ctx: ClientContext): void {
             return {
               text,
               accept: () => {
+                const hadObservedActivity = lifecycle.state.observedActivity
                 if (lifecycle.state.accept(session.getSnapshot())) {
+                  if (!hadObservedActivity && lifecycle.state.observedActivity) postObservedActivity(id, submissionId)
                   releaseLifecycleLock(id, submissionId)
                   return
                 }
+                if (!hadObservedActivity && lifecycle.state.observedActivity) postObservedActivity(id, submissionId)
                 if (!disposed) lifecycle.unsubscribe = session.subscribe(reconcile)
               },
               reject: () => { releaseLifecycleLock(id, submissionId) },
@@ -178,9 +190,14 @@ export function apply(ctx: ClientContext): void {
     const reconcile = (sessionId: string, session: SessionFace): void => {
       const snapshot = session.getSnapshot()
       const lifecycle = lifecycleLocks.get(sessionId)
-      if (lifecycle !== undefined && shouldReconcileSessionRunTarget(snapshot, lifecycle.state)) {
-        lifecycleLocks.delete(sessionId)
-        postReconcile(sessionId, lifecycle.state.submissionId)
+      if (lifecycle !== undefined) {
+        const hadObservedActivity = lifecycle.state.observedActivity
+        if (shouldReconcileSessionRunTarget(snapshot, lifecycle.state)) {
+          lifecycleLocks.delete(sessionId)
+          postReconcile(sessionId, lifecycle.state.submissionId)
+        } else if (!hadObservedActivity && lifecycle.state.observedActivity) {
+          postObservedActivity(sessionId, lifecycle.state.submissionId)
+        }
       }
     }
     const syncSessionSubscriptions = (): void => {

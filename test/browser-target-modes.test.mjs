@@ -792,6 +792,38 @@ test('queue activity releases an accepted Browser Target lock after idle, includ
   assert.equal(neverActive.accept(idle), false, 'initial idle without any Run activity remains protected')
 })
 
+test('a restored idle session reconciles an accepted Browser Target lock after the background preserved its observed activity', async () => {
+  const target = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const browserTarget = { browser: 'chrome', windowId: 7, tabId: target.id, url: target.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: target })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget,
+    }, sender), { ok: true, locked: true })
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'observe-browser-target-lock/v1', sessionId: 'session-a', submissionId: 'submission-a',
+    }, sender), { ok: true })
+
+    const projected = await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender)
+    assert.deepEqual(projected, {
+      ok: true,
+      lock: { sessionId: 'session-a', submissionId: 'submission-a', browserTarget, observedActivity: true },
+    })
+
+    const { BrowserTargetSessionRunLock, shouldReconcileSessionRunTarget } = await loadSessionRunLock()
+    const restored = BrowserTargetSessionRunLock.restore('submission-a', { observedActivity: projected.lock.observedActivity })
+    assert.equal(shouldReconcileSessionRunTarget({ running: false, queue: [] }, restored), true, 'a remounted idle snapshot must release a Run that was known to have been active before the surface closed')
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a', submissionId: 'submission-a',
+    }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), { ok: true })
+  } finally {
+    await background.cleanup()
+  }
+})
+
 test('follow lock can bind a Run started with none mode and an unlock before transfer confirmation cancels it', async () => {
   const first = { id: 42, windowId: 7, url: 'https://docs.example.test/first', title: 'First' }
   const second = { id: 43, windowId: 7, url: 'https://docs.example.test/second', title: 'Second' }

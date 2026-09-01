@@ -17,7 +17,7 @@ export interface BrowserTargetTab extends BrowserTarget {
   title: string
   favIconUrl?: string
 }
-export interface BrowserTargetActiveRunLock { sessionId: string; submissionId: string; target: BrowserTargetTab }
+export interface BrowserTargetActiveRunLock { sessionId: string; submissionId: string; target: BrowserTargetTab; observedActivity?: boolean }
 
 /** The extension-owned Browser Target policy. */
 export interface BrowserTargetSettings {
@@ -104,6 +104,7 @@ function isActiveRunLock(value: unknown): value is BrowserTargetActiveRunLock {
     && typeof (value as BrowserTargetActiveRunLock).sessionId === 'string' && (value as BrowserTargetActiveRunLock).sessionId.length > 0
     && typeof (value as BrowserTargetActiveRunLock).submissionId === 'string' && (value as BrowserTargetActiveRunLock).submissionId.length > 0
     && isBrowserTargetTab((value as BrowserTargetActiveRunLock).target)
+    && ((value as BrowserTargetActiveRunLock).observedActivity === undefined || typeof (value as BrowserTargetActiveRunLock).observedActivity === 'boolean')
 }
 
 function isSameRunTarget(left: BrowserTargetTab, right: BrowserTargetTab): boolean {
