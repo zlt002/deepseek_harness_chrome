@@ -217,26 +217,40 @@ function Stop-InstalledProductProcess([int]$processId) {
 }
 
 function Stop-InstalledProductProcesses([string]$Root) {
-  $processes = @(Get-InstalledProductProcesses $Root)
-  if ($processes.Count -eq 0) { return }
-  $ids = @($processes | ForEach-Object { [int]$_.ProcessId })
-  $roots = @($processes | Where-Object { $ids -notcontains [int]$_.ParentProcessId })
-  foreach ($process in $roots) {
-    Stop-InstalledProductProcess $process.ProcessId
-  }
-  foreach ($processId in $ids) {
-    Stop-InstalledProductProcess $processId
-  }
-  $deadline = [DateTime]::UtcNow.AddSeconds(8)
+  # Chrome can race the registration removal by starting one last Native Host
+  # after our first process snapshot. Drain every newly observed process and
+  # require a short quiet window before moving the runtime directory.
+  $stoppedIds = [System.Collections.Generic.HashSet[int]]::new()
+  $quietPasses = 0
+  $remaining = @()
+  $deadline = [DateTime]::UtcNow.AddSeconds(12)
   do {
+    $processes = @(Get-InstalledProductProcesses $Root)
+    if ($processes.Count -eq 0) {
+      $quietPasses += 1
+      if ($quietPasses -ge 3) { break }
+      Start-Sleep -Milliseconds 200
+      continue
+    }
+    $quietPasses = 0
+    $ids = @($processes | ForEach-Object { [int]$_.ProcessId })
+    $roots = @($processes | Where-Object { $ids -notcontains [int]$_.ParentProcessId })
+    foreach ($process in $roots) {
+      [void]$stoppedIds.Add([int]$process.ProcessId)
+      Stop-InstalledProductProcess $process.ProcessId
+    }
+    foreach ($processId in $ids) {
+      [void]$stoppedIds.Add([int]$processId)
+      Stop-InstalledProductProcess $processId
+    }
     Start-Sleep -Milliseconds 200
-    $remaining = @(Get-InstalledProductProcesses $Root)
-  } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+  } while ([DateTime]::UtcNow -lt $deadline)
+  $remaining = @(Get-InstalledProductProcesses $Root)
   if ($remaining.Count -gt 0) {
     $details = ($remaining | ForEach-Object { "$($_.Name) PID=$($_.ProcessId)" }) -join ', '
     throw "无法停止正在使用旧 Harness UI 文件的进程：$details。请关闭 Harness UI 侧边栏后重试。"
   }
-  Write-Host "已停止 $($processes.Count) 个旧 Harness UI 进程。"
+  if ($stoppedIds.Count -gt 0) { Write-Host "已停止 $($stoppedIds.Count) 个旧 Harness UI 进程。" }
 }
 
 function New-ExtensionInUseError([string]$ExtensionPath, [object]$Cause) {
