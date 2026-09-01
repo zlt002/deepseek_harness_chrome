@@ -15,6 +15,11 @@ on:
         required: false
         type: boolean
         default: false
+      fast_test_package:
+        description: Reuse cached Windows inputs and skip repeated quality gates for a draft test package
+        required: false
+        type: boolean
+        default: false
       publish_public:
         description: Publish the public update only after real Windows Chrome/Edge UAT passes
         required: false
@@ -84,11 +89,13 @@ jobs:
           key: windows-lite-ready-v2-${{ hashFiles('deepseek_harness_chrome/apps/chrome-extension/**', 'deepseek_harness_chrome/apps/native-server/**', 'deepseek_harness_chrome/packages/**', 'deepseek_harness_chrome/release/windows-lite/build-static-harness-runtime.mjs', 'deepseek_harness_chrome/release/mac-lite/build-mac-production.mjs', 'deepseek_harness_chrome/scripts/*.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/package.json', 'deepseek_harness_chrome/pnpm-lock.yaml', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
 
       - name: Build materialized Harness product
+        if: ${{ inputs.fast_test_package != true || steps.cache-harness-static-runtime.outputs.cache-hit != 'true' }}
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: pnpm build:harness-product
 
       - name: Run TypeScript and complete test gates
+        if: ${{ inputs.fast_test_package != true }}
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: |
