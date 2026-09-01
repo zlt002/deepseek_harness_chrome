@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { apply, createSelectedSourceDispatchGuard, installSelectedSourceDispatchTracking, partitionTools, publicToolName, sessionMeta } from '../src/index.mjs'
+import { apply, createSelectedSourceDispatchGuard, installSelectedSourceDispatchTracking, installSelectedSourceProgressCompletionGate, partitionTools, publicToolName, sessionMeta } from '../src/index.mjs'
 
 test('separates only configured raw MCP names into the continuable-child scope', () => {
   const tools = new Map([
@@ -206,6 +206,99 @@ test('releases a selected-source admission when dispatch fails before a child st
     return { isError: true }
   })
   assert.match(guard(exec('search_selected_knowledge')), /已启动一个 selected-source 检索/)
+  stop()
+})
+
+test('keeps a turn open when it claims background code search without starting a selected-source child', async () => {
+  const guard = createSelectedSourceDispatchGuard()
+  let stopping
+  const ctx = {
+    on(name, listener) {
+      if (name === 'agent/turn-stopping') stopping = listener
+      return () => { stopping = undefined }
+    },
+  }
+  const steered = []
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    {
+      type: 'assistant/message',
+      data: {
+        message: {
+          content: [{ type: 'text', text: '代码正在后台查询，您无需等待；结果回来后我会先核对现状。' }],
+        },
+      },
+    },
+  ]
+  const agent = {
+    id: 'parent-progress-gate',
+    session: { events },
+    steer(message) { steered.push(message) },
+  }
+
+  const stop = installSelectedSourceProgressCompletionGate(ctx, guard)
+  await stopping({ agent, turn: 1, signal: new AbortController().signal })
+
+  assert.equal(steered.length, 1)
+  assert.match(steered[0].content[0].text, /立即调用 search_selected_remote_code/)
+
+  await stopping({ agent, turn: 1, signal: new AbortController().signal })
+  assert.equal(steered.length, 2, 'the turn must remain open until a real child starts')
+
+  events.push({ type: 'tool/call', data: { name: 'search_selected_remote_code' } })
+  const search = { name: 'search_selected_remote_code', agent }
+  assert.equal(guard(search), undefined)
+  guard.childStarted(search)
+  await stopping({ agent, turn: 1, signal: new AbortController().signal })
+  assert.equal(steered.length, 2)
+  stop()
+})
+
+test('does not require a second wrapper after any selected-source child starts and skips subagent turns', async () => {
+  const guard = createSelectedSourceDispatchGuard()
+  let stopping
+  const ctx = {
+    on(name, listener) {
+      if (name === 'agent/turn-stopping') stopping = listener
+      return () => { stopping = undefined }
+    },
+  }
+  const steered = []
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    {
+      type: 'assistant/message',
+      data: {
+        message: {
+          content: [{ type: 'text', text: '知识库正在后台查询，结果回来后我会继续整理。' }],
+        },
+      },
+    },
+  ]
+  const agent = {
+    id: 'parent-mismatched-progress-gate',
+    session: { events },
+    steer(message) { steered.push(message) },
+  }
+
+  const stop = installSelectedSourceProgressCompletionGate(ctx, guard)
+  const search = { name: 'search_selected_remote_code', agent }
+  assert.equal(guard(search), undefined)
+  guard.childStarted(search)
+  await stopping({ agent, turn: 1, signal: new AbortController().signal })
+  assert.equal(steered.length, 0, 'any real selected-source child satisfies the progress gate')
+
+  const subagentSteered = []
+  const subagent = {
+    id: 'selected-source-child',
+    session: {
+      header: { origin: 'subagent' },
+      events,
+    },
+    steer(message) { subagentSteered.push(message) },
+  }
+  await stopping({ agent: subagent, turn: 1, signal: new AbortController().signal })
+  assert.equal(subagentSteered.length, 0, 'the progress gate must not inspect subagent sessions')
   stop()
 })
 

@@ -229,6 +229,7 @@ test('reports one body-free online-document event for every AI light-document Ve
     assert.deepEqual({ ...events[0], eventId: '<id>', occurredAt: '<time>' }, {
       eventId: '<id>', eventType: 'document_published', outcome: 'succeeded', occurredAt: '<time>',
       sessionId: 'prd-session', runId: 'write-run',
+      generationEventId: 'review:review-1:generated',
       documentName: 'REQ_CRM_PRD', documentCatalogId: '801', documentUrl: target.url,
     })
     assert.match(events[0].eventId, /^document:ai-write:[a-f0-9]{48}$/)
@@ -243,6 +244,8 @@ test('reports one body-free online-document event for every AI light-document Ve
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(events.length, 3)
     assert.equal(new Set(events.map((event) => event.eventId)).size, 3)
+    assert.equal(events[1].generationEventId, undefined)
+    assert.equal(events[2].generationEventId, undefined)
     assert.equal(events[1].documentName, '新建文档')
     assert.equal(events[2].sessionId, 'other-session')
   } finally {

@@ -389,9 +389,14 @@ test('rejects a .java locator in a fake PMD locator table outside a child item',
 
 test('creates the exact adopted PMD directly without a model receipt or page confirmation', async () => {
   const prdBody = await authoritativePmdBody()
-  const harness = await open((request) => request.action === 'inspect_parent'
-    ? { status: 'ok', parent, capabilities: { light_document: true } }
-    : { ...verified(request, '1'), readback: { body: visibleMarkdownReadback(request.body) } })
+  const events = []
+  const harness = await open(
+    (request) => request.action === 'inspect_parent'
+      ? { status: 'ok', parent, capabilities: { light_document: true } }
+      : { ...verified(request, '1'), readback: { body: visibleMarkdownReadback(request.body) } },
+    (request) => request.browserTarget,
+    { reportPrdEvent: async (event) => { events.push(event) } },
+  )
   try {
     const items = [{ name: 'REQ_CRM_PRD', body: prdBody }]
     const missing = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'pmd:req-crm', items }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
@@ -404,6 +409,8 @@ test('creates the exact adopted PMD directly without a model receipt or page con
     assert.equal(inspection.pmdReviewAdoption.contentHash, createHash('sha256').update(prdBody).digest('hex'))
     const result = await create(harness, 'pmd:req-crm', plan.result.structuredContent.challenge, 3, { 'io.deepseek.harness/sessionId': 'pmd-session' })
     assert.equal(result.result.structuredContent.status, 'verified_write', JSON.stringify(result))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(events[0]?.generationEventId, 'review:review-1:generated')
     const createRequest = harness.requests.find((request) => request.action === 'create' && request.batchId === 'pmd:req-crm')
     assert.equal(createRequest.userConfirmation, undefined)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }

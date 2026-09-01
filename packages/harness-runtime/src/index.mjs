@@ -3,7 +3,7 @@
  * continuable child. It uses only Cordis's public services: `ctx.tools` and
  * `ctx.subagents.registerContinuableSetup()`.
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { Readable } from 'node:stream'
 
@@ -17,6 +17,11 @@ const DEFAULT_TIMEOUT_MS = 60_000
 const SELECTED_SOURCE_SCOPE = 'mcp__chrome__selected_source_scope'
 const SELECTED_SOURCE_WRAPPERS = new Set(['search_selected_remote_code', 'search_selected_knowledge'])
 const GENERIC_SUBAGENT_TOOLS = new Set(['subagent', 'subagent_fork'])
+const SELECTED_SOURCE_PROGRESS_CLAIMS = [
+  { toolName: 'search_selected_remote_code', pattern: /代码正在后台(?:查询|检索)|远程仓库正在(?:后台)?检索|我(?:先|正在|会)?在后台检索(?:这|已选)?(?:两个|这些)?代码库/ },
+  { toolName: 'search_selected_knowledge', pattern: /知识库正在后台(?:查询|检索)|我(?:先|正在|会)?在后台检索(?:这|已选)?(?:个|些)?知识库/ },
+]
+const PROGRESS_GATE_SOURCE = Object.freeze({ kind: 'plugin', plugin: '@accrui/harness-runtime-mcp-scopes' })
 
 function activeParentTurn(agent) {
   if (agent === undefined || !Array.isArray(agent.session?.events)) return undefined
@@ -135,6 +140,10 @@ export function createSelectedSourceDispatchGuard() {
     const state = stateFor(exec)
     if (state !== undefined) state.searchPending = false
   }
+  guard.hasStartedChild = (agent, turn) => {
+    const state = states.get(String(agent?.id))
+    return state?.turn === turn && state.childStarted === true
+  }
   return guard
 }
 
@@ -157,6 +166,51 @@ export function installSelectedSourceDispatchTracking(ctx, guard) {
       stop()
       if (!childStarted) guard.dispatchFailed(exec)
     }
+  })
+}
+
+function latestAssistantTextInTurn(events, turn) {
+  let inTurn = false
+  let latest = ''
+  for (const event of events) {
+    if (event?.type === 'turn/start') {
+      inTurn = event.data?.turn === turn
+      continue
+    }
+    if (!inTurn) continue
+    if (event?.type === 'turn/end') break
+    if (event?.type !== 'assistant/message' || !Array.isArray(event.data?.message?.content)) continue
+    latest = event.data.message.content
+      .flatMap((block) => block?.type === 'text' && typeof block.text === 'string' ? [block.text] : [])
+      .join('')
+  }
+  return latest
+}
+
+function progressGateMessage(toolName) {
+  const source = toolName === 'search_selected_remote_code' ? '代码' : '知识库'
+  return Object.freeze({
+    id: randomUUID(),
+    role: 'user',
+    content: Object.freeze([Object.freeze({ type: 'text', text: `运行时校验失败：你刚才声称${source}正在后台查询，但本轮没有真实创建 selected-source 子代理。不要再输出进度说明；立即调用 ${toolName}，只传 description 和 prompt。首次 prompt 必须使用当前用户原始业务文本。只有收到子代理启动事件后，才能告诉用户后台查询已开始。` })]),
+    source: PROGRESS_GATE_SOURCE,
+  })
+}
+
+/**
+ * Keep the parent turn open when the model narrates selected-source progress
+ * without a published child. This turns the user-visible promise into a
+ * runtime invariant instead of relying on prompt compliance alone.
+ */
+export function installSelectedSourceProgressCompletionGate(ctx, guard) {
+  return ctx.on('agent/turn-stopping', ({ agent, turn }) => {
+    if (agent?.session?.header?.origin === 'subagent') return
+    const events = agent?.session?.events
+    if (!Array.isArray(events)) return
+    const latestText = latestAssistantTextInTurn(events, turn)
+    const claim = SELECTED_SOURCE_PROGRESS_CLAIMS.find((item) => item.pattern.test(latestText))
+    if (claim === undefined || guard.hasStartedChild(agent, turn)) return
+    agent.steer(progressGateMessage(claim.toolName))
   })
 }
 
@@ -416,6 +470,7 @@ export async function apply(ctx, input = {}) {
   const selectedSourceDispatchGuard = createSelectedSourceDispatchGuard()
   const stopSelectedSourceDispatchGuard = ctx.tools.guard(selectedSourceDispatchGuard)
   const stopSelectedSourceDispatchTracking = installSelectedSourceDispatchTracking(ctx, selectedSourceDispatchGuard)
+  const stopSelectedSourceProgressCompletionGate = installSelectedSourceProgressCompletionGate(ctx, selectedSourceDispatchGuard)
   const childDisposers = new Map()
   let globalDisposers = new Map()
   let definitions = new Map()
@@ -448,6 +503,7 @@ export async function apply(ctx, input = {}) {
     stopContinuableSetup()
     stopSelectedSourceDispatchGuard()
     stopSelectedSourceDispatchTracking()
+    stopSelectedSourceProgressCompletionGate()
     if (config.failOnStartupError) throw error
     ctx.logger.error(`MCP startup failed: ${String(error)}`)
   }
@@ -456,6 +512,7 @@ export async function apply(ctx, input = {}) {
     stopContinuableSetup()
     stopSelectedSourceDispatchGuard()
     stopSelectedSourceDispatchTracking()
+    stopSelectedSourceProgressCompletionGate()
     for (const disposers of childDisposers.values()) for (const dispose of disposers.values()) dispose()
     childDisposers.clear()
     for (const dispose of globalDisposers.values()) dispose()

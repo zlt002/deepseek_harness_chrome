@@ -81,7 +81,10 @@ export function normalizePrdTrackingEvent(value) {
     ...(status ? { status } : {}),
     ...(eventType === 'prd_generated' && documentName ? { name: documentName } : {}),
     ...(eventType === 'prd_rating' ? { generationEventId, rating } : {}),
-    ...(eventType === 'online_document_verified_write' ? { name: documentName, catalogId: documentCatalogId, url: documentUrl } : {}),
+    ...(eventType === 'online_document_verified_write' ? {
+      ...(generationEventId === undefined ? {} : { generationEventId }),
+      name: documentName, catalogId: documentCatalogId, url: documentUrl,
+    } : {}),
   })
 }
 

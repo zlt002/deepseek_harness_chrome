@@ -595,6 +595,8 @@ test('keeps selected-source routing in the final Code preset system prompt', asy
   assert.match(prompt, /The selection itself is the instruction/)
   assert.match(prompt, /When the end user's message is Chinese, write every user-visible message from the parent in Simplified Chinese/)
   assert.match(prompt, /For an initial or direct selected-source search triggered by the current end user's message, the wrapper prompt must equal that message character-for-character/)
+  assert.match(prompt, /Selected-source progress is verified progress/)
+  assert.match(prompt, /only after the matching wrapper call has successfully published its child/)
   assert.match(prompt, /This rule is the authoritative refinement of the initial-search wording above/)
   assert.match(prompt, /For a \/pmd-prd invocation, remove only the command prefix and its separating whitespace/)
   assert.match(prompt, /for every other direct query, preserve the complete user message character-for-character/)

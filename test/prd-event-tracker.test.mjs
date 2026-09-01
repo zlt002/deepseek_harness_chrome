@@ -53,9 +53,9 @@ test('PRD telemetry keeps a failed request in the durable outbox and retries it'
   assert.equal('rawInput' in requests.at(-1), false)
 })
 
-test('document publishing telemetry accepts every AI Verified Write with online document metadata', () => {
-  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'document:ai-write:42', eventType: 'document_published', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', runId: 'run-1', sessionId: 'session-1', documentName: '需求_PRD', documentCatalogId: '42', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42' }), {
-    eventId: 'document:ai-write:42', eventType: 'online_document_verified_write', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', runId: 'run-1', name: '需求_PRD', catalogId: '42', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42',
+test('document publishing telemetry accepts every AI Verified Write and preserves an optional PRD link', () => {
+  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'document:ai-write:42', eventType: 'document_published', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', runId: 'run-1', sessionId: 'session-1', generationEventId: 'review:1:generated', documentName: '需求_PRD', documentCatalogId: '42', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42' }), {
+    eventId: 'document:ai-write:42', eventType: 'online_document_verified_write', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', runId: 'run-1', generationEventId: 'review:1:generated', name: '需求_PRD', catalogId: '42', url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/42?id=42',
   })
 })
 

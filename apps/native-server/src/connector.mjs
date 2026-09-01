@@ -1712,6 +1712,7 @@ export class BrowserConnector {
       if (!catalogId) return
       const adoption = sessionId === undefined ? undefined : this.pmdPrdReviewAdoptions.get(sessionId)
       const adoptedName = adoption && adoption.batchId === undefined ? adoption.displayPath.split(/[\\/]/).at(-1)?.replace(/\.md$/i, '') : undefined
+      const generationEventId = adoption && adoption.batchId === undefined ? `review:${adoption.reviewId}:generated` : undefined
       const resourceName = typeof result?.resource?.documentName === 'string' ? result.resource.documentName : undefined
       const documentName = (adoptedName || resourceName || `在线文档 ${catalogId}`).trim().slice(0, 256)
       if (!documentName) return
@@ -1720,6 +1721,7 @@ export class BrowserConnector {
         eventId: `document:ai-write:${hash(canonicalJson([runId, idempotencyIdentity, catalogId])).slice(0, 48)}`,
         eventType: 'document_published', outcome: 'succeeded', occurredAt: new Date().toISOString(),
         ...(sessionId === undefined ? {} : { sessionId }), runId,
+        ...(generationEventId === undefined ? {} : { generationEventId }),
         documentName, documentCatalogId: catalogId, documentUrl: browserTarget.url,
       })).catch(() => {})
     } catch {
@@ -2779,11 +2781,15 @@ export class BrowserConnector {
             await this.teamDocStore.save({ idempotencyIdentity: item.idempotencyIdentity, targetFingerprint, contentHash: item.contentHash, kind: 'light_document', name: item.name, stages: itemResult.stages, catalogId: itemResult.item?.catalogId ?? null, verified: itemResult.status === 'verified_write', result: itemResult })
             await this.teamKnowledgeBatchStore.updateItem({ batchId: args.batchId, index: item.index, status: itemResult.status === 'verified_write' ? 'created' : 'failed', catalogId: itemResult.item?.catalogId ?? null, stages: itemResult.stages, error: itemResult.status === 'verified_write' ? null : itemResult.error })
             if (itemResult.status === 'verified_write') {
+              const adoptionKey = identity?.parentSessionId ?? identity?.sessionId
+              const adoption = adoptionKey === undefined ? undefined : this.pmdPrdReviewAdoptions.get(adoptionKey)
+              const generationEventId = adoption?.batchId === args.batchId ? `review:${adoption.reviewId}:generated` : undefined
               void Promise.resolve(this.reportPrdEvent({
                 eventId: `document:${hash(args.batchId).slice(0, 48)}:${String(item.index)}:${itemResult.item.catalogId}`,
                 eventType: 'document_published', outcome: 'succeeded', occurredAt: new Date().toISOString(),
                 ...(identity === undefined ? {} : { sessionId: identity.parentSessionId ?? identity.sessionId }),
                 runId, batchId: args.batchId, itemIndex: item.index,
+                ...(generationEventId === undefined ? {} : { generationEventId }),
                 documentName: itemResult.item.name, documentCatalogId: itemResult.item.catalogId, documentUrl: itemResult.item.url,
               })).catch(() => {})
             }
