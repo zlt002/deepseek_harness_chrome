@@ -54,9 +54,17 @@ export function nextWorkspaceMarkdownReviewOpenAction(
   return { baseline: resultSeq, open: review }
 }
 
-/** Retain activation baselines so hidden-session results are not mistaken for history. */
+/** Holds one mounted review overlay's activation baselines. */
 export class WorkspaceMarkdownReviewOpenTracker {
   readonly #baselines = new Map<string, number>()
+
+  /** A newly visible session waits for its timeline, then treats it as history. */
+  activate(sessionId: string, timelineReady: boolean, review: WorkspaceMarkdownReviewOpenTurnData | undefined): { readonly baseline: number } | undefined {
+    if (!timelineReady) return undefined
+    const baseline = review?.resultSeq ?? 0
+    this.#baselines.set(sessionId, baseline)
+    return { baseline }
+  }
 
   next(sessionId: string, review: WorkspaceMarkdownReviewOpenTurnData | undefined): { readonly baseline: number; readonly open?: WorkspaceMarkdownReviewOpenTurnData } {
     const action = nextWorkspaceMarkdownReviewOpenAction(this.#baselines.get(sessionId), review)
@@ -87,7 +95,7 @@ export function createWorkspaceMarkdownReviewOpenDefinition(): ConversationNodeD
         calls.set(String(match.event.data.callId), request)
         return { ...context.state, calls }
       }
-      if (match.event.type !== 'tool/result' || match.event.data.message.content[0]?.isError === true) return context.state
+      if (match.event.type !== 'tool/result' || match.event.surfaceOp !== 'append' || match.event.data.message.content[0]?.isError === true) return context.state
       const request = context.state.calls.get(String(match.event.data.message.source.callId))
       return request === undefined ? context.state : { ...context.state, opened: { ...request, resultSeq: match.event.seq } }
     },

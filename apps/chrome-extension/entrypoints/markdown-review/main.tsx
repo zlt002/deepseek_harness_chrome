@@ -32,6 +32,15 @@ const VERIFIED_SAVE_NOTICE = '已保存，并已按同一资源回读验证。'
 const VERIFIED_SAVE_NOTICE_DISMISS_MS = 5_000
 const PRD_STARS = [1, 2, 3, 4, 5] as const
 
+function ratingDescription(rating: PrdRating): string {
+  if (rating <= 1) return '需要较大改进'
+  if (rating <= 2) return '仍有改进空间'
+  if (rating <= 3) return '基本符合预期'
+  if (rating <= 4) return '整体表现不错'
+  if (rating < 5) return '接近理想体验'
+  return '非常满意'
+}
+
 function requestId(): string { return crypto.randomUUID() }
 
 function reviewIdFromLocation(location: Pick<Location, 'search'> = window.location): string | undefined {
@@ -844,8 +853,11 @@ function App(): React.JSX.Element {
       </div>
     </header>
     {snapshot?.pmdPrd === true && rating === undefined && <section className="prd-rating" aria-label="PRD 评分">
-      <span>这份 PRD 你觉得如何？</span>
-      <div className="prd-rating-options" role="radiogroup" aria-label="选择 0.5 到 5 星评分，可选半星">
+      <div className="prd-rating-copy">
+        <strong>这份 PRD 质量怎么样？</strong>
+        <span id="prd-rating-help">花 3 秒点亮星星，你的反馈会直接帮助我们改进生成质量。</span>
+      </div>
+      <div className="prd-rating-options" role="radiogroup" aria-label="选择 0.5 到 5 星评分，可选半星" aria-describedby="prd-rating-help">
         {PRD_STARS.map((star) => {
           const leftRating: PrdRating = (star === 1 ? 0.5 : star - 0.5) as PrdRating
           const rightRating: PrdRating = star as PrdRating
@@ -853,12 +865,12 @@ function App(): React.JSX.Element {
           const fill = preview === undefined ? 0 : preview >= rightRating ? 100 : preview >= leftRating ? 50 : 0
           return <span key={star} className="prd-rating-star" aria-label={`${star} 星位置`}>
             <span className="prd-rating-star-visual" aria-hidden="true"><span className="prd-rating-star-empty">☆</span><span className="prd-rating-star-fill" style={{ width: `${fill}%` }}>★</span></span>
-            <button type="button" className="prd-rating-half is-left" aria-label={`${leftRating} 星`} aria-pressed={ratingPending === leftRating || rating === leftRating} disabled={ratingPending !== undefined || state.status === 'reopen-required'} onMouseEnter={() => setRatingPreview(leftRating)} onMouseLeave={() => setRatingPreview(undefined)} onFocus={() => setRatingPreview(leftRating)} onBlur={() => setRatingPreview(undefined)} onClick={() => submitRating(leftRating)} />
-            <button type="button" className="prd-rating-half is-right" aria-label={`${rightRating} 星`} aria-pressed={ratingPending === rightRating || rating === rightRating} disabled={ratingPending !== undefined || state.status === 'reopen-required'} onMouseEnter={() => setRatingPreview(rightRating)} onMouseLeave={() => setRatingPreview(undefined)} onFocus={() => setRatingPreview(rightRating)} onBlur={() => setRatingPreview(undefined)} onClick={() => submitRating(rightRating)} />
+            <button type="button" className="prd-rating-half is-left" aria-label={`${leftRating} 星，${ratingDescription(leftRating)}`} aria-pressed={ratingPending === leftRating || rating === leftRating} disabled={ratingPending !== undefined || state.status === 'reopen-required'} onMouseEnter={() => setRatingPreview(leftRating)} onMouseLeave={() => setRatingPreview(undefined)} onFocus={() => setRatingPreview(leftRating)} onBlur={() => setRatingPreview(undefined)} onClick={() => submitRating(leftRating)} />
+            <button type="button" className="prd-rating-half is-right" aria-label={`${rightRating} 星，${ratingDescription(rightRating)}`} aria-pressed={ratingPending === rightRating || rating === rightRating} disabled={ratingPending !== undefined || state.status === 'reopen-required'} onMouseEnter={() => setRatingPreview(rightRating)} onMouseLeave={() => setRatingPreview(undefined)} onFocus={() => setRatingPreview(rightRating)} onBlur={() => setRatingPreview(undefined)} onClick={() => submitRating(rightRating)} />
           </span>
         })}
       </div>
-      <span className="prd-rating-label" aria-live="polite">{ratingPending !== undefined ? '正在提交…' : ratingPreview !== undefined ? `预览 ${ratingPreview} 星` : rating === undefined ? '未评分' : `已选 ${rating} 星`}</span>
+      <span className="prd-rating-label" aria-live="polite">{ratingPending !== undefined ? '正在提交…' : ratingPreview !== undefined ? `${ratingPreview} 星 · ${ratingDescription(ratingPreview)}` : '点击星星即可评分'}</span>
       {ratingNotice !== undefined && <span className="prd-rating-notice" role="status">{ratingNotice}</span>}
     </section>}
     {state.error !== undefined && !showRecoveryState && <section className="notice" role="alert">{state.error.message}{state.status !== 'reopen-required' && <><br /><button className="secondary" type="button" onClick={state.error.code === 'sidepanel_unavailable' ? () => { void openSidePanelAndRetry() } : requestSnapshotReload}>{state.error.code === 'sidepanel_unavailable' ? '打开侧边栏后重试' : '重试'}</button></>}</section>}

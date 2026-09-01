@@ -26,14 +26,19 @@ const successfulResult = (time, surfaceOp = 'append') => ({
   data: { turn: 3, message: { source: { callId: 'open-1' }, content: [{ isError: false }] } },
 })
 
-test('an activated session opens a late result once after returning, while cold history stays closed', () => {
+test('returning to a session waits for timeline hydration, then baselines history and opens only a new visible result once', () => {
   const tracker = new WorkspaceMarkdownReviewOpenTracker()
   const old = { path: 'spec/old.md', resultSeq: 10 }
   const late = { path: 'spec/late.md', resultSeq: 20 }
-  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-a', old))), { baseline: 10 })
-  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-b', { path: 'spec/history.md', resultSeq: 99 }))), { baseline: 99 })
-  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-a', late))), { baseline: 20, open: late })
-  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-b', { path: 'spec/history.md', resultSeq: 99 }))), { baseline: 99 })
+  const fresh = { path: 'spec/fresh.md', resultSeq: 30 }
+  assert.equal(tracker.activate('session-a', false, undefined), undefined, 'a loading session must not baseline an empty timeline')
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.activate('session-a', true, old))), { baseline: 10 }, 'the first open timeline is history')
+  assert.equal(tracker.activate('session-b', false, undefined), undefined)
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.activate('session-b', true, { path: 'spec/history.md', resultSeq: 99 }))), { baseline: 99 })
+  assert.equal(tracker.activate('session-a', false, undefined), undefined)
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.activate('session-a', true, late))), { baseline: 20 }, 'a late result received while hidden is history when the session returns')
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-a', fresh))), { baseline: 30, open: fresh })
+  assert.deepEqual(JSON.parse(JSON.stringify(tracker.next('session-a', fresh))), { baseline: 30 }, 'the same visible result must not reopen')
 })
 
 test('a successful review-open command publishes the automatic review marker', () => {
@@ -53,6 +58,15 @@ test('a successful review-open command publishes the automatic review marker', (
     key: 'workspace-markdown-review-open',
     value: { path: 'pmd-workspace/spec/req-1/req-1_PRD.md', source: 'pmd-prd', resultSeq: 11 },
   })
+})
+
+test('a replayed review-open result never publishes an automatic review marker', () => {
+  const definition = createWorkspaceMarkdownReviewOpenDefinition()
+  const state = definition.start({}, { event: turnStart })
+  const afterCall = definition.update({ state }, { event: call })
+  const replayed = successfulResult(99, { op: 'replace', start: 10, end: 11 })
+  const updated = definition.update({ state: afterCall }, { event: replayed })
+  assert.equal(definition.buildLocationData({ state: updated }, 'turn'), null)
 })
 
 test('ordinary tool results remain within their turn but do not publish a review marker', () => {

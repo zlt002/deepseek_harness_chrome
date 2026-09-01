@@ -9,7 +9,7 @@ on:
       version:
         description: AccrUI-compatible extension version
         required: true
-        default: 1.1.95
+        default: 1.1.96
       full_validation:
         description: Run full acceptance tests (~38 min added) for pre-release validation
         required: false
@@ -129,7 +129,7 @@ jobs:
         run: >-
           node release/windows-lite/windows-release.mjs
           --harness-runtime release/windows-lite/harness-static-win32-x64
-          --version "${{ inputs.version || '1.1.95' }}"
+          --version "${{ inputs.version || '1.1.96' }}"
 
       - name: Accept locally built Windows candidate
         # Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention.
@@ -140,7 +140,7 @@ jobs:
         run: >-
           ./release/windows-lite/acceptance-windows.ps1
           -PackageDir release/accr-ui-windows-lite-x64
-          -ExpectedVersion "${{ inputs.version || '1.1.95' }}"
+          -ExpectedVersion "${{ inputs.version || '1.1.96' }}"
 
       - name: Write checksum
         working-directory: deepseek_harness_chrome
@@ -156,8 +156,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.95' }}-candidate
-          RELEASE_VERSION: ${{ inputs.version || '1.1.95' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.96' }}-candidate
+          RELEASE_VERSION: ${{ inputs.version || '1.1.96' }}
         run: |
           $repo = '${{ github.repository }}'
           $zip = 'release/accr-ui-windows-lite-x64.zip'
@@ -240,10 +240,10 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version || '1.1.95' }}
-          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.95' }}
+          RELEASE_VERSION: ${{ inputs.version || '1.1.96' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.96' }}
           RELEASE_SHA: ${{ github.sha }}
-          CANDIDATE_TAG: windows-lite-v${{ inputs.version || '1.1.95' }}-candidate
+          CANDIDATE_TAG: windows-lite-v${{ inputs.version || '1.1.96' }}-candidate
           UAT_CANDIDATE_COMMIT: ${{ inputs.uat_candidate_commit }}
           UAT_CANDIDATE_SHA256: ${{ inputs.uat_candidate_sha256 }}
         run: |
@@ -305,7 +305,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $candidatePackageDir -PathType Container)) { throw "Exact UAT candidate ZIP did not contain the expected package directory: $candidatePackageDir" }
           ./release/windows-lite/acceptance-windows.ps1 `
           -PackageDir $candidatePackageDir `
-          -ExpectedVersion "${{ inputs.version || '1.1.95' }}"
+          -ExpectedVersion "${{ inputs.version || '1.1.96' }}"
 
       - name: Promote exact UAT candidate to published release
         if: ${{ inputs.full_validation == true && inputs.publish_public == true }}
@@ -313,9 +313,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.95' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.96' }}
           CHANNEL_TAG: windows-lite-current
-          RELEASE_VERSION: ${{ inputs.version || '1.1.95' }}
+          RELEASE_VERSION: ${{ inputs.version || '1.1.96' }}
           UAT_CANDIDATE_COMMIT: ${{ inputs.uat_candidate_commit }}
         run: |
           $repo = '${{ github.repository }}'
@@ -388,8 +388,8 @@ jobs:
         working-directory: deepseek_harness_chrome
         shell: pwsh
         env:
-          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.95' }}
-          RELEASE_VERSION: ${{ inputs.version || '1.1.95' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.96' }}
+          RELEASE_VERSION: ${{ inputs.version || '1.1.96' }}
           UAT_CANDIDATE_SHA256: ${{ inputs.uat_candidate_sha256 }}
         run: |
           $repo = '${{ github.repository }}'
@@ -412,7 +412,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHANNEL_TAG: windows-lite-current
-          RELEASE_VERSION: ${{ inputs.version || '1.1.95' }}
+          RELEASE_VERSION: ${{ inputs.version || '1.1.96' }}
           UAT_CANDIDATE_COMMIT: ${{ inputs.uat_candidate_commit }}
         run: |
           $repo = '${{ github.repository }}'

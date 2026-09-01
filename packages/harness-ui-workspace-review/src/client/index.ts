@@ -52,18 +52,30 @@ interface AutoOpenFrozenPmdPrdInjected {
 
 type AutoOpenFrozenPmdPrdProps = PropsRuntime<'conversation.input.overlay'> & AutoOpenFrozenPmdPrdInjected
 
-/** The first session snapshot establishes history; only a later Host result may open review. */
+/** A mounted overlay opens only results that arrive after its visible-session baseline. */
 function AutoOpenFrozenPmdPrd({ sessionId, open, useSession }: AutoOpenFrozenPmdPrdProps) {
-  const review = useSession(snapshot => latestWorkspaceMarkdownReviewOpen(snapshot.chat.timeline))
-  const tracker = useRef(autoOpenTracker)
+  const { review, openState } = useSession(snapshot => ({
+    review: latestWorkspaceMarkdownReviewOpen(snapshot.chat.timeline),
+    openState: snapshot.openState,
+  }))
+  const tracker = useRef(new WorkspaceMarkdownReviewOpenTracker())
+  const activatedSession = useRef<string | undefined>(undefined)
   useEffect(() => {
+    if (activatedSession.current !== sessionId) {
+      const activation = tracker.current.activate(sessionId, openState === 'open', review)
+      if (activation === undefined) return
+      activatedSession.current = sessionId
+      return
+    }
+    if (openState !== 'open') {
+      activatedSession.current = undefined
+      return
+    }
     const action = tracker.current.next(sessionId, review)
     if (action.open !== undefined) open(action.open.path, action.open.source)
-  }, [open, review, sessionId])
+  }, [open, openState, review, sessionId])
   return null
 }
-
-const autoOpenTracker = new WorkspaceMarkdownReviewOpenTracker()
 
 /** Preserve the unique full path behind a basename shown in closing prose. */
 function producedMarkdownMention(owner: Parameters<ChatFileMentions['forClosing']>[0], value: string): string | undefined {
