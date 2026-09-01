@@ -73,7 +73,7 @@ $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { throw 'Missing Node.js.' }
 $nodePath = [System.IO.Path]::GetFullPath($node.Source)
 $nodeVersion = (& $nodePath --version).Trim()
-if ($nodeVersion -notmatch '^v?(?<major>\d+)' -or [int]$Matches.major -lt 22) { throw 'Node.js 22+ is required.' }
+if ($nodeVersion -notmatch '^v?(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)' -or -not (([int]$Matches.major -eq 22 -and [int]$Matches.minor -ge 19) -or [int]$Matches.major -ge 24)) { throw 'Node.js 22.19.x or 24+ is required.' }
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText((Join-Path $runtimeDir 'node-path.txt'), $nodePath + [Environment]::NewLine, $utf8NoBom)
 $manifestDir = Join-Path $InstallRoot 'native-messaging'

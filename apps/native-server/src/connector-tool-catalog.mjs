@@ -192,13 +192,29 @@ const lightDocumentSelectionReplaceCommitTool = { name: 'light_document_selectio
 const lightDocumentSearchTool = { name: 'light_document_search', title: 'Search light document', description: 'Search the bound light document for a query. This is read-only and does not change the page.', annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, inputSchema: { type: 'object', additionalProperties: false, required: ['query'], properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, offset: { type: 'integer', minimum: 0, maximum: 100000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } } } }
 const lightDocumentWritePreviewTool = {
   name: 'light_document_write_preview', title: 'Preview light-document write',
-  description: 'Preview a non-selection light-document change on the current write target and return a one-time challenge. It does not change the document. For insert_drawing, use { mermaid, position: "after_selection", expectedSelectionFingerprint } immediately after light_document_selection_read when the user asks to insert after the selected content; this rechecks that same selection at commit and verifies the drawing position. Use start/end/before/after for document-block insertion; before/after require id or index. xychart-beta is not verified for this WebEdit target; use flowchart or pie instead. SVG is not accepted. blocks_delete accepts only { blocks: [{ id }] } from light_document_read, never index. After the user confirms, call light_document_write_commit with only that challenge.',
+  description: 'Preview a non-selection light-document change on the current write target and return a one-time challenge. It does not change the document. For insert_drawing, use { mermaid, position: "after_selection", expectedSelectionFingerprint } immediately after light_document_selection_read when the user asks to insert after the selected content; this rechecks that same selection at commit and verifies the drawing position. Use start/end/before/after for document-block insertion; before/after require id or index. xychart-beta is not verified for this WebEdit target; use flowchart or pie instead. SVG is not accepted. blocks_insert accepts 1–50 supported blocks per preview; longer content must use ordered, non-parallel batches, each completing preview → user confirmation → commit → same-target readback before the next. blocks_delete accepts only { blocks: [{ id }] } from light_document_read, never index. After the user confirms, call light_document_write_commit with only that challenge.',
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['operation', 'payload'],
     properties: { operation: { enum: MODEL_LIGHT_DOCUMENT_OPERATIONS }, payload: { type: 'object', additionalProperties: true } },
     allOf: [
       { if: { properties: { operation: { const: 'insert_drawing' } }, required: ['operation'] }, then: { properties: { payload: { type: 'object', additionalProperties: false, required: ['mermaid'], properties: { mermaid: { type: 'string', minLength: 1, maxLength: 20000, description: 'Mermaid source; xychart-beta is not verified for this WebEdit target.' }, position: { enum: ['start', 'end', 'before', 'after', 'after_selection'], description: 'Defaults to end. before/after require id or index. after_selection requires expectedSelectionFingerprint from light_document_selection_read.' }, id: { type: 'string', minLength: 1, maxLength: 256 }, index: { type: 'integer', minimum: 0, maximum: 100000 }, expectedSelectionFingerprint: { type: 'string', pattern: '^selection-v4-[0-9a-f]{32}$' } } } } } },
+      {
+        if: { properties: { operation: { const: 'blocks_insert' } }, required: ['operation'] },
+        then: {
+          properties: {
+            payload: {
+              type: 'object', additionalProperties: false, required: ['blocks'],
+              properties: {
+                blocks: { type: 'array', minItems: 1, maxItems: 50, items: lightDocumentBlockSchema },
+                position: { enum: ['start', 'end', 'before', 'after'], description: 'Defaults to end. before/after require id or index.' },
+                id: { type: 'string', minLength: 1, maxLength: 256 },
+                index: { type: 'integer', minimum: 0, maximum: 100000 },
+              },
+            },
+          },
+        },
+      },
       {
         if: { properties: { operation: { const: 'blocks_delete' } }, required: ['operation'] },
         then: {
@@ -243,3 +259,15 @@ export const CONNECTOR_TOOLS = [
   teamKnowledgeBatchPreviewTool, teamKnowledgeBatchCreateTool,
   knowledgeSearchTool, codeSearchTool, selectedSourceScopeTool,
 ]
+
+// Browser-bound calls require a captured Browser Target.  Keep this list next
+// to the published tool catalog so a newly exposed tool cannot silently skip
+// session/target correlation in the Native Connector.
+export const BROWSER_TOOL_NAMES = new Set([
+  'list_work_tabs', 'read_work_tab',
+  'spreadsheet_get_context', 'spreadsheet_read_range', 'spreadsheet_search', 'spreadsheet_inspect', 'spreadsheet_write_preview', 'spreadsheet_write_commit',
+  'presentation_get_capabilities', 'presentation_get_context', 'presentation_get_selection', 'presentation_get_text_boxes', 'presentation_write_preview', 'presentation_write_commit',
+  'light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit',
+  'html_workbench_read', 'html_workbench_preview', 'html_workbench_commit',
+  'team_knowledge_batch_preview', 'team_knowledge_batch_create',
+])

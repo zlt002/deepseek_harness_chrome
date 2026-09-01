@@ -78,6 +78,7 @@ test('Mac production package boots the real Web surface without node_modules', {
   assert.match(nativeHostRegistration, /com\.accrui\.harness\.chrome/)
   assert.doesNotMatch(nativeHostRegistration, /com\.deepseek\.harness\.chrome|com\.chromemcp\.nativehost/)
   const extensionManifest = JSON.parse(await readFile(path.join(installed, 'extension', 'manifest.json'), 'utf8'))
+  assert.equal(extensionManifest.name, 'accrui 1.1.63 beta')
   const webAccessibleResources = new Set(
     (extensionManifest.web_accessible_resources ?? []).flatMap((entry) => entry.resources ?? []),
   )

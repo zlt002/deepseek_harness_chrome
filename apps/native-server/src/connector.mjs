@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -6,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
 import { TeamKnowledgeBatchRecordStore } from './team-knowledge-batch-record-store.mjs'
 import { OfficeDocumentWriteRecordStore } from './office-document-write-record-store.mjs'
-import { CONNECTOR_TOOLS, LIGHT_DOCUMENT_OPERATIONS, MODEL_LIGHT_DOCUMENT_OPERATIONS, PRESENTATION_CHART_TYPES, PRESENTATION_EDIT_FIELDS, PRESENTATION_OBJECT_FIELDS, PRESENTATION_WRITE_ACTIONS, PRESENTATION_WRITE_OPERATIONS, PRESENTATION_WRITE_PAYLOAD_FIELDS, SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from './connector-tool-catalog.mjs'
+import { BROWSER_TOOL_NAMES, CONNECTOR_TOOLS, LIGHT_DOCUMENT_OPERATIONS, MODEL_LIGHT_DOCUMENT_OPERATIONS, PRESENTATION_CHART_TYPES, PRESENTATION_EDIT_FIELDS, PRESENTATION_OBJECT_FIELDS, PRESENTATION_WRITE_ACTIONS, PRESENTATION_WRITE_OPERATIONS, PRESENTATION_WRITE_PAYLOAD_FIELDS, SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from './connector-tool-catalog.mjs'
 import { KNOWLEDGE_PROXY_PATH, knowledgeErrorChain, knowledgeHttpsFetch, proxyKnowledgeRequest } from './knowledge-transport.mjs'
 import {
   CONNECTOR_CANCEL,
@@ -78,6 +79,16 @@ function harnessIdentity(message) {
   const parentSessionId = meta['io.deepseek.harness/parentSessionId']
   if (!validHarnessSessionIdentity(sessionId) || (parentSessionId !== undefined && !validHarnessSessionIdentity(parentSessionId))) return undefined
   return { sessionId, ...(parentSessionId === undefined ? {} : { parentSessionId }) }
+}
+
+function browserTargetOwner(message) {
+  const identity = harnessIdentity(message)
+  return identity?.parentSessionId ?? identity?.sessionId
+}
+
+function sameBrowserTab(left, right) {
+  return validBrowserTarget(left) && validBrowserTarget(right)
+    && left.browser === right.browser && left.windowId === right.windowId && left.tabId === right.tabId
 }
 
 function validKnowledgeResult(value) {
@@ -793,6 +804,8 @@ function lightDocumentArgumentsHint(args) {
       return 'light_document_write_preview insert_drawing requires Mermaid source. To insert after the current selected content, first call light_document_selection_read, then use payload { mermaid: "flowchart TD\\n开始 --> 结束", position: "after_selection", expectedSelectionFingerprint }. For document-block insertion, use start/end/before/after; before/after require id or index. SVG, text, image, and unknown payload fields are not accepted.'
     }
     if (args.operation === 'blocks_insert' && lightDocumentInsertFragments('blocks_insert', args.payload) === null) {
+      const count = Array.isArray(args.payload.blocks) ? args.payload.blocks.length : undefined
+      if (count !== undefined && count > 50) return `light_document_write_preview blocks_insert accepts at most 50 blocks per preview; received ${count}. Split the body into ordered batches of at most 50, and complete preview → user confirmation → commit → same Browser Target readback for each batch before starting the next.`
       return 'light_document_write_preview blocks_insert requires supported blocks and an optional insertion position.'
     }
     if (args.operation === 'blocks_delete' && lightDocumentBatchItems('blocks_delete', args.payload) === null) {
@@ -870,6 +883,17 @@ function lightDocumentWriteHash(operation, payload) { return createHash('sha256'
 function sameLightDocumentTarget(left, right) {
   return validLightDocumentResource(left) && validLightDocumentResource(right)
     && left.kind === right.kind && left.origin === right.origin && left.documentName === right.documentName
+}
+function sameLightDocumentWriteTarget(result, request) {
+  if (sameLightDocumentTarget(result.resource, request.resource)) return true
+  const title = result.observed?.title
+  // Initializing an empty document title legitimately changes documentName.
+  // Keep that narrow exception tied to the blocks_insert response which has
+  // already attested the requested body fragments below.
+  return request.operation === 'blocks_insert' && title?.initialized === true
+    && typeof title.text === 'string' && title.text.trim().length > 0 && title.text.length <= 500
+    && validLightDocumentResource(result.resource) && validLightDocumentResource(request.resource)
+    && result.resource.kind === request.resource.kind && result.resource.origin === request.resource.origin
 }
 function lightDocumentBatchItems(operation, payload) {
   if (!['blocks_delete', 'blocks_format'].includes(operation)) return null
@@ -1028,7 +1052,7 @@ function verifiedFragmentEvidence(request, result, requested) {
 function verifiedLightDocumentWriteMatches(result, request) {
   const matchesRequest = validLightDocumentWriteResult(result) && result.requested?.operation === request.operation
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
-    && result.observed?.verified === true && sameLightDocumentTarget(result.resource, request.resource)
+    && result.observed?.verified === true && sameLightDocumentWriteTarget(result, request)
   if (!matchesRequest) return false
   if (request.operation === 'selection_insert' || request.operation === 'selection_replace' || request.operation === 'selection_content_replace') return verifiedFragmentEvidence(request, result, selectionInsertFragments(request.payload))
   if (request.operation === 'selection_blocks_replace') {
@@ -1175,33 +1199,55 @@ function orderedMarkdownMarkersMissing(body, markers) {
   }
   return null
 }
-function pmdLocatorTableLineNumbers(lines) {
-  const indexes = new Set()
-  const normalStart = lines.findIndex(line => line.trim() === '## （一）正常业务场景'); const boundaryStart = lines.findIndex((line, index) => index > normalStart && line.trim() === '## 边界场景')
-  if (normalStart < 0 || boundaryStart < 0) return indexes
-  const changes = lines.flatMap((line, index) => index > normalStart && index < boundaryStart && /^###\s+4\.(\d+)\s+改动点：\S/.test(line.trim()) ? [{ index, number: line.trim().match(/^###\s+4\.(\d+)/)?.[1] }] : [])
-  for (let changeIndex = 0; changeIndex < changes.length; changeIndex += 1) {
-    const change = changes[changeIndex]; const end = changes[changeIndex + 1]?.index ?? boundaryStart
-    const children = lines.flatMap((line, index) => index > change.index && index < end && new RegExp(`^####\\s+4\\.${change.number}\\.\\d+\\s+\\S+：\\S`).test(line.trim()) ? [index] : [])
-    for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
-      const childEnd = children[childIndex + 1] ?? end
-      for (let index = children[childIndex] + 1; index < childEnd - 1; index += 1) {
-        if (lines[index].trim() !== '| 定位项 | 位置 |' || !/^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|\s*$/.test(lines[index + 1])) continue
-        indexes.add(index); indexes.add(index + 1)
-        for (let cursor = index + 2; cursor < childEnd && /^\|.*\|\s*$/.test(lines[cursor].trim()); cursor += 1) indexes.add(cursor)
-      }
-    }
-  }
-  return indexes
-}
 function pmdEstimatedPersonDays(lines) {
   const row = lines.map(line => line.trim().startsWith('|') && line.trim().endsWith('|') ? line.trim().slice(1, -1).split('|').map(cell => cell.trim()) : null).find(cells => cells?.[0] === '产品经理' && cells[2] === '预估人天')
   const match = row?.[3]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
   return match ? Number(match[1]) : null
 }
-function pmdHeadingHasContent(lines, start) {
-  const end = lines.findIndex((line, index) => index > start && /^#{1,5}\s+/.test(line.trim()))
-  return lines.slice(start + 1, end < 0 ? lines.length : end).some(line => line.trim() && !/^\|\s*:?-{3,}/.test(line.trim()))
+function pmdTableRow(line) {
+  const trimmed = line.trim()
+  return trimmed.startsWith('|') && trimmed.endsWith('|') ? trimmed.slice(1, -1).split('|').map(cell => cell.trim()) : null
+}
+function pmdTableRows(lines, header) {
+  const headerIndex = lines.findIndex(line => {
+    const row = pmdTableRow(line)
+    return row?.length === header.length && row.every((cell, index) => cell === header[index])
+  })
+  const separator = pmdTableRow(lines[headerIndex + 1] ?? '')
+  if (headerIndex < 0 || !separator || separator.length !== header.length || !separator.every(cell => /^:?-{3,}:?$/.test(cell))) return []
+  const rows = []
+  for (let index = headerIndex + 2; index < lines.length; index += 1) {
+    const row = pmdTableRow(lines[index])
+    if (!row) break
+    rows.push(row)
+  }
+  return rows
+}
+function pmdTargetChangeFailure(target) {
+  const text = target.replace(/<br\s*\/?>/gi, ' ').replace(/\s+/g, ' ').trim()
+  if (!text) return '目标修改点不能为空'
+  if (/^\[待确认\](?:（[^）]*）)?[。；]?$/.test(text) && !text.includes('影响')) return '目标修改点不能只有[待确认]，必须说明缺失信息对实施或测试的影响'
+  const plain = text.replace(/\[待确认\]（[^）]*）/g, '').replace(/[\s\d①②③④⑤⑥⑦⑧⑨⑩.,，。；:：、]/g, '')
+  if (plain.length < 8) return '目标修改点信息不足，需说明具体改动或完成效果'
+  if (/^(?:(?:优化|调整|修复)[\u4e00-\u9fff]{0,10}|(?:保持一致|正确展示)[\u4e00-\u9fff]{0,6})$/.test(plain)) return '目标修改点不能只是“优化、调整、修复、保持一致、正确展示”等空泛短句'
+  if (/(?:^|[^A-Za-z0-9_.\\/-])\/(?:[\w.-]+\/)+[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text) || /(?:^|[^A-Za-z0-9_.\\/-])[A-Za-z]:[\\/](?:[\w.-]+[\\/])*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text)) return '目标修改点不得使用开发者本机绝对路径，需使用代码库完整相对路径'
+  const codeFile = /(?:^|[^A-Za-z0-9_.\\/-])((?:[\w.-]+\/)*)([\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml))\b/g
+  for (const match of text.matchAll(codeFile)) if (!match[1]) return `目标修改点中的代码文件必须使用带目录的代码库相对路径，不能只写文件名：${match[2]}`
+  return null
+}
+function pmdTextOutsideTargetChangeCells(lines) {
+  const result = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const header = pmdTableRow(lines[index])
+    if (!header || header.length !== 4 || !header.every((cell, cellIndex) => cell === ['需求点', '类型', '原有实现', '目标修改点'][cellIndex]) || !pmdTableRow(lines[index + 1])) { result.push(lines[index]); continue }
+    result.push(lines[index], lines[index + 1]); index += 2
+    for (; index < lines.length; index += 1) {
+      const row = pmdTableRow(lines[index])
+      if (!row) { index -= 1; break }
+      result.push(`| ${row.slice(0, 3).join(' | ')} | [目标修改点] |`)
+    }
+  }
+  return result.join('\n')
 }
 function pmdDetailedFunctionalFailure(visiblePrd) {
   const lines = visiblePrd.split('\n'); const normalStart = lines.findIndex(line => line.trim() === '## （一）正常业务场景')
@@ -1219,24 +1265,18 @@ function pmdDetailedFunctionalFailure(visiblePrd) {
     for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
       const child = normal.slice(children[childIndex], children[childIndex + 1] ?? end).join('\n'); const heading = normal[children[childIndex]].trim()
       if (heading.match(/^####\s+4\.(\d+)\./)?.[1] !== change.number) return `${heading} must be numbered under ${normal[start].trim()}`
-      const type = child.match(/^\*\*变更类型：\*\*\s*(改造|新增)\s*$/m)?.[1]
-      if (!type) return `${heading} must declare 变更类型：改造 or 新增`
-      if (!child.includes('| 定位项 | 位置 |')) return `${heading} is missing locator table`
-      for (const locator of ['PC 页面 URL', '前端代码文件', '后端代码文件/接口']) {
-        const value = child.match(new RegExp(`^\\|\\s*${locator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\|\\s*(.*?)\\s*\\|\\s*$`, 'm'))?.[1]
-        if (!value) return `${heading} is missing locator: ${locator}`
-        if (value.includes('[待确认]') && !/（[^）]+）/.test(value)) return `${heading} must explain the impact when locator ${locator} is [待确认]`
-      }
-      if (type === '改造') {
-        const childLines = child.split('\n'); const original = childLines.findIndex(line => line.trim() === '##### 原逻辑'); const updated = childLines.findIndex((line, itemIndex) => itemIndex > original && line.trim() === '##### 调整后逻辑')
-        if (original < 0 || updated < 0) return `${heading} is a 改造 item and must compare 原逻辑 with 调整后逻辑`
-        if (!pmdHeadingHasContent(childLines, original)) return `${heading} 原逻辑 must contain content`
-        if (!pmdHeadingHasContent(childLines, updated)) return `${heading} 调整后逻辑 must contain content`
-      }
-      if (type === '新增') {
-        const childLines = child.split('\n'); const rules = childLines.findIndex(line => line.trim() === '##### 交互与规则')
-        if (childLines.some(line => line.trim() === '##### 原逻辑' || line.trim() === '##### 调整后逻辑')) return `${heading} is a 新增 item and must not retain 原逻辑 or 调整后逻辑 headings`
-        if (rules < 0 || !pmdHeadingHasContent(childLines, rules)) return `${heading} is a 新增 item and must describe applicable rules`
+      if (child.split('\n').slice(1).some(line => /^#{5,}\s+/.test(line.trim()))) return `${heading} must not contain Markdown headings below the specific-item level`
+      if (child.split('\n').slice(1).some(line => { const row = pmdTableRow(line); return row?.length === 2 && row[0] === '定位项' && row[1] === '位置' })) return `${heading} must not contain legacy locator table`
+      const changeRows = pmdTableRows(child.split('\n'), ['需求点', '类型', '原有实现', '目标修改点'])
+      if (!changeRows.length) return `${heading} is missing required development change table: 需求点 / 类型 / 原有实现 / 目标修改点`
+      for (const row of changeRows) {
+        const [requirement, type, original, target] = row
+        if (row.length !== 4 || !requirement || !type || !original || !target) return `${heading} development change table must contain complete 需求点、类型、原有实现、目标修改点`
+        if (!['新增', '修改', '删除', '修复'].includes(type)) return `${heading} 类型 must be one of: 新增、修改、删除、修复`
+        if (type === '新增' && original !== '不适用（新增）') return `${heading} 新增 item 原有实现 must be 不适用（新增）`
+        if (type !== '新增' && (original === '不适用（新增）' || (original.includes('[待确认]') && !/（[^）]+）/.test(original)))) return `${heading} ${type} item 原有实现 must be confirmed or explain [待确认] impact`
+        const targetChangeFailure = pmdTargetChangeFailure(target)
+        if (targetChangeFailure) return `${heading} ${targetChangeFailure}`
       }
     }
   }
@@ -1269,8 +1309,8 @@ function pmdBatchTemplateFailure(batchId, items) {
   const fieldLabel = visiblePrd.match(/\[(?:必填|选填|建议填写|涉及多系统交互时必填)\]|【选填】/)
   if (fieldLabel) return `PRD document exposes a field label: ${fieldLabel[0]}`
   if (/AccrUI\s*需求交接附录/.test(visiblePrd)) return 'PRD document appends a non-company-template handoff section'
-  const visibleLines = visiblePrd.split('\n'); const outsideLocatorTables = visibleLines.filter((_, index) => !pmdLocatorTableLineNumbers(visibleLines).has(index)).join('\n')
-  const codeLocator = outsideLocatorTables.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/im)
+  const visibleLines = visiblePrd.split('\n'); const outsideTargetChangeCells = pmdTextOutsideTargetChangeCells(visibleLines)
+  const codeLocator = outsideTargetChangeCells.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/im)
   if (codeLocator) return `PRD document contains a code locator: ${codeLocator[0].trim()}`
   return null
 }
@@ -1471,7 +1511,10 @@ export class BrowserConnector {
     this.token = undefined
     this.generation = undefined
     this.runTargets = new RunTargetRegistry()
+    this.capturedBrowserTargets = new Map()
+    this.browserCallBindings = new AsyncLocalStorage()
     this.pending = new Map()
+    this.updateQuiescent = false
     this.teamDocStore = options.teamDocStore ?? new TeamDocRecordStore()
     this.teamKnowledgeBatchStore = options.teamKnowledgeBatchStore ?? new TeamKnowledgeBatchRecordStore()
     this.teamKnowledgeBatchChallenges = new Map()
@@ -1519,6 +1562,22 @@ export class BrowserConnector {
     })
   }
 
+  /** True while a Browser operation is still awaiting its Extension response. */
+  isBusy() {
+    return this.pending.size > 0
+  }
+
+  /** Atomically reject new browser work after observing this Connector idle. */
+  beginUpdateQuiescence() {
+    if (this.updateQuiescent || this.pending.size > 0) return false
+    this.updateQuiescent = true
+    return true
+  }
+
+  endUpdateQuiescence() {
+    this.updateQuiescent = false
+  }
+
   /** @returns {Promise<void>} */
   async stop() {
     for (const pending of this.pending.values()) {
@@ -1538,6 +1597,7 @@ export class BrowserConnector {
     this.teamKnowledgeBatchChallenges.clear()
     this.pmdPrdReviewAdoptions.clear()
     this.runTargets.clear()
+    this.capturedBrowserTargets.clear()
     const server = this.server
     this.server = undefined
     this.url = undefined
@@ -1561,6 +1621,7 @@ export class BrowserConnector {
       this.htmlWorkbenchChallenges.clear()
       this.htmlWorkbenchWriteLocks.clear()
       this.teamKnowledgeBatchChallenges.clear()
+      this.capturedBrowserTargets.clear()
       this.uncertainSelectionWrite = undefined
     }
     if (registered.targetChanged) this.uncertainSelectionWrite = undefined
@@ -1571,6 +1632,48 @@ export class BrowserConnector {
   bindBrowserTarget(runId, browserTarget, browserTargets, unavailableBrowserTargets) {
     if (!validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowserTargets)) return false
     return this.registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+  }
+
+  /** Keep a send-time target per Harness session without changing the active Connector Run. */
+  captureBrowserTarget(runId, sessionId, submissionId, browserTarget, browserTargets, unavailableBrowserTargets) {
+    if (this.runTargets.currentRunId !== runId || !validHarnessSessionIdentity(sessionId) || !validHarnessSessionIdentity(submissionId)
+      || !validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowserTargets)) return false
+    const key = `${runId}\u0000${sessionId}`
+    this.capturedBrowserTargets.set(key, Object.freeze({ submissionId, browserTarget, browserTargets: browserTargets ?? [browserTarget], unavailableBrowserTargets: unavailableBrowserTargets ?? [] }))
+    return true
+  }
+
+  releaseCapturedBrowserTarget(sessionId, submissionId) {
+    if (!validHarnessSessionIdentity(sessionId) || !validHarnessSessionIdentity(submissionId) || this.runTargets.currentRunId === undefined) return false
+    const key = `${this.runTargets.currentRunId}\u0000${sessionId}`
+    const captured = this.capturedBrowserTargets.get(key)
+    if (!captured || captured.submissionId !== submissionId) return false
+    this.capturedBrowserTargets.delete(key)
+    return true
+  }
+
+  #browserBinding(message) {
+    const fallback = this.runTargets.current()
+    const runId = fallback?.runId
+    if (runId === undefined) throw new Error('No active Harness Run is available for Browser Target use.')
+    const owner = browserTargetOwner(message)
+    const capturesExist = [...this.capturedBrowserTargets.keys()].some(key => key.startsWith(`${runId}\u0000`))
+    if (owner === undefined) {
+      if (capturesExist) throw new Error('Browser Connector request lacks a Harness session identity, so its captured Browser Target cannot be selected.')
+      if (!validBrowserTarget(fallback?.browserTarget)) throw new Error('No Browser Target is bound to this Run by the Extension.')
+      return { ...fallback, harnessSessionId: undefined }
+    }
+    const captured = this.capturedBrowserTargets.get(`${runId}\u0000${owner}`)
+    if (captured === undefined) throw new Error('No Browser Target was captured for this Harness session; refusing to use another session’s page.')
+    return { runId, browserTarget: captured.browserTarget, browserTargets: captured.browserTargets, unavailableBrowserTargets: captured.unavailableBrowserTargets, harnessSessionId: owner }
+  }
+
+  #activateCapturedBrowserTarget(message) {
+    return this.#browserBinding(message)
+  }
+
+  #currentBrowserBinding() {
+    return this.browserCallBindings.getStore() ?? this.runTargets.current()
   }
 
   /** Store the exact saved PRD accepted in the visual Markdown Review. */
@@ -1584,15 +1687,21 @@ export class BrowserConnector {
     return true
   }
 
-  #authorizePmdPrdPreview(batchId, runId, identity, items) {
+  #authorizePmdPrdPreview(batchId, runId, identity, items, reserve = true) {
     const key = identity?.parentSessionId ?? identity?.sessionId
     if (!key) throw new Error('pmd_prd_review_adoption_session_required')
     const adoption = this.pmdPrdReviewAdoptions.get(key)
     if (!adoption) throw new Error('pmd_prd_review_adoption_required')
     if (items.length !== 1 || hash(items[0].body) !== adoption.contentHash) throw new Error('pmd_prd_review_adoption_content_changed')
     if (adoption.batchId !== undefined && adoption.batchId !== batchId) throw new Error('pmd_prd_review_adoption_batch_changed')
-    if (adoption.batchId === undefined) this.pmdPrdReviewAdoptions.set(key, Object.freeze({ ...adoption, batchId }))
+    if (reserve && adoption.batchId === undefined) this.pmdPrdReviewAdoptions.set(key, Object.freeze({ ...adoption, batchId }))
     return adoption
+  }
+
+  #preflightPmdPrdPreview(batchId, runId, identity, items) {
+    const templateFailure = pmdBatchTemplateFailure(batchId, items)
+    if (templateFailure) throw new Error(`pmd_prd_template_invalid: ${templateFailure}`)
+    if (batchId.startsWith('pmd:')) this.#authorizePmdPrdPreview(batchId, runId, identity, items, false)
   }
 
   #reportAiLightDocumentWrite(message, runId, browserTarget, result, idempotencyIdentity) {
@@ -1634,16 +1743,42 @@ export class BrowserConnector {
     const isSelectedSourceScopeRequest = pending.request.tool === 'selected_source_scope'
     const isBrowserBoundRequest = isOfficeContextRequest || isReadWorkTabRequest || isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest || isHtmlWorkbenchRequest || isTeamKnowledgeBatchRequest
     const sameOpenIdentity = response.runId === pending.request.runId && response.generation === pending.request.generation
-    const currentBinding = this.runTargets.get(pending.request.runId)
-    const currentTarget = currentBinding.browserTarget
-    const currentTargets = currentBinding.browserTargets
-    const currentUnavailable = currentBinding.unavailableBrowserTargets
+    // A second session may begin a later browser request before this Extension
+    // response returns.  Validate against the request's immutable correlation,
+    // never against the Connector's subsequently selected session target.
+    const currentTarget = pending.request.browserTarget
+    const currentTargets = pending.request.browserTargets ?? (currentTarget === undefined ? [] : [currentTarget])
+    const currentUnavailable = pending.request.unavailableBrowserTargets ?? []
     const responseTargets = response.browserTargets ?? (response.browserTarget === undefined ? undefined : [response.browserTarget])
     const responseUnavailable = response.unavailableBrowserTargets ?? []
-    const sameOfficeIdentity = sameOpenIdentity && sameBrowserTarget(response.browserTarget, currentTarget)
-      && sameBrowserTargetList(responseTargets, currentTargets)
+    const legalTeamKnowledgeLeaseMigration = sameOpenIdentity
+      && isTeamKnowledgeBatchRequest
+      && pending.request.action === 'inspect_parent'
+      && pending.request.lease === 'reuse'
+      && sameBrowserTab(response.browserTarget, currentTarget)
+      && Array.isArray(responseTargets) && responseTargets.length === 1
+      && sameBrowserTarget(responseTargets[0], response.browserTarget)
       && sameUnavailableBrowserTargetList(responseUnavailable, currentUnavailable)
+    const sameOfficeIdentity = sameOpenIdentity && (legalTeamKnowledgeLeaseMigration || (sameBrowserTarget(response.browserTarget, currentTarget)
+      && sameBrowserTargetList(responseTargets, currentTargets)
+      && sameUnavailableBrowserTargetList(responseUnavailable, currentUnavailable)))
+    if (isBrowserBoundRequest && sameOpenIdentity && !sameOfficeIdentity) {
+      clearTimeout(pending.timeout)
+      this.pending.delete(response.requestId)
+      pending.reject(new Error('Browser Target changed or no longer matches this tool request; no page operation was accepted.'))
+      return true
+    }
     if ((isBrowserBoundRequest && !sameOfficeIdentity) || (!isBrowserBoundRequest && !sameOpenIdentity)) return false
+    if (legalTeamKnowledgeLeaseMigration && pending.request.harnessSessionId !== undefined) {
+      const key = `${pending.request.runId}\u0000${pending.request.harnessSessionId}`
+      const captured = this.capturedBrowserTargets.get(key)
+      if (captured) this.capturedBrowserTargets.set(key, Object.freeze({
+        ...captured,
+        browserTarget: response.browserTarget,
+        browserTargets: [response.browserTarget],
+        unavailableBrowserTargets: responseUnavailable,
+      }))
+    }
     clearTimeout(pending.timeout)
     this.pending.delete(response.requestId)
     if (!Object.hasOwn(response, 'result')) {
@@ -1775,26 +1910,46 @@ export class BrowserConnector {
       this.#reply(response, errorResponse(message.id, -32601, 'method not found'))
       return
     }
-    if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit'].includes(message.params?.name)) {
-      await this.#flatLightDocument(message, response)
-      return
-    }
-    if (['spreadsheet_get_context', 'spreadsheet_read_range', 'spreadsheet_search', 'spreadsheet_inspect', 'spreadsheet_write_preview', 'spreadsheet_write_commit'].includes(message.params?.name)) {
-      await this.#flatSpreadsheet(message, response)
-      return
-    }
-    if (['presentation_get_capabilities', 'presentation_get_context', 'presentation_get_selection', 'presentation_get_text_boxes', 'presentation_write_preview', 'presentation_write_commit'].includes(message.params?.name)) {
-      await this.#flatPresentation(message, response)
-      return
-    }
-    if (['html_workbench_read', 'html_workbench_preview', 'html_workbench_commit'].includes(message.params?.name)) {
-      await this.#htmlWorkbench(message, response)
-      return
-    }
-    const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create' })[message.params?.name]
-    if (batchAction !== undefined) {
-      await this.#teamKnowledgeBatch({ ...message, params: { ...message.params, arguments: { ...(message.params?.arguments ?? {}), action: batchAction } } }, response)
-      return
+    if (BROWSER_TOOL_NAMES.has(message.params?.name)) {
+      const name = message.params?.name
+      const args = message.params?.arguments ?? {}
+      // These checks are local only: no Browser Target capture is required and
+      // no tab can be read or changed when they reject the call.
+      if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit'].includes(name)) {
+        if (name === 'light_document_write_preview' && lightDocumentPayloadHasLiteralEscapedNewline(args.payload)) {
+          this.#reply(response, errorResponse(message.id, -32602, 'Light-document payload contains a literal \\n outside a code block. Use real paragraph/list blocks or actual newline characters before requesting a write.'))
+          return
+        }
+        if (!validFlatLightDocumentArguments(name, args)) {
+          const hint = name === 'light_document_write_preview'
+            ? lightDocumentArgumentsHint({ action: 'inspect_write', ...args })
+            : `${name} received invalid arguments; use its flat schema exactly.`
+          this.#reply(response, errorResponse(message.id, -32602, hint))
+          return
+        }
+      }
+      const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create' })[name]
+      if (batchAction !== undefined) {
+        const batchArgs = { ...args, action: batchAction }
+        if (!validTeamKnowledgeBatchArguments(batchArgs)) {
+          this.#reply(response, errorResponse(message.id, -32602, `${name} received invalid arguments`))
+          return
+        }
+        if (batchAction === 'preview') {
+          try {
+            this.#preflightPmdPrdPreview(args.batchId, this.runTargets.currentRunId, harnessIdentity(message), args.items)
+          } catch (error) {
+            this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch preview failed')
+            return
+          }
+        }
+      }
+      let binding
+      try { binding = this.#browserBinding(message) } catch (error) {
+        this.#toolError(response, message.id, error instanceof Error ? error.message : 'Browser Target capture is unavailable.')
+        return
+      }
+      return this.browserCallBindings.run(Object.freeze(binding), () => this.#dispatchBrowserToolCall(message, response))
     }
     if (message.params?.name === 'knowledge_search' || message.params?.name === 'code_search') {
       await this.#knowledgeSearch(message, response)
@@ -1804,74 +1959,63 @@ export class BrowserConnector {
       await this.#selectedSourceScope(message, response)
       return
     }
-    if (message.params?.name === 'read_work_tab') {
-      await this.#readWorkTab(message, response)
-      return
+    this.#reply(response, errorResponse(message.id, -32601, `Unknown Connector tool: ${String(message.params?.name ?? '')}`))
+  }
+
+  async #dispatchBrowserToolCall(message, response) {
+    const name = message.params?.name
+    if (['light_document_read', 'light_document_selection_read', 'light_document_selection_replace_preview', 'light_document_selection_replace_commit', 'light_document_search', 'light_document_write_preview', 'light_document_write_commit'].includes(name)) {
+      return this.#flatLightDocument(message, response)
     }
-    if (message.params?.name !== 'list_work_tabs') {
-      this.#reply(response, errorResponse(message.id, -32601, `Unknown Connector tool: ${String(message.params?.name ?? '')}`))
+    if (['spreadsheet_get_context', 'spreadsheet_read_range', 'spreadsheet_search', 'spreadsheet_inspect', 'spreadsheet_write_preview', 'spreadsheet_write_commit'].includes(name)) {
+      return this.#flatSpreadsheet(message, response)
+    }
+    if (['presentation_get_capabilities', 'presentation_get_context', 'presentation_get_selection', 'presentation_get_text_boxes', 'presentation_write_preview', 'presentation_write_commit'].includes(name)) {
+      return this.#flatPresentation(message, response)
+    }
+    if (['html_workbench_read', 'html_workbench_preview', 'html_workbench_commit'].includes(name)) {
+      return this.#htmlWorkbench(message, response)
+    }
+    const batchAction = ({ team_knowledge_batch_preview: 'preview', team_knowledge_batch_create: 'create' })[name]
+    if (batchAction !== undefined) {
+      return this.#teamKnowledgeBatch({ ...message, params: { ...message.params, arguments: { ...(message.params?.arguments ?? {}), action: batchAction } } }, response)
+    }
+    if (name === 'read_work_tab') return this.#readWorkTab(message, response)
+    if (name !== 'list_work_tabs') {
+      this.#reply(response, errorResponse(message.id, -32601, `Unknown Connector tool: ${String(name ?? '')}`))
       return
     }
     if (!validOfficeGetContextArguments(message.params.arguments ?? {})) {
       this.#reply(response, errorResponse(message.id, -32602, 'list_work_tabs accepts no model-controlled target arguments'))
       return
     }
-
-    const currentBinding = this.runTargets.current()
+    const currentBinding = this.#currentBrowserBinding()
     const runId = currentBinding?.runId
     const boundTarget = currentBinding?.browserTarget
     if (!validBrowserTarget(boundTarget)) {
       this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
       return
     }
-
     const requestId = randomUUID()
     const browserTargets = currentBinding.browserTargets ?? [boundTarget]
     const unavailableBrowserTargets = currentBinding.unavailableBrowserTargets
     const isMultiTarget = browserTargets.length > 1 || unavailableBrowserTargets.length > 0
     const correlation = {
-      type: CONNECTOR_REQUEST,
-      requestId,
-      runId,
-      generation: this.generation,
-      browserTarget: boundTarget,
-      ...(isMultiTarget ? { browserTargets, unavailableBrowserTargets } : {}),
-      tool: 'list_work_tabs',
+      type: CONNECTOR_REQUEST, requestId, runId, generation: this.generation, browserTarget: boundTarget,
+      ...(currentBinding.harnessSessionId === undefined ? {} : { harnessSessionId: currentBinding.harnessSessionId }),
+      ...(isMultiTarget ? { browserTargets, unavailableBrowserTargets } : {}), tool: 'list_work_tabs',
     }
     try {
       const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
       const structuredContent = {
-        runId: correlation.runId,
-        requestId: correlation.requestId,
-        generation: correlation.generation,
-        browserTarget: resolved.browserTarget,
-        officeContext: resolved.officeContext,
-        ...(isMultiTarget ? {
-          primaryBrowserTarget: resolved.browserTarget,
-          browserTargets: resolved.browserTargets,
-          unavailableBrowserTargets: resolved.unavailableBrowserTargets,
-        } : {}),
+        runId: correlation.runId, requestId: correlation.requestId, generation: correlation.generation,
+        browserTarget: resolved.browserTarget, officeContext: resolved.officeContext,
+        ...(isMultiTarget ? { primaryBrowserTarget: resolved.browserTarget, browserTargets: resolved.browserTargets, unavailableBrowserTargets: resolved.unavailableBrowserTargets } : {}),
       }
-      if (!validOfficeGetContextOutput(structuredContent)) {
-        throw new Error('Browser Connector produced an invalid canonical Office context schema')
-      }
-      this.#reply(response, {
-        jsonrpc: '2.0',
-        id: message.id,
-        result: {
-          content: [{ type: 'text', text: JSON.stringify(structuredContent) }],
-          structuredContent,
-        },
-      })
+      if (!validOfficeGetContextOutput(structuredContent)) throw new Error('Browser Connector produced an invalid canonical Office context schema')
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent } })
     } catch (error) {
-      this.#reply(response, {
-        jsonrpc: '2.0',
-        id: message.id,
-        result: {
-          content: [{ type: 'text', text: error instanceof Error ? error.message : 'Browser Connector request failed' }],
-          isError: true,
-        },
-      })
+      this.#reply(response, { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: error instanceof Error ? error.message : 'Browser Connector request failed' }], isError: true } })
     }
   }
 
@@ -1952,13 +2096,13 @@ export class BrowserConnector {
       this.#reply(response, errorResponse(message.id, -32602, 'read_work_tab requires tab from list_work_tabs pages, starting at 1. Do not pass a tabId.'))
       return
     }
-    const currentBinding = this.runTargets.current()
-    const runId = currentBinding?.runId
-    const boundTarget = currentBinding?.browserTarget
-    if (!validBrowserTarget(boundTarget)) {
-      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
+    let currentBinding
+    try { currentBinding = this.#browserBinding(message) } catch (error) {
+      this.#toolError(response, message.id, error instanceof Error ? error.message : 'No Browser Target is available for this Harness session.')
       return
     }
+    const runId = currentBinding.runId
+    const boundTarget = currentBinding.browserTarget
     const browserTargets = currentBinding.browserTargets ?? [boundTarget]
     const unavailableBrowserTargets = currentBinding.unavailableBrowserTargets
     if (args.tab > browserTargets.length) {
@@ -1972,6 +2116,7 @@ export class BrowserConnector {
       runId,
       generation: this.generation,
       browserTarget: boundTarget,
+      ...(currentBinding.harnessSessionId === undefined ? {} : { harnessSessionId: currentBinding.harnessSessionId }),
       ...(isMultiTarget ? { browserTargets, unavailableBrowserTargets } : {}),
       tool: 'read_work_tab',
       tab: args.tab,
@@ -2050,13 +2195,13 @@ export class BrowserConnector {
 
   async #spreadsheet(message, response) {
     const args = message.params?.arguments ?? {}
-    const currentBinding = this.runTargets.current()
-    const runId = currentBinding?.runId
-    const browserTarget = currentBinding?.browserTarget
-    if (!validBrowserTarget(browserTarget)) {
-      this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.')
+    let currentBinding
+    try { currentBinding = this.#browserBinding(message) } catch (error) {
+      this.#toolError(response, message.id, error instanceof Error ? error.message : 'No Browser Target is available for this Harness session.')
       return
     }
+    const runId = currentBinding.runId
+    const browserTarget = currentBinding.browserTarget
     if (args.action === 'write') {
       const grant = this.spreadsheetChallenges.get(args.challenge)
       this.spreadsheetChallenges.delete(args.challenge)
@@ -2170,7 +2315,7 @@ export class BrowserConnector {
   }
 
   async #presentation(message, response) {
-    const args = message.params?.arguments ?? {}; const currentBinding = this.runTargets.current()
+    const args = message.params?.arguments ?? {}; const currentBinding = this.#currentBrowserBinding()
     const runId = currentBinding?.runId; const browserTarget = currentBinding?.browserTarget
     if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
     if (args.action === 'write') {
@@ -2241,7 +2386,7 @@ export class BrowserConnector {
       await this.#lightDocument({ ...message, params: { ...message.params, arguments: mapped } }, response)
       return
     }
-    const currentBinding = this.runTargets.current()
+    const currentBinding = this.#currentBrowserBinding()
     const runId = currentBinding?.runId
     const browserTarget = currentBinding?.browserTarget
     if (!validBrowserTarget(browserTarget)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
@@ -2323,7 +2468,7 @@ export class BrowserConnector {
     if ((name === 'html_workbench_preview' && !validHtmlWorkbenchPreviewArguments(args)) || (name === 'html_workbench_commit' && !validHtmlWorkbenchCommitArguments(args)) || (name === 'html_workbench_read' && (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 0))) {
       this.#reply(response, errorResponse(message.id, -32602, `${String(name)} received invalid arguments.`)); return
     }
-    const binding = this.runTargets.current(); const runId = binding?.runId; const browserTarget = binding?.browserTarget
+    const binding = this.#currentBrowserBinding(); const runId = binding?.runId; const browserTarget = binding?.browserTarget
     if (!validBrowserTarget(browserTarget) || !browserTarget.url.startsWith('file:')) { this.#toolError(response, message.id, 'HTML Workbench requires a bound local file:// HTML Browser Target.'); return }
     const send = async (action, extra = {}) => this.#requestExtension({ type: CONNECTOR_REQUEST, requestId: randomUUID(), runId, generation: this.generation, browserTarget, tool: 'html_workbench', action, ...extra }, undefined, this.officeRequestTimeoutMs)
     if (name === 'html_workbench_read') {
@@ -2397,7 +2542,7 @@ export class BrowserConnector {
       this.#reply(response, errorResponse(message.id, -32602, lightDocumentArgumentsHint(args)))
       return
     }
-    const currentBinding = this.runTargets.current()
+    const currentBinding = this.#currentBrowserBinding()
     const runId = currentBinding?.runId
     const browserTarget = currentBinding?.browserTarget
     if (!validBrowserTarget(browserTarget)) {
@@ -2447,6 +2592,9 @@ export class BrowserConnector {
         const resolved = await this.#requestExtension(correlation, undefined, this.officeRequestTimeoutMs)
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, ...resolved.result }
         if (!verifiedLightDocumentWriteMatches(resolved.result, correlation)) throw new Error('Browser Connector produced an invalid verified light-document write')
+        if (grant.titleInitializationRequired === true && (resolved.result.observed?.title?.initialized !== true || typeof resolved.result.observed.title.text !== 'string' || !resolved.result.observed.title.text.trim())) {
+          throw new Error('Empty light-document title initialization was required, but the Browser Target did not return verified title readback. Reread this same document before continuing.')
+        }
         await this.officeDocumentWriteStore.setState(args.idempotencyIdentity, 'verified')
         if (this.officeDocumentWrites.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentWrites.delete(this.officeDocumentWrites.keys().next().value)
         this.officeDocumentWrites.set(args.idempotencyIdentity, { fingerprint: requestFingerprint, result })
@@ -2479,6 +2627,22 @@ export class BrowserConnector {
           return
         }
         const selection = resolved.result.document?.selection
+        const firstH1 = args.operation === 'blocks_insert' && Array.isArray(args.payload?.blocks)
+          ? args.payload.blocks.find((block) => String(block?.type ?? block?.blockType ?? '').toLowerCase() === 'h1')
+          : null
+        const emptyBody = resolved.result.document?.emptyBody
+        const semanticEmpty = emptyBody?.semantic === true && Number.isInteger(emptyBody.physicalBlockCount) && emptyBody.physicalBlockCount >= 0
+          && Number.isInteger(emptyBody.blankParagraphCount) && emptyBody.blankParagraphCount >= 0 && emptyBody.blankParagraphCount <= emptyBody.physicalBlockCount
+        const titleInitializationRequired = semanticEmpty && firstH1 !== null && firstH1 !== undefined
+          && (() => {
+            const title = resolved.result.document?.title
+            if (title?.supported !== true || typeof title.text !== 'string' || title.truncated === true) return null
+            return title.text.trim() === ''
+          })()
+        if (firstH1 !== null && firstH1 !== undefined && (!emptyBody || typeof emptyBody.semantic !== 'boolean' || (semanticEmpty && titleInitializationRequired === null))) {
+          this.#toolError(response, message.id, 'Cannot safely determine whether this light document is semantically empty and has a readable title state. Reload the document page, reopen the side panel, then reread before previewing the body write.')
+          return
+        }
         if (args.operation === 'insert_drawing' && args.payload?.position === 'after_selection'
           && (selection?.selectionFingerprint !== args.payload.expectedSelectionFingerprint || selection?.stable !== true || selection?.hasSelection !== true || selection?.isCollapsed || !Array.isArray(selection?.selectedTagIds) || selection.selectedTagIds.length < 1 || selection.selectionIdsValid !== true)) {
           this.#toolError(response, message.id, 'The current light-document selection is not a stable block selection matching expectedSelectionFingerprint. Select the target content, call light_document_selection_read again, then preview the drawing.')
@@ -2489,7 +2653,7 @@ export class BrowserConnector {
         if (this.officeDocumentChallenges.size >= OFFICE_DOCUMENT_MAX_RECORDS) this.officeDocumentChallenges.delete(this.officeDocumentChallenges.keys().next().value)
         const payloadHash = lightDocumentWriteHash(args.operation, args.payload)
         const previewIdentity = hash(canonicalJson([resolved.result.resource.fingerprint, args.operation, args.payload]))
-        this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payload: args.payload, payloadHash, idempotencyIdentity: `light-write:${previewIdentity.slice(0, 48)}`, expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
+        this.officeDocumentChallenges.set(challenge, { runId, generation: this.generation, browserTarget, resource: resolved.result.resource, operation: args.operation, payload: args.payload, payloadHash, idempotencyIdentity: `light-write:${previewIdentity.slice(0, 48)}`, ...(titleInitializationRequired === true ? { titleInitializationRequired: true } : {}), expiresAt: Date.now() + OFFICE_DOCUMENT_CHALLENGE_TTL_MS })
         const result = { runId, requestId: correlation.requestId, generation: correlation.generation, browserTarget: resolved.browserTarget, action: 'inspect_write', resource: resolved.result.resource, operation: args.operation, ...(args.operation === 'insert_drawing' && args.payload?.position === 'after_selection' ? { insertion: { position: 'after_selection', selectedTagIds: selection.selectedTagIds } } : {}), challenge }
         this.#reply(response, lightDocumentToolResponse(message.id, result))
         return
@@ -2530,7 +2694,7 @@ export class BrowserConnector {
       this.#reply(response, errorResponse(message.id, -32602, `${String(message.params?.name ?? 'team_knowledge_batch')} received invalid arguments`))
       return
     }
-    const currentBinding = this.runTargets.current(); const runId = currentBinding?.runId; const target = currentBinding?.browserTarget
+    const currentBinding = this.#currentBrowserBinding(); const runId = currentBinding?.runId; const target = currentBinding?.browserTarget
     const identity = harnessIdentity(message)
     if (!validBrowserTarget(target)) { this.#toolError(response, message.id, 'No Browser Target is bound to this Run by the Extension.'); return }
     const existingBatch = await this.teamKnowledgeBatchStore.load(args.batchId)
@@ -2637,31 +2801,37 @@ export class BrowserConnector {
   }
 
   #requestExtension(correlation, response, timeoutMs = this.requestTimeoutMs) {
+    if (this.updateQuiescent) return Promise.reject(new Error('在线更新正在准备；暂不接受新的浏览器任务'))
+    const browserBound = ['list_work_tabs', 'read_work_tab', 'light_document', 'spreadsheet', 'presentation', 'html_workbench', 'team_knowledge_batch'].includes(correlation.tool)
+    const owner = this.browserCallBindings.getStore()?.harnessSessionId
+    const dispatched = browserBound && owner !== undefined && correlation.harnessSessionId === undefined
+      ? { ...correlation, harnessSessionId: owner }
+      : correlation
     return new Promise((resolve, reject) => {
       let cancelled = false
       const cancel = () => {
-        if (cancelled || !this.pending.delete(correlation.requestId)) return
+        if (cancelled || !this.pending.delete(dispatched.requestId)) return
         cancelled = true
         clearTimeout(timeout)
-        try { this.requestExtension({ type: CONNECTOR_CANCEL, requestId: correlation.requestId, runId: correlation.runId, generation: correlation.generation }) } catch {}
+        try { this.requestExtension({ type: CONNECTOR_CANCEL, requestId: dispatched.requestId, runId: dispatched.runId, generation: dispatched.generation }) } catch {}
         reject(new Error('Browser Connector request was cancelled'))
       }
       const timeout = setTimeout(() => {
-        this.pending.delete(correlation.requestId)
-        try { this.requestExtension({ type: CONNECTOR_CANCEL, requestId: correlation.requestId, runId: correlation.runId, generation: correlation.generation }) } catch {}
+        this.pending.delete(dispatched.requestId)
+        try { this.requestExtension({ type: CONNECTOR_CANCEL, requestId: dispatched.requestId, runId: dispatched.runId, generation: dispatched.generation }) } catch {}
         reject(new Error('Browser Connector timed out waiting for the Extension peer'))
       }, timeoutMs)
       const finish = (fn) => (value) => {
         if (response !== undefined) response.off('close', cancel)
         fn(value)
       }
-      this.pending.set(correlation.requestId, { request: correlation, resolve: finish(resolve), reject: finish(reject), timeout })
+      this.pending.set(dispatched.requestId, { request: dispatched, resolve: finish(resolve), reject: finish(reject), timeout })
       if (response !== undefined) response.once('close', cancel)
       try {
-        this.requestExtension(correlation)
+        this.requestExtension(dispatched)
       } catch (error) {
         clearTimeout(timeout)
-        this.pending.delete(correlation.requestId)
+        this.pending.delete(dispatched.requestId)
         reject(error)
       }
     })

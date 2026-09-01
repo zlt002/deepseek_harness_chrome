@@ -86,17 +86,25 @@ async function open(responder, responseTarget = (request) => request.browserTarg
   } })
   connector.bindBrowserTarget('batch-run', target)
   const endpoint = await connector.start()
-  const callTool = async (name, id, arguments_, meta) => (await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_, ...(meta === undefined ? {} : { _meta: meta }) } }), signal: AbortSignal.timeout(5_000) })).json()
-  const call = (id, arguments_) => {
+  const callTool = async (name, id, arguments_, meta) => {
+    const owner = meta?.['io.deepseek.harness/parentSessionId'] ?? meta?.['io.deepseek.harness/sessionId']
+    if (typeof owner === 'string') {
+      const binding = connector.runTargets.current()
+      assert.ok(binding?.runId && binding.browserTarget, 'test request requires a registered Browser Target before capture')
+      assert.equal(connector.captureBrowserTarget(binding.runId, owner, `test-submission-${id}`, binding.browserTarget, binding.browserTargets, binding.unavailableBrowserTargets), true)
+    }
+    return (await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_, ...(meta === undefined ? {} : { _meta: meta }) } }), signal: AbortSignal.timeout(5_000) })).json()
+  }
+  const call = (id, arguments_, meta) => {
     const { action, parentFingerprint: _parentFingerprint, ...toolArguments } = arguments_
     const name = action === 'preview' ? 'team_knowledge_batch_preview' : action === 'create' ? 'team_knowledge_batch_create' : `team_knowledge_batch_${String(action)}`
-    return callTool(name, id, toolArguments)
+    return callTool(name, id, toolArguments, meta)
   }
   return { connector, batchStore, teamDocStore, directory, requests, call, callTool }
 }
 
 async function preview(harness, batchId, items = documents, id = 1) { return harness.call(id, { action: 'preview', batchId, items }) }
-async function create(harness, batchId, challenge, id = 2) { return harness.call(id, { action: 'create', batchId, challenge }) }
+async function create(harness, batchId, challenge, id = 2, meta) { return harness.call(id, { action: 'create', batchId, challenge }, meta) }
 function recordPmdReviewAdoption(harness, body, sessionId = 'pmd-session') {
   const recorded = harness.connector.recordPmdPrdReviewAdoption({
     runId: 'batch-run', harnessSessionId: sessionId, reviewId: 'review-1', resourceId: 'resource-1',
@@ -320,7 +328,7 @@ test('rejects a partial retry when the Browser Target moves to another tab', asy
     assert.equal(partial.result.structuredContent.status, 'partial_delivery')
     const retry = await preview(harness, 'batch-reject-other-tab', items, 3)
     assert.equal(retry.result.isError, true)
-    assert.match(retry.result.content[0].text, /team_knowledge_batch_conflict/)
+    assert.match(retry.result.content[0].text, /Browser Target changed/)
     assert.equal(attempts, 1)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
@@ -394,7 +402,7 @@ test('creates the exact adopted PMD directly without a model receipt or page con
     assert.equal(plan.result.isError, undefined)
     const inspection = harness.requests.find((request) => request.action === 'inspect_parent' && request.batchId === 'pmd:req-crm')
     assert.equal(inspection.pmdReviewAdoption.contentHash, createHash('sha256').update(prdBody).digest('hex'))
-    const result = await create(harness, 'pmd:req-crm', plan.result.structuredContent.challenge, 3)
+    const result = await create(harness, 'pmd:req-crm', plan.result.structuredContent.challenge, 3, { 'io.deepseek.harness/sessionId': 'pmd-session' })
     assert.equal(result.result.structuredContent.status, 'verified_write', JSON.stringify(result))
     const createRequest = harness.requests.find((request) => request.action === 'create' && request.batchId === 'pmd:req-crm')
     assert.equal(createRequest.userConfirmation, undefined)
@@ -432,11 +440,11 @@ test('reports a body-free online-document event after every batch Verified Write
   try {
     const items = [{ name: '普通在线文档', body: '# 内容' }]
     const plan = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'batch:req-telemetry', items }, { 'io.deepseek.harness/sessionId': 'document-session' })
-    const result = await create(harness, 'batch:req-telemetry', plan.result.structuredContent.challenge)
+    const result = await create(harness, 'batch:req-telemetry', plan.result.structuredContent.challenge, 2, { 'io.deepseek.harness/sessionId': 'document-session' })
     assert.equal(result.result.structuredContent.status, 'verified_write', JSON.stringify(result))
     assert.equal(events.length, 1)
     assert.deepEqual({ ...events[0], occurredAt: '<time>', eventId: '<id>' }, {
-      eventId: '<id>', eventType: 'document_published', outcome: 'succeeded', occurredAt: '<time>', runId: 'batch-run', batchId: 'batch:req-telemetry', itemIndex: 0,
+      eventId: '<id>', eventType: 'document_published', outcome: 'succeeded', occurredAt: '<time>', sessionId: 'document-session', runId: 'batch-run', batchId: 'batch:req-telemetry', itemIndex: 0,
       documentName: '普通在线文档', documentCatalogId: '701', documentUrl: 'https://doc.midea.com/teamKnowledge/detail/docOnline/701?id=701',
     })
     assert.equal('body' in events[0], false)
@@ -620,7 +628,7 @@ test('keeps the incomplete-batch write fence after a Native Connector restart', 
   } finally { await connector.stop(); await rm(directory, { recursive: true, force: true }) }
 })
 
-test('uses the inspect-migrated Browser Target for batch grants, fingerprints, and every create', async () => {
+test('rejects an inspect response that tries to migrate a batch to another tab', async () => {
   const migrated = { browser: 'chrome', windowId: 1, tabId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/9?id=9' }
   let creates = 0
   const harness = await open((request) => request.action === 'inspect_parent'
@@ -628,13 +636,8 @@ test('uses the inspect-migrated Browser Target for batch grants, fingerprints, a
     : verified(request, String(++creates)), migrated)
   try {
     const plan = await preview(harness, 'migrated-batch', documents, 1)
-    assert.deepEqual(plan.result.structuredContent.browserTarget, migrated)
-    const created = await create(harness, 'migrated-batch', plan.result.structuredContent.challenge, 2)
-    assert.equal(created.result.structuredContent.status, 'verified_write')
-    assert.deepEqual(created.result.structuredContent.browserTarget, migrated)
-    const record = await harness.batchStore.load('migrated-batch')
-    assert.match(record.targetFingerprint, /^[a-f0-9]{64}$/)
-    assert.equal(creates, 2)
-    assert.ok(harness.requests.every((request) => request.action === 'inspect_parent' || request.browserTarget.url === migrated.url))
+    assert.equal(plan.result.isError, true)
+    assert.match(plan.result.content[0].text, /Browser Target changed/)
+    assert.equal(creates, 0)
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })

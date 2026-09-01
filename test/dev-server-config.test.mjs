@@ -62,7 +62,8 @@ test('Chrome extension uses ACCRUI consistently for user-visible branding', asyn
     readFile(sidepanelSourceUrl, 'utf8'),
   ])
 
-  assert.match(wxtConfig, /name:\s*'ACCRUI'/)
+  assert.match(wxtConfig, /const extensionVersion = extensionPackage\.version\.trim\(\)/)
+  assert.match(wxtConfig, /name:\s*`accrui \$\{extensionVersion\} beta`/)
   assert.match(wxtConfig, /description:\s*'Use ACCRUI from a Chrome side panel\.'/)
   assert.match(wxtConfig, /default_title:\s*'Open ACCRUI'/)
   assert.match(sidepanelHtml, /<title>ACCRUI<\/title>/)

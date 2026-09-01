@@ -1,17 +1,29 @@
 import { useEffect, useState } from 'react'
+import { confirmReleaseUpdate } from './release-update-confirmation.ts'
+import type { ReleaseUpdateCandidate } from './release-update-bridge.ts'
 import css from './ReleaseUpdateSection.module.css'
 
 export type ReleaseUpdateStatus = { state: 'pending' | 'succeeded' | 'failed', version: string, updatedAt: string, error?: string, logPath?: string }
-export type ReleaseUpdate = { available: boolean, version?: string, sha256?: string, error?: string, lastUpdate?: ReleaseUpdateStatus }
-export function ReleaseUpdateSection({ request }: { request: (action: 'check' | 'prepare') => Promise<ReleaseUpdate> }) {
+export type ReleaseUpdate = { available: boolean, version?: string, sha256?: string, packageUrl?: string, error?: string, lastUpdate?: ReleaseUpdateStatus }
+function candidateFor(update: ReleaseUpdate | undefined): ReleaseUpdateCandidate | undefined {
+  if (update?.available !== true || typeof update.version !== 'string' || typeof update.sha256 !== 'string' || typeof update.packageUrl !== 'string') return undefined
+  return { version: update.version, sha256: update.sha256, packageUrl: update.packageUrl }
+}
+export function ReleaseUpdateSection({ request }: { request: (action: 'check' | 'prepare', candidate?: ReleaseUpdateCandidate) => Promise<ReleaseUpdate> }) {
   const [update, setUpdate] = useState<ReleaseUpdate>()
   const [pending, setPending] = useState<'check' | 'prepare'>()
   const [prepared, setPrepared] = useState(false)
   const run = (action: 'check' | 'prepare'): void => {
-    if (pending !== undefined) return
+    if (pending !== undefined || (action === 'prepare' && !confirmReleaseUpdate())) return
     setPending(action)
     setPrepared(false)
-    void request(action).then(result => {
+    const candidate = action === 'prepare' ? candidateFor(update) : undefined
+    if (action === 'prepare' && candidate === undefined) {
+      setUpdate({ available: false, error: '更新候选已失效；请重新检查更新。' })
+      setPending(undefined)
+      return
+    }
+    void request(action, candidate).then(result => {
       setUpdate(result)
       if (action === 'prepare') setPrepared(true)
     }, error => setUpdate({ available: false, error: error instanceof Error ? error.message : String(error) })).finally(() => setPending(undefined))

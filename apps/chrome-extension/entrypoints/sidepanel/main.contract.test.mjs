@@ -21,6 +21,11 @@ test('the side panel accepts the iframe session report before enabling prototype
   assert.match(source, /command: 'capture-design-reference', tabId: activeTab\.tab\.tabId, sessionId: activeHarnessSessionId/)
 })
 
+test('the side panel forwards a too-late update cancellation so the iframe keeps waiting for prepare', async () => {
+  const source = await readFile(new URL('./main.tsx', import.meta.url), 'utf8')
+  assert.match(source, /response\.status === 'too_late'[\s\S]*?type: 'release-update-cancel-too-late\/v1'/)
+})
+
 test('observing the selected session cannot reload the side-panel iframe', async () => {
   const source = await readFile(new URL('./main.tsx', import.meta.url), 'utf8')
 
@@ -60,18 +65,18 @@ test('isolates pending and current Browser Target locks by session and submissio
   const projection = new BrowserTargetRunLockProjection()
   projection.start('session-a', 'a1', a)
   projection.reconcile('session-b', 'b1')
-  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a }], 'an unrelated session must not invalidate A pending ACK')
+  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a, observedActivity: false }], 'an unrelated session must not invalidate A pending ACK')
 
   projection.start('session-a', 'a2', a2)
-  assert.deepEqual(projection.acknowledge('session-a', 'a2', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a }, { sessionId: 'session-a', submissionId: 'a2', target: a2 }])
-  assert.deepEqual(projection.unlock('session-a', 'a1'), [{ sessionId: 'session-a', submissionId: 'a2', target: a2 }], 'old A1 unlock must not clear current A2')
-  assert.deepEqual(projection.reconcile('session-a', 'a1'), [{ sessionId: 'session-a', submissionId: 'a2', target: a2 }], 'late A1 reconciliation must not clear current A2')
+  assert.deepEqual(projection.acknowledge('session-a', 'a2', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a, observedActivity: false }, { sessionId: 'session-a', submissionId: 'a2', target: a2, observedActivity: false }])
+  assert.deepEqual(projection.unlock('session-a', 'a1'), [{ sessionId: 'session-a', submissionId: 'a2', target: a2, observedActivity: false }], 'old A1 unlock must not clear current A2')
+  assert.deepEqual(projection.reconcile('session-a', 'a1'), [{ sessionId: 'session-a', submissionId: 'a2', target: a2, observedActivity: false }], 'late A1 reconciliation must not clear current A2')
 
   const first = new BrowserTargetRunLockProjection()
   first.start('session-a', 'a3', a)
   first.start('session-a', 'a4', a2)
   assert.deepEqual(first.acknowledge('session-a', 'a4', false), [])
-  assert.deepEqual(first.acknowledge('session-a', 'a3', true), [{ sessionId: 'session-a', submissionId: 'a3', target: a }], 'a rejected peer request must not erase the first pending lock')
+  assert.deepEqual(first.acknowledge('session-a', 'a3', true), [{ sessionId: 'session-a', submissionId: 'a3', target: a, observedActivity: false }], 'a rejected peer request must not erase the first pending lock')
 })
 
 test('hydrates every authoritative active Run owner after sidepanel reconstruction', async () => {
@@ -89,7 +94,7 @@ test('reconnect clears stale Browser Target state before ready hydrates the auth
   const a = { browser: 'chrome', windowId: 1, tabId: 1, url: 'https://a.example.test', title: 'A' }
   const projection = new BrowserTargetRunLockProjection()
   projection.start('session-a', 'a1', a)
-  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a }])
+  assert.deepEqual(projection.acknowledge('session-a', 'a1', true), [{ sessionId: 'session-a', submissionId: 'a1', target: a, observedActivity: false }])
   assert.deepEqual(projection.reset(), [], 'a reconnect drops pending and acknowledged locks from the disconnected Harness')
   assert.match(source, /const connect = useCallback\(async \(\) => \{[\s\S]*?clearBrowserTargetLockProjection\(\)/)
   assert.match(source, /value\.type === 'browser-target-ready\/v1'[\s\S]*?hydrateActiveBrowserTargetLock\(\)/)

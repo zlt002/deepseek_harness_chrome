@@ -808,7 +808,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await copyWithoutSourceMaps(extensionDir, path.join(payloadDir, 'extension'))
   const manifestPath = path.join(payloadDir, 'extension', 'manifest.json')
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-  await writeFile(manifestPath, `${JSON.stringify({ ...manifest, name: 'accr-ui Harness UI', version: EXTENSION_VERSION, key: EXTENSION_KEY }, null, 2)}\n`)
+  await writeFile(manifestPath, `${JSON.stringify({ ...manifest, name: `accrui ${EXTENSION_VERSION} beta`, version: EXTENSION_VERSION, key: EXTENSION_KEY }, null, 2)}\n`)
   await mkdir(path.join(runtimeDir, 'native-server'), { recursive: true })
   await cp(nativeBundlePath, path.join(runtimeDir, 'native-server', 'runtime.mjs'))
   await cp(harnessRuntimePluginPath, path.join(runtimeDir, 'native-server', 'harness-runtime.mjs'))

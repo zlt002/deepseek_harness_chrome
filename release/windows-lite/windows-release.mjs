@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
 import { ACCRUI_NATIVE_HOST_NAME } from '../../apps/native-server/src/product-runtime-identity.mjs'
+import { WINDOWS_NODE_REQUIREMENT_LABEL, windowsNodePowerShellPredicate } from './node-version-policy.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -167,6 +168,7 @@ function nativeHostManifest(nativeHostName) {
 }
 
 function registerNativeHostPs1() {
+  const supportedNode = windowsNodePowerShellPredicate('$nodeVersion')
   return `param(
   [string]$InstallRoot = (Split-Path -Parent $PSScriptRoot),
   [switch]$PrepareOnly,
@@ -185,12 +187,11 @@ $registryRoots = @(
 )
 if (-not $PublishOnly) {
   $node = Get-Command node -ErrorAction SilentlyContinue
-  if (-not $node) { throw '未检测到 Node.js；Harness UI 需要 Node.js 22 或更高版本。' }
+  if (-not $node) { throw '未检测到 Node.js；Harness UI 需要 ${WINDOWS_NODE_REQUIREMENT_LABEL}。' }
   $nodePath = [System.IO.Path]::GetFullPath($node.Source)
   if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw "Node.js 路径无效：$nodePath" }
   $nodeVersion = (& $nodePath --version).Trim()
-  if ($nodeVersion -notmatch '^v?(?<major>\\d+)') { throw "无法读取 Node.js 版本：$nodeVersion" }
-  if ([int]$Matches.major -lt 22) { throw "Node.js $nodeVersion 版本过低；Harness UI 需要 Node.js 22 或更高版本。" }
+  if (-not ${supportedNode}) { throw "Node.js $nodeVersion 不受支持；Harness UI 需要 ${WINDOWS_NODE_REQUIREMENT_LABEL}。" }
   if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "缺少 Native Host launcher：$launcher" }
   $nodePathFile = Join-Path $runtimeDir 'node-path.txt'
   [System.IO.File]::WriteAllText($nodePathFile, $nodePath + [Environment]::NewLine, $utf8NoBom)
@@ -452,7 +453,8 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
       'Set-Item -Path $registryKey -Value $installedManifestPath',
       '[switch]$PrepareOnly',
       '[switch]$PublishOnly',
-      '-lt 22',
+      'minor -ge 19',
+      'major -ge 24',
       "$nodePathFile = Join-Path $runtimeDir 'node-path.txt'",
       '[System.Text.UTF8Encoding]::new($false)',
     ]) {
@@ -488,7 +490,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
   const installerPath = path.join(packageDir, 'install.ps1')
   if (existsSync(installerPath)) {
     const installer = await readFile(installerPath, 'utf8')
-    if (!installer.includes('Prepare-ReleaseTree $installRoot') || !installer.includes('Register-ReleaseTree $installRoot') || !installer.includes('Assert-NativeHostStartup') || !installer.includes('-lt 22')) {
+    if (!installer.includes('Prepare-ReleaseTree $installRoot') || !installer.includes('Register-ReleaseTree $installRoot') || !installer.includes('Assert-NativeHostStartup') || !installer.includes('minor -ge 19') || !installer.includes('major -ge 24')) {
       errors.push('install.ps1 does not validate, start-check, and register the installed release tree')
     }
     for (const requiredText of [
@@ -528,7 +530,7 @@ export async function validateWindowsRelease({ packageDir, zipPath = path.join(p
     const installerUi = await readFile(installerUiPath, 'utf8')
     for (const requiredText of [
       'System.Windows.Forms.FolderBrowserDialog',
-      'Node.js 22+',
+      WINDOWS_NODE_REQUIREMENT_LABEL,
       'Chrome / Edge',
       '-InstallRoot',
       '-ProgressPath',
@@ -583,7 +585,7 @@ export async function buildWindowsRelease({
   const sourceManifest = await readJson(manifestPath)
   const packagedManifest = {
     ...sourceManifest,
-    name: 'accr-ui Harness UI',
+    name: `accrui ${version} beta`,
     version,
     key: ACCR_UI_EXTENSION_MANIFEST_KEY,
   }

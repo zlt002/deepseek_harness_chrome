@@ -4,11 +4,25 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fetchRelease, resolveReleaseSource } from './release-source.mjs'
-import { extractZip, verifyWindowsLitePackage } from './package-verifier.mjs'
+import { compareVersion, extractZip, verifyWindowsLitePackage } from './package-verifier.mjs'
+
+function updateIdentity(source) {
+  if (typeof source.expectedVersion !== 'string') return undefined
+  return Object.freeze({ version: source.expectedVersion, sha256: source.expectedSha256, packageUrl: source.packageUrl })
+}
+
+function sameUpdateIdentity(left, right) {
+  return left?.version === right?.version && left?.sha256 === right?.sha256 && left?.packageUrl === right?.packageUrl
+}
 
 export async function checkUpdate(options = {}) {
   const source = await resolveReleaseSource(options)
-  const { bytes, etag } = await fetchRelease(source, options.fetchImpl)
+  const identity = updateIdentity(source)
+  if (identity !== undefined) {
+    const available = options.currentVersion === undefined || compareVersion(identity.version, options.currentVersion) > 0
+    return { available, ...identity, ...(source.releaseUrl === undefined ? {} : { releaseUrl: source.releaseUrl }) }
+  }
+  const { bytes, etag } = await fetchRelease(source, options.fetchImpl, options)
   try {
     const verified = verifyWindowsLitePackage(bytes, { currentVersion: options.currentVersion, expectedSha256: source.expectedSha256, expectedVersion: source.expectedVersion })
     return { available: true, ...verified, packageUrl: source.packageUrl, ...(source.releaseUrl === undefined ? {} : { releaseUrl: source.releaseUrl }), ...(etag === undefined ? {} : { etag }) }
@@ -21,8 +35,12 @@ export async function checkUpdate(options = {}) {
 
 export async function prepareUpdate(options = {}) {
   const source = await resolveReleaseSource(options)
-  const { bytes, etag } = await fetchRelease(source, options.fetchImpl)
+  const identity = updateIdentity(source)
+  if (options.candidate !== undefined && identity !== undefined && !sameUpdateIdentity(identity, options.candidate)) throw new Error('更新候选已变化；请重新检查更新后再安装')
+  if (options.candidate !== undefined && identity === undefined && (source.expectedSha256 !== options.candidate.sha256 || source.packageUrl !== options.candidate.packageUrl)) throw new Error('更新候选已变化；请重新检查更新后再安装')
+  const { bytes, etag } = await fetchRelease(source, options.fetchImpl, options)
   const verified = verifyWindowsLitePackage(bytes, { currentVersion: options.currentVersion, expectedSha256: source.expectedSha256, expectedVersion: source.expectedVersion })
+  if (options.candidate !== undefined && !sameUpdateIdentity({ version: verified.version, sha256: verified.sha256, packageUrl: source.packageUrl }, options.candidate)) throw new Error('下载的更新包与已检查候选不一致；已拒绝安装')
   const root = await mkdtemp(join(tmpdir(), 'accrui-release-update-'))
   const packagePath = join(root, 'accr-ui-windows-lite-x64.zip')
   await writeFile(packagePath, bytes)
@@ -31,9 +49,10 @@ export async function prepareUpdate(options = {}) {
   return { ...verified, packagePath, extractRoot, packageUrl: source.packageUrl, ...(source.releaseUrl === undefined ? {} : { releaseUrl: source.releaseUrl }), ...(etag === undefined ? {} : { etag }) }
 }
 
-export async function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform, handshakeTimeoutMs: requestedHandshakeTimeoutMs, writeFileImpl = writeFile, renameImpl = rename } = {}) {
+export async function launchPreparedUpdate(prepared, { installRoot, nativePid, spawnImpl, platform = process.platform, handshakeTimeoutMs: requestedHandshakeTimeoutMs, writeFileImpl = writeFile, renameImpl = rename, signal, onCommitted } = {}) {
   if (platform !== 'win32') throw new Error('在线更新仅支持 Windows Lite')
   if (!prepared?.extractRoot || !prepared?.version || !installRoot || !Number.isInteger(nativePid)) throw new Error('更新启动参数无效')
+  if (signal?.aborted) throw signal.reason ?? new Error('在线更新请求已取消')
   const escapedRoot = String(installRoot).replaceAll("'", "''")
   const escapedScript = join(prepared.extractRoot, 'install.ps1').replaceAll("'", "''")
   const escapedVersion = String(prepared.version).replaceAll("'", "''")
@@ -61,6 +80,8 @@ $readyPath = '${escapePowerShell(readyPath)}'
 $goPath = '${escapePowerShell(goPath)}'
 $cancelPath = '${escapePowerShell(cancelPath)}'
 $errorPath = '${escapePowerShell(errorPath)}'
+$mutex = $null
+$mutexHeld = $false
 function Get-SafeUpdateError([object]$Cause) {
   $text = if ($null -eq $Cause) { '安装程序未返回错误详情。' } elseif ($Cause.Exception) { $Cause.Exception.Message } else { [string]$Cause }
   $safe = ([string]$text).Replace("\`r", ' ').Replace("\`n", ' ').Trim()
@@ -76,6 +97,12 @@ function Write-UpdateStatus([string]$State, [string]$ErrorText = '') {
   Move-Item -LiteralPath $temporary -Destination $statusPath -Force
 }
 try {
+  $mutexHasher = [System.Security.Cryptography.SHA256]::Create()
+  try { $mutexHash = $mutexHasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($installRoot.ToLowerInvariant())) } finally { $mutexHasher.Dispose() }
+  $mutexName = 'Local\\AccrUIReleaseUpdate-' + ([System.BitConverter]::ToString($mutexHash).Replace('-', ''))
+  $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+  if (-not $mutex.WaitOne(0)) { throw '另一个在线更新正在安装此目录；本次请求未接管 Native Host。' }
+  $mutexHeld = $true
   Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
   Write-UpdateStatus 'pending'
   [System.IO.File]::WriteAllText($readyPath, 'ready', [System.Text.UTF8Encoding]::new($false))
@@ -91,8 +118,11 @@ try {
 } catch {
   $safeError = Get-SafeUpdateError $_
   try { [System.IO.File]::WriteAllText($errorPath, $safeError, [System.Text.UTF8Encoding]::new($false)) } catch {}
-  Write-UpdateStatus 'failed' $safeError
+  if ($mutexHeld) { Write-UpdateStatus 'failed' $safeError }
   exit 1
+} finally {
+  if ($mutexHeld) { try { $mutex.ReleaseMutex() } catch {} }
+  if ($null -ne $mutex) { $mutex.Dispose() }
 }`
   await writeFileImpl(updaterScriptPath, Buffer.from(`\uFEFF${command}`, 'utf8'))
   const launcher = [
@@ -110,6 +140,8 @@ try {
     let pollTimer
     let timeout
     let stderrFd
+    let onAbort
+    let handoffDecision = 'pending'
     const closeStderr = () => {
       if (stderrFd === undefined) return
       const fd = stderrFd
@@ -124,16 +156,19 @@ try {
       child?.removeListener?.('spawn', onSpawn)
       child?.removeListener?.('error', onError)
       child?.removeListener?.('exit', onExit)
+      signal?.removeEventListener('abort', onAbort)
       callback(value)
     }
-    const cancel = async error => {
-      if (settled) return
+    const cancel = async (error, { force = false } = {}) => {
+      if (settled || (handoffDecision === 'go' && !force)) return
+      handoffDecision = 'cancel'
       settled = true
       clearInterval(pollTimer)
       clearTimeout(timeout)
       child?.removeListener?.('spawn', onSpawn)
       child?.removeListener?.('error', onError)
       child?.removeListener?.('exit', onExit)
+      signal?.removeEventListener('abort', onAbort)
       try {
         await writeFileImpl(cancelPath, 'cancel', 'utf8')
         rejectPromise(error)
@@ -153,17 +188,20 @@ try {
       void cancel(new Error(updaterError ? `${updaterError}（${exitDetail}）` : `更新启动器在就绪握手前退出（${exitDetail}）。`))
     }
     const onReady = async () => {
-      if (settled || committing) return
+      if (settled || committing || handoffDecision !== 'pending') return
       committing = true
       clearInterval(pollTimer)
       clearTimeout(timeout)
       try {
         child?.unref?.()
         await writeFileImpl(goPendingPath, 'go', 'utf8')
-        if (!settled) await renameImpl(goPendingPath, goPath)
-        if (!settled) settle(resolvePromise, true)
+        if (settled || handoffDecision !== 'pending') return
+        handoffDecision = 'go'
+        await renameImpl(goPendingPath, goPath)
+        onCommitted?.()
+        settle(resolvePromise, true)
       } catch (error) {
-        if (!settled) await cancel(error)
+        if (!settled) await cancel(error, { force: true })
       } finally {
         committing = false
       }
@@ -177,6 +215,9 @@ try {
       timeout = setTimeout(() => { void cancel(new Error(`更新启动器未在 ${handshakeTimeoutMs}ms 内完成就绪握手。`)) }, handshakeTimeoutMs)
     }
     try {
+      onAbort = () => { void cancel(signal.reason ?? new Error('在线更新请求已取消')) }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted) { void cancel(signal.reason ?? new Error('在线更新请求已取消')); return }
       stderrFd = openSync(stderrPath, 'a')
       try {
         child = (spawnImpl ?? spawn)('cmd.exe', ['/d', '/s', '/c', launcherPath], { detached: true, windowsHide: true, stdio: ['ignore', 'ignore', stderrFd] })

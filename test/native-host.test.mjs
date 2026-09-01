@@ -5,14 +5,50 @@ import { createPublicKey, verify } from 'node:crypto'
 import { NativeHost } from '../apps/native-server/src/native-host.mjs'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
 
-test('forwards only validated PRD events to the durable tracker', async () => {
+test('acknowledges only PRD events durably accepted by the tracker', async () => {
   const events = []
-  const tracker = { start() {}, stop() {}, setProductVersion() {}, async report(event) { events.push(event) } }
+  const tracker = { start() {}, stop() {}, setProductVersion() {}, async report(event) { events.push(event); return true } }
   const host = new NativeHost({ prdEventTracker: tracker, exit: () => {} })
-  await host.handle({ type: 'report-prd-event', payload: { eventId: 'review:1', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite' } })
-  await host.handle({ type: 'report-prd-event', payload: { eventId: 'invalid', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite', body: 'must not pass' } })
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(events, [{ eventId: 'review:1', eventType: 'markdown_review_rewrite', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1' }])
+  const messages = []
+  host.send = message => messages.push(message)
+  await host.handle({ type: 'report-prd-event', requestId: 'event-rewrite', payload: { eventId: 'review:1', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite' } })
+  await host.handle({ type: 'report-prd-event', requestId: 'event-1', payload: { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4 } })
+  await host.handle({ type: 'report-prd-event', requestId: 'event-invalid', payload: { eventId: 'invalid', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite', body: 'must not pass' } })
+  assert.deepEqual(events, [
+    { eventId: 'review:1', eventType: 'markdown_review_rewrite', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1' },
+    { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4 },
+  ])
+  assert.deepEqual(messages, [
+    { type: 'prd_event_recorded', requestId: 'event-rewrite' },
+    { type: 'prd_event_recorded', requestId: 'event-1' },
+    { type: 'prd_event_failed', requestId: 'event-invalid', error: 'PRD 埋点数据无效。' },
+  ])
+  tracker.stop()
+})
+
+test('reports tracker rejection or failure through the PRD event ACK', async () => {
+  const messages = []
+  const rejected = new NativeHost({ prdEventTracker: { start() {}, stop() {}, setProductVersion() {}, async report() { return false } }, exit: () => {} })
+  rejected.send = message => messages.push(message)
+  const payload = { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4 }
+  await rejected.handle({ type: 'report-prd-event', requestId: 'event-rejected', payload })
+  const throwing = new NativeHost({ prdEventTracker: { start() {}, stop() {}, setProductVersion() {}, async report() { throw new Error('outbox unavailable') } }, exit: () => {} })
+  throwing.send = message => messages.push(message)
+  await throwing.handle({ type: 'report-prd-event', requestId: 'event-error', payload })
+  assert.deepEqual(messages, [
+    { type: 'prd_event_failed', requestId: 'event-rejected', error: 'PRD 埋点未持久化。' },
+    { type: 'prd_event_failed', requestId: 'event-error', error: 'outbox unavailable' },
+  ])
+})
+
+test('forwards only validated knowledge login identities to the durable tracker', async () => {
+  const observations = []
+  const tracker = { start() {}, stop() {}, setProductVersion() {}, async report(value) { observations.push(value) } }
+  const host = new NativeHost({ userIdentityTracker: tracker, exit: () => {} })
+  await host.handle({ type: 'report-user-identity', payload: { userCode: 'zhanglt21', employeeId: '20680888', observedAt: '2026-09-01T08:00:00Z' } })
+  await host.handle({ type: 'report-user-identity', payload: { userCode: 'zhanglt21', employeeId: '20680888', email: 'must-not-pass@example.test' } })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(observations, [{ userCode: 'zhanglt21', employeeId: '20680888', observedAt: '2026-09-01T08:00:00.000Z' }])
   tracker.stop()
 })
 
@@ -158,6 +194,26 @@ test('starts a pure Harness Run without a Browser Target and leaves browser tool
   } finally {
     await host.close('stop requested')
   }
+})
+
+test('captures a session Browser Target without replacing the active Run binding', async () => {
+  const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://docs.example.test/captured' }
+  const active = { browser: 'chrome', windowId: 1, tabId: 1, url: 'https://docs.example.test/active' }
+  const calls = []
+  const host = new NativeHost({ exit: () => {} })
+  const messages = []
+  host.send = (message) => messages.push(message)
+  host.currentRunId = 'run-capture'
+  host.browserTargets.set('run-capture', active)
+  host.connector = { captureBrowserTarget(...args) { calls.push(args); return true } }
+
+  await host.handle({ type: 'capture-browser-target', requestId: 'capture-1', runId: 'run-capture', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: target })
+  assert.deepEqual(calls, [['run-capture', 'session-a', 'submission-a', target, undefined, undefined]])
+  assert.deepEqual(host.browserTargets.get('run-capture'), active)
+  assert.deepEqual(messages.at(-1), { type: 'browser_target_captured', requestId: 'capture-1' })
+
+  await host.handle({ type: 'capture-browser-target', requestId: 'capture-wrong-run', runId: 'other-run', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: target })
+  assert.equal(messages.at(-1).type, 'browser_target_capture_failed')
 })
 
 test('creates a trusted Run from the explicit Browser Target supplied at Native start and forwards correlated Extension replies', async () => {

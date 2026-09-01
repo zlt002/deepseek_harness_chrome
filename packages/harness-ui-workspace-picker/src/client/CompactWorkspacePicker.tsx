@@ -23,7 +23,7 @@ const PRODUCT_VERSION_QUERY_KEY = 'dshProductVersion'
 export function productTitle(workspaceTitle: string, location: Pick<Location, 'search'> = window.location): string {
   const productVersion = new URLSearchParams(location.search).get(PRODUCT_VERSION_QUERY_KEY)
   return workspaceTitle === 'ACCRUI' && productVersion !== null && /^\d+(?:\.\d+){0,3}$/.test(productVersion)
-    ? `ACCRUI ${productVersion}`
+    ? `accrui ${productVersion} beta`
     : workspaceTitle
 }
 

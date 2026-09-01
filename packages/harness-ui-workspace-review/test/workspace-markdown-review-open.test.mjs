@@ -20,7 +20,7 @@ const {
   WorkspaceMarkdownReviewOpenTracker,
 } = module.exports
 const turnStart = { type: 'turn/start', seq: 9, time: 89, data: { turn: 3 } }
-const call = { type: 'tool/call', seq: 10, time: 90, data: { turn: 3, callId: 'open-1', name: 'open_workspace_markdown_review', arguments: JSON.stringify({ path: 'pmd-workspace/spec/req-1/req-1_PRD.md' }) } }
+const call = { type: 'tool/call', seq: 10, time: 90, data: { turn: 3, callId: 'open-1', name: 'open_workspace_markdown_review', arguments: JSON.stringify({ path: 'pmd-workspace/spec/req-1/req-1_PRD.md', source: 'pmd-prd' }) } }
 const successfulResult = (time, surfaceOp = 'append') => ({
   type: 'tool/result', seq: 11, time, surfaceOp,
   data: { turn: 3, message: { source: { callId: 'open-1' }, content: [{ isError: false }] } },
@@ -51,7 +51,7 @@ test('a successful review-open command publishes the automatic review marker', (
     kind: 'turn',
     turn: 3,
     key: 'workspace-markdown-review-open',
-    value: { path: 'pmd-workspace/spec/req-1/req-1_PRD.md', resultSeq: 11 },
+    value: { path: 'pmd-workspace/spec/req-1/req-1_PRD.md', source: 'pmd-prd', resultSeq: 11 },
   })
 })
 

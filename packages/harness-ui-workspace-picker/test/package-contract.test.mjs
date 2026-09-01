@@ -34,7 +34,7 @@ test('keeps the e327 compact picker in an out-of-tree public workspace seat', as
   assert.match(picker, /function productTitle\(workspaceTitle: string/)
   assert.match(picker, /new URLSearchParams\(location\.search\)\.get\(PRODUCT_VERSION_QUERY_KEY\)/)
   assert.match(picker, /workspaceTitle === 'ACCRUI'/)
-  assert.match(picker, /ACCRUI \$\{productVersion\}/)
+  assert.match(picker, /accrui \$\{productVersion\} beta/)
   assert.match(picker, /productTitle\(owner\.workspaceTitle\)/)
   assert.match(actions, /从 Claude Code 导入/)
   assert.match(actions, /ClaudeImportModal/)

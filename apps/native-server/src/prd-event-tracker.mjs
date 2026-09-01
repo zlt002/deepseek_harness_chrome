@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT_MS = 5_000
 const MAX_OUTBOX_EVENTS = 1_000
 const MAX_ATTEMPTS = 12
 
-const EVENT_TYPES = new Set(['review_generated', 'review_action', 'document_published'])
+const EVENT_TYPES = new Set(['review_generated', 'review_action', 'prd_rating', 'document_published'])
 const REVIEW_ACTIONS = new Set(['rewrite', 'accept'])
 const OUTCOMES = new Set(['succeeded', 'failed', 'timeout'])
 const REVIEW_STATUSES = new Set(['draft_ready', 'queued', 'processing'])
@@ -50,6 +50,8 @@ export function normalizePrdTrackingEvent(value) {
   const runId = text(value.runId, 200)
   const action = text(value.action, 32)
   const status = text(value.status, 64)
+  const generationEventId = text(value.generationEventId, 200)
+  const rating = typeof value.rating === 'number' && [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5].includes(value.rating) ? value.rating : undefined
   const batchId = text(value.batchId, 100)
   const itemIndex = Number.isSafeInteger(value.itemIndex) && value.itemIndex >= 0 && value.itemIndex <= 100 ? value.itemIndex : undefined
   const documentName = text(value.documentName ?? value.name, 256)
@@ -60,9 +62,10 @@ export function normalizePrdTrackingEvent(value) {
     : rawEventType === 'review_action' && action === 'accept' ? 'markdown_review_accept'
       : rawEventType === 'document_published' ? 'online_document_verified_write' : rawEventType
   const outcome = rawOutcome === 'succeeded' ? 'success' : rawOutcome === 'failed' ? 'failure' : rawOutcome
-  if (!eventId || !eventType || !['prd_generated', 'markdown_review_rewrite', 'markdown_review_accept', 'online_document_verified_write'].includes(eventType) || !outcome || !['success', 'failure', 'timeout'].includes(outcome) || Number.isNaN(Date.parse(occurredAt))) return undefined
-  if ((eventType === 'prd_generated' || eventType === 'markdown_review_rewrite' || eventType === 'markdown_review_accept') && !sessionId) return undefined
+  if (!eventId || !eventType || !['prd_generated', 'markdown_review_rewrite', 'markdown_review_accept', 'prd_rating', 'online_document_verified_write'].includes(eventType) || !outcome || !['success', 'failure', 'timeout'].includes(outcome) || Number.isNaN(Date.parse(occurredAt))) return undefined
+  if ((eventType === 'prd_generated' || eventType === 'markdown_review_rewrite' || eventType === 'markdown_review_accept' || eventType === 'prd_rating') && !sessionId) return undefined
   if (eventType === 'prd_generated' && outcome !== 'success') return undefined
+  if (eventType === 'prd_rating' && (outcome !== 'success' || generationEventId === undefined || rating === undefined)) return undefined
   if (eventType === 'online_document_verified_write' && (outcome !== 'success' || !runId || !documentName || !documentCatalogId || !documentUrl)) return undefined
   const validStatus = status === undefined
     || (eventType === 'markdown_review_rewrite' && outcome === 'success' && status === 'draft_ready')
@@ -76,6 +79,8 @@ export function normalizePrdTrackingEvent(value) {
     ...(sessionId ? { sessionId } : {}),
     ...(runId ? { runId } : {}),
     ...(status ? { status } : {}),
+    ...(eventType === 'prd_generated' && documentName ? { name: documentName } : {}),
+    ...(eventType === 'prd_rating' ? { generationEventId, rating } : {}),
     ...(eventType === 'online_document_verified_write' ? { name: documentName, catalogId: documentCatalogId, url: documentUrl } : {}),
   })
 }
@@ -102,7 +107,11 @@ async function readOrCreateInstallationId(environment) {
 async function loadOutbox(path) {
   try {
     const value = JSON.parse(await readFile(path, 'utf8'))
-    return Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && !Array.isArray(item)).slice(-MAX_OUTBOX_EVENTS) : []
+    // Do not trim here. A full outbox must retain every previously accepted
+    // event; report() rejects only new unique events once the capacity is
+    // reached, and flush() may drain an over-capacity outbox created by an
+    // older version without silently deleting its head.
+    return Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && !Array.isArray(item)) : []
   } catch (error) {
     if (error?.code === 'ENOENT') return []
     throw error
@@ -157,9 +166,17 @@ export class PrdEventTracker {
       const events = await loadOutbox(this.outboxPath)
       const entry = { event, attempts: 0, nextAttemptAt: this.now() }
       const index = events.findIndex(item => item?.event?.eventId === event.eventId)
-      if (index >= 0) events[index] = entry
-      else events.push(entry)
-      await saveOutbox(this.outboxPath, events.slice(-MAX_OUTBOX_EVENTS))
+      if (index >= 0) {
+        // Re-reporting the same eventId is idempotent with respect to queue
+        // capacity: refresh the existing entry without adding another item.
+        events[index] = entry
+      } else {
+        // Preserve the durable queue's existing contents. In particular,
+        // never ACK a new event after silently evicting an older one.
+        if (events.length >= MAX_OUTBOX_EVENTS) return false
+        events.push(entry)
+      }
+      await saveOutbox(this.outboxPath, events)
       await this.#flushUnlocked()
       return true
     })

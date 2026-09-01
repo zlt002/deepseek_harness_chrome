@@ -99,6 +99,41 @@ test('advertises and explains the recoverable insert_drawing Mermaid contract', 
   }
 })
 
+test('makes the blocks_insert 50-block preview limit explicit before dispatch', async () => {
+  const connector = new BrowserConnector({ requestExtension: () => assert.fail('an oversized blocks_insert preview must not reach the Browser Target') })
+  const endpoint = await connector.start()
+  try {
+    const listed = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    })
+    const tools = await listed.json()
+    const preview = tools.result.tools.find((tool) => tool.name === 'light_document_write_preview')
+    const insertContract = preview.inputSchema.allOf.find((entry) => entry.if?.properties?.operation?.const === 'blocks_insert')
+    assert.deepEqual(insertContract.then.properties.payload.properties.blocks, {
+      type: 'array', minItems: 1, maxItems: 50, items: {
+        type: 'object', additionalProperties: false, properties: {
+          type: { enum: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'blockquote', 'ul', 'ol', 'table', 'codeblock'] },
+          text: { type: 'string', maxLength: 20000 }, markdown: { type: 'string', maxLength: 20000 }, html: { type: 'string', maxLength: 20000 },
+          items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string', minLength: 1, maxLength: 20000 } }, rows: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'string', maxLength: 2000 } } }, language: { type: 'string', minLength: 1, maxLength: 32 },
+        },
+      },
+    })
+    assert.match(preview.description, /blocks_insert.*1[–-]50/i)
+
+    const rejected = await call(endpoint, 'light_document_write_preview', {
+      operation: 'blocks_insert',
+      payload: { blocks: Array.from({ length: 51 }, (_, index) => ({ type: 'p', text: `有效块 ${index + 1}` })) },
+    }, 2)
+    assert.equal(rejected.error.code, -32602)
+    assert.match(rejected.error.message, /51/)
+    assert.match(rejected.error.message, /50/)
+  } finally {
+    await connector.stop()
+  }
+})
+
 test('dispatches a bounded light-document read through the Browser Target instead of routing it to spreadsheet A1 APIs', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/100?id=100' }
   let received
@@ -183,6 +218,8 @@ test('reports one body-free online-document event for every AI light-document Ve
       displayPath: 'pmd-workspace/spec/REQ_CRM_PRD.md', revision: 'revision-1', fingerprint: 'a'.repeat(64), contentHash: 'b'.repeat(64),
     }), true)
     connector.bindBrowserTarget('write-run', target)
+    assert.equal(connector.captureBrowserTarget('write-run', 'prd-session', 'prd-submission', target), true)
+    assert.equal(connector.captureBrowserTarget('write-run', 'other-session', 'other-submission', target), true)
     const identity = { 'io.deepseek.harness/sessionId': 'tool-session', 'io.deepseek.harness/parentSessionId': 'prd-session' }
     const preview = await call(endpoint, 'light_document_write_preview', { operation: 'title', payload: { markdown: '已采纳 PRD' } }, 1, identity)
     const written = await call(endpoint, 'light_document_write_commit', { challenge: preview.result.structuredContent.challenge }, 2, identity)
@@ -326,7 +363,7 @@ test('binds approval and extension readback to the exact operation and payload, 
     const drawing = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { mermaid: 'flowchart TD\n开始 --> 结束' } }, 13)
     assert.equal(drawing.result.structuredContent.action, 'inspect_write')
     const blocks = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { position: 'end', blocks: [{ type: 'h2', text: '项目概述' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] } }, 14)
-    assert.equal(blocks.result.structuredContent.action, 'inspect_write')
+    assert.equal(blocks.result?.structuredContent?.action, 'inspect_write', JSON.stringify(blocks))
     const missingDrawing = await call(endpoint, 'light_document_write_preview', { operation: 'insert_drawing', payload: { text: 'flowchart TD' } }, 15)
     assert.equal(missingDrawing.error.code, -32602)
     assert.match(missingDrawing.error.message, /invalid arguments|mermaid/)
@@ -439,15 +476,16 @@ test('never dispatches a historical pending checkpoint or two concurrent writes 
 
 test('blocks_insert and insert_drawing obtain a challenge on empty documents and attest payload-bound XML evidence', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 22, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/110?id=110' }
-  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '空文档', fingerprint: 'before' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: null, fingerprint: 'before' }
   const drawingPayload = { mermaid: 'flowchart TD\n开始 --> 结束', position: 'end' }
-  const blocksPayload = { position: 'end', blocks: [{ type: 'h2', text: '项目概述' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] }
+  const blocksPayload = { position: 'end', blocks: [{ type: 'h1', text: '演示 PRD：团队任务管理助手' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] }
   let writes = 0
   const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
-    if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 0, offset: 0, limit: 1, hasMore: false, blocks: [] } } })
+    if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ index: 0, id: null, type: 'p', text: '', textLength: 0, truncated: false }], emptyBody: { semantic: true, physicalBlockCount: 1, blankParagraphCount: 1 }, title: { supported: true, text: '', textLength: 0, truncated: false } } } })
     writes += 1
-    const fragments = request.operation === 'insert_drawing' ? ['flowchart', 'TD', '开始', '结束'] : ['项目概述', '负责人', '交付物', '张三', '说明书']
-    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, fingerprint: `after-${request.operation}` }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: fragments, fragmentEvidence: fragments.map((fragment) => ({ fragment, blockIds: ['inserted'] })), observedBlocks: [{ id: 'inserted', type: request.operation === 'insert_drawing' ? 'codeblock' : 'h2', text: fragments.join(' ') }] } } })
+    const fragments = request.operation === 'insert_drawing' ? ['flowchart', 'TD', '开始', '结束'] : ['演示', 'PRD', '团队任务管理助手', '负责人', '交付物', '张三', '说明书']
+    const initializedTitle = request.operation === 'blocks_insert' ? { initialized: true, text: '演示 PRD：团队任务管理助手' } : undefined
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, ...(initializedTitle ? { documentName: initializedTitle.text } : {}), fingerprint: `after-${request.operation}` }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: fragments, fragmentEvidence: fragments.map((fragment) => ({ fragment, blockIds: ['inserted'] })), observedBlocks: [{ id: 'inserted', type: request.operation === 'insert_drawing' ? 'codeblock' : 'h1', text: fragments.join(' ') }], ...(initializedTitle ? { title: initializedTitle } : {}) } } })
   }) })
   connector.bindBrowserTarget('light-doc-insert-run', target); const endpoint = await connector.start()
   const write = async (operation, payload, identity, id) => {
@@ -459,6 +497,7 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
     assert.equal(drawn.result.structuredContent.status, 'verified_write')
     const inserted = await write('blocks_insert', blocksPayload, 'blocks-1', 3)
     assert.equal(inserted.result.structuredContent.status, 'verified_write')
+    assert.deepEqual(inserted.result.structuredContent.observed.title, { initialized: true, text: '演示 PRD：团队任务管理助手' })
     assert.equal(writes, 2)
     const rejected = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'unknown', text: 'x' }] } }, 5)
     assert.equal(rejected.error.code, -32602)
@@ -467,6 +506,26 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
     assert.match(escapedNewline.error.message, /literal \\n/)
     const codeBlock = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'codeblock', text: 'const escaped = "\\n"' }] } }, 7)
     assert.equal(typeof codeBlock.result.structuredContent.challenge, 'string')
+  } finally { await connector.stop() }
+})
+
+test('rejects body-only success from an old runtime when an empty h1 document requires title readback', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 23, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/111?id=111' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: null, fingerprint: 'before' }
+  const payload = { position: 'end', blocks: [{ type: 'h1', text: '必须落到文档标题' }, { type: 'p', text: '正文' }] }
+  const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
+    const result = request.action === 'write'
+      ? { status: 'verified_write', resource: { ...resource, fingerprint: 'after' }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: ['必须落到文档标题', '正文'], fragmentEvidence: [{ fragment: '必须落到文档标题', blockIds: ['heading'] }, { fragment: '正文', blockIds: ['body'] }], observedBlocks: [{ id: 'heading', type: 'h1', text: '必须落到文档标题' }, { id: 'body', type: 'p', text: '正文' }] } }
+      : { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ index: 0, id: null, type: 'p', text: '', textLength: 0, truncated: false }], emptyBody: { semantic: true, physicalBlockCount: 1, blankParagraphCount: 1 }, title: { supported: true, text: '', textLength: 0, truncated: false } } }
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result })
+  }) })
+  connector.bindBrowserTarget('light-doc-old-runtime-run', target)
+  const endpoint = await connector.start()
+  try {
+    const preview = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload })
+    const committed = await call(endpoint, 'light_document_write_commit', { challenge: preview.result.structuredContent.challenge }, 2)
+    assert.equal(committed.result.isError, true)
+    assert.match(committed.result.content[0].text, /title initialization was required|verified title readback/i)
   } finally { await connector.stop() }
 })
 
@@ -698,5 +757,8 @@ test('WebEdit light-document Skill prescribes one selection read and supports ar
   assert.match(skill, /选区未变化时不要重复 `selection_read`/)
   assert.match(skill, /`\{ blocks: \[\] \}`/)
   assert.match(skill, /超时或回读不确定时不得自动重试/)
+  assert.match(skill, /1–50 个受支持块/)
+  assert.match(skill, /preview → 用户确认 → commit → 同一 Browser Target 回读/)
+  assert.match(skill, /不得并行提交，也不得靠逐个类型探测来试错/)
   assert.doesNotMatch(skill, /局部或歧义选区请用户重新选择完整块/)
 })

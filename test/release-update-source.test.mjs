@@ -8,6 +8,7 @@ import {
   fetchRelease,
   resolveReleaseSource,
 } from '../apps/native-server/src/release-update/release-source.mjs'
+import { checkUpdate } from '../apps/native-server/src/release-update/index.mjs'
 
 const manifestBytes = value => Buffer.from(JSON.stringify(value))
 const packageUrl = 'https://github.com/zlt002/deepseek_harness_chrome/releases/download/windows-lite-v1.1.86/accr-ui-windows-lite-x64.zip'
@@ -155,4 +156,49 @@ test('accepts a streamed release response without Content-Length', async () => {
     }),
   )
   assert.deepEqual(release.bytes, bytes)
+})
+
+test('manifest update checks compare the signed release identity without downloading its ZIP', async () => {
+  const result = await checkUpdate({
+    currentVersion: '1.1.85',
+    env: { ACCRUI_WINDOWS_LITE_UPDATE_MANIFEST_URL: 'https://example.test/release.json' },
+    fetchImpl: async input => {
+      assert.equal(String(input), 'https://example.test/release.json')
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        body: streamBody([manifestBytes({
+          format: 'accr-ui-windows-lite-update-v1',
+          releaseUrl: 'https://example.test/releases/1.1.86',
+          version: '1.1.86',
+          sha256: 'a'.repeat(64),
+          packageUrl: 'https://example.test/accr-ui-windows-lite-x64.zip',
+        })]),
+      }
+    },
+  })
+  assert.deepEqual(result, {
+    available: true,
+    version: '1.1.86',
+    sha256: 'a'.repeat(64),
+    packageUrl: 'https://example.test/accr-ui-windows-lite-x64.zip',
+    releaseUrl: 'https://example.test/releases/1.1.86',
+  })
+})
+
+test('release source honours an already-cancelled caller signal', async () => {
+  const controller = new AbortController()
+  controller.abort(new Error('caller cancelled'))
+  await assert.rejects(
+    resolveReleaseSource({
+      env: { ACCRUI_WINDOWS_LITE_UPDATE_MANIFEST_URL: 'https://example.test/release.json' },
+      signal: controller.signal,
+      fetchImpl: async (_input, options) => {
+        assert.equal(options.signal.aborted, true)
+        throw options.signal.reason
+      },
+    }),
+    /caller cancelled/,
+  )
 })

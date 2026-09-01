@@ -67,28 +67,28 @@ function Get-AccrUiLegacyNativeHostRegistrations([string[]]$Names = $legacyAccrU
 
 function Suspend-NativeHostRegistration {
   if ($script:nativeHostRegistrationSuspended) { return }
-  $captured = @()
   foreach ($registryRoot in $nativeHostRegistryRoots) {
     foreach ($nativeHostName in $nativeHostNames) {
       $key = Join-Path $registryRoot $nativeHostName
       if (-not (Test-Path -LiteralPath $key)) { continue }
-      $captured += [pscustomobject]@{
+      $script:suspendedNativeHostRegistrations += [pscustomobject]@{
         Path = $key
         Value = (Get-Item -LiteralPath $key).GetValue('')
       }
+      $script:nativeHostRegistrationSuspended = $true
       Remove-Item -LiteralPath $key -Recurse -Force
     }
   }
   foreach ($registration in @(Get-AccrUiLegacyNativeHostRegistrations)) {
-    $captured += $registration
+    $script:suspendedNativeHostRegistrations += $registration
+    $script:nativeHostRegistrationSuspended = $true
     Remove-Item -LiteralPath $registration.Path -Recurse -Force
   }
   foreach ($registration in @(Get-AccrUiLegacyNativeHostRegistrations $deprecatedNativeHostNames)) {
-    $captured += $registration
+    $script:suspendedNativeHostRegistrations += $registration
+    $script:nativeHostRegistrationSuspended = $true
     Remove-Item -LiteralPath $registration.Path -Recurse -Force
   }
-  $script:suspendedNativeHostRegistrations = $captured
-  $script:nativeHostRegistrationSuspended = $true
   Write-Host '已暂停 Chrome 和 Edge 自动重启旧 Harness UI。'
 }
 
@@ -529,11 +529,11 @@ if ($Rollback) {
 
 if (-not (Test-Path -LiteralPath $payloadZip -PathType Leaf)) { throw '缺少 payload.zip 安装包。' }
 $node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) { throw '未检测到 Node.js；Harness UI 需要 Node.js 22 或更高版本。' }
+if (-not $node) { throw '未检测到 Node.js；Harness UI 需要 Node.js 22.19.x 或 24+。' }
 $nodePath = [System.IO.Path]::GetFullPath($node.Source)
 if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw "Node.js 路径无效：$nodePath" }
 $nodeVersion = (& $nodePath --version).Trim()
-if ($nodeVersion -notmatch '^v?(?<major>\d+)' -or [int]$Matches.major -lt 22) { throw "Node.js $nodeVersion 版本过低；Harness UI 需要 Node.js 22 或更高版本。" }
+if ($nodeVersion -notmatch '^v?(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)' -or -not (([int]$Matches.major -eq 22 -and [int]$Matches.minor -ge 19) -or [int]$Matches.major -ge 24)) { throw "Node.js $nodeVersion 不受支持；Harness UI 需要 Node.js 22.19.x 或 24+。" }
 Write-InstallProgress 8 'preparing' "已检测到 Node.js $nodeVersion。"
 
 $stagingRoot = Join-Path $env:TEMP ('accr-ui-harness-stage-' + [guid]::NewGuid().ToString('N'))
@@ -542,12 +542,14 @@ $preservePreviousRoot = $false
 New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $previousRoot -Force | Out-Null
 try {
+  # Do this before extraction: a running old Host can otherwise be restarted
+  # by Chrome/Edge while the candidate is being unpacked.
+  Suspend-NativeHostRegistration
   Write-InstallProgress 15 'extracting' '正在解压安装包...'
   Expand-Archive -LiteralPath $payloadZip -DestinationPath $stagingRoot -Force
   Assert-ReleaseTree $stagingRoot | Out-Null
   Write-InstallProgress 65 'configuring' '正在保存现有版本并安装新版本...'
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-  Suspend-NativeHostRegistration
   Stop-InstalledProductProcesses $installRoot
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
   Copy-ExtensionTree $installRoot $previousRoot -ExplainLockedExtension

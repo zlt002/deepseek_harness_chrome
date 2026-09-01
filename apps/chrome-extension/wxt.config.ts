@@ -1,5 +1,6 @@
 import { defineConfig } from 'wxt'
 import { execFile } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { copyFile, mkdir } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +11,9 @@ const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)))
 const projectRoot = resolve(extensionRoot, '..', '..')
 const isDevCommand = !process.argv.some((argument) => ['build', 'zip', 'submit'].includes(argument))
 const execFileAsync = promisify(execFile)
+const extensionPackage = JSON.parse(readFileSync(resolve(extensionRoot, 'package.json'), 'utf8')) as { version?: unknown }
+if (typeof extensionPackage.version !== 'string' || extensionPackage.version.trim() === '') throw new Error('Chrome extension package.json must define a version.')
+const extensionVersion = extensionPackage.version.trim()
 
 /**
  * The first browser surface is a sidepanel shell around the locally served
@@ -110,7 +114,7 @@ export default defineConfig({
     },
   },
   manifest: {
-    name: 'ACCRUI',
+    name: `accrui ${extensionVersion} beta`,
     description: 'Use ACCRUI from a Chrome side panel.',
     // Chrome 116 introduced the Side Panel API used by the normal workspace.
     // The optional full-screen handoff remains gated at runtime on

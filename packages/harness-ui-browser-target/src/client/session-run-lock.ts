@@ -1,6 +1,8 @@
 export interface SessionRunSnapshot {
   running: boolean
   queue: readonly unknown[]
+  /** True only when the Host log has never accepted a prompt for this session. */
+  blank?: boolean
 }
 
 export interface RestoredSessionRunLifecycle {
@@ -11,6 +13,7 @@ export interface RestoredSessionRunLifecycle {
 export class BrowserTargetSessionRunLock {
   accepted = false
   observedActivity = false
+  restored = false
 
   constructor(readonly submissionId: string) {}
 
@@ -19,6 +22,7 @@ export class BrowserTargetSessionRunLock {
     const lock = new BrowserTargetSessionRunLock(submissionId)
     lock.accepted = true
     lock.observedActivity = lifecycle.observedActivity
+    lock.restored = true
     return lock
   }
 
@@ -30,7 +34,9 @@ export class BrowserTargetSessionRunLock {
   /** Returns true only after this accepted Run's running or queue activity becomes completely idle. */
   observe(snapshot: SessionRunSnapshot): boolean {
     if (snapshot.running || snapshot.queue.length > 0) this.observedActivity = true
-    return this.accepted && this.observedActivity && !snapshot.running && snapshot.queue.length === 0
+    const idle = !snapshot.running && snapshot.queue.length === 0
+    const restoredPromptNeverAccepted = this.restored && snapshot.blank === true
+    return this.accepted && idle && (this.observedActivity || restoredPromptNeverAccepted)
   }
 }
 

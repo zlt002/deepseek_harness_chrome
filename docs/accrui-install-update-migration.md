@@ -69,7 +69,7 @@ POST /api/system/update
 
 旧项目曾禁止 C 盘和中文路径。Harness 当前的路径传递、文件操作和 Native Host
 launcher 都有完整引号，没有证据需要继续保留这个产品限制，因此迁移时已删除。
-静态 Harness 包也不需要 Git，所以只把 Node.js 22+ 和 Chrome/Edge 作为运行环境检查。
+静态 Harness 包也不需要 Git，所以只把 Node.js 22.19.x 或 24+ 和 Chrome/Edge 作为运行环境检查。
 
 ## 当前已经迁入 Harness 的部分
 
@@ -92,7 +92,7 @@ skill 还会以独立 provider 优先发布，用户端同名目录不能覆盖�
 
 `install-ui.ps1` 已迁入以下体验：
 
-- 检测 Node.js 22+；
+- 检测 Node.js 22.19.x 或 24+；
 - 检测 Chrome/Edge；
 - 浏览和手填安装目录；
 - 已有内容时确认；

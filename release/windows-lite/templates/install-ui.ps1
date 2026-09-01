@@ -98,7 +98,7 @@ function New-RequirementRow([string]$Name, [int]$Top) {
   return @{ Detail = $detail; Badge = $badge }
 }
 
-$nodeRow = New-RequirementRow 'Node.js 22+' 105
+$nodeRow = New-RequirementRow 'Node.js 22.19.x 或 24+' 105
 $browserRow = New-RequirementRow 'Chrome / Edge' 180
 
 $pathLabel = New-Object System.Windows.Forms.Label
@@ -158,14 +158,14 @@ function Set-Badge($Row, [bool]$Ok, [string]$Text) {
 function Refresh-Requirements {
   $node = Get-Command node -ErrorAction SilentlyContinue
   $nodeReady = $false
-  $nodeText = '未检测到 Node.js，请先安装 Node.js 22 或更高版本。'
+  $nodeText = '未检测到 Node.js，请先安装 Node.js 22.19.x 或 24+。'
   if ($node) {
     try {
       $version = (& $node.Source --version).Trim()
-      if ($version -match '^v?(?<major>\d+)' -and [int]$Matches.major -ge 22) {
+      if ($version -match '^v?(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)' -and (([int]$Matches.major -eq 22 -and [int]$Matches.minor -ge 19) -or [int]$Matches.major -ge 24)) {
         $nodeReady = $true
         $nodeText = "已检测到 $version：$($node.Source)"
-      } else { $nodeText = "检测到 $version，但版本低于 22。" }
+      } else { $nodeText = "检测到 $version，但需要 Node.js 22.19.x 或 24+。" }
     } catch { $nodeText = "Node.js 检测失败：$($_.Exception.Message)" }
   }
   Set-Badge $nodeRow $nodeReady $nodeText

@@ -17,15 +17,18 @@ async function accountBackground(cookies, {
   remove = undefined,
   pageLogout = undefined,
   logoutNavigationTimeoutMs = undefined,
+  identityResponse = undefined,
 } = {}) {
+  const previousFetch = globalThis.fetch
   const end = source.lastIndexOf('\nexport default defineBackground')
   assert.notEqual(end, -1, 'account adapter source must remain before background bootstrap')
-  const adapterSource = `${source.slice(0, end)}\nexport { locallySignOutAccount, companyBrowserAuthentication }\n`
+  const adapterSource = `${source.slice(0, end)}\nexport { locallySignOutAccount, companyBrowserAuthentication, accountAccessSnapshot, parseCompanyLoginIdentity }\n`
   const compiled = await bundleTypescript(adapterSource, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   const local = {}
   const portalTab = { id: 42, active: true, url: 'https://wb-uat.annto.com/index' }
   const executions = []
   const navigationListeners = new Set()
+  const nativeMessages = []
   const emitNavigation = (url) => {
     for (const listener of navigationListeners) listener({ tabId: portalTab.id, frameId: 0, url })
   }
@@ -68,19 +71,58 @@ async function accountBackground(cookies, {
     webNavigation: {
       onCommitted: { addListener: (listener) => navigationListeners.add(listener), removeListener: (listener) => navigationListeners.delete(listener) },
     },
+    runtime: {
+      connectNative: () => ({
+        postMessage: message => nativeMessages.push(message),
+        onDisconnect: { addListener() {}, removeListener() {} },
+        onMessage: { addListener() {}, removeListener() {} },
+      }),
+      sendMessage: async () => {},
+    },
+  }
+  if (identityResponse !== undefined) {
+    globalThis.fetch = async () => ({ ok: true, json: async () => identityResponse })
   }
   const module = await import(`data:text/javascript,${encodeURIComponent(compiled)}#account-access-${Date.now()}`)
   return {
     logout: module.locallySignOutAccount,
     isAuthenticated: module.companyBrowserAuthentication,
+    snapshot: module.accountAccessSnapshot,
+    parseIdentity: module.parseCompanyLoginIdentity,
+    nativeMessages,
     executions,
     cleanup: () => {
       delete globalThis.__ACCRUI_COMPANY_LOGOUT_NAVIGATION_TIMEOUT_MS
       delete globalThis.__ACCRUI_TEST_EMIT_COMPANY_LOGOUT_NAVIGATION
       delete globalThis.chrome
+      globalThis.fetch = previousFetch
     },
   }
 }
+
+test('authenticated account reports only userCode and employeeId from the nested login response', async () => {
+  const cookies = [{ name: 'MAS_TGC_UAT', domain: '.annto.com', path: '/', secure: true, storeId: '0' }]
+  const background = await accountBackground(cookies, {
+    identityResponse: {
+      code: '0',
+      data: { userCode: 'zhanglt21', employeeId: '20680888', email: 'private@example.test', userName: 'Private Name' },
+    },
+  })
+  try {
+    assert.equal((await background.snapshot()).status, 'authenticated')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.nativeMessages.length, 1)
+    assert.equal(background.nativeMessages[0].type, 'report-user-identity')
+    assert.deepEqual({
+      userCode: background.nativeMessages[0].payload.userCode,
+      employeeId: background.nativeMessages[0].payload.employeeId,
+    }, { userCode: 'zhanglt21', employeeId: '20680888' })
+    assert.equal('email' in background.nativeMessages[0].payload, false)
+    assert.equal('userName' in background.nativeMessages[0].payload, false)
+  } finally {
+    background.cleanup()
+  }
+})
 
 test('logout removes every company authentication cookie before reporting guest mode', async () => {
   const cookies = [

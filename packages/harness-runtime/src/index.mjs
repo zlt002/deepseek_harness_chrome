@@ -30,6 +30,58 @@ function activeParentTurn(agent) {
 
 const MAX_SELECTED_SOURCE_SEARCHES_PER_TURN = 1
 
+function userText(message) {
+  if (message?.source?.kind !== 'user' || !Array.isArray(message.content)) return undefined
+  const text = message.content
+    .flatMap((block) => block?.type === 'text' && typeof block.text === 'string' ? [block.text] : [])
+    .join('')
+  return text.length === 0 ? undefined : text
+}
+
+function initialSelectedSourcePrompt(events) {
+  let latestUser
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event?.type !== 'user/message') continue
+    const text = userText(event.data)
+    if (text === undefined) continue
+    const pmdPrd = /^\/pmd-prd(?:\s+([\s\S]*))?$/.exec(text)
+    latestUser = { index, text: pmdPrd?.[1]?.trim() ? pmdPrd[1].trim() : text }
+  }
+  return latestUser
+}
+
+function hasSettledSelectedSourceEvidence(events, afterIndex) {
+  let wrapperStarted = false
+  for (let index = afterIndex + 1; index < events.length; index += 1) {
+    const event = events[index]
+    if (event?.type === 'tool/call' && SELECTED_SOURCE_WRAPPERS.has(event.data?.name)) {
+      wrapperStarted = true
+      continue
+    }
+    if (!wrapperStarted || event?.type !== 'user/message' || event.data?.source?.kind !== 'subagent-settled') continue
+    const summary = event.data.source.summary
+    if (typeof summary !== 'string' || !summary.includes(' finished and will do no further work')) continue
+    const text = Array.isArray(event.data.content)
+      ? event.data.content.flatMap((block) => block?.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n')
+      : ''
+    if (/Its closing message:\s*\S/.test(text)) return true
+  }
+  return false
+}
+
+function initialPromptGuardReason(exec) {
+  const events = exec.agent?.session?.events
+  if (!Array.isArray(events)) return undefined
+  const initial = initialSelectedSourcePrompt(events)
+  if (initial === undefined || hasSettledSelectedSourceEvidence(events, initial.index)) return undefined
+  const prompt = exec.arguments !== null && typeof exec.arguments === 'object'
+    ? exec.arguments.prompt
+    : undefined
+  if (prompt === initial.text) return undefined
+  return `这是首次检索，prompt 必须使用用户原始业务文本。请把 prompt 原样改为：${JSON.stringify(initial.text)} 后重试。`
+}
+
 /**
  * Admit one selected-source child per parent turn.
  * A guard is a product-owned, lifecycle-aware enforcement seam: unlike prompt
@@ -67,6 +119,8 @@ export function createSelectedSourceDispatchGuard() {
     if (state.searchCount >= MAX_SELECTED_SOURCE_SEARCHES_PER_TURN || state.searchPending) {
       return '本次父会话轮次已启动一个 selected-source 检索；请先等待该结果结算。只有结算后仍存在独立证据缺口时，才在后续父会话轮次追加一个聚焦检索。'
     }
+    const promptGuardReason = initialPromptGuardReason(exec)
+    if (promptGuardReason !== undefined) return promptGuardReason
     state.searchPending = true
     return undefined
   }

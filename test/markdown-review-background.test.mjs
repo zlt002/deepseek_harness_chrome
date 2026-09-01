@@ -11,6 +11,7 @@ async function loadBackground() {
   const page = { id: 42, windowId: 7, url: 'https://docs.example.test/source', title: 'Source' }
   const reviewTab = { id: 91, windowId: 7, url: '', title: 'Markdown Review' }
   const nativeListeners = new Set()
+  let prdEventResponse = 'recorded'
   globalThis.fetch = async (url, init) => {
     fetches.push({ url: String(url), init })
     const pathname = new URL(String(url)).pathname
@@ -48,6 +49,11 @@ async function loadBackground() {
         postMessage: message => {
           nativeMessages.push(message)
           if (message.type === 'start') queueMicrotask(() => { for (const listener of nativeListeners) listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'run-review' } }) })
+          if (message.type === 'report-prd-event') queueMicrotask(() => {
+            for (const listener of nativeListeners) listener(prdEventResponse === 'recorded'
+              ? { type: 'prd_event_recorded', requestId: message.requestId }
+              : { type: 'prd_event_failed', requestId: message.requestId, error: 'outbox unavailable' })
+          })
           if (message.type === 'record-pmd-prd-review-adoption') queueMicrotask(() => {
             for (const listener of nativeListeners) listener({ type: 'pmd_prd_review_adoption_recorded', requestId: message.requestId })
           })
@@ -85,6 +91,7 @@ async function loadBackground() {
   }
   return {
     created, updates, fetches, forwarded, rehydrates, responses, nativeMessages,
+    setPrdEventResponse: value => { prdEventResponse = value },
     open: review => runtimeMessage({ type: 'open-markdown-review/v1', review }, { url: 'chrome-extension://test/sidepanel.html' }),
     connect: () => connectListener(port),
     portMessage: message => { for (const listener of portMessageListeners) listener(message) },
@@ -93,17 +100,14 @@ async function loadBackground() {
 }
 
 const openReview = { v: 1, reviewId: 'review-1', harnessSessionId: 'session-1', resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-1', fingerprint: 'fingerprint-1', capability: 'opaque-capability-that-never-enters-the-url' }
+const pmdPrdReview = { ...openReview, pmdPrd: true }
 
 test('opens a capability-free review URL, proxies a bounded snapshot, and delivers to the fixed session', async () => {
   const background = await loadBackground()
   try {
     assert.equal((await background.open(openReview)).ok, true)
     assert.equal(background.created.length, 1)
-    assert.deepEqual(background.nativeMessages.filter(message => message.type === 'report-prd-event').map(message => message.payload), [{
-      eventId: 'review:review-1:generated', eventType: 'review_generated', outcome: 'succeeded',
-      occurredAt: background.nativeMessages.find(message => message.type === 'report-prd-event').payload.occurredAt,
-      sessionId: 'session-1',
-    }])
+    assert.deepEqual(background.nativeMessages.filter(message => message.type === 'report-prd-event'), [])
     assert.match(background.created[0].url, /markdown-review\.html\?reviewId=review-1$/)
     assert.doesNotMatch(background.created[0].url, /capability|session-1|resource-1/)
     background.connect()
@@ -113,8 +117,13 @@ test('opens a capability-free review URL, proxies a bounded snapshot, and delive
     assert.equal(snapshot.ok, true, JSON.stringify(snapshot))
     assert.equal(snapshot.snapshot.harnessSessionId, 'session-1')
     assert.equal(snapshot.snapshot.sidePanelTabId, 42)
+    assert.equal(snapshot.snapshot.pmdPrd, undefined)
     const snapshotFetch = background.fetches.find(({ url }) => new URL(url).pathname.endsWith('/snapshot'))
     assert.equal(snapshotFetch.init.headers.authorization, `Bearer ${openReview.capability}`)
+    background.portMessage({ v: 1, type: 'markdown-review-rating-request', requestId: 'ordinary-rating', reviewId: 'review-1', rating: 4 })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'ordinary-rating') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.responses.find(message => message.requestId === 'ordinary-rating')?.ok, false)
+    assert.equal(background.nativeMessages.some(message => message.type === 'report-prd-event' && message.payload.eventType === 'prd_rating'), false)
 
     background.portMessage({
       v: 1, type: 'markdown-review-deliver-request', requestId: 'deliver-1', reviewId: 'review-1', harnessSessionId: 'session-1', deliveryId: 'annotation-1',
@@ -183,6 +192,54 @@ test('forwards rewrite and accept only to the review-bound session', async () =>
     const adoption = background.nativeMessages.find(message => message.type === 'record-pmd-prd-review-adoption')
     assert.equal(adoption.payload.harnessSessionId, 'session-current')
     assert.match(adoption.payload.contentHash, /^[a-f0-9]{64}$/)
+  } finally { background.cleanup() }
+})
+
+test('only explicit pmd-prd Reviews report generated/rating telemetry and restore ratings', async () => {
+  const background = await loadBackground()
+  try {
+    await background.open(pmdPrdReview); background.connect()
+    background.portMessage({ v: 1, type: 'markdown-review-rating-request', requestId: 'rating-1', reviewId: 'review-1', rating: 0.5 })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'rating-1') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.deepEqual(background.responses.find(message => message.requestId === 'rating-1'), { v: 1, type: 'markdown-review-rating-response', requestId: 'rating-1', ok: true, rating: 0.5 })
+    const generated = background.nativeMessages.find(message => message.type === 'report-prd-event' && message.payload.eventType === 'review_generated')
+    assert.equal(generated?.payload.eventId, 'review:review-1:generated')
+    assert.equal(generated?.payload.name, 'README.md')
+    const rating = background.nativeMessages.find(message => message.type === 'report-prd-event' && message.payload.eventType === 'prd_rating')
+    assert.deepEqual({ eventId: rating.payload.eventId, eventType: rating.payload.eventType, outcome: rating.payload.outcome, sessionId: rating.payload.sessionId, generationEventId: rating.payload.generationEventId, rating: rating.payload.rating }, {
+      eventId: 'review:review-1:rating:rating-1', eventType: 'prd_rating', outcome: 'succeeded', sessionId: 'session-1', generationEventId: 'review:review-1:generated', rating: 0.5,
+    })
+    background.portMessage({ v: 1, type: 'markdown-review-snapshot-request', requestId: 'rating-readback-1', reviewId: 'review-1' })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'rating-readback-1') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.responses.find(message => message.requestId === 'rating-readback-1')?.snapshot?.rating, 0.5)
+    assert.equal(background.responses.find(message => message.requestId === 'rating-readback-1')?.snapshot?.pmdPrd, true)
+  } finally { background.cleanup() }
+})
+
+test('generated PRD telemetry reports only the basename of an absolute Markdown path', async () => {
+  const background = await loadBackground()
+  try {
+    await background.open({ ...pmdPrdReview, reviewId: 'review-absolute', displayPath: '/Users/zhanglt21/Documents/需求_PRD.md' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const generated = background.nativeMessages.find(message => message.type === 'report-prd-event' && message.payload.eventType === 'review_generated')
+    assert.equal(generated?.payload.name, '需求_PRD.md')
+    assert.doesNotMatch(generated?.payload.name ?? '', /Users|Documents|\//)
+  } finally { background.cleanup() }
+})
+
+test('does not retain a rating when Native rejects its durable PRD event', async () => {
+  const background = await loadBackground()
+  try {
+    background.setPrdEventResponse('failed')
+    await background.open(pmdPrdReview); background.connect()
+    background.portMessage({ v: 1, type: 'markdown-review-rating-request', requestId: 'rating-failed', reviewId: 'review-1', rating: 2 })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'rating-failed') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.responses.find(message => message.requestId === 'rating-failed')
+    assert.equal(response?.ok, false)
+    assert.match(response?.error?.message ?? '', /outbox unavailable/)
+    background.portMessage({ v: 1, type: 'markdown-review-snapshot-request', requestId: 'rating-failed-readback', reviewId: 'review-1' })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'rating-failed-readback') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.responses.find(message => message.requestId === 'rating-failed-readback')?.snapshot?.rating, undefined)
   } finally { background.cleanup() }
 })
 

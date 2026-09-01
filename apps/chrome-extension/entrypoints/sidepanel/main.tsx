@@ -7,6 +7,7 @@ import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessHandoffTa
 import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
 import { MARKDOWN_AI_ACK_TIMEOUT_MS } from '../markdown-review/delivery-timeouts'
 import { validateWorkspaceMarkdownFeedback, validateWorkspaceMarkdownReviewAction, type WorkspaceMarkdownFeedback, type WorkspaceMarkdownReviewAction } from './markdown-feedback-validator'
+import { retryNativeConnection } from '../../src/native-reconnect-policy'
 import './style.css'
 
 type HarnessStatus = 'starting' | 'ready' | 'error'
@@ -37,7 +38,7 @@ interface CompanyGatewayMetadata { models: CompanyGatewayModel[]; quota: Company
 interface AccountAccessSnapshot { status: AccountAccessStatus; displayName?: string; knowledgeAccess: boolean; codeAccess: boolean; modelMode: 'manual' | 'company-pending'; gateway?: CompanyGatewayMetadata; message?: string }
 interface AccountAccessResponse { ok: boolean; snapshot?: AccountAccessSnapshot; error?: string }
 interface CompanyGatewayProbeResponse { ok: boolean; requestId?: string; gateway?: CompanyGatewayMetadata; error?: string }
-interface ReleaseUpdateResponse { ok: boolean; update?: { available: boolean; version?: string; sha256?: string; error?: string }; error?: string }
+interface ReleaseUpdateResponse { ok: boolean; update?: { available: boolean; version?: string; sha256?: string; error?: string }; error?: string; status?: string }
 interface OpenMarkdownReview {
   v: 1
   reviewId: string
@@ -47,6 +48,7 @@ interface OpenMarkdownReview {
   revision: string
   fingerprint: string
   capability: string
+  pmdPrd?: true
 }
 
 interface MarkdownReviewIdentity { reviewId: string; harnessSessionId: string; resourceId: string }
@@ -168,6 +170,7 @@ function isOpenMarkdownReview(value: unknown): value is OpenMarkdownReview {
     && ['reviewId', 'harnessSessionId', 'resourceId', 'revision', 'fingerprint'].every(key => boundedString(review[key], 160))
     && boundedString(review.displayPath, 2_048)
     && boundedString(review.capability, 512)
+    && (review.pmdPrd === undefined || review.pmdPrd === true)
 }
 
 function isMarkdownReviewIdentity(value: unknown): value is MarkdownReviewIdentity {
@@ -199,8 +202,8 @@ function requestHarness(message: unknown = { type: 'ensure-harness' }): Promise<
   })
 }
 
-function requestReleaseUpdate(action: 'check' | 'prepare'): Promise<ReleaseUpdateResponse> {
-  return new Promise(resolve => chrome.runtime.sendMessage({ type: 'release-update/v1', action }, (response: ReleaseUpdateResponse | undefined) => {
+function requestReleaseUpdate(action: 'check' | 'prepare' | 'cancel', requestId: string, candidate?: unknown): Promise<ReleaseUpdateResponse> {
+  return new Promise(resolve => chrome.runtime.sendMessage({ type: 'release-update/v1', action, requestId, ...(candidate === undefined ? {} : { candidate }) }, (response: ReleaseUpdateResponse | undefined) => {
     const runtimeError = chrome.runtime.lastError
     resolve(runtimeError === undefined ? response ?? { ok: false, error: 'Native Host 未返回更新结果。' } : { ok: false, error: runtimeError.message })
   }))
@@ -460,6 +463,7 @@ function App(): React.JSX.Element {
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
   const knowledgeLoginTimerRef = useRef<number | undefined>(undefined)
+  const reconnectAbortRef = useRef<AbortController | undefined>(undefined)
   const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions, requestSequence: number) => Promise<void>>(async () => {})
   const accountCommandHandlerRef = useRef<(command: 'refresh' | 'login' | 'logout') => Promise<void>>(async () => {})
   const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
@@ -508,16 +512,31 @@ function App(): React.JSX.Element {
   }, [])
 
   const connect = useCallback(async () => {
+    reconnectAbortRef.current?.abort()
+    const controller = new AbortController()
+    reconnectAbortRef.current = controller
     // Reconnecting unmounts and recreates the Harness iframe, whose command
     // sequence starts again at 1 even if the reused URL keeps the same nonce.
     clearBrowserTargetLockProjection()
     knowledgeCommandSequenceRef.current = 0
     knowledgeRequestSequenceBySessionRef.current.clear()
     setStatus('starting'); setError(undefined)
-    const response = await requestHarness()
-    if (response.ok && response.url !== undefined) { setUrl(response.url); setStatus('ready'); return }
-    setStatus('error'); setError(response.error ?? 'Unable to start the ACCRUI native server.')
+    let lastError = 'Unable to start the ACCRUI native server.'
+    const connected = await retryNativeConnection(async () => {
+      const response = await requestHarness()
+      if (controller.signal.aborted) return false
+      if (response.ok && response.url !== undefined) {
+        setUrl(response.url); setStatus('ready'); setError(undefined)
+        return true
+      }
+      lastError = response.error ?? lastError
+      return false
+    }, { signal: controller.signal })
+    if (reconnectAbortRef.current === controller) reconnectAbortRef.current = undefined
+    if (!connected && !controller.signal.aborted) { setStatus('error'); setError(lastError) }
   }, [clearBrowserTargetLockProjection])
+
+  useEffect(() => () => reconnectAbortRef.current?.abort(), [])
 
   const loadTargetSettings = useCallback(async () => {
     const response = await requestTargetSettings({ type: 'get-browser-target-settings' })
@@ -908,7 +927,7 @@ function App(): React.JSX.Element {
   useLayoutEffect(() => {
     const onFrameMessage = (event: MessageEvent<unknown>): void => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
-      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; targetSessionId?: unknown; targetSessionTitle?: unknown; status?: unknown; apiKey?: unknown; protocol?: unknown }
+      const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; candidate?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; targetSessionId?: unknown; targetSessionTitle?: unknown; status?: unknown; apiKey?: unknown; protocol?: unknown }
       if (value.nonce !== frameNonce) return
       if (value.type === 'prototype-studio-prompt-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = prototypePromptRef.current.get(value.deliveryId)
@@ -1048,8 +1067,14 @@ function App(): React.JSX.Element {
       }
       if (value.type === 'account-access-ready/v1') { accountCommandSequenceRef.current = 0; void handleAccountAccessCommand('refresh'); return }
       if (value.type === 'release-update-command/v1') {
-        if (typeof value.requestId !== 'string' || !boundedString(value.requestId, 160) || (value.action !== 'check' && value.action !== 'prepare') || frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
-        void requestReleaseUpdate(value.action).then(response => frameRef.current?.contentWindow?.postMessage(
+        if (typeof value.requestId !== 'string' || !boundedString(value.requestId, 160) || (value.action !== 'check' && value.action !== 'prepare' && value.action !== 'cancel') || frameOrigin === undefined || frameRef.current?.contentWindow === null || frameRef.current?.contentWindow === undefined) return
+        if (value.action === 'cancel') {
+          void requestReleaseUpdate(value.action, value.requestId).then(response => {
+            if (response.status === 'too_late') frameRef.current?.contentWindow?.postMessage({ type: 'release-update-cancel-too-late/v1', nonce: frameNonce, requestId: value.requestId }, frameOrigin)
+          })
+          return
+        }
+        void requestReleaseUpdate(value.action, value.requestId, value.candidate).then(response => frameRef.current?.contentWindow?.postMessage(
           response.ok ? { type: 'release-update-result/v1', nonce: frameNonce, requestId: value.requestId, update: response.update } : { type: 'release-update-failed/v1', nonce: frameNonce, requestId: value.requestId, error: response.error ?? '在线更新失败。' }, frameOrigin))
         return
       }

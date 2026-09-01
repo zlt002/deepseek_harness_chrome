@@ -5,6 +5,8 @@ export const WORKSPACE_MARKDOWN_REVIEW_OPEN_TURN_DATA = 'workspace-markdown-revi
 
 export interface WorkspaceMarkdownReviewOpenTurnData {
   readonly path: string
+  /** Only the narrow PMD tool invocation is eligible for PRD telemetry. */
+  readonly source?: 'pmd-prd'
   readonly resultSeq: number
 }
 
@@ -17,18 +19,19 @@ declare module '@deepseek-ai/dsh-client-runtime/client' {
 
 interface WorkspaceMarkdownReviewOpenState {
   readonly turn: number
-  readonly calls: ReadonlyMap<string, string>
+  readonly calls: ReadonlyMap<string, Pick<WorkspaceMarkdownReviewOpenTurnData, 'path' | 'source'>>
   readonly opened?: WorkspaceMarkdownReviewOpenTurnData
 }
 
-function openPath(argumentsRaw: string): string {
+function openRequest(argumentsRaw: string): Pick<WorkspaceMarkdownReviewOpenTurnData, 'path' | 'source'> | undefined {
   try {
     const value: unknown = JSON.parse(argumentsRaw)
     if (value !== null && typeof value === 'object' && !Array.isArray(value) && typeof (value as Record<string, unknown>).path === 'string') {
-      return (value as Record<string, string>).path
+      const source = (value as Record<string, unknown>).source
+      return { path: (value as Record<string, string>).path, ...(source === 'pmd-prd' ? { source } : {}) }
     }
   } catch { /* the Host rejects malformed tool arguments before a successful result exists */ }
-  return ''
+  return undefined
 }
 
 /** The newest successful review-open command currently materialized for this session. */
@@ -78,15 +81,15 @@ export function createWorkspaceMarkdownReviewOpenDefinition(): ConversationNodeD
     update: (context, match) => {
       if (match.event.type === 'tool/call') {
         if (match.event.data.name !== OPEN_WORKSPACE_MARKDOWN_REVIEW) return context.state
-        const path = openPath(match.event.data.arguments)
-        if (path === '') return context.state
+        const request = openRequest(match.event.data.arguments)
+        if (request === undefined) return context.state
         const calls = new Map(context.state.calls)
-        calls.set(String(match.event.data.callId), path)
+        calls.set(String(match.event.data.callId), request)
         return { ...context.state, calls }
       }
       if (match.event.type !== 'tool/result' || match.event.data.message.content[0]?.isError === true) return context.state
-      const path = context.state.calls.get(String(match.event.data.message.source.callId))
-      return path === undefined ? context.state : { ...context.state, opened: { path, resultSeq: match.event.seq } }
+      const request = context.state.calls.get(String(match.event.data.message.source.callId))
+      return request === undefined ? context.state : { ...context.state, opened: { ...request, resultSeq: match.event.seq } }
     },
     buildLocationData: (context, scope) => {
       if (scope !== 'turn' || context.state?.opened === undefined) return null

@@ -13,6 +13,7 @@ import {
   type MarkdownReviewProposal,
   type MarkdownReviewSnapshot,
   type PreparedWrite,
+  type PrdRating,
 } from './protocol'
 import { reduceReviewState, type ReviewState } from './review-state'
 import { beginCommit, canUpdateAnnotationDeliveryStatus, failUnsettledAnnotations, isCurrentCommit, pendingAnnotationCount, reviewSaveBlockedReason, reviewSelectionProposal, settleCommit, shouldProtectLocalReviewWork, updateAnnotationDeliveryStatus, verifiedWriteCleanupAllowed, type CommitAttempt } from './review-state-safety'
@@ -23,12 +24,13 @@ import './style.css'
 
 type LocalAnnotation = MarkdownReviewAnnotation & VisualReviewAnnotation
 type PreparedWriteState = { preparation: PreparedWrite; content: string; idempotencyKey: string }
-type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'session-action'; action: 'rewrite' | 'accept' } | { kind: 'proposals' } | { kind: 'prepare'; content: string; adoption?: true } | { kind: 'commit'; content: string; token: string; adoption?: true }
+type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'session-action'; action: 'rewrite' | 'accept' } | { kind: 'rating'; rating: PrdRating } | { kind: 'proposals' } | { kind: 'prepare'; content: string; adoption?: true } | { kind: 'commit'; content: string; token: string; adoption?: true }
 
 const initialState: ReviewState = { status: 'initializing' }
 const SIDE_PANEL_STARTUP_RETRY_DELAYS_MS = [500, 1_000, 2_000, 3_000] as const
 const VERIFIED_SAVE_NOTICE = '已保存，并已按同一资源回读验证。'
 const VERIFIED_SAVE_NOTICE_DISMISS_MS = 5_000
+const PRD_STARS = [1, 2, 3, 4, 5] as const
 
 function requestId(): string { return crypto.randomUUID() }
 
@@ -77,6 +79,10 @@ function App(): React.JSX.Element {
   const [sessionActionPending, setSessionActionPending] = useState<'rewrite' | 'accept'>()
   const [adoptionConfirmation, setAdoptionConfirmation] = useState<MarkdownReviewSnapshot>()
   const [adoptionReady, setAdoptionReady] = useState(false)
+  const [rating, setRating] = useState<PrdRating>()
+  const [ratingPending, setRatingPending] = useState<PrdRating>()
+  const [ratingPreview, setRatingPreview] = useState<PrdRating>()
+  const [ratingNotice, setRatingNotice] = useState<string>()
   const portRef = useRef<chrome.runtime.Port | undefined>(undefined)
   const pendingRef = useRef(new Map<string, PendingRequest>())
   const deliveryTimeoutsRef = useRef(new Map<string, number>())
@@ -263,6 +269,10 @@ function App(): React.JSX.Element {
           setDraft(message.snapshot.content)
           draftRef.current = message.snapshot.content
           snapshotRef.current = message.snapshot
+          setRating(message.snapshot.rating)
+          setRatingPending(undefined)
+          setRatingPreview(undefined)
+          setRatingNotice(undefined)
           proposalSequenceRef.current = 0
           proposalQueueRef.current = []
           annotationSelectionsRef.current.clear()
@@ -353,6 +363,16 @@ function App(): React.JSX.Element {
             : `执行指令已放入右侧输入框，请选择空白轻文档后发送。`)
         } else {
           setProposalNotice(`无法${expected.action === 'rewrite' ? '准备重写' : '采纳'}：${message.error?.message ?? '未知错误'}`)
+          if (message.error?.reopenRequired) dispatch({ type: 'request-failed', error: message.error })
+        }
+      }
+      if (message.type === 'markdown-review-rating-response' && expected.kind === 'rating') {
+        setRatingPending(undefined)
+        if (message.ok && message.rating === expected.rating) {
+          setRating(message.rating)
+          setRatingNotice(`已选择 ${message.rating} 星，评分已提交，正在同步埋点。`)
+        } else {
+          setRatingNotice(`评分未提交：${message.error?.message ?? '请重试。'}`)
           if (message.error?.reopenRequired) dispatch({ type: 'request-failed', error: message.error })
         }
       }
@@ -602,6 +622,20 @@ function App(): React.JSX.Element {
     deliveryTimeoutsRef.current.set(request, timeout)
   }, [externalUpdatePending, post, reviewId, sessionActionPending, syncEditorMarkdown])
 
+  const submitRating = useCallback((nextRating: PrdRating) => {
+    if (reviewId === undefined || snapshotRef.current?.pmdPrd !== true || ratingPending !== undefined) return
+    const request = requestId()
+    pendingRef.current.set(request, { kind: 'rating', rating: nextRating })
+    setRatingPending(nextRating)
+    setRatingNotice('正在提交评分…')
+    if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-rating-request', requestId: request, reviewId, rating: nextRating })) {
+      pendingRef.current.delete(request)
+      setRatingPending(undefined)
+      setRatingNotice('评分未提交：与 Harness 会话的连接已断开。')
+      dispatch({ type: 'port-disconnected' })
+    }
+  }, [post, ratingPending, reviewId])
+
   useEffect(() => {
     if (!adoptionReady) return
     setAdoptionReady(false)
@@ -803,12 +837,30 @@ function App(): React.JSX.Element {
         <span className={dirty ? 'status draft' : 'status'}>{dirty ? '本地草稿未保存' : '已与文件同步'}</span>
         {snapshot?.truncated === true && <span className="status truncated" title="文件快照已截断，不能安全保存或发送完整文档">内容已截断</span>}
         <span className="history-actions" role="group" aria-label="编辑历史"><button type="button" className="secondary icon-button" title="撤销（Ctrl+Z）" aria-label="撤销（Ctrl+Z）" onClick={() => { if (editorRef.current?.undo() === true) syncEditorMarkdown() }}>↶</button><button type="button" className="secondary icon-button" title="重做（Ctrl+Y）" aria-label="重做（Ctrl+Y）" onClick={() => { if (editorRef.current?.redo() === true) syncEditorMarkdown() }}>↷</button></span>
-        <button type="button" className="review-session-action is-rewrite" onClick={() => runSessionAction('rewrite')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中准备重写提示">↺ 重写</button>
-        <button type="button" className="review-session-action is-accept" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required' || snapshot?.truncated === true} title={snapshot?.truncated === true ? '内容已截断，不能安全采纳' : '把执行指令放入右侧当前会话'}>✓ 采纳</button>
+        <button type="button" className="review-session-action is-rewrite" onClick={() => runSessionAction('rewrite')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required'} title="在绑定会话中准备重写提示">↺ 删除重写</button>
+        <button type="button" className="review-session-action is-accept" onClick={() => runSessionAction('accept')} disabled={sessionActionPending !== undefined || state.status === 'reopen-required' || snapshot?.truncated === true} title={snapshot?.truncated === true ? '内容已截断，不能安全采纳' : '把执行指令放入右侧当前会话'}>✓ 写入在线文档</button>
         {dirty && snapshot?.truncated !== true && <button type="button" onClick={prepareSave} disabled={preparedWrite !== undefined || committing || state.status === 'reopen-required' || saveBlockedReason !== undefined} title={saveBlockedReason ?? '保存当前草稿'}>保存草稿</button>}
         <button className="secondary icon-button" type="button" title="重新读取" aria-label="重新读取" onClick={requestSnapshotReload} disabled={state.status === 'loading' || state.status === 'reopen-required'}>↻</button>
       </div>
     </header>
+    {snapshot?.pmdPrd === true && rating === undefined && <section className="prd-rating" aria-label="PRD 评分">
+      <span>这份 PRD 你觉得如何？</span>
+      <div className="prd-rating-options" role="radiogroup" aria-label="选择 0.5 到 5 星评分，可选半星">
+        {PRD_STARS.map((star) => {
+          const leftRating: PrdRating = (star === 1 ? 0.5 : star - 0.5) as PrdRating
+          const rightRating: PrdRating = star as PrdRating
+          const preview = ratingPending ?? ratingPreview
+          const fill = preview === undefined ? 0 : preview >= rightRating ? 100 : preview >= leftRating ? 50 : 0
+          return <span key={star} className="prd-rating-star" aria-label={`${star} 星位置`}>
+            <span className="prd-rating-star-visual" aria-hidden="true"><span className="prd-rating-star-empty">☆</span><span className="prd-rating-star-fill" style={{ width: `${fill}%` }}>★</span></span>
+            <button type="button" className="prd-rating-half is-left" aria-label={`${leftRating} 星`} aria-pressed={ratingPending === leftRating || rating === leftRating} disabled={ratingPending !== undefined || state.status === 'reopen-required'} onMouseEnter={() => setRatingPreview(leftRating)} onMouseLeave={() => setRatingPreview(undefined)} onFocus={() => setRatingPreview(leftRating)} onBlur={() => setRatingPreview(undefined)} onClick={() => submitRating(leftRating)} />
+            <button type="button" className="prd-rating-half is-right" aria-label={`${rightRating} 星`} aria-pressed={ratingPending === rightRating || rating === rightRating} disabled={ratingPending !== undefined || state.status === 'reopen-required'} onMouseEnter={() => setRatingPreview(rightRating)} onMouseLeave={() => setRatingPreview(undefined)} onFocus={() => setRatingPreview(rightRating)} onBlur={() => setRatingPreview(undefined)} onClick={() => submitRating(rightRating)} />
+          </span>
+        })}
+      </div>
+      <span className="prd-rating-label" aria-live="polite">{ratingPending !== undefined ? '正在提交…' : ratingPreview !== undefined ? `预览 ${ratingPreview} 星` : rating === undefined ? '未评分' : `已选 ${rating} 星`}</span>
+      {ratingNotice !== undefined && <span className="prd-rating-notice" role="status">{ratingNotice}</span>}
+    </section>}
     {state.error !== undefined && !showRecoveryState && <section className="notice" role="alert">{state.error.message}{state.status !== 'reopen-required' && <><br /><button className="secondary" type="button" onClick={state.error.code === 'sidepanel_unavailable' ? () => { void openSidePanelAndRetry() } : requestSnapshotReload}>{state.error.code === 'sidepanel_unavailable' ? '打开侧边栏后重试' : '重试'}</button></>}</section>}
     {activityNotice !== undefined && <section className="proposal-notice" role="status"><span className="proposal-notice-message">{activityNotice}</span>{sidePanelRecoveryAnnotation !== undefined && <button className="secondary" type="button" onClick={() => { void openSidePanelAndRetry() }}>打开侧边栏并重试</button>}<button className="proposal-notice-close" type="button" aria-label="关闭提示" title="关闭提示" onClick={dismissActivityNotice}>×</button></section>}
     {showExternalUpdateConfirmation && <div className="confirmation-dialog-backdrop">

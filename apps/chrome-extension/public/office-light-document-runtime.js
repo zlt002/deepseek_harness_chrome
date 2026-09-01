@@ -6,7 +6,10 @@
   // this main-world adapter. It rejects stale/crossed CustomEvent replies; it
   // is not a security boundary against a script that controls the page world.
   const bridgeChannel = document.currentScript?.dataset?.deepseekHarnessChannel
-  const runtimeKey = '__deepseekHarnessLightDocumentRuntime'
+  // V2 deliberately gets a new main-world key. The former adapter only
+  // rebinds channels, so an already-open WebEdit page would otherwise keep
+  // executing its pre-title-initialization implementation after a refresh.
+  const runtimeKey = '__deepseekHarnessLightDocumentRuntimeV2'
   const existingRuntime = globalThis[runtimeKey]
   // Content-script healing may inject again while the main-world runtime is
   // still alive. Rebind the new isolated-world channel to that same adapter
@@ -108,6 +111,15 @@
     // The public read index deliberately excludes the document title.  Keep
     // that invariant here so a model can never replace title by using index 0.
     return { inner, all, list: all.filter((block) => block.tag.toLowerCase() !== 'outlinetitle') }
+  }
+  const emptyBodyEvidence = (parsed) => {
+    if (!parsed) return null
+    const blankParagraphs = parsed.list.filter((block) => block.tag.toLowerCase() === 'p' && /^[\s\u200B-\u200D\uFEFF]*$/.test(block.text))
+    return {
+      semantic: parsed.list.length === 0 || blankParagraphs.length === parsed.list.length,
+      physicalBlockCount: parsed.list.length,
+      blankParagraphCount: blankParagraphs.length,
+    }
   }
   const targetBlock = (xml, payload) => {
     const parsed = editableBlocks(xml)
@@ -836,6 +848,22 @@
       if (!selection.supported || selection.truncated || selection.stable !== true || selection.hasSelection !== true || selection.isCollapsed || selection.selectionIdsValid !== true || selection.selectionFingerprint !== input.payload.expectedSelectionFingerprint || !parsed || selected.length !== selection.selectedTagIds.length || selected.length === 0) return fail('invalid_range', 'insert_drawing after_selection requires the unchanged stable block selection returned by light_document_selection_read')
       return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, selection } } }
     }
+    if (input.action === 'inspect_write' && input.operation === 'blocks_insert') {
+      const emptyBody = emptyBodyEvidence(editableBlocks(xml))
+      const hasH1 = Array.isArray(input.payload?.blocks) && input.payload.blocks.some((block) => String(block?.type ?? block?.blockType ?? '').toLowerCase() === 'h1')
+      if (!emptyBody) return fail('unsupported', 'WebEdit did not expose readable light-document blocks for empty-body inspection')
+      if (!emptyBody.semantic || !hasH1) return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, emptyBody } } }
+      const document = documentApi(current)
+      let title = null
+      try {
+        const value = await document?.getTitleContent?.()
+        title = typeof value === 'string' ? value : typeof value?.text === 'string' ? value.text : null
+      } catch { title = null }
+      const titleState = title === null
+        ? { supported: false, reason: typeof document?.getTitleContent === 'function' ? 'title_api_unreadable' : 'title_api_not_detected' }
+        : { supported: true, text: title.slice(0, 500), textLength: title.length, truncated: title.length > 500 }
+      return { ok: true, result: { status: 'ok', resource, document: { ...documentResult, emptyBody, title: titleState } } }
+    }
     return { ok: true, result: { status: 'ok', resource, document: documentResult } }
   }
   const write = async (input) => {
@@ -999,8 +1027,54 @@
       return { ok: true, result: { status: 'verified_write', resource: await documentResource(afterXml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, verified: true } } }
     }
     if (input.operation === 'blocks_insert' || input.operation === 'insert_drawing') {
-      const parsed = editableBlocks(beforeXml)
+      let baseXml = beforeXml
+      let parsed = editableBlocks(baseXml)
       if (!parsed) return fail('unsupported', 'WebEdit did not expose editable light-document blocks')
+      // A new light document has two independent writable surfaces: its body
+      // canvas and the document title.  Only initialize the latter when both
+      // values are provably empty/available.  In particular, never infer a
+      // title from a paragraph or overwrite any existing title.
+      let initializedTitle = null
+      if (input.operation === 'blocks_insert' && emptyBodyEvidence(parsed)?.semantic === true) {
+        const firstHeading = Array.isArray(input.payload?.blocks)
+          ? input.payload.blocks.find((block) => String(block?.type ?? block?.blockType ?? '').toLowerCase() === 'h1')
+          : null
+        // First normalize through the same structured-block serializer used
+        // for the body, then decode its rendered XML. This gives the title
+        // exactly the readable h1 text, never serialized tags or markup.
+        const headingXml = firstHeading ? structuredBlockXml(firstHeading) : null
+        const candidate = headingXml ? decode(headingXml).trim() : ''
+        const document = documentApi(current)
+        if (candidate && candidate.length <= 500 && typeof document?.getTitleContent === 'function' && typeof document?.setTitleContent === 'function') {
+          let titleBefore
+          try {
+            const value = await document.getTitleContent()
+            titleBefore = typeof value === 'string' ? value : typeof value?.text === 'string' ? value.text : null
+          } catch { titleBefore = null }
+          if (titleBefore !== null && !titleBefore.trim()) {
+            try { await document.setTitleContent(candidate) } catch {
+              return fail('runtime_error', 'WebEdit could not initialize the empty document title; the body was not written')
+            }
+            let titleAfter
+            const deadline = Date.now() + 1_500
+            do {
+              try {
+                const value = await document.getTitleContent()
+                titleAfter = typeof value === 'string' ? value : typeof value?.text === 'string' ? value.text : null
+              } catch { titleAfter = null }
+              if (titleAfter === candidate) break
+              await sleep(50)
+            } while (Date.now() < deadline)
+            if (titleAfter !== candidate) return fail('readback_mismatch', 'WebEdit title initialization did not read back; the body was not written')
+            // setTitleContent may also update the canvas XML. Rebase the body
+            // patch on that fresh XML so it cannot restore the old blank title.
+            baseXml = await current.openApi.editor.canvas.getDocXml()
+            parsed = editableBlocks(baseXml)
+            if (!parsed) return fail('readback_mismatch', 'WebEdit title initialization left no readable light-document canvas; the body was not written')
+            initializedTitle = candidate
+          }
+        }
+      }
       const xml = input.operation === 'insert_drawing' ? structuredBlockXml({ type: 'codeblock', language: 'mermaid', text: input.payload?.mermaid }, null) : blockXml(input.payload)
       const selection = input.payload?.position === 'after_selection' ? await readSelection(current, 20_000) : null
       const offset = insertPosition(parsed, input.payload, selection)
@@ -1009,13 +1083,25 @@
         : 'blocks_insert requires bounded h1-h6/p/blockquote/ul/ol/table/codeblock items and a start/end/before/after position')
       const fragments = distinctiveFragments(input.operation === 'insert_drawing' ? input.payload?.mermaid : (input.payload?.blocks ?? []).map((item) => Array.isArray(item?.items) ? item.items.join('\n') : Array.isArray(item?.rows) ? item.rows.flat().join('\n') : item?.text ?? item?.markdown ?? item?.html ?? '').join('\n'))
       if (!fragments.length) return fail('invalid_range', `${input.operation} requires distinctive readable content for XML readback`)
-      const patched = await patchXml(current, beforeXml, `${parsed.inner.slice(0, offset)}${xml}${parsed.inner.slice(offset)}`)
-      if (!patched.ok) return patched
-      const observed = verifyInsertedFragments(beforeXml, patched.xml, fragments)
-      if (!observed) return fail('readback_mismatch', `WebEdit ${input.operation} did not produce matching XML content and structural evidence`)
+      const patched = await patchXml(current, baseXml, `${parsed.inner.slice(0, offset)}${xml}${parsed.inner.slice(offset)}`)
+      if (!patched.ok) return initializedTitle
+        ? fail('write_incomplete', `WebEdit initialized title "${initializedTitle}" but did not verify the body write; reread this same document before continuing`)
+        : patched
+      const observed = verifyInsertedFragments(baseXml, patched.xml, fragments)
+      if (!observed) return initializedTitle
+        ? fail('write_incomplete', `WebEdit initialized title "${initializedTitle}" but did not verify the body write; reread this same document before continuing`)
+        : fail('readback_mismatch', `WebEdit ${input.operation} did not produce matching XML content and structural evidence`)
       const insertion = input.operation === 'insert_drawing' && input.payload?.position === 'after_selection' ? verifyDrawingAfterSelection(beforeXml, patched.xml, selection, fragments) : null
       if (input.operation === 'insert_drawing' && input.payload?.position === 'after_selection' && !insertion) return fail('readback_mismatch', 'WebEdit insert_drawing did not remain immediately after the selected blocks')
-      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, ...(insertion ? { insertion } : {}), verified: true } } }
+      if (initializedTitle) {
+        let titleAfter
+        try {
+          const value = await documentApi(current)?.getTitleContent?.()
+          titleAfter = typeof value === 'string' ? value : typeof value?.text === 'string' ? value.text : null
+        } catch { titleAfter = null }
+        if (titleAfter !== initializedTitle) return fail('readback_mismatch', `WebEdit wrote the body but could not verify initialized title "${initializedTitle}"; reread this same document before continuing`)
+      }
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, ...(insertion ? { insertion } : {}), ...(initializedTitle ? { title: { initialized: true, text: initializedTitle } } : {}), verified: true } } }
     }
     if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
     if (input.operation === 'set_title') {

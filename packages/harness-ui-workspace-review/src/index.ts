@@ -1,5 +1,7 @@
 /** Host half: bounded, read-only Markdown review capabilities rooted in session.header.cwd. */
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { realpath } from 'node:fs/promises'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   WORKSPACE_REVIEW_COMMIT_WRITE_PATH,
   WORKSPACE_REVIEW_LIST_PATH,
@@ -12,9 +14,10 @@ import {
 } from './protocol.ts'
 import { resolveSessionProject } from './session-project.ts'
 import { WorkspaceReviewRuntime } from './workspace.mjs'
+import { verifyPmdPrdSourceProof } from './pmd-prd-source-proof.mjs'
 
 export const name = 'accrui-workspace-review'
-export const inject = ['sessions', 'tools', 'workspaceRegistry']
+export const inject = ['sessions', 'tools', 'workspaceRegistry', 'skills']
 
 export * from './protocol.ts'
 export { WorkspaceReviewRuntime } from './workspace.mjs'
@@ -23,12 +26,17 @@ interface SessionLookup {
   get(id: string): { header: { cwd?: string } } | undefined
 }
 
+interface SkillSourceLookup {
+  listSource(options?: { cwd?: string }): Promise<readonly { readonly name: string, readonly source?: string, readonly resourceBase?: { readonly kind?: string, readonly path?: string } }[]>
+}
+
 interface WebServerLookup {
   register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
 }
 
 interface HostContext {
   sessions: SessionLookup
+  skills: SkillSourceLookup
   workspaceRegistry: { list(): readonly { readonly path: string; readonly sessionIds: readonly string[] }[] }
   tools: { register(definition: unknown): () => void }
   webServer: WebServerLookup
@@ -37,7 +45,7 @@ interface HostContext {
 }
 
 interface ProposeEditArgs { review_id: string; selection_id: string; replacement_markdown: string; summary?: string }
-interface OpenWorkspaceMarkdownReviewArgs { path: string }
+interface OpenWorkspaceMarkdownReviewArgs { path: string; source?: 'pmd-prd' }
 interface ToolExecutionContext { agent?: { id: string } }
 
 /** Same-origin session-intake routes and bearer background routes deliberately have separate guards. */
@@ -45,10 +53,11 @@ export function apply(ctx: HostContext): void {
   const reviews = new WorkspaceReviewRuntime()
   ctx.tools.register({
     name: 'open_workspace_markdown_review',
-    description: 'Open one existing workspace Markdown file in the visual Markdown Review after the caller has finished validating its content. The path must belong to the current Harness session workspace.',
+    description: 'Open one existing workspace Markdown file in the visual Markdown Review after the caller has finished validating its content. Use source "pmd-prd" only for a frozen /pmd-prd output that has passed its deterministic validation gate.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['path'], properties: {
         path: { type: 'string', description: 'Workspace-relative .md or .markdown path to review.' },
+        source: { type: 'string', const: 'pmd-prd', description: 'Only for the validated frozen output of /pmd-prd.' },
       },
     },
     output: {
@@ -68,6 +77,13 @@ export function apply(ctx: HostContext): void {
       const session = ctx.sessions.get(sessionId)
       if (session?.header.cwd === undefined) throw new Error('open_workspace_markdown_review requires the current Harness session workspace')
       const review = await reviews.open(sessionId, session.header.cwd, parsed.path)
+      if (parsed.source === 'pmd-prd') {
+        await verifyPmdPrdSourceProof({
+          cwd: session.header.cwd,
+          relativePath: review.displayPath,
+          validatorPath: await productPmdPrdValidatorPath(ctx.skills, session.header.cwd),
+        })
+      }
       return { status: 'ready', path: review.displayPath, fingerprint: review.fingerprint }
     },
     presentCall: () => ({ card: 'generic', title: '打开 Markdown 审阅', kind: 'read' }),
@@ -211,7 +227,20 @@ function openWorkspaceMarkdownReviewArgs(value: unknown): OpenWorkspaceMarkdownR
   if (value === null || typeof value !== 'object' || Array.isArray(value) || typeof (value as Record<string, unknown>).path !== 'string') {
     throw new Error('open_workspace_markdown_review requires a path')
   }
-  return { path: (value as Record<string, string>).path }
+  const source = (value as Record<string, unknown>).source
+  if (source !== undefined && source !== 'pmd-prd') throw new Error('open_workspace_markdown_review source is invalid')
+  return { path: (value as Record<string, string>).path, ...(source === 'pmd-prd' ? { source } : {}) }
+}
+
+/** Resolve only the currently mounted, product-owned PMD validator. */
+async function productPmdPrdValidatorPath(skills: SkillSourceLookup, cwd: string): Promise<string> {
+  const source = (await skills.listSource({ cwd })).find(skill => skill.name === 'pmd-prd' && skill.source === 'custom' && skill.resourceBase?.kind === 'directory' && typeof skill.resourceBase.path === 'string')
+  if (source?.resourceBase?.path === undefined) throw new Error('PMD review proof requires the product /pmd-prd skill')
+  const root = await realpath(source.resourceBase.path)
+  const validator = await realpath(resolve(root, 'scripts', 'validate-deliverables.mjs'))
+  const path = relative(root, validator)
+  if (path === '' || path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) throw new Error('PMD review proof validator escapes the product skill')
+  return validator
 }
 function header(req: IncomingMessage, name: string): string | undefined { const value = req.headers[name]; return typeof value === 'string' ? value : undefined }
 function bearer(req: IncomingMessage): string | undefined { const value = header(req, 'authorization'); return value?.startsWith('Bearer ') === true ? value.slice(7) : undefined }

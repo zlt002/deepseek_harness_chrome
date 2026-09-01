@@ -104,6 +104,15 @@ test('account, gateway, and onboarding styles use the settings design tokens', a
   assert.match(css, /:focus-visible[^}]*box-shadow: 0 0 0 2px var\(--dsw-alias-border-l3\)/)
 })
 
+test('company gateway onboarding keeps its actions reachable on short viewports', async () => {
+  const css = await source('src/client/AccountAccessSection.module.css')
+
+  assert.match(css, /\.onboardingModal \{[^}]*box-sizing: border-box;[^}]*max-height: calc\(100vh - 32px\);[^}]*max-height: calc\(100dvh - 32px\);/)
+  assert.match(css, /\.onboardingContent \{[^}]*min-height: 0;[^}]*overflow-y: auto;/)
+  assert.match(css, /\.onboardingContent \{[^}]*max-height: inherit;/)
+  assert.match(css, /\.onboardingContent \.gatewayEditorActions \{[^}]*position: sticky;[^}]*bottom: 0;[^}]*padding:[^}]*background: var\(--dsw-alias-bg-layer-1\);/)
+})
+
 test('is registered in the product plugin manifest and release closure', async () => {
   const [productPluginManifest, macRelease, windowsRelease, productUiSmoke] = await Promise.all([
     source('../../apps/native-server/src/product-plugin-manifest.mjs'),

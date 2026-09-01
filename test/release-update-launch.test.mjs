@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { writeSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -57,6 +57,12 @@ test('detached updater writes a standalone script and waits for ready before han
     assert.match(script, /\$nativeDeadline = \[DateTime\]::UtcNow\.AddSeconds\(10\)/)
     assert.match(script, /while \(\(Get-Process -Id 1234 -ErrorAction SilentlyContinue\) -and \[DateTime\]::UtcNow -lt \$nativeDeadline\)/)
     assert.match(script, /\$progressPath = Join-Path \$installRoot '\.accrui-update-progress\.txt'/)
+    assert.match(script, /Local\\AccrUIReleaseUpdate-/)
+    assert.match(script, /SHA256\]::Create\(\)/)
+    assert.match(script, /\.ComputeHash\(/)
+    assert.match(script, /BitConverter\]::ToString/)
+    assert.doesNotMatch(script, /::HashData|Convert\]::ToHexString/)
+    assert.match(script, /WaitOne\(0\)/)
     assert.match(script, /Remove-Item -LiteralPath \$progressPath -Force -ErrorAction SilentlyContinue/)
     assert.match(script, /& powershell\.exe -NoProfile -ExecutionPolicy Bypass -File '[^']*install\.ps1' -InstallRoot \$installRoot -ProgressPath \$progressPath/)
     assert.match(script, /if \(\$LASTEXITCODE -ne 0\) \{ throw "安装程序退出码：\$LASTEXITCODE" \}/)
@@ -340,6 +346,39 @@ test('detached updater cancels a late ready handshake instead of allowing a dela
     await writeFile(join(handoffRoot, 'ready'), 'late', 'utf8')
     await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
     await assert.rejects(access(join(handoffRoot, 'go')))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an abort after the irreversible go decision does not report a cancelled upgrade', async () => {
+  let invocation
+  let allowRename
+  let renameStarted
+  const child = new EventEmitter()
+  child.unref = () => {}
+  const controller = new AbortController()
+  const root = await mkdtemp(join(tmpdir(), 'release-update-launch-'))
+  try {
+    const renameGate = new Promise(resolve => { allowRename = resolve })
+    const renameEntered = new Promise(resolve => { renameStarted = resolve })
+    const launched = launchPreparedUpdate(
+      { version: '1.1.81', extractRoot: root },
+      {
+        installRoot: join(root, 'install-root'), nativePid: 1234, platform: 'win32', signal: controller.signal,
+        renameImpl: async (...args) => { renameStarted(); await renameGate; return rename(...args) },
+        spawnImpl: (...args) => { invocation = args; return child },
+      },
+    )
+    invocation = await waitFor(() => invocation)
+    child.emit('spawn')
+    const handoffRoot = dirname(invocation[1].at(-1))
+    await writeFile(join(handoffRoot, 'ready'), 'ready', 'utf8')
+    await renameEntered
+    controller.abort(new Error('too late to cancel'))
+    allowRename()
+    assert.equal(await launched, true)
+    await assert.rejects(access(join(handoffRoot, 'cancel')))
   } finally {
     await rm(root, { recursive: true, force: true })
   }

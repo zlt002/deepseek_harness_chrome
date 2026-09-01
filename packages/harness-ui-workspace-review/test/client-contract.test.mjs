@@ -46,7 +46,7 @@ test('renders through the picker child slot and desktop header action without a 
   assert.match(client, /resolveWorkspaceMarkdown\(String\(owner\.sessionId\), owner\.cwd, value\)/)
   assert.match(client, /resolve:\s*resolveReview, resolveLink:\s*resolveReview/)
   assert.match(client, /openWorkspaceMarkdown\(sessionId, displayPath\)/)
-  assert.match(client, /requestOpenReview\(window\.parent, bridge, review\)/)
+  assert.match(client, /requestOpenReview\(window\.parent, bridge, source === 'pmd-prd' \? \{ \.\.\.review, pmdPrd: true \} : review\)/)
   assert.match(client, /conversation\.input\.overlay/)
   assert.match(client, /accrui-workspace-review-auto-open/)
   assert.match(client, /latestWorkspaceMarkdownReviewOpen/)

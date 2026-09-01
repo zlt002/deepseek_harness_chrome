@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFile as execFileCallback, execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { promisify } from 'node:util'
 
 import {
   ACCR_UI_EXTENSION_ID,
@@ -30,6 +31,7 @@ import {
   parseStaticRuntimeArgs,
   patchBundledWindowsAclRunnerPath,
 } from '../release/windows-lite/build-static-harness-runtime.mjs'
+
 import {
   PRODUCT_UI_PLUGIN_PACKAGES,
   bundleDirectoryPickerWorker,
@@ -39,6 +41,8 @@ import {
   staticBundleAliases,
   staticPackageSource,
 } from '../release/mac-lite/build-mac-production.mjs'
+
+const execFile = promisify(execFileCallback)
 
 async function writeFixture(root, relativePath, content = '') {
   const target = path.join(root, relativePath)
@@ -317,7 +321,7 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   const manifest = JSON.parse(readZip(payloadZip, 'extension/manifest.json', 'utf8'))
   assert.equal(manifest.key, ACCR_UI_EXTENSION_MANIFEST_KEY)
   assert.equal(manifest.version, '1.1.63')
-  assert.equal(manifest.name, 'accr-ui Harness UI')
+  assert.equal(manifest.name, 'accrui 1.1.63 beta')
   const launcher = readZip(payloadZip, 'runtime/run_native_host.bat', 'utf8')
   const payloadEntries = zipEntries(payloadZip)
   assertPortableZipEntries(payloadEntries)
@@ -353,7 +357,8 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.doesNotMatch(packagedReadme, /%APPDATA%\\accr-ui-harness\\profile/)
   const packagedSkill = readZip(payloadZip, 'runtime/skills/pmd-prd/SKILL.md', 'utf8')
   assert.match(packagedSkill, /Harness Workspace 是唯一用户界面/)
-  assert.doesNotMatch(packagedSkill, /pmd-workspace|clarification\.md/)
+  assert.match(packagedSkill, /pmd-workspace\/spec\/<requirementId>\/<requirementId>_\*_PRD\.md/)
+  assert.doesNotMatch(packagedSkill, /clarification\.md/)
   assert.match(readZip(payloadZip, 'runtime/skills/product-prototype/SKILL.md', 'utf8'), /name:\s*product-prototype/)
   for (const [entry, expectedName] of [
     ['runtime/skills/pptx/SKILL.md', 'name: pptx'],
@@ -384,7 +389,7 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.match(installLauncher, /WScript\.Quit exitCode/)
   const installUi = readZip(result.zipPath, `${ACCR_UI_WINDOWS_PACKAGE_NAME}/install-ui.ps1`, 'utf8')
   assert.match(installUi, /System\.Windows\.Forms\.FolderBrowserDialog/)
-  assert.match(installUi, /Node\.js 22\+/)
+  assert.match(installUi, /Node\.js 22\.19\.x 或 24\+/)
   assert.match(installUi, /Chrome \/ Edge/)
   assert.match(installUi, /-InstallRoot/)
   assert.match(installUi, /-ProgressPath/)
@@ -432,7 +437,8 @@ test('the in-place updater retains the prior AccrUI Native Messaging name while 
   assert.doesNotMatch(registerScript, /com\.chromemcp\.nativehost/)
   assert.match(registerScript, /HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts/)
   assert.match(registerScript, /HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts/)
-  assert.match(registerScript, /-lt 22/)
+  assert.match(registerScript, /minor -ge 19/)
+  assert.match(registerScript, /major -ge 24/)
   assert.match(registerScript, /node-path\.txt/)
   assert.match(registerScript, /UTF8Encoding\]::new\(\$false\)/)
   assert.match(registerScript, /\[switch\]\$PrepareOnly/)
@@ -471,6 +477,8 @@ test('the in-place updater retains the prior AccrUI Native Messaging name while 
   assert.match(installer, /function Suspend-NativeHostRegistration/)
   assert.match(installer, /function Complete-NativeHostRegistrationTransition/)
   assert.match(installer, /NativeMessagingHosts/)
+  const installation = installer.slice(installer.indexOf('$stagingRoot ='))
+  assert.match(installation, /try \{[\s\S]*?Suspend-NativeHostRegistration[\s\S]*?Write-InstallProgress 15 'extracting'[\s\S]*?Expand-Archive/)
   assert.match(installer, /Get-CimInstance Win32_Process/)
   assert.match(installer, /taskkill\.exe/)
   assert.match(installer, /Stop-Process -Id \$processId -Force/)
@@ -548,6 +556,37 @@ test('the in-place updater retains the prior AccrUI Native Messaging name while 
   assert.equal(installer.includes('Remove-Item -LiteralPath $installRoot -Recurse -Force'), false)
   assert.match(installer, /workspace, logs, \.webmcp/)
   assert.match(installer, /@\('extension', 'runtime', 'release\.json'\)/)
+})
+
+test('Windows installer restores the first Native Messaging registration when deleting the second one fails', { skip: process.platform !== 'win32' }, async () => {
+  const installer = await readFile(new URL('../release/windows-lite/templates/install.ps1', import.meta.url), 'utf8')
+  const suspend = installer.slice(installer.indexOf('function Suspend-NativeHostRegistration'), installer.indexOf('function Suspend-NewNativeHostRegistration'))
+  const restore = installer.slice(installer.indexOf('function Restore-SuspendedNativeHostRegistration'), installer.indexOf('function Complete-NativeHostRegistrationTransition'))
+  const script = `$script:suspendedNativeHostRegistrations = @()
+$script:nativeHostRegistrationSuspended = $false
+$nativeHostRegistryRoots = @('root-one', 'root-two')
+$nativeHostNames = @('host')
+$legacyAccrUiNativeHostNames = @()
+$deprecatedNativeHostNames = @()
+$script:registry = @{ 'root-one\\host' = 'first'; 'root-two\\host' = 'second' }
+$script:removeCount = 0
+function Join-Path { param($Path, $ChildPath) return "$Path\\$ChildPath" }
+function Test-Path { param($LiteralPath) return $script:registry.ContainsKey($LiteralPath) }
+function Get-Item { param($LiteralPath) $item = [pscustomobject]@{ Path = $LiteralPath }; $item | Add-Member -MemberType ScriptMethod -Name GetValue -Value { param($name) $script:registry[$this.Path] }; return $item }
+function Remove-Item { param($LiteralPath) $script:removeCount += 1; if ($script:removeCount -eq 2) { throw 'injected second delete failure' }; [void]$script:registry.Remove($LiteralPath) }
+function New-Item { param($Path) if (-not $script:registry.ContainsKey($Path)) { $script:registry[$Path] = '' }; return [pscustomobject]@{} }
+function Set-Item { param($Path, $Value) $script:registry[$Path] = $Value }
+function Get-AccrUiLegacyNativeHostRegistrations { param([string[]]$Names) return @() }
+${suspend}
+${restore}
+try { Suspend-NativeHostRegistration } catch { Restore-SuspendedNativeHostRegistration }
+if ($script:registry['root-one\\host'] -ne 'first') { throw 'first registration was not restored' }
+if ($script:registry['root-two\\host'] -ne 'second') { throw 'second registration changed unexpectedly' }
+if ($script:nativeHostRegistrationSuspended) { throw 'suspension flag was not cleared by recovery' }
+Write-Output 'recovered'`
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded])
+  assert.match(stdout, /recovered/)
 })
 
 test('version policy prevents a package that Chrome would treat as older than the AccrUI replacement', () => {

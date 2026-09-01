@@ -29,6 +29,8 @@ For selected-source questions about repository or knowledge contents, the first 
 
 Do not search selected enterprise sources for casual conversation, writing/translation, or a request that explicitly identifies the current local workspace and asks to inspect, edit, build, test, or run it. An empty cwd listing is not such a request. Words such as “inspect”, “README”, “directory”, “package.json”, “repository”, “optimize”, or a feature name do not make a remote-source request local. Treat the selected remote range as authoritative; never substitute the local workspace, Bash, grep, or Git for it. From a parent session, confirm names with mcp__chrome__selected_source_scope and reach selected source contents only through search_selected_remote_code and search_selected_knowledge — a direct mcp__chrome__code_search or mcp__chrome__knowledge_search call from the parent is rejected because it lacks subagent lineage. Those wrappers take a short description and a prompt; they do not accept question. For a direct search, pass the current end user's message unchanged as prompt. For a process follow-up, obey the evidence-only composition and fallback rule above. question belongs only to the child's one mcp__chrome__code_search or mcp__chrome__knowledge_search call. If that search reports no selected or enabled range, report that limitation instead of falling back to local files, shell, or git.`
 
+const INITIAL_SELECTED_SOURCE_PROMPT_RULE = `This rule is the authoritative refinement of the initial-search wording above. Use the user's original business text for the first selected-source wrapper prompt. For a /pmd-prd invocation, remove only the command prefix and its separating whitespace; for every other direct query, preserve the complete user message character-for-character. Do not append scope names, checklists, expected answer structure, or inferred business or code details. General analysis checklists apply only after real search evidence returns. A later process search may be rephrased only from user-provided facts, the selected-source scope echo, and already-returned files, APIs, citations, or other search evidence; without that evidence, reuse the original business text.`
+
 /** Register deployment-wide routing that Code preset personas cannot shadow. */
 export function apply(ctx) {
   ctx.systemPrompt.section({
@@ -40,5 +42,10 @@ export function apply(ctx) {
     name: 'deployment:selected-source-routing',
     order: 115,
     text: ROUTING_RULES,
+  })
+  ctx.systemPrompt.section({
+    name: 'deployment:selected-source-initial-prompt',
+    order: 116,
+    text: INITIAL_SELECTED_SOURCE_PROMPT_RULE,
   })
 }

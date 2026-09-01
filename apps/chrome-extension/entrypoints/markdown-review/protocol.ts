@@ -49,7 +49,14 @@ export interface MarkdownReviewSnapshot {
   content: string
   truncated: boolean
   readOnly: boolean
+  /** Only a validated /pmd-prd review may collect a PRD score. */
+  pmdPrd?: true
+  /** The latest submitted half-star rating for this generated PRD. */
+  rating?: PrdRating
 }
+
+/** The only supported PRD scores are whole- and half-star values. */
+export type PrdRating = 0.5 | 1 | 1.5 | 2 | 2.5 | 3 | 3.5 | 4 | 4.5 | 5
 
 export interface SelectionAnchor {
   version: 1
@@ -156,7 +163,16 @@ export interface CommitWriteRequest {
   content: string
 }
 
-export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest | SessionActionRequest | ProposalsRequest | PrepareWriteRequest | CommitWriteRequest
+/** Rating is deliberately keyed by reviewId: its generated event is deterministic. */
+export interface RatingRequest {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-rating-request'
+  requestId: string
+  reviewId: string
+  rating: PrdRating
+}
+
+export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest | SessionActionRequest | ProposalsRequest | PrepareWriteRequest | CommitWriteRequest | RatingRequest
 
 export interface SnapshotResponse {
   v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
@@ -257,6 +273,15 @@ export interface CommitWriteResponse {
   error?: MarkdownReviewError
 }
 
+export interface RatingResponse {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-rating-response'
+  requestId: string
+  ok: boolean
+  rating?: PrdRating
+  error?: MarkdownReviewError
+}
+
 /** Sent when background reuses a live Tab after Host refreshed its target. */
 export interface TargetUpdatedNotification {
   v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
@@ -265,7 +290,7 @@ export interface TargetUpdatedNotification {
   reviewId: string
 }
 
-export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | SessionActionResponse | ProposalsResponse | PrepareWriteResponse | CommitWriteResponse | TargetUpdatedNotification
+export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | SessionActionResponse | ProposalsResponse | PrepareWriteResponse | CommitWriteResponse | RatingResponse | TargetUpdatedNotification
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -273,6 +298,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function boundedText(value: unknown, maxLength: number, allowEmpty = false): value is string {
   return typeof value === 'string' && value.length <= maxLength && (allowEmpty || value.trim().length > 0)
+}
+
+export function isPrdRating(value: unknown): value is PrdRating {
+  return typeof value === 'number' && [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5].includes(value)
 }
 
 /** Identifiers are opaque, but bounded printable values are safe to route. */
@@ -370,6 +399,8 @@ export function isMarkdownReviewPortRequest(value: unknown): value is MarkdownRe
   if (value.type === 'markdown-review-commit-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'approval', 'idempotencyKey', 'content'].includes(key))
     && isMarkdownReviewId(value.approval) && isMarkdownReviewId(value.idempotencyKey)
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
+  if (value.type === 'markdown-review-rating-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'rating'].includes(key))
+    && isPrdRating(value.rating)
   if (value.type === 'markdown-review-session-action-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'action'].includes(key))
     && isMarkdownReviewId(value.harnessSessionId) && isMarkdownReviewId(value.resourceId) && isMarkdownReviewId(value.revision) && isMarkdownReviewId(value.fingerprint) && boundedText(value.displayPath, MAX_PATH_LENGTH) && (value.action === 'rewrite' || value.action === 'accept')
   return value.type === 'markdown-review-deliver-request'
@@ -403,6 +434,8 @@ export function isMarkdownReviewSnapshot(value: unknown): value is MarkdownRevie
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
     && typeof value.truncated === 'boolean'
     && typeof value.readOnly === 'boolean'
+    && (value.pmdPrd === undefined || value.pmdPrd === true)
+    && (value.rating === undefined || isPrdRating(value.rating))
 }
 
 function isHostSnapshot(value: unknown): value is Omit<MarkdownReviewSnapshot, 'harnessSessionId'> {
@@ -473,6 +506,10 @@ export function isMarkdownReviewPortResponse(value: unknown): value is MarkdownR
   if (value.type === 'markdown-review-commit-write-response') {
     return Object.keys(value).every(key => ['v', 'type', 'requestId', 'ok', 'result', 'error'].includes(key))
       && (value.ok ? isCommitWriteResult(value.result) && value.error === undefined : isMarkdownReviewError(value.error) && value.result === undefined)
+  }
+  if (value.type === 'markdown-review-rating-response') {
+    return Object.keys(value).every(key => ['v', 'type', 'requestId', 'ok', 'rating', 'error'].includes(key))
+      && (value.ok ? isPrdRating(value.rating) && value.error === undefined : isMarkdownReviewError(value.error) && value.rating === undefined)
   }
   return false
 }

@@ -55,7 +55,7 @@ Release；即使开启完整自动验收，只要未开启 `publish_public` 仍�
 2. 选择 **Build Windows Lite**。
 3. 点击 **Run workflow**。
 4. 选择需要打包的分支。
-5. 填写三段式版本号，例如 `1.1.94`。
+5. 填写三段式版本号，例如 `1.1.95`。
 6. 保持 `full_validation` 关闭并运行。
 
 也可以使用 GitHub CLI：
@@ -63,7 +63,7 @@ Release；即使开启完整自动验收，只要未开启 `publish_public` 仍�
 ```sh
 gh workflow run build-windows-lite.yml \
   --ref codex/windows-lite-1.1.63 \
-  -f version=1.1.94 \
+  -f version=1.1.95 \
   -f full_validation=false \
   -f publish_public=false
 ```
@@ -76,7 +76,7 @@ gh run watch <RUN_ID> --interval 10 --exit-status
 ```
 
 推送到 `codex/windows-lite-*` 分支也会自动出包，但自动推送使用工作流中的默认
-版本。目前默认值是 `1.1.94`。发布新版本时应手动传入 `version`，或者同步修改
+版本。目前默认值是 `1.1.95`。发布新版本时应手动传入 `version`，或者同步修改
 [build-windows-lite.yml](../.github/workflows/build-windows-lite.yml) 中的默认版本，避免
 包内容和预期版本不一致。
 
@@ -87,14 +87,14 @@ gh run watch <RUN_ID> --interval 10 --exit-status
 ```sh
 gh workflow run build-windows-lite.yml \
   --ref codex/windows-lite-1.1.63 \
-  -f version=1.1.94 \
+  -f version=1.1.95 \
   -f full_validation=true
 ```
 
 完整验收会自动检查：
 
 - `install.vbs` 能在 CI 无界面模式调用 `install.ps1` 完成安装。
-- 包含 `install-ui.ps1` 可视化安装壳，支持 Node.js 22+ 和 Chrome/Edge 检测、选择目录、覆盖确认与进度显示。
+- 包含 `install-ui.ps1` 可视化安装壳，支持 Node.js 22.19.x 或 24+ 和 Chrome/Edge 检测、选择目录、覆盖确认与进度显示。
 - Chrome、Edge 的 Native Messaging 注册正确。
 - Native Host 能完成 `ping/pong` 并正常停止。
 - Harness Web 能启动并激活产品插件唯一清单中的全部 UI 插件。
@@ -115,9 +115,9 @@ UAT 已完成后，先从草稿候选 Release 取得其精确提交和 ZIP SHA25
 同一个 `windows-lite-v<版本号>-candidate`，不能使用本机重新组装包的 SHA：
 
 ```sh
-gh release view windows-lite-v1.1.94-candidate \
+gh release view windows-lite-v1.1.95-candidate \
   --json targetCommitish,assets
-gh release download windows-lite-v1.1.94-candidate \
+gh release download windows-lite-v1.1.95-candidate \
   --pattern accr-ui-windows-lite-x64.zip --dir /tmp/accr-ui-candidate
 shasum -a 256 /tmp/accr-ui-candidate/accr-ui-windows-lite-x64.zip
 ```
@@ -129,7 +129,7 @@ UAT 已完成后，才以相同版本、同一提交和上一步得到的 SHA �
 ```sh
 gh workflow run build-windows-lite.yml \
   --ref codex/windows-lite-1.1.63 \
-  -f version=1.1.94 \
+  -f version=1.1.95 \
   -f full_validation=true \
   -f publish_public=true \
   -f uat_candidate_commit=<candidate-targetCommitish> \
@@ -160,7 +160,7 @@ pnpm build
 ```sh
 node release/windows-lite/windows-release.mjs \
   --harness-runtime release/windows-lite/harness-static-win32-x64 \
-  --version 1.1.94
+  --version 1.1.95
 ```
 
 没有 Windows x64 runtime 时，不要在 macOS 上跑
@@ -222,7 +222,7 @@ Windows 静态 runtime 由
 查看 Release：
 
 ```sh
-gh release view windows-lite-v1.1.94 \
+gh release view windows-lite-v1.1.95 \
   --json tagName,isDraft,targetCommitish,assets,url
 ```
 

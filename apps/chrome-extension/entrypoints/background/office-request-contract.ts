@@ -1,7 +1,12 @@
 import { validBrowserTarget, validUnavailableBrowserTarget } from '../../../native-server/src/connector-protocol.mjs'
 import type { BrowserTarget, ConnectorCorrelation, UnavailableBrowserTarget } from '../../../native-server/src/connector-protocol.mjs'
 
-export interface ListWorkTabsRequest extends ConnectorCorrelation {
+export interface BrowserSessionCorrelation extends ConnectorCorrelation {
+  /** Trusted Native-side owner of a send-time Browser Target capture. */
+  harnessSessionId?: string
+}
+
+export interface ListWorkTabsRequest extends BrowserSessionCorrelation {
   type: 'connector_request'
   browserTarget: BrowserTarget
   browserTargets?: BrowserTarget[]
@@ -9,7 +14,7 @@ export interface ListWorkTabsRequest extends ConnectorCorrelation {
   tool: 'list_work_tabs'
 }
 
-export interface ReadWorkTabRequest extends ConnectorCorrelation {
+export interface ReadWorkTabRequest extends BrowserSessionCorrelation {
   type: 'connector_request'
   browserTarget: BrowserTarget
   browserTargets?: BrowserTarget[]
@@ -39,7 +44,7 @@ export interface LightDocumentResourceIdentity {
   fingerprint: string
 }
 
-export interface OfficeDocumentRequest extends ConnectorCorrelation {
+export interface OfficeDocumentRequest extends BrowserSessionCorrelation {
   type: 'connector_request'
   browserTarget: BrowserTarget
   tool: 'light_document'
@@ -60,7 +65,7 @@ export interface SpreadsheetResourceIdentity {
   fingerprint: string
 }
 
-export interface OfficeSpreadsheetRequest extends ConnectorCorrelation {
+export interface OfficeSpreadsheetRequest extends BrowserSessionCorrelation {
   type: 'connector_request'
   browserTarget: BrowserTarget
   tool: 'spreadsheet'
@@ -94,7 +99,7 @@ export interface PresentationResourceIdentity {
   slideCount?: number
 }
 
-export interface OfficePresentationRequest extends ConnectorCorrelation {
+export interface OfficePresentationRequest extends BrowserSessionCorrelation {
   type: 'connector_request'
   browserTarget: BrowserTarget
   tool: 'presentation'

@@ -329,6 +329,67 @@ button.secondary:focus-visible { border-color: var(--review-accent); }
 .review-session-action.is-accept:focus-visible { outline-color: var(--review-success-action); }
 .truncated { flex: none; color: var(--review-warn); font-size: 11px; line-height: 18px; white-space: nowrap; }
 
+.prd-rating {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, #d99100 28%, var(--review-border-subtle));
+  border-radius: 8px;
+  margin: 6px 10px;
+  color: var(--review-text-secondary);
+  background: color-mix(in srgb, #fff3cd 58%, var(--review-surface-subtle));
+  box-shadow: 0 1px 3px rgb(217 145 0 / 12%);
+  font-size: 12px;
+}
+.prd-rating-options { display: flex; flex-wrap: nowrap; gap: 2px; }
+.prd-rating-star {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 34px;
+  flex: none;
+}
+.prd-rating-star-visual {
+  position: absolute;
+  display: block;
+  inset: 0;
+  color: #c9ced8;
+  font-size: 32px;
+  line-height: 34px;
+  text-align: center;
+  pointer-events: none;
+}
+.prd-rating-star-empty { position: absolute; inset: 0; }
+.prd-rating-star-fill {
+  position: absolute;
+  display: block;
+  overflow: hidden;
+  color: #e99a00;
+  white-space: nowrap;
+}
+.prd-rating-half {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  opacity: 0;
+}
+.prd-rating-half.is-left { left: 0; }
+.prd-rating-half.is-right { right: 0; }
+.prd-rating-half:hover:not(:disabled),
+.prd-rating-half:focus-visible { opacity: 1; outline: 2px solid #d99100; outline-offset: -2px; }
+.prd-rating-label { color: var(--review-text-tertiary); white-space: nowrap; }
+.prd-rating-notice { min-width: 0; overflow: hidden; color: var(--review-text-tertiary); text-overflow: ellipsis; white-space: nowrap; }
+
 .document-canvas { display: flex; min-height: 0; flex: 1; overflow: hidden; }
 .source-canvas { background: var(--review-surface-subtle); }
 

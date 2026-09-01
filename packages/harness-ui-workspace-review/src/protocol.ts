@@ -48,6 +48,8 @@ export interface OpenWorkspaceReview extends WorkspaceReviewResource {
   readonly reviewId: string
   readonly harnessSessionId: string
   readonly capability: string
+  /** Present only after the narrow, Host-validated /pmd-prd tool invocation. */
+  readonly pmdPrd?: true
 }
 
 export interface WorkspaceReviewSnapshot {

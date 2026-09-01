@@ -17,7 +17,7 @@ async function runtime(options = {}) {
   }
   const canvas = {
     async getDocXml() { return xml },
-    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.regenerateIds) { let id = 0; xml = xml.replace(/\bid="[^"]*"/g, () => `id="rebuilt-${++id}"`) } if (options.tamperOutside) xml = xml.replace('>前置<', '>被篡改<'); if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
+    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (options.rejectPatch) return { success: false }; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.regenerateIds) { let id = 0; xml = xml.replace(/\bid="[^"]*"/g, () => `id="rebuilt-${++id}"`) } if (options.tamperOutside) xml = xml.replace('>前置<', '>被篡改<'); if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
     ...(options.selectionInfo ? { canvas: { getSelectionInfo: () => options.selectionInfo } } : {}),
   }
   const applySelection = (value) => {
@@ -162,6 +162,153 @@ test('light-document resource falls back to document.title when the public title
   const read = await call({ action: 'read' })
   assert.equal(read.result.resource.documentName, '测试')
   assert.notEqual(read.result.resource.documentName, '[object Object]')
+})
+
+test('empty body blocks_insert initializes an empty title only from its first h1 and reads both back', async () => {
+  let title = ''
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title"></outlineTitle></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: title } },
+    async setTitleContent(value) { title = value; state.titleWrites = (state.titleWrites ?? 0) + 1; state.titleValues = [...(state.titleValues ?? []), value] },
+  } })
+  const read = await call({ action: 'read' })
+  const payload = { blocks: [{ type: 'p', text: '摘要' }, { type: 'h1', html: '<strong>演示 PRD：团队任务管理助手</strong>' }] }
+  const inspected = await call({ action: 'inspect_write', operation: 'blocks_insert', payload })
+  assert.deepEqual(JSON.parse(JSON.stringify(inspected.result.document.title)), { supported: true, text: '', textLength: 0, truncated: false })
+  const written = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload })
+  assert.equal(written.ok, true)
+  assert.equal(title, '演示 PRD：团队任务管理助手')
+  assert.equal(state.titleWrites, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(written.result.observed.title)), { initialized: true, text: '演示 PRD：团队任务管理助手' })
+  assert.deepEqual(state.titleValues, ['演示 PRD：团队任务管理助手'])
+  assert.doesNotMatch(state.titleValues[0], /<|>|\*|_|#/, 'title API receives plain readable text, not XML or Markdown')
+  assert.match(state.xml, /<h1[^>]*>.*演示 PRD：团队任务管理助手/)
+})
+
+test('a single blank paragraph is semantic-empty and initializes the first h1 as title', async () => {
+  let title = ''
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title"></outlineTitle><p id=""></p></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: title } },
+    async setTitleContent(value) { title = value; state.titleWrites = (state.titleWrites ?? 0) + 1 },
+  } })
+  const read = await call({ action: 'read' })
+  assert.equal(read.result.document.blockCount, 1, 'the physical empty paragraph must not be silently dropped from the raw read')
+  assert.equal(read.result.resource.documentName, null, 'the empty title remains null even though WebEdit carries one physical blank paragraph')
+  const payload = { blocks: [{ type: 'h1', text: '演示 PRD：智能工单管理系统' }] }
+  const inspected = await call({ action: 'inspect_write', operation: 'blocks_insert', payload })
+  assert.deepEqual(JSON.parse(JSON.stringify(inspected.result.document.emptyBody)), { semantic: true, physicalBlockCount: 1, blankParagraphCount: 1 })
+  const written = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload })
+  assert.equal(written.ok, true)
+  assert.equal(title, '演示 PRD：智能工单管理系统')
+  assert.equal(state.titleWrites, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(written.result.observed.title)), { initialized: true, text: '演示 PRD：智能工单管理系统' })
+})
+
+test('blocks_insert never overwrites an existing title when the body has one blank paragraph', async () => {
+  let title = '已有标题'
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title">已有标题</outlineTitle><p id=""></p></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: title } },
+    async setTitleContent(value) { title = value; state.titleWrites = (state.titleWrites ?? 0) + 1 },
+  } })
+  const read = await call({ action: 'read' })
+  const written = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload: { blocks: [{ type: 'h1', text: '正文标题' }] } })
+  assert.equal(written.ok, true)
+  assert.equal(title, '已有标题')
+  assert.equal(state.titleWrites ?? 0, 0)
+  assert.equal(written.result.observed.title, undefined)
+})
+
+test('blocks_insert does not guess a title when one blank paragraph has no h1', async () => {
+  let title = ''
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title"></outlineTitle><p id="\u200B">\u200B</p></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: title } },
+    async setTitleContent(value) { title = value; state.titleWrites = (state.titleWrites ?? 0) + 1 },
+  } })
+  const read = await call({ action: 'read' })
+  const written = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload: { blocks: [{ type: 'h2', text: '二级标题' }] } })
+  assert.equal(written.ok, true)
+  assert.equal(title, '')
+  assert.equal(state.titleWrites ?? 0, 0)
+  assert.equal(written.result.observed.title, undefined)
+})
+
+test('readable content or an empty non-paragraph structure is never semantic-empty', async () => {
+  for (const xml of [
+    '<apcanvas><outlineTitle id="title"></outlineTitle><p id="one">已有正文</p></apcanvas>',
+    '<apcanvas><outlineTitle id="title"></outlineTitle><h2 id="one"></h2></apcanvas>',
+    '<apcanvas><outlineTitle id="title"></outlineTitle><table id="one"></table></apcanvas>',
+    '<apcanvas><outlineTitle id="title"></outlineTitle><ul id="one"></ul></apcanvas>',
+    '<apcanvas><outlineTitle id="title"></outlineTitle><codeBlock id="one" lang="plaintext"><![CDATA[]]></codeBlock></apcanvas>',
+  ]) {
+    const call = await runtime({ initialXml: xml, documentApi: { async getTitleContent() { return { text: '' } }, async setTitleContent() { assert.fail('non-empty structure must not initialize title') } } })
+    const inspected = await call({ action: 'inspect_write', operation: 'blocks_insert', payload: { blocks: [{ type: 'h1', text: '不应取标题' }] } })
+    assert.equal(inspected.result.document.emptyBody.semantic, false, xml)
+  }
+})
+
+test('a readable paragraph prevents automatic title initialization even when this insert contains h1', async () => {
+  let title = ''
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title"></outlineTitle><p id="one">已有正文</p></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: title } },
+    async setTitleContent() { state.titleWrites = (state.titleWrites ?? 0) + 1 },
+  } })
+  const read = await call({ action: 'read' })
+  const written = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload: { blocks: [{ type: 'h1', text: '后续章节标题' }] } })
+  assert.equal(written.ok, true)
+  assert.equal(title, '')
+  assert.equal(state.titleWrites ?? 0, 0)
+  assert.equal(written.result.observed.title, undefined)
+})
+
+test('a failed automatic title write does not report success or write the body', async () => {
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title"></outlineTitle></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: '' } },
+    async setTitleContent() { throw new Error('title failed') },
+  } })
+  const read = await call({ action: 'read' })
+  const failed = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload: { blocks: [{ type: 'h1', text: '不能误报' }] } })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.error.code, 'runtime_error')
+  assert.match(failed.error.message, /body was not written/)
+  assert.equal(state.patchCalls ?? 0, 0)
+  assert.doesNotMatch(state.xml, /不能误报/)
+})
+
+test('an automatic title readback failure does not write the body or report success', async () => {
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title"></outlineTitle></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: '' } },
+    async setTitleContent() { state.titleWrites = (state.titleWrites ?? 0) + 1 },
+  } })
+  const read = await call({ action: 'read' })
+  const failed = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload: { blocks: [{ type: 'h1', text: '回读失败' }] } })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.error.code, 'readback_mismatch')
+  assert.match(failed.error.message, /body was not written/)
+  assert.equal(state.titleWrites, 1)
+  assert.equal(state.patchCalls ?? 0, 0)
+  assert.doesNotMatch(state.xml, /回读失败/)
+})
+
+test('a verified title followed by a rejected body patch reports write_incomplete', async () => {
+  const state = {}
+  let title = ''
+  const call = await runtime({ state, rejectPatch: true, initialXml: '<apcanvas><outlineTitle id="title"></outlineTitle></apcanvas>', documentApi: {
+    async getTitleContent() { return { text: title } },
+    async setTitleContent(value) { title = value },
+  } })
+  const read = await call({ action: 'read' })
+  const failed = await call({ action: 'write', operation: 'blocks_insert', resource: read.result.resource, payload: { blocks: [{ type: 'h1', text: '标题已写入' }, { type: 'p', text: '正文未写入' }] } })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.error.code, 'write_incomplete')
+  assert.match(failed.error.message, /initialized title/)
+  assert.equal(title, '标题已写入')
+  assert.doesNotMatch(state.xml, /正文未写入/)
 })
 
 test('light-document caret capabilities keep selection readable while whole-block preview stays unavailable', async () => {

@@ -47,7 +47,7 @@ interface ProducedFileFact {
 
 interface AutoOpenFrozenPmdPrdInjected {
   readonly sessionId: string
-  readonly open: (path: string) => void
+  readonly open: (path: string, source?: 'pmd-prd') => void
 }
 
 type AutoOpenFrozenPmdPrdProps = PropsRuntime<'conversation.input.overlay'> & AutoOpenFrozenPmdPrdInjected
@@ -58,7 +58,7 @@ function AutoOpenFrozenPmdPrd({ sessionId, open, useSession }: AutoOpenFrozenPmd
   const tracker = useRef(autoOpenTracker)
   useEffect(() => {
     const action = tracker.current.next(sessionId, review)
-    if (action.open !== undefined) open(action.open.path)
+    if (action.open !== undefined) open(action.open.path, action.open.source)
   }, [open, review, sessionId])
   return null
 }
@@ -96,10 +96,10 @@ export function apply(ctx: ClientContext): void {
     if (conversation === undefined || binding === undefined) return
     try { conversation.input.for(binding.ctx).notify('error', message) } catch { /* the session may have closed while opening */ }
   }
-  const openWorkspaceMarkdownReview = (sessionId: string, displayPath: string): void => {
+  const openWorkspaceMarkdownReview = (sessionId: string, displayPath: string, source?: 'pmd-prd'): void => {
     if (bridge === undefined) return
     void openWorkspaceMarkdown(sessionId, displayPath)
-      .then(review => { requestOpenReview(window.parent, bridge, review) })
+      .then(review => { requestOpenReview(window.parent, bridge, source === 'pmd-prd' ? { ...review, pmdPrd: true } : review) })
       .catch(error => {
         const message = error instanceof Error ? error.message : String(error)
         notifyOpenFailure(sessionId, message)
@@ -142,7 +142,7 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.overlay', id: 'accrui-workspace-review-auto-open', order: -10,
     inject: (sessionId: SessionId): AutoOpenFrozenPmdPrdInjected => ({
       sessionId: String(sessionId),
-      open: (displayPath: string) => { openWorkspaceMarkdownReview(String(sessionId), displayPath) },
+      open: (displayPath: string, source?: 'pmd-prd') => { openWorkspaceMarkdownReview(String(sessionId), displayPath, source) },
     }),
   }, AutoOpenFrozenPmdPrd))
   if (bridge !== undefined) ctx.effect(() => {

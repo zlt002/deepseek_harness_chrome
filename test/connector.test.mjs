@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { BrowserConnector, knowledgeErrorChain, isRetryableKnowledgeTransport, knowledgeHttpsFetch } from '../apps/native-server/src/connector.mjs'
+import { BROWSER_TOOL_NAMES, CONNECTOR_TOOLS } from '../apps/native-server/src/connector-tool-catalog.mjs'
 import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
 
 async function callOfficeGetContext(endpoint, args = {}, id = 1) {
@@ -35,6 +36,16 @@ async function callTool(endpoint, name, arguments_, id = 1) {
   assert.equal(response.status, 200)
   return response.json()
 }
+
+test('keeps Browser Target tool classification complete and keeps remote search unbound', () => {
+  const published = new Set(CONNECTOR_TOOLS.map((tool) => tool.name))
+  assert.ok([...BROWSER_TOOL_NAMES].every((name) => published.has(name)))
+  assert.deepEqual([...BROWSER_TOOL_NAMES].sort(), [...new Set(BROWSER_TOOL_NAMES)].sort())
+  assert.equal(BROWSER_TOOL_NAMES.has('knowledge_search'), false)
+  assert.equal(BROWSER_TOOL_NAMES.has('code_search'), false)
+  assert.equal(BROWSER_TOOL_NAMES.has('selected_source_scope'), false)
+})
+
 test('publishes list_work_tabs and correlates a simulated extension response', async () => {
   const requests = []
   const target = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/budget' }
@@ -117,6 +128,79 @@ test('publishes list_work_tabs and correlates a simulated extension response', a
   } finally {
     await connector.stop()
   }
+})
+
+test('uses a captured session target and rejects missing or different session identities', async () => {
+  const targetA = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/a' }
+  const requests = []
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      requests.push(request)
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget,
+        result: { status: 'browser_target_verified', pageIdentity: { title: 'A', url: targetA.url }, documentIdentity: null },
+      }))
+    },
+  })
+  connector.registerRun('captured-run')
+  assert.equal(connector.captureBrowserTarget('captured-run', 'session-a', 'submission-a', targetA), true)
+  const endpoint = await connector.start()
+  const call = async (id, meta) => {
+    const response = await fetch(`${endpoint.url}/mcp`, {
+      method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'list_work_tabs', arguments: {}, ...(meta === undefined ? {} : { _meta: meta }) } }),
+    })
+    return response.json()
+  }
+  try {
+    const missing = await call(1)
+    assert.equal(missing.result.isError, true)
+    assert.match(missing.result.content[0].text, /session identity/i)
+    const other = await call(2, { 'io.deepseek.harness/sessionId': 'session-b' })
+    assert.equal(other.result.isError, true)
+    assert.match(other.result.content[0].text, /No Browser Target was captured/i)
+    const matched = await call(3, { 'io.deepseek.harness/sessionId': 'session-a' })
+    assert.equal(matched.result.structuredContent.browserTarget.url, targetA.url)
+    assert.deepEqual(requests.at(-1).harnessSessionId, 'session-a')
+  } finally {
+    await connector.stop()
+  }
+})
+
+test('keeps an awaited browser call bound to its own captured session target', async () => {
+  const targetA = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/101' }
+  const targetB = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/102' }
+  const fence = Promise.withResolvers(); const entered = Promise.withResolvers(); const requests = []
+  const connector = new BrowserConnector({
+    teamKnowledgeBatchStore: { async findIncompleteItemsByCatalogId(catalogId) { if (catalogId === '101') { entered.resolve(); await fence.promise }; return [] } },
+    requestExtension: (request) => {
+      requests.push(request)
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget,
+        ...(request.tool === 'list_work_tabs'
+          ? { result: { status: 'browser_target_verified', pageIdentity: { title: 'page', url: request.browserTarget.url }, documentIdentity: null } }
+          : { error: { code: 'runtime_error', message: 'stop after correlation inspection' } }),
+      }))
+    },
+  })
+  connector.registerRun('race-run')
+  connector.captureBrowserTarget('race-run', 'session-a', 'submission-a', targetA)
+  connector.captureBrowserTarget('race-run', 'session-b', 'submission-b', targetB)
+  const endpoint = await connector.start()
+  const call = (id, name, arguments_, sessionId) => fetch(`${endpoint.url}/mcp`, {
+    method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_, _meta: { 'io.deepseek.harness/sessionId': sessionId } } }),
+  })
+  try {
+    const first = call(1, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'p', text: 'hello' }] } }, 'session-a')
+    await entered.promise
+    await (await call(2, 'list_work_tabs', {}, 'session-b')).json()
+    fence.resolve()
+    await (await first).json()
+    const delayedA = requests.find(request => request.tool === 'light_document')
+    assert.deepEqual(delayedA.browserTarget, targetA)
+    assert.equal(delayedA.harnessSessionId, 'session-a')
+  } finally { await connector.stop() }
 })
 test('commits selected-content replacement from a challenge-only flat tool with an internal write fence', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 71, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/71?id=71' }
@@ -743,11 +827,14 @@ test('rejects list_work_tabs before extension execution until the trusted Native
   try {
     const unboundConnector = new BrowserConnector({ requestExtension: () => { extensionRequests += 1 } })
     const unboundEndpoint = await unboundConnector.start()
-    const unbound = await callOfficeGetContext(unboundEndpoint)
-    assert.equal(unbound.result.isError, true)
-    assert.match(unbound.result.content[0].text, /no Browser Target is bound/i)
-    assert.equal(extensionRequests, 0)
-    await unboundConnector.stop()
+    try {
+      const unbound = await callOfficeGetContext(unboundEndpoint)
+      assert.equal(unbound.result.isError, true)
+      assert.match(unbound.result.content[0].text, /no active Harness Run|no Browser Target is bound/i)
+      assert.equal(extensionRequests, 0)
+    } finally {
+      await unboundConnector.stop()
+    }
 
     const bound = await callOfficeGetContext(endpoint)
     assert.equal(bound.result.structuredContent.runId, 'run-bound')
@@ -763,23 +850,21 @@ test('rejects list_work_tabs before extension execution until the trusted Native
     await connector.stop()
   }
 })
-test('uses an Extension-confirmed Browser Target transfer for the next office turn', async () => {
+test('uses the immutable Browser Target correlation for an office turn', async () => {
   const initial = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://www.baidu.com/' }
-  const next = { browser: 'chrome', windowId: 7, tabId: 43, url: 'https://wb.example.test/' }
   const connector = new BrowserConnector({
     requestTimeoutMs: 50,
     requestExtension: (request) => {
       queueMicrotask(() => {
-        connector.bindBrowserTarget(request.runId, next)
         connector.acceptExtensionResponse({
           type: 'connector_response',
           requestId: request.requestId,
           runId: request.runId,
           generation: request.generation,
-          browserTarget: next,
+          browserTarget: request.browserTarget,
           result: {
             status: 'browser_target_verified',
-            pageIdentity: { title: 'WB', url: next.url },
+            pageIdentity: { title: 'Baidu', url: initial.url },
             documentIdentity: null,
           },
         })
@@ -791,8 +876,8 @@ test('uses an Extension-confirmed Browser Target transfer for the next office tu
 
   try {
     const response = await callOfficeGetContext(endpoint)
-    assert.equal(response.result.structuredContent.browserTarget.url, next.url)
-    assert.equal(response.result.structuredContent.officeContext.pageIdentity.url, next.url)
+    assert.equal(response.result.structuredContent.browserTarget.url, initial.url)
+    assert.equal(response.result.structuredContent.officeContext.pageIdentity.url, initial.url)
   } finally {
     await connector.stop()
   }

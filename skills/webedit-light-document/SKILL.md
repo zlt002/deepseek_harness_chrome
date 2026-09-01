@@ -13,7 +13,7 @@ description: "在已绑定的美的 Team Knowledge / WebEdit 轻文档中写入�
 
 只在已读到的目标上选一条路径：
 
-- **空白文档（`blockCount=0`）**：结构化正文用 `blocks_insert`，payload `{ position: "end", blocks: [...] }`；Mermaid 用 `insert_drawing`，payload `{ mermaid, position: "end" }`。`xychart-beta` 未经当前 WebEdit 验证，改用 flowchart 或 pie；其他既有 Mermaid 类型保持原契约。只在光标处写纯正文时，先读取当前选区（下方 `selection_read`），再用 `selection_insert`，payload 为恰好一个 `text`、`markdown` 或 `html`，并带该次读取的 `expectedSelectionFingerprint`。
+- **空白文档（`blockCount=0`）**：结构化正文用 `blocks_insert`，payload `{ position: "end", blocks: [...] }`；每次 preview 只能传 1–50 个受支持块。超过 50 个时按正文顺序分批，每一批都完整执行 `preview → 用户确认 → commit → 同一 Browser Target 回读` 后才能开始下一批；不得并行提交，也不得靠逐个类型探测来试错。Mermaid 用 `insert_drawing`，payload `{ mermaid, position: "end" }`。`xychart-beta` 未经当前 WebEdit 验证，改用 flowchart 或 pie；其他既有 Mermaid 类型保持原契约。只在光标处写纯正文时，先读取当前选区（下方 `selection_read`），再用 `selection_insert`，payload 为恰好一个 `text`、`markdown` 或 `html`，并带该次读取的 `expectedSelectionFingerprint`。
 - **已有正文的小范围更新**：只改已读到的稳定旧块。单块使用 `replace` / `blocks_replace`，多块使用 `blocks_batch_replace`；后者 payload 只能是 `{ replacements: [{ id, ... }] }`，最多 50 个 replacement，`id` 必须来自这次读取的旧块；它不能接受 `{ blocks: [...] }`，也不能用来重建整篇文档。删除完整稳定块用 `blocks_delete` 的公开 payload `{ blocks: [{ id }] }`；只接受本次读取的 id，不接受 index。只改标题用 `set_title`。
 - **已有正文的全文重写**：先读取正文，再用选区读取确认用户选中了精确、稳定、非折叠的全文，且 `replaceStrategy` 支持替换；只走下方的选区 preview/commit 路线。不能形成受支持的精确全文选区，或返回 `editor not ready` 时，停止并请用户刷新页面、重新绑定 Browser Target 后再读取；此全文/选区替换分支不得猜测 `blocks_delete`、`blocks_insert` 或其他补救 payload。
 

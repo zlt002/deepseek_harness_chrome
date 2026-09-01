@@ -5,7 +5,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BrowserTargetControl, BrowserTargetPanel, type BrowserTargetInjected } from './BrowserTargetControl.tsx'
 import { FullscreenReturnControl, type FullscreenReturnControlInjected } from './FullscreenReturnControl.tsx'
 import { HarnessReconnectAction, type HarnessReconnectActionInjected } from './HarnessReconnectAction.tsx'
-import { activeTabBridgeConfig, createBrowserTargetBridge } from './active-tab-bridge.ts'
+import { activeTabBridgeConfig, browserTargetTriggerTab, createBrowserTargetBridge } from './active-tab-bridge.ts'
 import { restoreHandoffSession } from './session-handoff.ts'
 import { BrowserTargetSessionRunLock, shouldCaptureSessionRunTarget, shouldReconcileSessionRunTarget } from './session-run-lock.ts'
 
@@ -134,13 +134,16 @@ export function apply(ctx: ClientContext): void {
         const session = ctx.sessions.binding(sessionId)?.session
         const targetSnapshot = bridge.source.getSnapshot()
         if (session === undefined || !shouldCaptureSessionRunTarget(session.getSnapshot(), lifecycleLocks.has(id))) return { text }
-        if (targetSnapshot?.settings.mode === 'follow-active-tab' && targetSnapshot.activeTab !== undefined) {
+        const browserTarget = targetSnapshot?.settings.mode === 'follow-active-tab'
+          ? targetSnapshot.activeTab
+          : targetSnapshot?.settings.mode === 'pinned-tabs' ? browserTargetTriggerTab(targetSnapshot) : undefined
+        if (browserTarget !== undefined) {
           const submissionId = crypto.randomUUID()
           const lifecycle = { state: new BrowserTargetSessionRunLock(submissionId), unsubscribe: undefined as (() => void) | undefined }
           lifecycleLocks.set(id, lifecycle)
           let locked: boolean
           try {
-            locked = await lockSubmission(id, submissionId, { browser: 'chrome', windowId: targetSnapshot.activeTab.windowId, tabId: targetSnapshot.activeTab.tabId, url: targetSnapshot.activeTab.url })
+            locked = await lockSubmission(id, submissionId, { browser: 'chrome', windowId: browserTarget.windowId, tabId: browserTarget.tabId, url: browserTarget.url })
           } catch (error) {
             if (lifecycleLocks.get(id) === lifecycle) lifecycleLocks.delete(id)
             throw error

@@ -66,6 +66,11 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
             }
           })()
         }
+        if (message.type === 'capture-browser-target') {
+          queueMicrotask(() => {
+            for (const listener of nativeMessageListeners) listener({ type: 'browser_target_captured', requestId: message.requestId })
+          })
+        }
       },
       disconnect: () => {
         for (const listener of nativeDisconnectListeners) listener()
@@ -519,26 +524,27 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
     }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true, locked: true })
     assert.deepEqual(await background.sendRuntimeMessage({
       type: 'lock-browser-target/v1', sessionId: 'session-other', submissionId: 'follow-2', browserTarget: { browser: 'chrome', windowId: 7, tabId: 43, url: wb.url },
-    }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: false, error: '另一个对话正在运行，结束后再试。' })
+    }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true, locked: true })
     background.emitNative({
       type: 'connector_request', requestId: 'baidu-turn', runId: 'run-follow', generation: 'generation-1',
-      browserTarget: baiduTarget, tool: 'list_work_tabs',
+      harnessSessionId: 'session-follow', browserTarget: baiduTarget, tool: 'list_work_tabs',
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     await new Promise((resolve) => setTimeout(resolve, 0))
     background.emitNative({
       type: 'connector_request', requestId: 'wb-turn', runId: 'run-follow', generation: 'generation-1',
-      browserTarget: baiduTarget, tool: 'list_work_tabs',
+      harnessSessionId: 'session-other', browserTarget: { browser: 'chrome', windowId: 7, tabId: 43, url: wb.url }, tool: 'list_work_tabs',
     })
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some((message) => message.type === 'connector_response' && message.requestId === 'wb-turn'); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
-    const transferIndex = background.nativeMessages.findIndex((message) => message.type === 'transfer-browser-target' && message.requestId === 'wb-turn')
+    const transferIndex = background.nativeMessages.findIndex((message) => message.type === 'transfer-browser-target' && message.browserTarget?.tabId === wb.id)
     const responseIndex = background.nativeMessages.findIndex((message) => message.type === 'connector_response' && message.requestId === 'wb-turn')
-    assert.equal(transferIndex, -1, 'an active-tab change must not migrate an in-flight Run')
+    assert.ok(transferIndex >= 0, 'a real Browser Connector request transfers its own captured target')
     const secondTurn = background.nativeMessages[responseIndex]
-    assert.equal(secondTurn.result.pageIdentity.url, baidu.url)
+    assert.equal(secondTurn.result.pageIdentity.url, wb.url)
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-follow', submissionId: 'follow-1' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-other', submissionId: 'follow-2' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true })
     background.emitNative({
       type: 'connector_request', requestId: 'after-complete', runId: 'run-follow', generation: 'generation-1',
       browserTarget: baiduTarget, tool: 'list_work_tabs',
@@ -548,6 +554,65 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
     }
     const afterComplete = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'after-complete')
     assert.equal(afterComplete.result.pageIdentity.url, wb.url, 'completion restores follow-current Browser Target behavior')
+  } finally {
+    await background.cleanup()
+  }
+})
+
+test('a submitted Browser Target is only captured until a later browser request needs it', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: b, tabsById: { 42: a, 43: b } })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    await background.activateTab(a.id)
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA,
+    }, sender), { ok: true, locked: true })
+    assert.equal(background.nativeMessages.some(message => message.type === 'transfer-browser-target'), false, 'a remote code or knowledge query must not bind or occupy the Browser Target')
+
+    await background.activateTab(b.id)
+    background.emitNative({
+      type: 'connector_request', requestId: 'read-captured-a', runId: 'run-follow', generation: 'generation-a',
+      harnessSessionId: 'session-a', browserTarget: targetA, tool: 'list_work_tabs',
+    })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'read-captured-a'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'read-captured-a')
+    assert.equal(response.error, undefined)
+    assert.equal(response.result.pageIdentity.url, a.url, 'the browser request must use its captured send-time target, not the newly active tab')
+    assert.equal(background.nativeMessages.filter(message => message.type === 'transfer-browser-target').length, 1, 'the target moves only for the bounded browser request')
+  } finally {
+    await background.cleanup()
+  }
+})
+
+test('a pinned session captures its selected primary Browser Target before its first tool call', async () => {
+  const pinnedTab = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/801', title: 'Pinned document' }
+  const otherTab = { id: 43, windowId: 7, url: 'https://docs.example.test/other', title: 'Other' }
+  const pinnedTarget = { browser: 'chrome', windowId: 7, tabId: pinnedTab.id, url: pinnedTab.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [pinnedTarget], primaryTabId: pinnedTab.id }, activeTab: otherTab, tabsById: { 42: pinnedTab, 43: otherTab },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'pinned-session', submissionId: 'pinned-submission', browserTarget: pinnedTarget,
+    }, sender), { ok: true, locked: true })
+    assert.equal(background.nativeMessages.some(message => message.type === 'capture-browser-target' && message.sessionId === 'pinned-session' && message.submissionId === 'pinned-submission' && message.browserTarget?.tabId === pinnedTab.id), true)
+    assert.equal(background.nativeMessages.some(message => message.type === 'transfer-browser-target'), false, 'capturing a pinned session must not operate its page yet')
+
+    await background.activateTab(otherTab.id)
+    background.emitNative({
+      type: 'connector_request', requestId: 'pinned-first-list', runId: 'run-follow', generation: 'generation-pinned',
+      harnessSessionId: 'pinned-session', browserTarget: pinnedTarget, tool: 'list_work_tabs',
+    })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'pinned-first-list'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'pinned-first-list')
+    assert.equal(response.error, undefined)
+    assert.equal(response.result.pageIdentity.url, pinnedTab.url)
   } finally {
     await background.cleanup()
   }
@@ -576,8 +641,9 @@ test('follow-active-tab permits concurrent sessions on the same frozen Browser T
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
       ok: true, lock: { sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetA },
     })
-    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-c', submissionId: 'submission-c', browserTarget: targetB }, sender), { ok: false, error: '另一个对话正在运行，结束后再试。' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-c', submissionId: 'submission-c', browserTarget: targetB }, sender), { ok: true, locked: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b' }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-c', submissionId: 'submission-c' }, sender), { ok: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), { ok: true })
     await background.activateTab(b.id)
     background.emitNative({ type: 'connector_request', requestId: 'after-last-unlock', runId: 'run-follow', generation: 'generation-a', browserTarget: targetA, tool: 'list_work_tabs' })
@@ -588,25 +654,24 @@ test('follow-active-tab permits concurrent sessions on the same frozen Browser T
   }
 })
 
-test('concurrent first locks for one Browser Target share a single Native transfer', async () => {
+test('concurrent captures do not transfer until a Browser Connector request needs the target', async () => {
   const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
   const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
   const sender = { url: 'chrome-extension://test/sidepanel.html' }
-  const transferGate = Promise.withResolvers()
   const background = await loadBackground({
-    settings: { mode: 'none', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a }, waitForTransferAck: transferGate.promise,
+    settings: { mode: 'none', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a },
     runtimeResponseTimeoutMs: 1_000,
   })
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     const first = background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender)
     const second = background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetA }, sender)
-    for (let attempt = 0; attempt < 20; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
-    assert.equal(background.nativeMessages.filter(message => message.type === 'transfer-browser-target').length, 1, 'same-target owners must share the in-flight transfer')
-    transferGate.resolve()
     assert.deepEqual(await Promise.all([first, second]), [{ ok: true, locked: true }, { ok: true, locked: true }])
+    assert.equal(background.nativeMessages.filter(message => message.type === 'transfer-browser-target').length, 0)
+    background.emitNative({ type: 'connector_request', requestId: 'captured-request', runId: 'run-follow', generation: 'generation-a', harnessSessionId: 'session-a', browserTarget: targetA, tool: 'list_work_tabs' })
+    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'captured-request'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(background.nativeMessages.filter(message => message.type === 'transfer-browser-target').length, 1)
   } finally {
-    transferGate.resolve()
     await background.cleanup()
   }
 })
@@ -675,7 +740,7 @@ test('a follow lock keeps its send-moment Browser Target while an in-flight sett
     await changingPolicy
     assert.deepEqual(await locking, { ok: true, locked: true })
 
-    background.emitNative({ type: 'connector_request', requestId: 'still-a', runId: 'run-follow', generation: 'generation-a', browserTarget: targetA, tool: 'list_work_tabs' })
+    background.emitNative({ type: 'connector_request', requestId: 'still-a', runId: 'run-follow', generation: 'generation-a', harnessSessionId: 'session-follow', browserTarget: targetA, tool: 'list_work_tabs' })
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'still-a'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'still-a').result.pageIdentity.url, a.url)
 
@@ -757,7 +822,7 @@ test('an accepted follow lock ignores the initial idle reconciliation window so 
     await background.activateTab(b.id)
     background.emitNative({
       type: 'connector_request', requestId: 'read-after-b-activation', runId: 'run-follow', generation: 'generation-a',
-      tool: 'read_work_tab', tab: 1, browserTarget: targetA, browserTargets: [targetA],
+      harnessSessionId: 'session-a', tool: 'read_work_tab', tab: 1, browserTarget: targetA, browserTargets: [targetA],
     })
     let response
     for (let attempt = 0; attempt < 20 && response === undefined; attempt += 1) {
@@ -824,25 +889,57 @@ test('a restored idle session reconciles an accepted Browser Target lock after t
   }
 })
 
-test('follow lock can bind a Run started with none mode and an unlock before transfer confirmation cancels it', async () => {
+test('a restored blank session releases a Browser Target lock whose prompt was never accepted', async () => {
+  const first = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const second = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const firstTarget = { browser: 'chrome', windowId: 7, tabId: first.id, url: first.url }
+  const secondTarget = { browser: 'chrome', windowId: 7, tabId: second.id, url: second.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({
+    settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: first, tabsById: { 42: first, 43: second },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'blank-session', submissionId: 'abandoned-submission', browserTarget: firstTarget,
+    }, sender), { ok: true, locked: true })
+
+    const { BrowserTargetSessionRunLock, shouldReconcileSessionRunTarget } = await loadSessionRunLock()
+    const restored = BrowserTargetSessionRunLock.restore('abandoned-submission', { observedActivity: false })
+    const promptNeverAccepted = { running: false, queue: [], blank: true }
+    const shouldRelease = shouldReconcileSessionRunTarget(promptNeverAccepted, restored)
+    assert.equal(shouldRelease, true, 'a blank restored session proves that the guarded prompt never entered the Host log')
+    if (shouldRelease) {
+      await background.sendRuntimeMessage({
+        type: 'reconcile-browser-target-lock/v1', sessionId: 'blank-session', submissionId: 'abandoned-submission',
+      }, sender)
+    }
+
+    await background.activateTab(second.id)
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'next-session', submissionId: 'next-submission', browserTarget: secondTarget,
+    }, sender), { ok: true, locked: true })
+  } finally {
+    await background.cleanup()
+  }
+})
+
+test('unlocking a captured follow target releases it before any Browser Connector transfer', async () => {
   const first = { id: 42, windowId: 7, url: 'https://docs.example.test/first', title: 'First' }
   const second = { id: 43, windowId: 7, url: 'https://docs.example.test/second', title: 'Second' }
   const firstTarget = { browser: 'chrome', windowId: 7, tabId: 42, url: first.url }
   const sender = { url: 'chrome-extension://test/sidepanel.html' }
-  const transferGate = Promise.withResolvers()
   const background = await loadBackground({
     settings: { mode: 'none', pinnedTabs: [] }, activeTab: first, tabsById: { 42: first, 43: second },
-    waitForTransferAck: transferGate.promise,
   })
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     await background.sendRuntimeMessage({ type: 'save-browser-target-settings', settings: { mode: 'follow-active-tab', pinnedTabs: [] } })
     const locking = background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-follow', submissionId: 'first', browserTarget: firstTarget }, sender)
-    for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'transfer-browser-target'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
-    assert.equal(background.nativeMessages.some(message => message.type === 'transfer-browser-target'), true)
+    assert.deepEqual(await locking, { ok: true, locked: true })
+    assert.equal(background.nativeMessages.some(message => message.type === 'transfer-browser-target'), false)
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-follow', submissionId: 'first' }, sender), { ok: true })
-    transferGate.resolve()
-    assert.deepEqual(await locking, { ok: true, locked: false })
+    assert.equal(background.nativeMessages.some(message => message.type === 'release-browser-target-capture' && message.sessionId === 'session-follow' && message.submissionId === 'first'), true)
     await background.activateTab(43)
     background.emitNative({ type: 'connector_request', requestId: 'after-unlock', runId: 'run-follow', generation: 'generation-1', browserTarget: firstTarget, tool: 'list_work_tabs' })
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))

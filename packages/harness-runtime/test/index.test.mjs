@@ -48,6 +48,129 @@ test('admits one selected-source child per parent turn and rejects generic deleg
   assert.match(directSearchGuard(exec('subagent', 3)), /所选远程范围/)
 })
 
+test('rejects expanded first selected-source prompts until real search evidence settles', () => {
+  const guard = createSelectedSourceDispatchGuard()
+  const userMessage = (text) => ({
+    type: 'user/message',
+    data: {
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+      role: 'user',
+    },
+  })
+  const exec = (name, prompt, events) => ({
+    name,
+    arguments: { description: '检索客户管理', prompt },
+    agent: { id: 'parent-pmd', session: { events } },
+  })
+  const initialEvents = [
+    userMessage('/pmd-prd  优化下客户管理功能'),
+    { type: 'turn/start', data: { turn: 1 } },
+  ]
+  const expanded = '请检索客户列表、导入导出、权限、软删除等完整现状'
+
+  assert.match(
+    guard(exec('search_selected_remote_code', expanded, initialEvents)),
+    /首次检索.*优化下客户管理功能/,
+  )
+  assert.equal(
+    guard(exec('search_selected_remote_code', '优化下客户管理功能', initialEvents)),
+    undefined,
+  )
+
+  const knowledgeGuard = createSelectedSourceDispatchGuard()
+  assert.match(
+    knowledgeGuard(exec('search_selected_knowledge', expanded, initialEvents)),
+    /首次检索.*优化下客户管理功能/,
+  )
+  assert.equal(
+    knowledgeGuard(exec('search_selected_knowledge', '优化下客户管理功能', initialEvents)),
+    undefined,
+  )
+
+  const directGuard = createSelectedSourceDispatchGuard()
+  const directEvents = [userMessage('怎么出库啊'), { type: 'turn/start', data: { turn: 1 } }]
+  assert.match(
+    directGuard(exec('search_selected_remote_code', '请完整解释怎么出库', directEvents)),
+    /请把 prompt 原样改为："怎么出库啊"/,
+  )
+  assert.equal(
+    directGuard(exec('search_selected_remote_code', '怎么出库啊', directEvents)),
+    undefined,
+  )
+
+  const latestUserGuard = createSelectedSourceDispatchGuard()
+  const latestUserEvents = [
+    userMessage('/pmd-prd  优化下客户管理功能'),
+    userMessage('重点优化客户查询速度'),
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
+  assert.match(
+    latestUserGuard(exec('search_selected_remote_code', '优化下客户管理功能', latestUserEvents)),
+    /请把 prompt 原样改为："重点优化客户查询速度"/,
+  )
+  assert.equal(
+    latestUserGuard(exec('search_selected_remote_code', '重点优化客户查询速度', latestUserEvents)),
+    undefined,
+  )
+
+  const failedFollowupGuard = createSelectedSourceDispatchGuard()
+  const failedEvents = [
+    ...initialEvents.slice(0, 1),
+    {
+      type: 'tool/call',
+      data: { callId: 'selected-source-failed', name: 'search_selected_remote_code', arguments: '{}' },
+    },
+    {
+      type: 'user/message',
+      data: {
+        content: [{ type: 'text', text: 'It left no closing message.' }],
+        source: {
+          kind: 'subagent-settled',
+          senderSessionId: 'child-failed',
+          summary: 'Background subagent child-failed failed before it finished.',
+        },
+        role: 'user',
+      },
+    },
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
+  assert.match(
+    failedFollowupGuard(exec('search_selected_remote_code', expanded, failedEvents)),
+    /首次检索.*优化下客户管理功能/,
+  )
+
+  const followupGuard = createSelectedSourceDispatchGuard()
+  const settledEvents = [
+    userMessage('/pmd-prd  优化下客户管理功能'),
+    {
+      type: 'tool/call',
+      data: {
+        callId: 'selected-source-1',
+        name: 'search_selected_remote_code',
+        arguments: JSON.stringify({ prompt: '优化下客户管理功能' }),
+      },
+    },
+    {
+      type: 'user/message',
+      data: {
+        content: [{ type: 'text', text: 'Its closing message:\nsrc/customer.ts 显示已有客户列表。' }],
+        source: {
+          kind: 'subagent-settled',
+          senderSessionId: 'child-1',
+          summary: 'Background subagent child-1 finished and will do no further work unless you send it more.',
+        },
+        role: 'user',
+      },
+    },
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
+  assert.equal(
+    followupGuard(exec('search_selected_knowledge', '根据 src/customer.ts 补查客户状态规则', settledEvents)),
+    undefined,
+  )
+})
+
 test('releases a selected-source admission when dispatch fails before a child starts', async () => {
   const guard = createSelectedSourceDispatchGuard()
   const listeners = new Map()
