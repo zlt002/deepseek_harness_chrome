@@ -26,7 +26,7 @@ test('detached updater writes a standalone script and waits for ready before han
   const root = await mkdtemp(join(tmpdir(), 'release-update-launch-'))
   try {
     const launched = launchPreparedUpdate(
-      { version: '1.1.81', extractRoot: root },
+      { version: '1.1.81', packageId: 'W/"gitlab-package-1"', extractRoot: root },
       {
         installRoot: join(root, 'install-root'),
         nativePid: 1234,
@@ -52,6 +52,8 @@ test('detached updater writes a standalone script and waits for ready before han
     assert.match(script, /go/)
     assert.match(script, /cancel/)
     assert.match(script, /Write-UpdateStatus 'succeeded'/)
+    assert.match(script, /gitlab-package-1/)
+    assert.match(script, /\$State -eq 'succeeded'.*\$status\.packageId/)
     assert.match(script, /Write-UpdateStatus 'failed'/)
     assert.match(script, /Get-Process -Id 1234/)
     assert.match(script, /\$nativeDeadline = \[DateTime\]::UtcNow\.AddSeconds\(10\)/)
@@ -444,4 +446,16 @@ test('reads the last persisted updater result from the install root', async () =
   })
   assert.equal(requestedPath, resolve('/tmp/accr-ui-harness', '.accrui-update-status.json'))
   assert.deepEqual(status, { state: 'failed', version: '1.1.81', updatedAt: '2026-08-27T00:00:00.000Z', error: '安装内容不完整', logPath: '%TEMP%\\accr-ui-harness-install.log' })
+})
+
+test('reads the installed GitLab ZIP identity only after a successful update', async () => {
+  const status = await readUpdateStatus('/tmp/accr-ui-harness', {
+    readFileImpl: async () => JSON.stringify({
+      state: 'succeeded',
+      version: '1.1.96',
+      packageId: 'W/"gitlab-package-1"',
+      updatedAt: '2026-09-01T12:00:00.000Z',
+    }),
+  })
+  assert.equal(status.packageId, 'W/"gitlab-package-1"')
 })

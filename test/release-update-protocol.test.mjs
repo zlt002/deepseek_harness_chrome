@@ -11,7 +11,10 @@ async function loadBridge() {
 }
 
 function rememberCandidate(host, candidate) {
-  host.releaseUpdateCandidates = new Map([[`${candidate.version}\u0000${candidate.sha256}\u0000${candidate.packageUrl}`, candidate]])
+  const key = candidate.packageId === undefined
+    ? `release\u0000${candidate.version}\u0000${candidate.sha256}\u0000${candidate.packageUrl}`
+    : `package\u0000${candidate.packageId}\u0000${candidate.packageUrl}`
+  host.releaseUpdateCandidates = new Map([[key, candidate]])
 }
 
 test('Side Panel update command reaches Native Host and returns the verified release identity to the iframe bridge', async () => {
@@ -92,37 +95,40 @@ test('Native Host does not confirm or close when the detached updater cannot sta
 })
 
 test('Native Host returns the persisted updater outcome when checking again', async () => {
+  let checkOptions
   const host = new NativeHost({
     platform: 'win32', exit: () => {},
-    updateCheck: async () => ({ available: false, version: '1.1.80', sha256: 'c'.repeat(64) }),
-    updateStatusRead: async () => ({ state: 'failed', version: '1.1.81', updatedAt: '2026-08-27T00:00:00.000Z', error: '安装内容不完整', logPath: '%TEMP%\\accr-ui-harness-install.log' }),
+    updateCheck: async options => { checkOptions = options; return { available: false, packageId: 'W/"installed-package"', packageUrl: 'https://git.midea.com/example/release.zip' } },
+    updateStatusRead: async () => ({ state: 'succeeded', version: '1.1.81', packageId: 'W/"installed-package"', updatedAt: '2026-08-27T00:00:00.000Z' }),
   })
   const messages = []; host.send = message => messages.push(message)
   await host.checkReleaseUpdate('request-status-123')
+  assert.equal(checkOptions.currentPackageId, 'W/"installed-package"')
   assert.deepEqual(messages.at(-1), {
     type: 'release_update_checked', requestId: 'request-status-123',
     update: {
-      available: false, version: '1.1.80', sha256: 'c'.repeat(64),
-      lastUpdate: { state: 'failed', version: '1.1.81', updatedAt: '2026-08-27T00:00:00.000Z', error: '安装内容不完整', logPath: '%TEMP%\\accr-ui-harness-install.log' },
+      available: false, packageId: 'W/"installed-package"', packageUrl: 'https://git.midea.com/example/release.zip',
+      lastUpdate: { state: 'succeeded', version: '1.1.81', packageId: 'W/"installed-package"', updatedAt: '2026-08-27T00:00:00.000Z' },
     },
   })
 })
 
 test('Native Host prepares only the exact candidate returned by its previous update check', async () => {
   let prepareOptions
+  const candidate = { packageId: 'W/"gitlab-package-1"', packageUrl: 'https://git.midea.com/example/accr-ui-windows-lite-x64.zip' }
   const host = new NativeHost({
     platform: 'win32', exit: () => {},
-    updateCheck: async () => ({ available: true, version: '1.1.81', sha256: 'd'.repeat(64), packageUrl: 'https://example.test/1.1.81.zip' }),
+    updateCheck: async () => ({ available: true, ...candidate }),
     updatePrepare: async options => {
       prepareOptions = options
-      return { version: '1.1.81', sha256: 'd'.repeat(64), packageUrl: 'https://example.test/1.1.81.zip', extractRoot: 'C:\\temp\\package' }
+      return { version: '1.1.81', sha256: 'd'.repeat(64), ...candidate, extractRoot: 'C:\\temp\\package' }
     },
     updateLaunch: async () => true,
   })
   const messages = []; host.send = message => messages.push(message)
   await host.checkReleaseUpdate('request-check-candidate')
-  await host.prepareReleaseUpdate('request-prepare-candidate', { version: '1.1.81', sha256: 'd'.repeat(64), packageUrl: 'https://example.test/1.1.81.zip' })
-  assert.deepEqual(prepareOptions.candidate, { version: '1.1.81', sha256: 'd'.repeat(64), packageUrl: 'https://example.test/1.1.81.zip' })
+  await host.prepareReleaseUpdate('request-prepare-candidate', candidate)
+  assert.deepEqual(prepareOptions.candidate, candidate)
 
   const withoutCheck = new NativeHost({ platform: 'win32', exit: () => {}, updatePrepare: async () => { throw new Error('must not prepare') } })
   const rejected = []; withoutCheck.send = message => rejected.push(message)

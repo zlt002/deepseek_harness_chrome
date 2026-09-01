@@ -93,9 +93,9 @@ export async function extractZip(bytes, destination, { stripCommonRoot = false }
 
 export function verifyWindowsLitePackage(bytes, { currentVersion, expectedSha256, expectedVersion } = {}) {
   if (!Buffer.isBuffer(bytes)) throw new Error('更新包内容无效')
-  if (typeof expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error('更新源缺少有效 SHA256；拒绝校验不足的更新包')
+  if (expectedSha256 !== undefined && (typeof expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSha256))) throw new Error('更新源包含无效 SHA256')
   const digest = sha256(bytes)
-  if (expectedSha256 !== digest) throw new Error(`更新包 SHA256 不匹配：预期 ${expectedSha256}，实际 ${digest}`)
+  if (expectedSha256 !== undefined && expectedSha256 !== digest) throw new Error(`更新包 SHA256 不匹配：预期 ${expectedSha256}，实际 ${digest}`)
   const outerNames = zipEntries(bytes); const root = commonRoot(outerNames, 'install.ps1')
   const outer = new Set(outerNames.map(name => root && name.startsWith(root) ? name.slice(root.length) : name)); const missing = REQUIRED_OUTER.filter(name => !outer.has(name))
   if (missing.length > 0) throw new Error(`更新包结构不完整：缺少 ${missing.join(', ')}`)

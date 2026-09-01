@@ -36,7 +36,7 @@ test('accepts the published Windows Lite common-root archive only when identity 
   const missingKeyPayload = zip({ 'extension/manifest.json': JSON.stringify({ version: '1.1.76' }) })
   const missingKeyArchive = zip({ 'accr-ui-windows-lite-x64/install.ps1': 'installer', 'accr-ui-windows-lite-x64/install.vbs': 'entry', 'accr-ui-windows-lite-x64/install-ui.ps1': 'ui', 'accr-ui-windows-lite-x64/payload.zip': missingKeyPayload })
   assert.throws(() => verifyWindowsLitePackage(missingKeyArchive, { expectedSha256: digest(missingKeyArchive), expectedVersion: '1.1.76' }), /固定身份 key/)
-  assert.throws(() => verifyWindowsLitePackage(archive, { expectedVersion: '1.1.76' }), /SHA256/)
+  assert.equal(verifyWindowsLitePackage(archive, { expectedVersion: '1.1.76' }).sha256, expectedSha256)
   assert.throws(() => verifyWindowsLitePackage(archive, { expectedSha256, expectedVersion: '1.1.77' }), /版本不匹配/)
 })
 

@@ -3,10 +3,12 @@ import { confirmReleaseUpdate } from './release-update-confirmation.ts'
 import type { ReleaseUpdateCandidate } from './release-update-bridge.ts'
 import css from './ReleaseUpdateSection.module.css'
 
-export type ReleaseUpdateStatus = { state: 'pending' | 'succeeded' | 'failed', version: string, updatedAt: string, error?: string, logPath?: string }
-export type ReleaseUpdate = { available: boolean, version?: string, sha256?: string, packageUrl?: string, error?: string, lastUpdate?: ReleaseUpdateStatus }
+export type ReleaseUpdateStatus = { state: 'pending' | 'succeeded' | 'failed', version: string, updatedAt: string, packageId?: string, error?: string, logPath?: string }
+export type ReleaseUpdate = { available: boolean, version?: string, sha256?: string, packageId?: string, lastModified?: string, packageUrl?: string, error?: string, lastUpdate?: ReleaseUpdateStatus }
 function candidateFor(update: ReleaseUpdate | undefined): ReleaseUpdateCandidate | undefined {
-  if (update?.available !== true || typeof update.version !== 'string' || typeof update.sha256 !== 'string' || typeof update.packageUrl !== 'string') return undefined
+  if (update?.available !== true || typeof update.packageUrl !== 'string') return undefined
+  if (typeof update.packageId === 'string') return { packageId: update.packageId, packageUrl: update.packageUrl }
+  if (typeof update.version !== 'string' || typeof update.sha256 !== 'string') return undefined
   return { version: update.version, sha256: update.sha256, packageUrl: update.packageUrl }
 }
 export function ReleaseUpdateSection({ request }: { request: (action: 'check' | 'prepare', candidate?: ReleaseUpdateCandidate) => Promise<ReleaseUpdate> }) {
@@ -29,7 +31,7 @@ export function ReleaseUpdateSection({ request }: { request: (action: 'check' | 
     }, error => setUpdate({ available: false, error: error instanceof Error ? error.message : String(error) })).finally(() => setPending(undefined))
   }
   useEffect(() => { run('check') }, [])
-  return <section className={css.section} data-testid="release-update-settings"><h2>在线更新</h2><p>当前安装会从已发布的 Windows Lite 更新源检查新版本。</p>
+  return <section className={css.section} data-testid="release-update-settings"><h2>在线更新</h2><p>当前安装会检查美的 GitLab 上的 Windows Lite ZIP；发布时只需覆盖同名 ZIP。</p>
     <dl><div><dt>状态</dt><dd>{pending === 'check' ? '正在检查…' : update?.lastUpdate?.state === 'failed' ? '最近一次更新失败' : update?.lastUpdate?.state === 'succeeded' ? '最近一次更新成功' : update?.lastUpdate?.state === 'pending' ? '更新程序正在等待侧边栏关闭' : update?.error ?? (prepared ? '更新程序已启动' : update?.available ? '发现可更新版本' : '暂无可用更新')}</dd></div>
       {update?.version !== undefined && <div><dt>新版本</dt><dd>{update.version}</dd></div>}
       {update?.sha256 !== undefined && <div><dt>SHA256</dt><dd title={update.sha256}>{update.sha256.slice(0, 16)}…</dd></div>}</dl>

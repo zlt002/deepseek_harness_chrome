@@ -22,14 +22,19 @@ function validProductVersion(value) {
 }
 
 function releaseUpdateCandidate(update) {
-  if (update?.available !== true || typeof update.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(update.version)
-    || typeof update.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(update.sha256)
-    || typeof update.packageUrl !== 'string' || !/^https:\/\//.test(update.packageUrl)) return undefined
+  if (update?.available !== true || typeof update.packageUrl !== 'string' || !/^https:\/\//.test(update.packageUrl)) return undefined
+  if (typeof update.packageId === 'string' && update.packageId.length > 0 && update.packageId.length <= 1_024 && !/[\r\n]/.test(update.packageId)) {
+    return Object.freeze({ packageId: update.packageId, packageUrl: update.packageUrl })
+  }
+  if (typeof update.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(update.version)
+    || typeof update.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(update.sha256)) return undefined
   return Object.freeze({ version: update.version, sha256: update.sha256.toLowerCase(), packageUrl: update.packageUrl })
 }
 
 function releaseUpdateCandidateKey(candidate) {
-  return `${candidate.version}\u0000${candidate.sha256}\u0000${candidate.packageUrl}`
+  return candidate.packageId === undefined
+    ? `release\u0000${candidate.version}\u0000${candidate.sha256}\u0000${candidate.packageUrl}`
+    : `package\u0000${candidate.packageId}\u0000${candidate.packageUrl}`
 }
 
 function installedNativeVersion(installRoot) {
@@ -371,7 +376,12 @@ export class NativeHost {
     this.releaseUpdateRequest = { requestId, controller }
     try {
       const lastUpdate = await this.updateStatusRead(this.installRoot)
-      const update = await this.updateCheck({ installRoot: this.installRoot, currentVersion: this.productVersion, signal: controller.signal })
+      const update = await this.updateCheck({
+        installRoot: this.installRoot,
+        currentVersion: this.productVersion,
+        ...(lastUpdate?.state === 'succeeded' && typeof lastUpdate.packageId === 'string' ? { currentPackageId: lastUpdate.packageId } : {}),
+        signal: controller.signal,
+      })
       const candidate = releaseUpdateCandidate(update)
       if (candidate !== undefined) {
         this.releaseUpdateCandidates.set(releaseUpdateCandidateKey(candidate), candidate)

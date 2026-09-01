@@ -1,11 +1,16 @@
-export type ReleaseUpdateCandidate = { version: string, sha256: string, packageUrl: string }
+export type ReleaseUpdateCandidate =
+  | { packageId: string, packageUrl: string }
+  | { version: string, sha256: string, packageUrl: string }
 
 export function validReleaseUpdateCandidate(value: unknown): value is ReleaseUpdateCandidate {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).length === 3
-    && typeof (value as ReleaseUpdateCandidate).version === 'string' && /^\d+\.\d+\.\d+$/.test((value as ReleaseUpdateCandidate).version)
-    && typeof (value as ReleaseUpdateCandidate).sha256 === 'string' && /^[a-f0-9]{64}$/i.test((value as ReleaseUpdateCandidate).sha256)
-    && typeof (value as ReleaseUpdateCandidate).packageUrl === 'string' && /^https:\/\//.test((value as ReleaseUpdateCandidate).packageUrl)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== 2 && Object.keys(value).length !== 3
+    || typeof (value as ReleaseUpdateCandidate).packageUrl !== 'string' || !/^https:\/\//.test((value as ReleaseUpdateCandidate).packageUrl)) return false
+  if ('packageId' in value) return Object.keys(value).length === 2
+    && typeof value.packageId === 'string' && value.packageId.length > 0 && value.packageId.length <= 1_024 && !/[\r\n]/.test(value.packageId)
+  return Object.keys(value).length === 3
+    && typeof (value as { version?: unknown }).version === 'string' && /^\d+\.\d+\.\d+$/.test((value as { version: string }).version)
+    && typeof (value as { sha256?: unknown }).sha256 === 'string' && /^[a-f0-9]{64}$/i.test((value as { sha256: string }).sha256)
 }
 
 export function releaseUpdateNativeMessage(action: unknown, requestId: unknown, candidate?: unknown) {
@@ -13,7 +18,7 @@ export function releaseUpdateNativeMessage(action: unknown, requestId: unknown, 
   if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160) throw new Error('在线更新请求 ID 无效')
   if (action === 'prepare') {
     if (!validReleaseUpdateCandidate(candidate)) throw new Error('在线更新候选无效')
-    return { type: 'release-update-prepare', requestId, candidate: { ...candidate, sha256: candidate.sha256.toLowerCase() } }
+    return { type: 'release-update-prepare', requestId, candidate: 'sha256' in candidate ? { ...candidate, sha256: candidate.sha256.toLowerCase() } : candidate }
   }
   if (candidate !== undefined) throw new Error('在线更新候选只可用于安装请求')
   return { type: action === 'check' ? 'release-update-check' : 'release-update-cancel', requestId }

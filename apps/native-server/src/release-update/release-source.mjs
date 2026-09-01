@@ -1,8 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
-const OFFICIAL_RELEASE_ROOT = 'https://github.com/zlt002/deepseek_harness_chrome/releases'
-export const DEFAULT_WINDOWS_LITE_MANIFEST_URL = `${OFFICIAL_RELEASE_ROOT}/download/windows-lite-current/accr-ui-windows-lite-update.json`
+export const DEFAULT_WINDOWS_LITE_ZIP_URL = 'https://git.midea.com/zhanglt21/claudecodeuibox/-/raw/main/accr-ui-windows-lite-x64.zip'
 const SOURCE_FILE = '.accrui-update-source.json'
 const MAX_RELEASE_BYTES = 1024 * 1024 * 1024
 const MAX_MANIFEST_BYTES = 64 * 1024
@@ -22,7 +21,7 @@ export async function resolveReleaseSource({ installRoot, env = process.env, fet
       if (typeof source?.packageUrl === 'string') return directSource(source.packageUrl, source.sha256, '安装目录更新源配置')
     } catch (error) { if (error?.code !== 'ENOENT') throw new Error(`无法读取更新源配置：${error.message}`) }
   }
-  return fetchReleaseManifest(DEFAULT_WINDOWS_LITE_MANIFEST_URL, fetchImpl, { signal, timeoutMs: manifestTimeoutMs })
+  return directSource(DEFAULT_WINDOWS_LITE_ZIP_URL, undefined, '默认 GitLab 更新源')
 }
 
 function isHttpUrl(value) {
@@ -37,6 +36,7 @@ function requiredSha256(value, label) {
 
 function directSource(packageUrl, sha256, label) {
   if (!isHttpUrl(packageUrl)) throw new Error(`${label}必须使用 HTTPS package URL`)
+  if (sha256 === undefined || sha256 === null || String(sha256).trim() === '') return { packageUrl }
   return { packageUrl, expectedSha256: requiredSha256(sha256, label) }
 }
 
@@ -122,7 +122,41 @@ export async function fetchRelease(source, fetchImpl = fetch, { signal, timeoutM
   const bytes = Buffer.from(await response.arrayBuffer())
   if (bytes.length === 0 || bytes.length > MAX_RELEASE_BYTES) throw new Error(`更新包大小无效或超过 ${MAX_RELEASE_BYTES} 字节上限`)
   if (contentType.includes('text/html') || bytes.subarray(0, 512).toString('utf8').toLowerCase().includes('<html')) throw new Error('更新地址返回 HTML，不是 ZIP raw 下载地址')
-    return { bytes, etag: response.headers.get('etag') ?? undefined }
+    const metadata = releaseMetadata(response)
+    return { bytes, ...metadata }
+  } finally {
+    request.dispose()
+  }
+}
+
+function releaseMetadata(response) {
+  const etag = response.headers.get('etag')?.trim() || undefined
+  const lastModified = response.headers.get('last-modified')?.trim() || undefined
+  const packageId = etag ?? lastModified
+  return {
+    ...(packageId === undefined ? {} : { packageId }),
+    ...(etag === undefined ? {} : { etag }),
+    ...(lastModified === undefined ? {} : { lastModified }),
+  }
+}
+
+/** Check a stable ZIP URL without downloading the package body. */
+export async function probeRelease(source, fetchImpl = fetch, { signal, timeoutMs = MANIFEST_TIMEOUT_MS } = {}) {
+  const request = requestController(signal, timeoutMs, '检查 GitLab 更新包')
+  let response
+  try {
+    response = await fetchImpl(source.packageUrl, { method: 'HEAD', headers: { accept: 'application/zip' }, signal: request.controller.signal })
+    if (response.status === 405) {
+      response = await fetchImpl(source.packageUrl, { method: 'GET', headers: { accept: 'application/zip', range: 'bytes=0-0' }, signal: request.controller.signal })
+    }
+    if (!response.ok) throw new Error(`GitLab 更新包不可访问：HTTP ${response.status}`)
+    const metadata = releaseMetadata(response)
+    if (metadata.packageId === undefined) throw new Error('GitLab 更新包未返回 ETag 或 Last-Modified，无法可靠判断是否更新')
+    try { await response.body?.cancel?.() } catch {}
+    return metadata
+  } catch (error) {
+    if (error instanceof Error && error.message === 'fetch failed') throw new Error('无法连接美的 GitLab 更新源；请确认已连接公司网络')
+    throw error
   } finally {
     request.dispose()
   }

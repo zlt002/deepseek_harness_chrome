@@ -1,6 +1,8 @@
 import type { ReleaseUpdate } from './ReleaseUpdateSection.tsx'
 
-export type ReleaseUpdateCandidate = { version: string, sha256: string, packageUrl: string }
+export type ReleaseUpdateCandidate =
+  | { packageId: string, packageUrl: string }
+  | { version: string, sha256: string, packageUrl: string }
 
 export function createReleaseUpdateBridge(nonce: string, parentOrigin: string) {
   let sequence = 0

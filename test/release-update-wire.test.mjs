@@ -17,3 +17,8 @@ test('release update wire requires the checked release identity for prepare', ()
   assert.deepEqual(releaseUpdateNativeMessage('prepare', 'request-12345678', candidate), { type: 'release-update-prepare', requestId: 'request-12345678', candidate })
   assert.throws(() => releaseUpdateNativeMessage('prepare', 'request-12345678'), /候选/)
 })
+
+test('release update wire accepts a checked GitLab ZIP identity', () => {
+  const candidate = { packageId: 'W/"gitlab-zip-etag"', packageUrl: 'https://git.midea.com/example/release.zip' }
+  assert.deepEqual(releaseUpdateNativeMessage('prepare', 'request-12345678', candidate), { type: 'release-update-prepare', requestId: 'request-12345678', candidate })
+})

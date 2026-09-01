@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import test from 'node:test'
 
 import {
-  DEFAULT_WINDOWS_LITE_MANIFEST_URL,
+  DEFAULT_WINDOWS_LITE_ZIP_URL,
   fetchRelease,
   resolveReleaseSource,
 } from '../apps/native-server/src/release-update/release-source.mjs'
@@ -20,39 +20,39 @@ const streamBody = (chunks, { onCancel } = {}) => new ReadableStream({
   cancel: onCancel,
 })
 
-test('uses a validated published release manifest when no install root or override is available', async () => {
-  assert.match(DEFAULT_WINDOWS_LITE_MANIFEST_URL, /releases\/download\/windows-lite-current\//)
-  const source = await resolveReleaseSource({
+test('checks the single Midea GitLab ZIP by metadata without downloading it', async () => {
+  assert.equal(
+    DEFAULT_WINDOWS_LITE_ZIP_URL,
+    'https://git.midea.com/zhanglt21/claudecodeuibox/-/raw/main/accr-ui-windows-lite-x64.zip',
+  )
+  let downloaded = false
+  const update = await checkUpdate({
+    currentPackageId: 'W/"old-package"',
     env: {},
-    fetchImpl: async input => {
-      assert.equal(String(input), DEFAULT_WINDOWS_LITE_MANIFEST_URL)
+    fetchImpl: async (input, options) => {
+      assert.equal(String(input), DEFAULT_WINDOWS_LITE_ZIP_URL)
+      assert.equal(options.method, 'HEAD')
       return {
         ok: true,
         status: 200,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        body: streamBody([manifestBytes({
-          format: 'accr-ui-windows-lite-update-v1',
-          releaseUrl: 'https://github.com/zlt002/deepseek_harness_chrome/releases/tag/windows-lite-v1.1.86',
-          version: '1.1.86',
-          sha256: 'a'.repeat(64),
-          packageUrl,
-        })]),
-        arrayBuffer: async () => { throw new Error('manifest must not use arrayBuffer') },
+        headers: new Headers({ etag: 'W/"new-package"', 'last-modified': 'Tue, 01 Sep 2026 12:00:00 GMT' }),
+        arrayBuffer: async () => { downloaded = true; throw new Error('check must not download ZIP bytes') },
       }
     },
   })
-  assert.deepEqual(source, {
-    packageUrl,
-    expectedSha256: 'a'.repeat(64),
-    expectedVersion: '1.1.86',
-    releaseUrl: 'https://github.com/zlt002/deepseek_harness_chrome/releases/tag/windows-lite-v1.1.86',
+  assert.equal(downloaded, false)
+  assert.deepEqual(update, {
+    available: true,
+    packageId: 'W/"new-package"',
+    lastModified: 'Tue, 01 Sep 2026 12:00:00 GMT',
+    packageUrl: DEFAULT_WINDOWS_LITE_ZIP_URL,
   })
 })
 
-test('fails closed when a direct override omits its SHA256', async () => {
-  await assert.rejects(
-    resolveReleaseSource({ env: { ACCRUI_WINDOWS_LITE_UPDATE_URL: 'https://example.test/release.zip' } }),
-    /SHA256/,
+test('accepts a direct single-ZIP override without a separately uploaded SHA file', async () => {
+  assert.deepEqual(
+    await resolveReleaseSource({ env: { ACCRUI_WINDOWS_LITE_UPDATE_URL: 'https://example.test/release.zip' } }),
+    { packageUrl: 'https://example.test/release.zip' },
   )
 })
 

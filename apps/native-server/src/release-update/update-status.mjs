@@ -9,6 +9,7 @@ function validStatus(value) {
   if (typeof value.version !== 'string' || value.version.length === 0 || value.version.length > 128) return false
   if (typeof value.updatedAt !== 'string' || Number.isNaN(Date.parse(value.updatedAt))) return false
   if (value.error !== undefined && (typeof value.error !== 'string' || value.error.length > 2_048)) return false
+  if (value.packageId !== undefined && (typeof value.packageId !== 'string' || value.packageId.length === 0 || value.packageId.length > 1_024 || /[\r\n]/.test(value.packageId))) return false
   return value.logPath === undefined || (typeof value.logPath === 'string' && value.logPath.length <= 1_024)
 }
 
@@ -22,6 +23,7 @@ export async function readUpdateStatus(installRoot, { readFileImpl = readFile } 
       state: status.state,
       version: status.version,
       updatedAt: status.updatedAt,
+      ...(status.packageId === undefined ? {} : { packageId: status.packageId }),
       ...(status.error === undefined ? {} : { error: status.error }),
       ...(status.logPath === undefined ? {} : { logPath: status.logPath }),
     })

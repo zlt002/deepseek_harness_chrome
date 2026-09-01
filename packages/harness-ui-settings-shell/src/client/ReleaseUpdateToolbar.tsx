@@ -27,9 +27,11 @@ export function ReleaseUpdateToolbar({ request }: Props) {
     const version = state.phase === 'ready' ? state.version : undefined
     setFailure(undefined)
     setState({ phase: 'preparing' })
-    const candidate = update?.available === true && typeof update.version === 'string' && typeof update.sha256 === 'string' && typeof update.packageUrl === 'string'
-      ? { version: update.version, sha256: update.sha256, packageUrl: update.packageUrl }
-      : undefined
+    const candidate = update?.available === true && typeof update.packageUrl === 'string' && typeof update.packageId === 'string'
+      ? { packageId: update.packageId, packageUrl: update.packageUrl }
+      : update?.available === true && typeof update.version === 'string' && typeof update.sha256 === 'string' && typeof update.packageUrl === 'string'
+        ? { version: update.version, sha256: update.sha256, packageUrl: update.packageUrl }
+        : undefined
     if (candidate === undefined) { setFailure('更新候选已失效；请重新检查更新。'); setState({ phase: 'ready', ...(version === undefined ? {} : { version }) }); return }
     void request('prepare', candidate).then(() => setState({ phase: 'hidden' }), error => {
       setFailure(error instanceof Error ? error.message : String(error))
