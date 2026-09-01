@@ -24,7 +24,7 @@ $installRootDrive = [System.IO.Path]::GetPathRoot($installRoot)
 if ($installRoot.TrimEnd('\') -eq $installRootDrive.TrimEnd('\')) { throw '安装位置不能是磁盘根目录。' }
 $rollbackRoot = Join-Path $installRoot 'rollback'
 $managedNames = @('extension', 'runtime', 'release.json')
-$swappableManagedNames = @('runtime', 'release.json')
+$swappableManagedNames = @('release.json')
 $installLog = Join-Path $env:TEMP 'accr-ui-harness-install.log'
 $nativeHostNames = @('com.accrui.harness.chrome')
 $legacyAccrUiNativeHostNames = @('com.deepseek.harness.chrome')
@@ -306,6 +306,29 @@ function Move-ManagedTree([string]$Source, [string]$Destination, [switch]$Explai
   }
 }
 
+function Copy-RuntimeTree([string]$SourceRoot, [string]$DestinationRoot) {
+  $source = Join-Path $SourceRoot 'runtime'
+  if (-not (Test-Path -LiteralPath $source -PathType Container)) { return }
+  $destination = Join-Path $DestinationRoot 'runtime'
+  if (Test-Path -LiteralPath $destination) { Remove-ManagedPathWithRetry $destination }
+  New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
+  Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force -ErrorAction Stop
+}
+
+function Install-RuntimeTree([string]$Source, [string]$Destination) {
+  if (-not (Test-Path -LiteralPath $Source -PathType Container)) { throw "安装内容不完整：缺少 $Source" }
+  New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  # Keep the runtime directory itself in place. The detached updater can inherit
+  # this directory as its Windows working directory, which makes renaming the
+  # directory fail even after every Native Host process has exited.
+  foreach ($item in @(Get-ChildItem -LiteralPath $Destination -Force)) {
+    Remove-ManagedPathWithRetry $item.FullName
+  }
+  foreach ($item in @(Get-ChildItem -LiteralPath $Source -Force)) {
+    Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+  }
+}
+
 function Copy-ExtensionTree([string]$SourceRoot, [string]$DestinationRoot, [switch]$ExplainLockedExtension) {
   $source = Join-Path $SourceRoot 'extension'
   if (-not (Test-Path -LiteralPath $source -PathType Container)) { return }
@@ -496,12 +519,16 @@ function Restore-Rollback {
   New-Item -ItemType Directory -Path $swapRoot -Force | Out-Null
   try {
     Copy-ExtensionTree $installRoot $swapRoot
+    Copy-RuntimeTree $installRoot $swapRoot
     Move-ManagedTree $installRoot $swapRoot -Names $swappableManagedNames -MovedNames $installedToSwap
+    Install-RuntimeTree (Join-Path $rollbackRoot 'runtime') (Join-Path $installRoot 'runtime')
     Move-ManagedTree $rollbackRoot $installRoot -Names $swappableManagedNames
     Install-ExtensionTree (Join-Path $rollbackRoot 'extension') (Join-Path $installRoot 'extension')
     Write-ProductState $installRoot
     Restore-NativeHostRegistration $installRoot
     Copy-ExtensionTree $swapRoot $rollbackRoot
+    Remove-ManagedPathWithRetry (Join-Path $rollbackRoot 'runtime')
+    Move-ManagedTree $swapRoot $rollbackRoot -Names @('runtime')
     Move-ManagedTree $swapRoot $rollbackRoot -Names $swappableManagedNames
     Complete-NativeHostRegistrationTransition
     Write-Host 'Harness UI 已回滚；再次运行 -Rollback 可切换回刚才的版本。'
@@ -515,6 +542,9 @@ function Restore-Rollback {
         $rollbackPath = Join-Path $rollbackRoot $name
         $restoreSource = if (Test-Path -LiteralPath $swapPath) { $swapPath } elseif (Test-Path -LiteralPath $rollbackPath) { $rollbackPath } else { throw "无法找到原版本 $name 的安全备份" }
         Move-ManagedPathWithRetry $restoreSource (Join-Path $installRoot $name)
+      }
+      if (Test-Path -LiteralPath (Join-Path $swapRoot 'runtime') -PathType Container) {
+        Install-RuntimeTree (Join-Path $swapRoot 'runtime') (Join-Path $installRoot 'runtime')
       }
       if (Test-Path -LiteralPath (Join-Path $swapRoot 'extension\manifest.json') -PathType Leaf) {
         Install-ExtensionTree (Join-Path $swapRoot 'extension') (Join-Path $installRoot 'extension')
@@ -567,8 +597,10 @@ try {
   Stop-InstalledProductProcesses $installRoot
   # Preserve user-owned workspace, logs, .webmcp, and the last rollback tree.
   Copy-ExtensionTree $installRoot $previousRoot -ExplainLockedExtension
+  Copy-RuntimeTree $installRoot $previousRoot
   try {
     Move-ManagedTree $installRoot $previousRoot -Names $swappableManagedNames
+    Install-RuntimeTree (Join-Path $stagingRoot 'runtime') (Join-Path $installRoot 'runtime')
     Move-ManagedTree $stagingRoot $installRoot -Names $swappableManagedNames
     Install-ExtensionTree (Join-Path $stagingRoot 'extension') (Join-Path $installRoot 'extension')
     foreach ($name in @('workspace', 'logs', '.webmcp', 'guide-state.json')) {
@@ -597,6 +629,9 @@ try {
       foreach ($name in $swappableManagedNames) {
         $failedPath = Join-Path $installRoot $name
         Remove-ManagedPathWithRetry $failedPath
+      }
+      if (Test-Path -LiteralPath (Join-Path $previousRoot 'runtime') -PathType Container) {
+        Install-RuntimeTree (Join-Path $previousRoot 'runtime') (Join-Path $installRoot 'runtime')
       }
       Move-ManagedTree $previousRoot $installRoot -Names $swappableManagedNames
       if (Test-Path -LiteralPath (Join-Path $previousRoot 'extension\manifest.json') -PathType Leaf) {
