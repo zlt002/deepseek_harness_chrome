@@ -95,7 +95,7 @@ import { retainedPrototypeReferences } from '../src/prototype-reference-storage'
 import { sha256Fingerprint, validateReferenceEvidence, verifyReferenceEvidenceFingerprint } from '../../../packages/harness-ui-prototype-studio/src/prototype-document'
 import { productBrief } from '../../../packages/harness-ui-prototype-studio/src/product-brief.mjs'
 import { releaseUpdateNativeMessage, releaseUpdateResult } from '../src/release-update-wire'
-import { shouldConsumeReleaseUpdateReload } from '../src/native-reconnect-policy'
+import { NATIVE_UPDATE_HANDOFF_GRACE_MS, shouldConsumeReleaseUpdateReload } from '../src/native-reconnect-policy'
 const KNOWLEDGE_API_ORIGIN = 'https://anapi-uat.annto.com'
 const KNOWLEDGE_BASE_URL = `${KNOWLEDGE_API_ORIGIN}/api-sse-kd`
 const KNOWLEDGE_CATALOG_TIMEOUT_MS = 15_000
@@ -383,6 +383,7 @@ interface NativeTransferPayload {
 }
 
 let nativePort: chrome.runtime.Port | undefined
+let releaseUpdateReconnectBlockedUntil = 0
 const pendingReleaseUpdates = new Map<string, { resolve: (value: { ok: boolean, update?: unknown, error?: string }) => void, timer: ReturnType<typeof setTimeout>, cancelResolve?: (value: { ok: boolean, error?: string, status?: string }) => void, cancelTimer?: ReturnType<typeof setTimeout>, cancelling?: boolean }>()
 const RELEASE_UPDATE_RELOAD_GUARD_KEY = 'accrui:release-update-reload-guard:v1'
 const RELEASE_UPDATE_RELOAD_GUARD_MS = 5 * 60_000
@@ -4483,13 +4484,17 @@ function disconnectNativePort(port: chrome.runtime.Port): void {
   pendingReleaseUpdates.clear()
   for (const [requestId, pending] of pendingPmdPrdReviewAdoptions) { clearTimeout(pending.timeout); pending.reject(new Error(error)); pendingPmdPrdReviewAdoptions.delete(requestId) }
   for (const [requestId, pending] of pendingPrdEventReports) { clearTimeout(pending.timeout); pending.reject(new Error(error)); pendingPrdEventReports.delete(requestId) }
+  const updateInstalling = Date.now() < releaseUpdateReconnectBlockedUntil
   void chrome.runtime.sendMessage({
-    type: 'harness-disconnected',
+    type: updateInstalling ? 'harness-update-installing' : 'harness-disconnected',
     error,
   }).catch(() => {})
 }
 
 function connectNativePort(): chrome.runtime.Port {
+  if (Date.now() < releaseUpdateReconnectBlockedUntil) {
+    throw new Error('Harness UI 正在安装更新，请稍候。')
+  }
   if (nativePort !== undefined) return nativePort
   const port = chrome.runtime.connectNative(NATIVE_HOST_NAME)
   port.onDisconnect.addListener(() => disconnectNativePort(port))
@@ -4516,6 +4521,9 @@ function connectNativePort(): chrome.runtime.Port {
       return
     }
     if (message.type === 'release_update_reload_required') {
+      // Do not let the open side panel immediately recreate the old Host while
+      // the detached installer is trying to replace its runtime directory.
+      releaseUpdateReconnectBlockedUntil = Date.now() + NATIVE_UPDATE_HANDOFF_GRACE_MS
       void rememberReleaseUpdateReload((message as { version?: unknown }).version).catch(error => console.warn('[deepseek-harness] Could not persist release-update reload request:', error))
       return
     }

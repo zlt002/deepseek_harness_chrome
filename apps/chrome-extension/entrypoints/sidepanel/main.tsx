@@ -7,7 +7,7 @@ import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessHandoffTa
 import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
 import { MARKDOWN_AI_ACK_TIMEOUT_MS } from '../markdown-review/delivery-timeouts'
 import { validateWorkspaceMarkdownFeedback, validateWorkspaceMarkdownReviewAction, type WorkspaceMarkdownFeedback, type WorkspaceMarkdownReviewAction } from './markdown-feedback-validator'
-import { retryNativeConnection } from '../../src/native-reconnect-policy'
+import { NATIVE_UPDATE_HANDOFF_GRACE_MS, retryNativeConnection } from '../../src/native-reconnect-policy'
 import './style.css'
 
 type HarnessStatus = 'starting' | 'ready' | 'error'
@@ -511,7 +511,7 @@ function App(): React.JSX.Element {
     setLockedRunTargets(runTargetLockProjectionRef.current.reset())
   }, [])
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (initialDelayMs = 0) => {
     reconnectAbortRef.current?.abort()
     const controller = new AbortController()
     reconnectAbortRef.current = controller
@@ -531,7 +531,7 @@ function App(): React.JSX.Element {
       }
       lastError = response.error ?? lastError
       return false
-    }, { signal: controller.signal })
+    }, { signal: controller.signal, initialDelayMs })
     if (reconnectAbortRef.current === controller) reconnectAbortRef.current = undefined
     if (!connected && !controller.signal.aborted) { setStatus('error'); setError(lastError) }
   }, [clearBrowserTargetLockProjection])
@@ -718,6 +718,7 @@ function App(): React.JSX.Element {
       if (value.type === 'harness-ready' && typeof value.url === 'string') { setUrl(value.url); setStatus('ready'); setError(undefined) }
       if (value.type === 'harness-runtime-mismatch' && typeof value.error === 'string') { setStatus('error'); setError(value.error) }
       if (value.type === 'harness-disconnected') { void connect() }
+      if (value.type === 'harness-update-installing') { void connect(NATIVE_UPDATE_HANDOFF_GRACE_MS) }
       // Relay live selected-source search progress into the Harness iframe,
       // guarded by the same nonce as every other bridge message.
       if (value.type === 'search-progress/v1' && typeof value.requestId === 'string' && typeof value.harnessSessionId === 'string' && (value.harnessParentSessionId === undefined || typeof value.harnessParentSessionId === 'string') && (value.tool === 'code_search' || value.tool === 'knowledge_search') && typeof value.question === 'string' && (value.phase === 'querying' || value.phase === 'streaming' || value.phase === 'done' || value.phase === 'error') && typeof value.chars === 'number' && typeof value.content === 'string' && frameOrigin !== undefined && frameReadyRef.current && frameRef.current?.contentWindow !== null) {

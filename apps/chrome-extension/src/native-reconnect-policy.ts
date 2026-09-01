@@ -1,4 +1,5 @@
 export const NATIVE_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000, 12_000, 16_000, 16_000] as const
+export const NATIVE_UPDATE_HANDOFF_GRACE_MS = 15_000
 
 export function shouldConsumeReleaseUpdateReload(targetVersion: unknown, nativeVersion: unknown): boolean {
   return typeof targetVersion === 'string' && /^\d+\.\d+\.\d+$/.test(targetVersion)
@@ -8,6 +9,7 @@ export function shouldConsumeReleaseUpdateReload(targetVersion: unknown, nativeV
 type NativeReconnectOptions = {
   signal?: AbortSignal
   delaysMs?: readonly number[]
+  initialDelayMs?: number
   wait?: (delayMs: number, signal?: AbortSignal) => Promise<void>
 }
 
@@ -35,6 +37,10 @@ export async function retryNativeConnection(
 ): Promise<boolean> {
   const delaysMs = options.delaysMs ?? NATIVE_RECONNECT_DELAYS_MS
   const wait = options.wait ?? waitForReconnect
+
+  if ((options.initialDelayMs ?? 0) > 0) {
+    await wait(options.initialDelayMs!, options.signal)
+  }
 
   for (let attempt = 0; ; attempt += 1) {
     if (reconnectAborted(options.signal)) return false
