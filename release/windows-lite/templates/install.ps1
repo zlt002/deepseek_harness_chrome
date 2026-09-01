@@ -361,6 +361,23 @@ function Copy-ExtensionFileAtomically([System.IO.FileInfo]$Source, [string]$Dest
   }
 }
 
+function Commit-ExtensionManifest([string]$Source, [string]$Destination) {
+  if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "安装内容不完整：缺少 $Source" }
+  # Chrome can keep the unpacked extension active while the installer runs.
+  # Write the tiny commit file directly, then prove the bytes and version were
+  # actually replaced before the updater is allowed to report success.
+  $expectedBytes = [System.IO.File]::ReadAllBytes($Source)
+  [System.IO.File]::WriteAllBytes($Destination, $expectedBytes)
+  $actualBytes = [System.IO.File]::ReadAllBytes($Destination)
+  if ($actualBytes.Length -ne $expectedBytes.Length -or
+      [System.BitConverter]::ToString($actualBytes) -ne [System.BitConverter]::ToString($expectedBytes)) {
+    throw "扩展 manifest 写入后回读不一致：$Destination"
+  }
+  $expectedVersion = (Get-Content -LiteralPath $Source -Raw | ConvertFrom-Json).version
+  $actualVersion = (Get-Content -LiteralPath $Destination -Raw | ConvertFrom-Json).version
+  if ($actualVersion -ne $expectedVersion) { throw "扩展版本写入失败：期望 $expectedVersion，实际 $actualVersion" }
+}
+
 function Install-ExtensionTree([string]$Source, [string]$Destination) {
   $sourceDirectory = Get-Item -LiteralPath $Source
   $manifestPath = Join-Path $sourceDirectory.FullName 'manifest.json'
@@ -380,13 +397,32 @@ function Install-ExtensionTree([string]$Source, [string]$Destination) {
   }
   # Once all resources are in place, make the candidate manifest visible. Stale
   # files may survive an interruption, but they cannot break either manifest.
-  Copy-ExtensionFileAtomically $manifestFile (Join-Path $Destination 'manifest.json')
+  Commit-ExtensionManifest $manifestFile.FullName (Join-Path $Destination 'manifest.json')
   foreach ($file in @(Get-ChildItem -LiteralPath $destinationDirectory.FullName -Recurse -File)) {
     $relativePath = $file.FullName.Substring($destinationPrefix.Length)
     if (-not $expected.Contains($relativePath)) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
   }
   foreach ($directory in @(Get-ChildItem -LiteralPath $Destination -Recurse -Directory | Sort-Object FullName -Descending)) {
     if ((Get-ChildItem -LiteralPath $directory.FullName -Force | Measure-Object).Count -eq 0) { Remove-Item -LiteralPath $directory.FullName -Force -ErrorAction Stop }
+  }
+}
+
+function Assert-InstalledReleaseMatchesCandidate([string]$CandidateRoot, [string]$InstalledRoot) {
+  $candidateManifest = Assert-ReleaseTree $CandidateRoot
+  $installedManifest = Assert-ReleaseTree $InstalledRoot
+  if ($installedManifest.version -ne $candidateManifest.version) {
+    throw "扩展安装版本不一致：目标 $($candidateManifest.version)，实际 $($installedManifest.version)"
+  }
+  $releasePath = Join-Path $InstalledRoot 'release.json'
+  if (-not (Test-Path -LiteralPath $releasePath -PathType Leaf)) { throw "安装内容不完整：缺少 $releasePath" }
+  $release = Get-Content -LiteralPath $releasePath -Raw | ConvertFrom-Json
+  if ($release.extensionVersion -ne $candidateManifest.version) {
+    throw "版本状态与扩展不一致：状态 $($release.extensionVersion)，扩展 $($candidateManifest.version)"
+  }
+  $launcherPath = Join-Path $InstalledRoot 'runtime\run_native_host.bat'
+  $launcher = Get-Content -LiteralPath $launcherPath -Raw
+  if (-not $launcher.Contains('ACCR_PRODUCT_VERSION=' + $candidateManifest.version)) {
+    throw "Native Host 版本与扩展不一致：目标 $($candidateManifest.version)"
   }
 }
 
@@ -610,6 +646,7 @@ try {
         Move-Item -LiteralPath $sourcePath -Destination $destinationPath
       }
     }
+    Assert-InstalledReleaseMatchesCandidate $stagingRoot $installRoot
     # Do every validation and local state write that cannot wake the browser
     # before publishing the Native Messaging registrations.
     Write-ProductState $installRoot
