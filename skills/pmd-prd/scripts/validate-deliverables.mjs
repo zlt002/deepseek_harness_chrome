@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url'
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_REFERENCE_PATH = resolve(SCRIPT_DIR, '../references/templates.md')
 const PRD_SUFFIX = '_PRD'
-const ALLOWED_MISSING_MARKERS = ['[待确认]', '不适用（原因）']
 const FINAL_FIELD_LABEL = /\[(?:必填|选填|建议填写|涉及多系统交互时必填)\]|【选填】/
 const ACCEPTANCE_CATEGORIES = ['正常情况', '异常情况', '边界情况', '权限情况', '兼容情况']
 const IMPACT_RISK_HEADER = ['直接改动', '关联影响', '可能风险', '建议处理', '是否需要产品决策']
@@ -99,8 +98,8 @@ function buildTemplateContract(authority) {
   if (prdTemplate === null) throw new Error('references/templates.md must contain a complete prd.md fenced template')
   const headings = headingLines(prdTemplate).filter((heading) => heading.level === 1 || (heading.level === 2 && /^(## 需求基本信息|## 修订记录)/.test(heading.raw)))
   const headers = tableHeaders(prdTemplate)
-  if (headings.length !== 12 || headers.length < 5) throw new Error('references/templates.md does not expose the expected single-PRD template contract')
-  return { headings, headerStarts: headers.filter((header) => ['业务需求名称', '版本', '角色', '指标项'].includes(header[0])).map((header) => header[0]) }
+  if (headings.length !== 7 || headers.length < 5) throw new Error('references/templates.md does not expose the expected single-PRD template contract')
+  return { headings, headerStarts: headers.filter((header) => ['业务需求名称', '版本', '角色'].includes(header[0])).map((header) => header[0]) }
 }
 
 function validateFilename(name) {
@@ -140,8 +139,18 @@ function exactHeadingIndex(lines, heading, after = -1) {
 function validateBasicInformation(body) {
   const visible = markdownOutsideFences(body)
   const errors = []
-  if (!/^\|\s*需求编号及链接\s*\|/m.test(visible)) errors.push('PRD basic information is missing: 需求编号及链接')
-  if (!/^\|\s*产品经理\s*\|[^\n]*\|\s*预估人天\s*\|/m.test(visible)) errors.push('PRD basic information is missing: 预估人天')
+  const rows = visible.split('\n').map(tableRow)
+  const required = [['业务需求名称', 0, 1], ['所属系统', 2, 3], ['需求编号及链接', 0, 1], ['产品经理', 2, 3], ['预估人天', 0, 1]]
+  for (const [label, labelIndex, valueIndex] of required) {
+    const row = rows.find((cells) => cells?.includes(label))
+    if (!row || row[labelIndex] !== label || !row[valueIndex] || row[valueIndex].trim() === '') errors.push(`PRD basic information is missing: ${label}`)
+  }
+  const revision = rows.find((cells) => cells?.[0] === 'V1.0')
+  if (!revision || revision.length !== 6 || revision.some((cell) => cell.trim() === '')) errors.push('PRD revision record must be complete')
+  const requirement = rows.find((cells) => cells?.[0] === '需求编号及链接')?.[1] ?? ''
+  if (requirement && !/https?:\/\/\S+/.test(requirement)) errors.push('PRD basic information must include a confirmed requirement link')
+  const estimate = rows.find((cells) => cells?.[0] === '预估人天')?.[1] ?? ''
+  if (estimate && !/^\d+(?:\.\d+)?\s*人天$/.test(estimate)) errors.push('PRD 预估人天 must be a confirmed numeric person-day value')
   return errors
 }
 
@@ -152,17 +161,18 @@ function validateFunctionalRequirements(body) {
   const chapterEnd = exactHeadingIndex(lines, '# 五、角色权限', chapterStart)
   const normalStart = exactHeadingIndex(lines, '## （一）正常业务场景', chapterStart)
   const boundaryStart = exactHeadingIndex(lines, '## 边界场景', normalStart)
-  const abnormalStart = exactHeadingIndex(lines, '## （二）异常业务场景', boundaryStart)
-  if (chapterStart < 0 || chapterEnd < 0 || normalStart < 0 || boundaryStart < 0 || abnormalStart < 0 || abnormalStart > chapterEnd) {
-    return ['PRD functional requirements must keep 正常业务场景 → 边界场景 → 异常业务场景']
+  const abnormalStart = exactHeadingIndex(lines, '## （二）异常业务场景', normalStart)
+  if (chapterStart < 0 || chapterEnd < 0 || normalStart < 0 || abnormalStart < 0 || abnormalStart > chapterEnd || (boundaryStart >= 0 && boundaryStart > abnormalStart)) {
+    return ['PRD functional requirements must keep 正常业务场景 → optional 边界场景 → 异常业务场景']
   }
 
-  if (lines.slice(normalStart + 1, boundaryStart).some((line) => /^##\s+(?:（四）)?(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()) || /^(?:###|##)\s+(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()))) errors.push('PRD normal business scenarios must not add a change overview or locator overview')
-  const changeStarts = lines.flatMap((line, index) => index > normalStart && index < boundaryStart && /^###\s+4\.\d+\s+改动点：\S/.test(line.trim()) ? [index] : [])
+  const normalEnd = boundaryStart >= 0 ? boundaryStart : abnormalStart
+  if (lines.slice(normalStart + 1, normalEnd).some((line) => /^##\s+(?:（四）)?(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()) || /^(?:###|##)\s+(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()))) errors.push('PRD normal business scenarios must not add a change overview or locator overview')
+  const changeStarts = lines.flatMap((line, index) => index > normalStart && index < normalEnd && /^###\s+4\.\d+\s+改动点：\S/.test(line.trim()) ? [index] : [])
   if (changeStarts.length === 0) return ['PRD normal business scenarios must contain at least one ### 4.x 改动点： heading']
   for (let changeIndex = 0; changeIndex < changeStarts.length; changeIndex += 1) {
     const start = changeStarts[changeIndex]
-    const end = changeStarts[changeIndex + 1] ?? boundaryStart
+    const end = changeStarts[changeIndex + 1] ?? normalEnd
     const changeHeading = lines[start].trim()
     const changeNumber = changeHeading.match(/^###\s+4\.(\d+)\s+改动点：/)?.[1]
     const childStarts = lines.flatMap((line, index) => index > start && index < end && /^####\s+4\.\d+\.\d+\s+\S+：\S/.test(line.trim()) ? [index] : [])
@@ -175,17 +185,18 @@ function validateFunctionalRequirements(body) {
       errors.push(...validateFunctionalChild(lines.slice(childStart, childEnd)))
     }
   }
+  const estimatedDays = estimatedPersonDays(lines)
+  if (boundaryStart < 0) {
+    if (estimatedDays !== null && estimatedDays > 10) errors.push('PRD boundary scenarios are required when estimated person-days exceed 10')
+    return errors
+  }
   const boundaryLines = lines.slice(boundaryStart + 1, abnormalStart)
   const boundarySection = boundaryLines.join('\n')
-  const boundaryRows = tableDataRows(boundarySection, ['系统边界', '系统表现', '[待确认]及影响'])
-  const estimatedDays = estimatedPersonDays(lines)
-  const notApplicable = boundarySection.includes('不适用（预估人天不超过10人天）')
-  if (estimatedDays !== null && estimatedDays <= 10 && notApplicable) return errors
+  const boundaryRows = tableDataRows(boundarySection, ['系统边界', '系统表现', '处理依据'])
   for (const boundary of SYSTEM_BOUNDARIES) {
     const row = boundaryRows.find((candidate) => candidate[0] === boundary)
     if (!row || row.length !== 3 || row.some((cell) => cell.length === 0)) { errors.push(`PRD boundary scenarios must define system behaviour for: ${boundary}`); continue }
-    if (estimatedDays !== null && row[1].includes('[待确认]')) errors.push(`PRD boundary scenarios must define system behaviour for: ${boundary}`)
-    if (estimatedDays === null && (!row[1].includes('[待确认]') || row[2].includes('[待确认]') || row[2].length < 4)) errors.push(`PRD boundary scenarios must retain [待确认] and impact for unknown 预估人天: ${boundary}`)
+    if (row.some((cell) => cell.includes('[待确认]'))) errors.push(`PRD boundary scenarios must define system behaviour for: ${boundary}`)
   }
   return errors
 }
@@ -217,20 +228,21 @@ function validateTargetChange(target) {
   if (/^(?:(?:优化|调整|修复)[\u4e00-\u9fff]{0,10}|(?:保持一致|正确展示)[\u4e00-\u9fff]{0,6})$/.test(plain)) return '目标修改点不能只是“优化、调整、修复、保持一致、正确展示”等空泛短句'
   if (/(?:^|[^A-Za-z0-9_.\\/-])\/(?:[\w.-]+\/)+[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text) || /(?:^|[^A-Za-z0-9_.\\/-])[A-Za-z]:[\\/](?:[\w.-]+[\\/])*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text)) return '目标修改点不得使用开发者本机绝对路径，需使用代码库完整相对路径'
   for (const match of text.matchAll(CODE_FILE_PATTERN)) if (!match[1]) return `目标修改点中的代码文件必须使用带目录的代码库相对路径，不能只写文件名：${match[2]}`
+  if (!/(?:[\w.-]+\/)+[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/.test(text)) return '目标修改点必须包含完整相对路径'
   return null
 }
 
 function estimatedPersonDays(lines) {
-  const row = lines.map(tableRow).find((cells) => cells?.[0] === '产品经理' && cells[2] === '预估人天')
-  const match = row?.[3]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
+  const row = lines.map(tableRow).find((cells) => cells?.[0] === '预估人天')
+  const match = row?.[1]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
   return match ? Number(match[1]) : null
 }
 
 function validateTestFocus(body) {
   const lines = markdownOutsideFences(body).split('\n')
   const chapterStart = exactHeadingIndex(lines, '# 八、测试关注点')
-  const chapterEnd = exactHeadingIndex(lines, '# 九、参考文档', chapterStart)
-  const required = ['## （一）影响范围分析', '## （二）异常场景关注点', '## （三）验收清单', '## （四）性能压测要求', '## （五）数据准备要求']
+  const chapterEnd = lines.length
+  const required = ['## （一）影响范围分析', '## （二）异常场景关注点', '## （三）验收清单']
   let cursor = chapterStart
   const errors = []
   for (const heading of required) {
@@ -272,9 +284,10 @@ function textOutsideTargetChangeCells(lines) {
 function validatePrdLanguage(body) {
   const visible = markdownOutsideFences(body); const errors = []
   const unresolvedLine = visible.split('\n').find((line) => /^\s*\{[^{}\n]+\}\s*$/.test(line))
-  if (unresolvedLine) errors.push(`PRD leaves a template placeholder; use ${ALLOWED_MISSING_MARKERS.join(' or ')}: ${unresolvedLine.trim()}`)
+  if (unresolvedLine) errors.push(`PRD leaves a template placeholder; resolve it before freezing: ${unresolvedLine.trim()}`)
   const unresolvedToken = visible.match(/\{[^{}\n]+\}/)
   if (unresolvedToken) errors.push(`PRD leaves an unresolved template token: ${unresolvedToken[0]}`)
+  if (visible.includes('[待确认]')) errors.push('PRD contains [待确认]; confirm required facts before freezing')
   const label = visible.match(FINAL_FIELD_LABEL)
   if (label) errors.push(`PRD exposes a field label: ${label[0]}`)
   if (visible.includes('\\n')) errors.push('PRD contains a literal \\n outside a fenced code block')

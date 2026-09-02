@@ -1202,16 +1202,11 @@ const PMD_PRD_MARKERS = [
   '# PRD:',
   '## 需求基本信息',
   '## 修订记录',
-  '# 一、术语与缩写',
   '# 二、背景与目标',
-  '# 三、整体流程',
   '# 四、功能性需求',
   '## （一）正常业务场景',
-  '## 边界场景',
   '## （二）异常业务场景',
   '# 五、角色权限',
-  '# 六、非功能性需求',
-  '# 七、配置与开关',
   '# 八、测试关注点',
   '## （三）验收清单',
   '### 正常情况',
@@ -1219,7 +1214,6 @@ const PMD_PRD_MARKERS = [
   '### 边界情况',
   '### 权限情况',
   '### 兼容情况',
-  '# 九、参考文档',
 ]
 function markdownOutsideFences(body) {
   let fence = null
@@ -1239,9 +1233,24 @@ function orderedMarkdownMarkersMissing(body, markers) {
   return null
 }
 function pmdEstimatedPersonDays(lines) {
-  const row = lines.map(line => line.trim().startsWith('|') && line.trim().endsWith('|') ? line.trim().slice(1, -1).split('|').map(cell => cell.trim()) : null).find(cells => cells?.[0] === '产品经理' && cells[2] === '预估人天')
-  const match = row?.[3]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
+  const row = lines.map(line => line.trim().startsWith('|') && line.trim().endsWith('|') ? line.trim().slice(1, -1).split('|').map(cell => cell.trim()) : null).find(cells => cells?.[0] === '预估人天')
+  const match = row?.[1]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
   return match ? Number(match[1]) : null
+}
+function pmdBasicInformationFailure(visiblePrd) {
+  const rows = visiblePrd.split('\n').map(pmdTableRow)
+  const required = [['业务需求名称', 0, 1], ['所属系统', 2, 3], ['需求编号及链接', 0, 1], ['产品经理', 2, 3], ['预估人天', 0, 1]]
+  for (const [label, labelIndex, valueIndex] of required) {
+    const row = rows.find(cells => cells?.includes(label))
+    if (!row || row[labelIndex] !== label || !row[valueIndex]?.trim()) return `PRD basic information is missing: ${label}`
+  }
+  const revision = rows.find(cells => cells?.[0] === 'V1.0')
+  if (!revision || revision.length !== 6 || revision.some(cell => !cell.trim())) return 'PRD revision record must be complete'
+  const requirement = rows.find(cells => cells?.[0] === '需求编号及链接')?.[1] ?? ''
+  if (requirement && !/https?:\/\/\S+/.test(requirement)) return 'PRD basic information must include a confirmed requirement link'
+  const estimate = rows.find(cells => cells?.[0] === '预估人天')?.[1] ?? ''
+  if (estimate && !/^\d+(?:\.\d+)?\s*人天$/.test(estimate)) return 'PRD 预估人天 must be a confirmed numeric person-day value'
+  return null
 }
 function pmdTableRow(line) {
   const trimmed = line.trim()
@@ -1272,6 +1281,7 @@ function pmdTargetChangeFailure(target) {
   if (/(?:^|[^A-Za-z0-9_.\\/-])\/(?:[\w.-]+\/)+[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text) || /(?:^|[^A-Za-z0-9_.\\/-])[A-Za-z]:[\\/](?:[\w.-]+[\\/])*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text)) return '目标修改点不得使用开发者本机绝对路径，需使用代码库完整相对路径'
   const codeFile = /(?:^|[^A-Za-z0-9_.\\/-])((?:[\w.-]+\/)*)([\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml))\b/g
   for (const match of text.matchAll(codeFile)) if (!match[1]) return `目标修改点中的代码文件必须使用带目录的代码库相对路径，不能只写文件名：${match[2]}`
+  if (!/(?:[\w.-]+\/)+[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/.test(text)) return '目标修改点必须包含完整相对路径'
   return null
 }
 function pmdTextOutsideTargetChangeCells(lines) {
@@ -1291,9 +1301,10 @@ function pmdTextOutsideTargetChangeCells(lines) {
 function pmdDetailedFunctionalFailure(visiblePrd) {
   const lines = visiblePrd.split('\n'); const normalStart = lines.findIndex(line => line.trim() === '## （一）正常业务场景')
   const boundaryStart = lines.findIndex((line, index) => index > normalStart && line.trim() === '## 边界场景')
-  const abnormalStart = lines.findIndex((line, index) => index > boundaryStart && line.trim() === '## （二）异常业务场景')
-  if (normalStart < 0 || boundaryStart < 0 || abnormalStart < 0) return 'PRD functional requirements must keep 正常业务场景 → 边界场景 → 异常业务场景'
-  const normal = lines.slice(normalStart + 1, boundaryStart)
+  const abnormalStart = lines.findIndex((line, index) => index > normalStart && line.trim() === '## （二）异常业务场景')
+  if (normalStart < 0 || abnormalStart < 0 || (boundaryStart >= 0 && boundaryStart > abnormalStart)) return 'PRD functional requirements must keep 正常业务场景 → optional 边界场景 → 异常业务场景'
+  const normalEnd = boundaryStart >= 0 ? boundaryStart : abnormalStart
+  const normal = lines.slice(normalStart + 1, normalEnd)
   if (normal.some(line => /^(?:##|###)\s+(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()))) return 'PRD must not add a change overview or locator overview'
   const changes = normal.flatMap((line, index) => /^###\s+4\.(\d+)\s+改动点：\S/.test(line.trim()) ? [{ index, number: line.trim().match(/^###\s+4\.(\d+)/)?.[1] }] : [])
   if (!changes.length) return 'PRD normal business scenarios must contain at least one ### 4.x 改动点： heading'
@@ -1319,14 +1330,12 @@ function pmdDetailedFunctionalFailure(visiblePrd) {
       }
     }
   }
+  const estimatedDays = pmdEstimatedPersonDays(lines)
+  if (boundaryStart < 0) return estimatedDays !== null && estimatedDays > 10 ? 'PRD boundary scenarios are required when estimated person-days exceed 10' : null
   const boundary = lines.slice(boundaryStart + 1, abnormalStart).join('\n')
-  const estimatedDays = pmdEstimatedPersonDays(lines); const notApplicable = boundary.includes('不适用（预估人天不超过10人天）')
-  if (!(estimatedDays !== null && estimatedDays <= 10 && notApplicable)) {
-    for (const systemBoundary of ['超时', '并发', '数据量极值']) {
-      const match = boundary.match(new RegExp(`^\\|\\s*${systemBoundary}\\s*\\|\\s*(.*?)\\s*\\|\\s*(.*?)\\s*\\|\\s*$`, 'm'))
-      if (!match || !match[1] || !match[2] || (estimatedDays !== null && match[1].includes('[待确认]'))) return `PRD boundary scenarios must define system behaviour for: ${systemBoundary}`
-      if (estimatedDays === null && (!match[1].includes('[待确认]') || match[2].includes('[待确认]') || match[2].length < 4)) return `PRD boundary scenarios must retain [待确认] and impact for unknown 预估人天: ${systemBoundary}`
-    }
+  for (const systemBoundary of ['超时', '并发', '数据量极值']) {
+    const match = boundary.match(new RegExp(`^\\|\\s*${systemBoundary}\\s*\\|\\s*(.*?)\\s*\\|\\s*(.*?)\\s*\\|\\s*$`, 'm'))
+    if (!match || !match[1] || !match[2] || match[1].includes('[待确认]') || match[2].includes('[待确认]')) return `PRD boundary scenarios must define system behaviour for: ${systemBoundary}`
   }
   return null
 }
@@ -1338,9 +1347,12 @@ function pmdBatchTemplateFailure(batchId, items) {
   if (/\\n/.test(markdownOutsideFences(prd.body))) return `${prd.name} contains a literal \\n outside a fenced code block`
   const missingPrd = orderedMarkdownMarkersMissing(prd.body, PMD_PRD_MARKERS)
   if (missingPrd) return `PRD document is missing or reorders: ${missingPrd}`
-  for (const header of ['| 业务需求名称 |', '| 版本 | 日期 |', '| 角色 | 功能/页面 |', '| 指标项 | 目标值 |']) if (!prd.body.includes(header)) return `PRD document is missing required table: ${header}`
+  for (const header of ['| 业务需求名称 |', '| 版本 | 日期 |', '| 角色 | 功能/页面 |']) if (!prd.body.includes(header)) return `PRD document is missing required table: ${header}`
   const internalTerm = /\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/
   const visiblePrd = markdownOutsideFences(prd.body)
+  if (visiblePrd.includes('[待确认]')) return 'PRD document contains [待确认]; confirm required facts before freezing'
+  const basicInformationFailure = pmdBasicInformationFailure(visiblePrd)
+  if (basicInformationFailure) return basicInformationFailure
   const functionalFailure = pmdDetailedFunctionalFailure(visiblePrd)
   if (functionalFailure) return functionalFailure
   const prdInternalTerm = visiblePrd.match(internalTerm)

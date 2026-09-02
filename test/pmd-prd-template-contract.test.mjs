@@ -11,21 +11,97 @@ const projectRoot = resolve(import.meta.dirname, '..')
 const authorityPath = resolve(projectRoot, 'skills/pmd-prd/references/templates.md')
 const validatorPath = resolve(projectRoot, 'skills/pmd-prd/scripts/validate-deliverables.mjs')
 
-function prdTemplate(authority) {
-  const normalized = authority.replaceAll('\r\n', '\n')
-  return [...normalized.matchAll(/```markdown\s*\n([\s\S]*?)\n```/g)].map((match) => match[1]).find((body) => body.includes('# PRD:'))
+function validPrd() {
+  return `# PRD: REQ-100 - 客户状态维护
+
+## 需求基本信息
+
+| 业务需求名称 | 客户状态维护 | 所属系统 | 客户管理系统 |
+|---|---|---|---|
+| 需求编号及链接 | REQ-100：https://example.test/REQ-100 | 产品经理 | 张三 |
+| 预估人天 | 8人天 | | |
+
+## 修订记录
+
+| 版本 | 日期 | 修订人 | 审核人 | 修订说明 | 变更分类（产品/业务） |
+|---|---|---|---|---|---|
+| V1.0 | 2026-09-03 | 张三 | 李四 | 首次提交 | 产品/业务 |
+
+# 二、背景与目标
+
+## （一）描述/痛点
+
+客服无法区分已停用客户，容易继续发起无效服务。
+
+## （二）目标/价值
+
+| 量化维度 | 现状/基线 | 目标值 | 业务收益 | 度量口径 |
+|---|---|---|---|---|
+| 停用客户误服务 | 每周10次 | 上线后为0次 | 减少无效服务 | 每周从工单系统统计并由客服主管验收 |
+
+# 四、功能性需求
+
+## （一）正常业务场景
+
+### 4.1 改动点：客户资料
+
+#### 4.1.1 字段与表格：展示客户状态
+
+| 需求点 | 类型 | 原有实现 | 目标修改点 |
+|---|---|---|---|
+| 客户状态展示 | 修改 | 客户列表只展示名称和等级 | src/customer/CustomerList.vue 的 statusColumn：展示启用、停用状态；停用客户禁止发起服务并显示原因。 |
+
+**实现约束与验收规则**
+
+停用状态由客户资料中的状态字段决定；无权修改状态的人员只能查看。
+
+## （二）异常业务场景
+
+状态读取失败时提示“暂无法获取客户状态”，用户刷新后重试。
+
+# 五、角色权限
+
+| 角色 | 功能/页面 | 权限范围 | 数据范围 | 备注 |
+|---|---|---|---|---|
+| 客服 | 客户列表 | 查看状态、不可修改 | 本人负责客户 | 无权限变化（已确认依据） |
+
+# 八、测试关注点
+
+## （一）影响范围分析
+
+### 关联改动与风险
+
+| 直接改动 | 关联影响 | 可能风险 | 建议处理 | 是否需要产品决策 |
+|---|---|---|---|---|
+| 客户列表展示状态 | 服务发起入口 | 状态不同步导致误服务 | 发起前再次校验状态 | 否 |
+
+### 回归范围
+
+回归客户列表、服务发起入口及客服角色的数据权限。
+
+## （二）异常场景关注点
+
+验证状态接口失败后的提示、刷新和恢复结果。
+
+## （三）验收清单
+
+### 正常情况
+- [ ] 启用和停用客户均展示正确状态。
+
+### 异常情况
+- [ ] 状态读取失败时展示提示，刷新后可恢复。
+
+### 边界情况
+- [ ] 无相关边界风险（已确认原因）。
+
+### 权限情况
+- [ ] 客服只能查看状态，不能修改状态。
+
+### 兼容情况
+- [ ] 服务发起入口仍可正常使用。`
 }
 
-function materialise(body) {
-  return body.replaceAll('{编号}', 'REQ-CONTRACT').replaceAll('{编号及链接}', 'REQ-CONTRACT（需求链接待确认）').replaceAll('{主题}', '单一交付').replaceAll('{功能名称}', '客户维护')
-    .replace(/\{[^{}\n]+\}/g, '[待确认]')
-}
-
-function replaceFirstTarget(body, target) {
-  return body.replace(/^(\| \[待确认\] \| 修改 \| \[待确认\]（未取得已选代码库证据，无法确认当前实现及改动影响） \| ).* \|$/m, `$1${target} |`)
-}
-
-async function runFixture({ body, name = 'req_contract_单一交付_PRD.md' }) {
+async function runFixture({ body, name = 'REQ_100_客户状态维护_PRD.md' }) {
   const directory = await mkdtemp(join(tmpdir(), 'pmd-prd-contract-'))
   try {
     const prdPath = join(directory, name)
@@ -34,78 +110,32 @@ async function runFixture({ body, name = 'req_contract_单一交付_PRD.md' }) {
   } finally { await rm(directory, { recursive: true, force: true }) }
 }
 
-test('accepts one complete product-readable PRD with target-bound implementation details and an acceptance checklist', async () => {
+test('accepts a certain PRD while optional chapters are omitted', async () => {
   const authority = await readFile(authorityPath, 'utf8')
-  const template = prdTemplate(authority)
-  assert.ok(template, 'authoritative templates must expose one complete PRD body')
-  const body = materialise(template)
+  const body = validPrd()
   const result = await runFixture({ body })
   assert.match(result.stdout, /PASS: PMD frozen PRD contract/)
-  assert.doesNotMatch(body, /\[(?:必填|选填|建议填写)\]|【选填】/)
-  assert.doesNotMatch(body, /^#{5,}\s+/m)
-  for (const section of ['## （一）正常业务场景', '### 4.1 改动点：', '#### 4.1.1 按钮：', '适用页面：', '| 需求点 | 类型 | 原有实现 | 目标修改点 |', '**实现约束与验收规则**', '## 边界场景', '| 超时 |', '| 并发 |', '| 数据量极值 |', '## （二）异常业务场景', '### 关联改动与风险', '### 回归范围', '## （二）异常场景关注点', '## （三）验收清单', '### 正常情况', '### 异常情况', '### 边界情况', '### 兼容情况']) assert.match(body, new RegExp(section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  assert.doesNotMatch(body, /\| 定位项 \| 位置 \|/)
-  assert.match(authority, /完整相对代码路径/)
-  assert.match(authority, /按实际复杂度选择最清楚的方式/)
-  assert.doesNotMatch(authority, /序号\.【新增\/修改\/删除\/复用】定位：/)
-  assert.equal(authority.includes(['“目标修改点”', '的“定位”字段'].join('')), false)
-  assert.match(body, /\| 直接改动 \| 关联影响 \| 可能风险 \| 建议处理 \| 是否需要产品决策 \|/)
-  assert.match(body, /\| 产品经理 \| \[待确认\] \| 预估人天 \| \[待确认\] \|/)
+  assert.doesNotMatch(body, /# (?:一、术语与缩写|三、整体流程|六、非功能性需求|七、配置与开关|九、参考文档)/)
+  assert.doesNotMatch(body, /需求优先级|所属功能模块|## 边界场景/)
+  assert.match(authority, /最终 PRD 禁止出现 `\[待确认\]`/)
+  assert.match(authority, /多系统交互必须输出时序图/)
 })
 
-test('accepts flexible development-facing target changes and rejects empty or vague targets', async () => {
-  const authority = await readFile(authorityPath, 'utf8')
-  const body = materialise(prdTemplate(authority))
-  const flexibleTargets = [
-    '查询区初始化模块：[待确认]（未取得代码证据，无法确认稳定位置；影响研发需先检索入口）；首次渲染时仅展示客户编码、客户名称、客户状态、客户等级和归属人，低频条件仍随请求提交。',
-    '① src/modules/mdm/customer/customerManage.js 的 columnConfig 配置：保留合法字段的相对顺序。<br>② src/modules/mdm/customer/columnPreferences.js 的回退逻辑：缺失、重复或无法解析时恢复默认列，并提示用户。',
-  ]
-  for (const target of flexibleTargets) {
-    const result = await runFixture({ body: replaceFirstTarget(body, target) })
-    assert.match(result.stdout, /PASS: PMD frozen PRD contract/)
-  }
-  for (const target of ['', '[待确认]', '优化客户列表展示。']) {
-    await assert.rejects(runFixture({ body: replaceFirstTarget(body, target) }), (error) => {
-      assert.equal(error.code, 1)
-      assert.match(error.stderr, /目标修改点/)
-      return true
-    })
-  }
-})
-
-test('rejects invalid two-level changes, legacy locators, invalid code paths, incomplete rules, and wrong system boundaries', async () => {
-  const authority = await readFile(authorityPath, 'utf8')
-  const body = materialise(prdTemplate(authority))
+test('rejects unresolved facts, missing required sections, and ambiguous implementation entry points', async () => {
+  const body = validPrd()
   const fixtures = [
-    { body: body.replace('#### 4.1.1 按钮：', '##### 4.1.1 按钮：'), message: /must contain at least one specific child item/ },
-    { body: body.replace('#### 4.1.1 按钮：', '#### 4.2.1 按钮：'), message: /must be numbered under ### 4.1 改动点/ },
-    { body: body.replace(/(#### 4\.1\.1 [^\n]+\n\n)(适用页面：)/, '$1| 定位项 | 位置 |\n|---|---|\n| 前端代码文件 | src/contract/Detail.java |\n\n$2'), message: /must not contain legacy locator table/ },
-    { body: body.replace('| 需求点 | 类型 | 原有实现 | 目标修改点 |', '| 需求点 | 类型 | 目标修改点 |'), message: /missing required development change table/ },
-    { body: body.replace('**实现约束与验收规则**', '##### 实现约束与验收规则'), message: /must not contain Markdown headings below the specific-item level/ },
-    { body: body.replace('| [待确认] | 修改 |', '| [待确认] | 改造 |'), message: /类型 must be one of: 新增、修改、删除、修复/ },
-    { body: body.replace('| [待确认] | 修改 | [待确认]（未取得已选代码库证据，无法确认当前实现及改动影响） |', '| [待确认] | 修改 | 不适用（新增） |'), message: /修改 item 原有实现 must be confirmed or explain \[待确认\] impact/ },
-    { body: body.replace('| [待确认] | 修改 |', '| [待确认] | 新增 |'), message: /新增 item 原有实现 must be 不适用（新增）/ },
-    { body: body.replace('| 数据量极值 |', '| 大数据 |'), message: /must define system behaviour for: 数据量极值/ },
-    { body: `${body}\n\n实现位于 src/contract/Detail.java。`, message: /PRD contains a code locator: src\/contract\/Detail.java/ },
-    { body: replaceFirstTarget(body, 'src/contract/Detail.java > CustomerSearchForm > visibleFields：首次渲染时仅保留高频条件，低频条件继续参与查询。'), message: null },
-    { body: replaceFirstTarget(body, 'customerManage.js 的列配置：首次渲染时仅保留高频条件，低频条件继续参与查询。'), message: /代码文件必须使用带目录的代码库相对路径/ },
-    { body: replaceFirstTarget(body, '/Users/example/workspace/customerManage.js 的列配置：首次渲染时仅保留高频条件，低频条件继续参与查询。'), message: /不得使用开发者本机绝对路径/ },
-    { body: replaceFirstTarget(body, 'C:\\workspace\\customerManage.js 的列配置：首次渲染时仅保留高频条件，低频条件继续参与查询。'), message: /不得使用开发者本机绝对路径/ },
-    { body: `${body}\n\n## 第八章伪定位\n\n| 定位项 | 位置 |\n|---|---|\n| 前端代码文件 | src/contract/Detail.java |`, message: /PRD contains a code locator: src\/contract\/Detail.java/ },
-    { body: body.replace('| 产品经理 | [待确认] | 预估人天 | [待确认] |', '| 产品经理 | [待确认] | 预估人天 | 12人天 |'), message: /must define system behaviour for: 超时/ },
-    { body: body.replace('| 产品经理 | [待确认] | 预估人天 | [待确认] |', '| 产品经理 | [待确认] | 预估人天 | 8人天 |').replace('| 超时 | [待确认] |', '| 超时 | 不适用（预估人天不超过10人天） |').replace('| 并发 | [待确认] |', '| 并发 | 不适用（预估人天不超过10人天） |').replace('| 数据量极值 | [待确认] |', '| 数据量极值 | 不适用（预估人天不超过10人天） |'), message: null },
-    { body: body.replace('### 关联改动与风险', '### 普通影响说明'), message: /PRD impact analysis is missing: ### 关联改动与风险/ },
-    { body: body.replace('| 直接改动 | 关联影响 | 可能风险 | 建议处理 | 是否需要产品决策 |', '| 改动内容 | 影响说明 |'), message: /PRD impact analysis is missing required table/ },
-    { body: body.replace('### 回归范围', '### 其他说明'), message: /PRD impact analysis is missing: ### 回归范围/ },
-    { body: body.replace('## （二）异常场景关注点', '## （二）验收清单').replace('## （三）验收清单', '## （三）补充说明'), message: /PRD test focus is missing or reorders: ## （二）异常场景关注点/ },
-    { body: body.replace('| 产品经理 | [待确认] | 预估人天 | [待确认] |', '| 产品经理 | [待确认] | | |'), message: /PRD basic information is missing: 预估人天/ },
-    { body: `${body}\n\n调用 confirmReceivingOrders 完成接单。`, message: /code-style identifier.*confirmReceivingOrders/ },
-    { body: body.replace(/### 兼容情况\r?\n- \[ \] \[待确认\]/, '### 兼容情况\n无'), message: /PRD acceptance checklist is empty: 兼容情况/ },
-    { body: body.replace('## 修订记录', '## 修订记录 [必填]'), message: /PRD exposes a field label: \[必填\]/ },
-    { body, name: 'req_contract_PRD_02.md', message: /PRD filename must end with _PRD/ },
+    { body: body.replace('客户管理系统', '[待确认]'), message: /contains \[待确认\]/ },
+    { body: body.replace('| 需求编号及链接 | REQ-100：https://example.test/REQ-100 | 产品经理 | 张三 |', '| 需求编号及链接 | REQ-100：https://example.test/REQ-100 | 产品经理 |  |'), message: /basic information is missing: 产品经理/ },
+    { body: body.replace('REQ-100：https://example.test/REQ-100', 'REQ-100'), message: /must include a confirmed requirement link/ },
+    { body: body.replace('| 预估人天 | 8人天 |', '| 预估人天 | 大约一周 |'), message: /must be a confirmed numeric person-day value/ },
+    { body: body.replace('| 预估人天 | 8人天 |', '| 预估人天 | 12人天 |'), message: /boundary scenarios are required/ },
+    { body: body.replace('| V1.0 | 2026-09-03 | 张三 | 李四 | 首次提交 | 产品\/业务 |', '| V1.0 | 2026-09-03 | 张三 |  | 首次提交 | 产品\/业务 |'), message: /revision record must be complete/ },
+    { body: body.replace('# 五、角色权限', '# 五、权限说明'), message: /missing or reorders: # 五、角色权限/ },
+    { body: body.replace('src/customer/CustomerList.vue 的 statusColumn', '客户列表模块'), message: /必须包含完整相对路径/ },
+    { body: body.replace('## （二）异常业务场景', '## （二）其他说明'), message: /正常业务场景 → optional 边界场景 → 异常业务场景/ },
+    { body: body.replace('### 兼容情况\n- [ ] 服务发起入口仍可正常使用。', '### 兼容情况\n无'), message: /acceptance checklist is empty: 兼容情况/ },
   ]
   for (const fixture of fixtures) {
-    if (fixture.message === null) { const result = await runFixture(fixture); assert.match(result.stdout, /PASS: PMD frozen PRD contract/); continue }
     await assert.rejects(runFixture(fixture), (error) => {
       assert.equal(error.code, 1)
       assert.match(error.stderr, fixture.message)

@@ -18,10 +18,13 @@ async function authoritativePmdBody() {
   const materialise = (body) => body
     .replaceAll('{编号}', 'REQ')
     .replaceAll('{主题}', 'CRM')
-    .replace(/\{[^{}\n]+\}/g, '[待确认]')
+    .replace(/\{[^{}\n]+\}/g, '已确认内容')
   const prdBody = blocks.find((body) => body.includes('# PRD:'))
   assert.ok(prdBody, 'authoritative PMD templates must expose one document body')
   return materialise(prdBody)
+    .replace(/(\| 需求点 \| 类型 \| 原有实现 \| 目标修改点 \|\n\|---\|---\|---\|---\|\n)\|[^\n]+\|/, '$1| 客户状态展示 | 修改 | 客户列表只展示名称 | src/contracts/ContractDetail.java 的 statusColumn：展示客户状态并阻止停用客户发起服务。 |')
+    .replace('| 需求编号及链接 | 已确认内容 | 产品经理 | 已确认内容 |', '| 需求编号及链接 | REQ：https://example.test/REQ | 产品经理 | 已确认内容 |')
+    .replace('| 预估人天 | 已确认内容 | | |', '| 预估人天 | 8人天 | | |')
 }
 
 // Matches Harness's current model-facing projection: it reads only top-level
@@ -365,8 +368,8 @@ test('rejects a PMD batch that is not one complete company-template PRD', async 
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('allows a .java locator only in a PMD child item locator table', async () => {
-  const body = (await authoritativePmdBody()).replace('| 前端代码文件 | [待确认]（未取得已选代码库证据，无法确认实现位置） |', '| 前端代码文件 | src/contracts/ContractDetail.java |')
+test('allows a .java locator in a PMD child target-change cell', async () => {
+  const body = await authoritativePmdBody()
   const items = [{ name: 'REQ_CRM_PRD', body }]
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
   try {

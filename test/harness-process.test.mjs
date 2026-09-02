@@ -308,25 +308,21 @@ test('mounts the Harness-native pmd-prd skill with its template contract', async
   assert.match(capabilityMatrix, /未选侧禁止 `search_selected_remote_code`、`search_selected_knowledge`、`subagent` 和底层检索 MCP/)
   assert.match(template, /PRD: \{编号\} - \{主题\}/)
   assert.match(template, /单 PRD 模板/)
-  for (const heading of [
-    '# 一、术语与缩写', '# 二、背景与目标', '# 三、整体流程', '# 四、功能性需求',
-    '# 五、角色权限', '# 六、非功能性需求', '# 七、配置与开关', '# 八、测试关注点',
-    '# 九、参考文档',
-  ]) assert.match(template, new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  for (const rule of ['最终只生成一份 PRD', '改动点', '具体子项', 'PRD 只写最终业务结论']) assert.match(template, new RegExp(rule))
-  for (const rule of ['问题基线/规模', '目标值', '业务收益', '度量口径', '用户已确认', '标注“估算”', '不得猜测']) assert.match(skill + template, new RegExp(rule))
-  assert.match(template, /没有依据的数字、目标、成本或收益写 `\[待确认\]`/)
+  for (const heading of ['# 二、背景与目标', '# 四、功能性需求', '# 五、角色权限', '# 八、测试关注点']) assert.match(template, new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  for (const rule of ['最终 PRD 禁止', '改动点', '具体子项', '只输出实际出现章节']) assert.match(template, new RegExp(rule))
+  for (const optional of ['术语与缩写', '整体流程', '非功能性需求', '配置与开关', '参考文档']) assert.match(template, new RegExp(`${optional}.*可省略|${optional}.*仅在`))
+  for (const rule of ['问题基线/规模', '目标值', '业务收益', '度量口径', '用户已确认', '标注“估算（口径', '不得猜测']) assert.match(skill + template, new RegExp(rule))
+  assert.match(template, /最终 PRD 禁止出现 `\[待确认\]`/)
   assert.match(skill, /主动核对“问题基线\/规模、目标值、业务收益、度量口径”四项/)
   assert.match(skill, /最多提出 3 个最小业务确认问题/)
   assert.match(skill, /基线数量及统计周期/)
   assert.match(skill, /单次人工处理时长或成本/)
   assert.match(skill, /目标值及数据来源\/验收周期/)
-  assert.match(skill, /价值暂不可量化/)
+  assert.match(skill, /价值不能量化时/)
   assert.match(skill, /“按照建议来”“全部按推荐”等泛化确认/)
   assert.match(skill, /不把未知基线、收益参数、数据来源或估算结果变成已确认/)
   assert.match(template, /量化维度 \| 现状\/基线 \| 目标值 \| 业务收益 \| 度量口径/)
-  assert.match(template, /只代表接受业务方向，不代表确认未知数字/)
-  for (const heading of ['4.1 改动点', '4.1.1 按钮', '适用页面', '需求点', '类型', '原有实现', '目标修改点', '完整相对代码路径', '研发执行视角', '按实际复杂度选择最清楚的方式', '实现约束与验收规则', '验收清单']) assert.match(template, new RegExp(heading))
+  for (const heading of ['4.1 改动点', '4.1.1', '需求点', '类型', '原有实现', '目标修改点', '完整相对路径', '实现约束与验收规则', '验收清单']) assert.match(template, new RegExp(heading))
   assert.doesNotMatch(template, /^#{5,}\s+/m)
   assert.doesNotMatch(template, /\| 定位项 \| 位置 \|/)
   for (const boundary of ['超时', '并发', '数据量极值']) assert.match(template, new RegExp(boundary))
@@ -477,7 +473,7 @@ test('keeps pending research internal while limiting each parent turn to one sel
   assert.match(capabilityMatrix, /结算结果存在独立证据缺口时，才在后续父会话轮次追加一个检索/)
   assert.match(capabilityMatrix, /`research\(pending\)` 与 `internal_requirement_normalization` 并行/)
   assert.match(capabilityMatrix, /结算后先用代码\/知识证据排除可自行查明的问题/)
-  assert.match(capabilityMatrix, /所有查询已结算\/明确失败\/明确跳过且影响分析 settled 后才可冻结/)
+  assert.match(capabilityMatrix, /所有查询已结算且影响分析完成后才可冻结/)
 })
 
 test('keeps pmd-prd user output decision-first while hiding internal process details', async () => {
