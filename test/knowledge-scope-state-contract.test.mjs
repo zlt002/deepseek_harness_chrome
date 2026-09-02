@@ -92,6 +92,6 @@ test('the extension waits for the nonce-bound Harness frame readiness signal bef
 test('reconnecting Harness accepts the remounted knowledge scope command sequence again', async () => {
   const sidepanel = await source('apps/chrome-extension/entrypoints/sidepanel/main.tsx')
 
-  assert.match(sidepanel, /const connect = useCallback\(async \(\) => \{[\s\S]*knowledgeCommandSequenceRef\.current = 0[\s\S]*knowledgeRequestSequenceBySessionRef\.current\.clear\(\)[\s\S]*setStatus\('starting'\)[\s\S]*requestHarness\(\)/)
+  assert.match(sidepanel, /const connect = useCallback\(async \([^)]*\) => \{[\s\S]*knowledgeCommandSequenceRef\.current = 0[\s\S]*knowledgeRequestSequenceBySessionRef\.current\.clear\(\)[\s\S]*setStatus\('starting'\)[\s\S]*requestHarness\(\)/)
   assert.match(sidepanel, /value\.type === 'knowledge-scope-command\/v1'[\s\S]*value\.sequence <= knowledgeCommandSequenceRef\.current[\s\S]*knowledgeCommandSequenceRef\.current = value\.sequence/)
 })

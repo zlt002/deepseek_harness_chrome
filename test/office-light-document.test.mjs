@@ -165,6 +165,92 @@ test('dispatches a bounded light-document read through the Browser Target instea
   }
 })
 
+test('rejects unlocated replacement previews before dispatch, permits a stable locator, and guides semantic-empty documents to insertion', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 121, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/121?id=121' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '空白文档', fingerprint: 'before' }
+  let semanticEmpty = false
+  let dispatched = 0
+  let connector
+  connector = new BrowserConnector({
+    requestExtension: (request) => queueMicrotask(() => {
+      dispatched += 1
+      connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+        result: {
+          status: 'ok', resource,
+          document: semanticEmpty
+            ? { blockCount: 1, emptyBody: { semantic: true, physicalBlockCount: 1, blankParagraphCount: 1 }, offset: 0, limit: 1, hasMore: false, blocks: [{ index: 0, id: 'blank-paragraph', type: 'p', text: '' }] }
+            : { blockCount: 1, emptyBody: { semantic: false, physicalBlockCount: 1, blankParagraphCount: 0 }, offset: 0, limit: 1, hasMore: false, blocks: [{ index: 0, id: 'stable-paragraph', type: 'p', text: '已有正文' }] },
+        },
+      })
+    }),
+  })
+  connector.bindBrowserTarget('light-doc-locator-run', target)
+  const endpoint = await connector.start()
+  try {
+    for (const operation of ['replace', 'blocks_replace']) {
+      const rejected = await call(endpoint, 'light_document_write_preview', { operation, payload: { markdown: '不能猜测目标' } })
+      assert.equal(rejected.error.code, -32602, operation)
+      assert.match(rejected.error.message, /stable id or index|read.*current block/i, operation)
+    }
+    assert.equal(dispatched, 0, 'a preview without a stable block locator must not reach the Browser Target')
+
+    const valid = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_replace', payload: { id: 'stable-paragraph', markdown: '定位替换' } }, 3)
+    assert.equal(valid.result.structuredContent.action, 'inspect_write')
+    assert.equal(dispatched, 1)
+
+    semanticEmpty = true
+    const blank = await call(endpoint, 'light_document_write_preview', { operation: 'replace', payload: { id: 'blank-paragraph', markdown: '不能替换空段落' } }, 4)
+    assert.equal(blank.result.isError, true)
+    assert.match(blank.result.content[0].text, /semantically blank/i)
+    assert.match(blank.result.content[0].text, /blocks_insert|selection_insert/i)
+    assert.equal(dispatched, 2, 'semantic emptiness is determined from the current Browser Target read')
+  } finally { await connector.stop() }
+})
+
+test('recognizes the live one-empty-paragraph read shape as semantic-empty even without emptyBody metadata', async () => {
+  const target = { browser: 'chrome', windowId: 4, tabId: 124, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/124?id=124' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '真实空白文档', fingerprint: 'live-empty' }
+  let connector
+  connector = new BrowserConnector({
+    requestExtension: (request) => queueMicrotask(() => connector.acceptExtensionResponse({
+      type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target,
+      result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ index: 0, id: 'live-empty-paragraph', type: 'p', text: '', textLength: 0, truncated: false }] } },
+    })),
+  })
+  connector.bindBrowserTarget('light-doc-live-empty-run', target)
+  const endpoint = await connector.start()
+  try {
+    const blank = await call(endpoint, 'light_document_write_preview', { operation: 'replace', payload: { id: 'live-empty-paragraph', markdown: '# 不应写入' } })
+    assert.equal(blank.result.isError, true)
+    assert.match(blank.result.content[0].text, /semantically blank/i)
+    assert.match(blank.result.content[0].text, /blocks_insert|selection_insert/i)
+  } finally { await connector.stop() }
+})
+
+test('accepts a direct light-document read only after Native confirms the resolved Browser Target migration', async () => {
+  const staleTarget = { browser: 'chrome', windowId: 4, tabId: 122, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/122?id=122' }
+  const resolvedTarget = { browser: 'chrome', windowId: 4, tabId: 123, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/123?id=123' }
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '迁移后文档', fingerprint: 'after-migration' }
+  let connector
+  connector = new BrowserConnector({
+    requestExtension: (request) => queueMicrotask(() => {
+      assert.deepEqual(request.browserTarget, staleTarget, 'the Native request keeps its immutable pre-transfer correlation')
+      assert.equal(connector.bindBrowserTarget(request.runId, resolvedTarget), true, 'the Native Host must confirm the transfer before the extension response')
+      assert.equal(connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: resolvedTarget,
+        result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ index: 0, id: 'resolved-block', type: 'p', text: '已迁移' }] } },
+      }), true)
+    }),
+  })
+  connector.bindBrowserTarget('light-doc-resolved-target-run', staleTarget)
+  const endpoint = await connector.start()
+  try {
+    const read = await call(endpoint, 'light_document_read', { offset: 0, limit: 1 })
+    assert.equal(read.result.structuredContent.browserTarget.url, resolvedTarget.url)
+  } finally { await connector.stop() }
+})
+
 test('requires a one-time light-document challenge and returns only a verified write readback', async () => {
   const target = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/101?id=101' }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '演示文档', fingerprint: 'before' }
@@ -355,11 +441,11 @@ test('binds approval and extension readback to the exact operation and payload, 
     assert.equal(missingFingerprint.error.code, -32602)
     assert.match(missingFingerprint.error.message, /invalid arguments|expectedSelectionFingerprint/)
     const emptyReplace = await call(endpoint, 'light_document_write_preview', { operation: 'replace', payload: { markdown: '演示内容' } }, 10)
-    assert.equal(emptyReplace.result.isError, true)
-    assert.match(emptyReplace.result.content[0].text, /no public replaceable block/)
+    assert.equal(emptyReplace.error.code, -32602)
+    assert.match(emptyReplace.error.message, /stable id or index|current light_document_read/i)
     const emptyBlocks = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_replace', payload: { type: 'h1', text: '演示内容' } }, 11)
-    assert.equal(emptyBlocks.result.isError, true)
-    assert.match(emptyBlocks.result.content[0].text, /selection_insert/)
+    assert.equal(emptyBlocks.error.code, -32602)
+    assert.match(emptyBlocks.error.message, /stable id or index|current light_document_read/i)
     const emptyInsert = await call(endpoint, 'light_document_write_preview', { operation: 'selection_insert', payload: { text: '演示内容', expectedSelectionFingerprint: 'selection-v4-ac78eacf0123456789abcdef01234567' } }, 12)
     assert.equal(emptyInsert.result.structuredContent.action, 'inspect_write')
     assert.ok(emptyInsert.result.structuredContent.challenge)

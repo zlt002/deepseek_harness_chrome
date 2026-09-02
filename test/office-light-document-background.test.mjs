@@ -80,3 +80,67 @@ test('concurrent light-document writes fence per resource fingerprint while diff
     assert.equal(nativeMessages.filter((message) => message.type === 'connector_response' && message.requestId === 'w3').length, 1)
   } finally { delete globalThis.chrome; delete globalThis.defineBackground }
 })
+
+test('direct Office reads migrate a stale Browser Target once and reply from the resolved binding', async () => {
+  const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+  const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
+  let runtimeListener
+  const listeners = new Set(); const sent = []; const nativeMessages = []
+  const staleTarget = { browser: 'chrome', windowId: 7, tabId: 51, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/151?id=151' }
+  const resolvedTarget = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/152?id=152' }
+  const secondaryTarget = { browser: 'chrome', windowId: 7, tabId: 53, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/153?id=153' }
+  const resolvedBinding = [resolvedTarget, secondaryTarget]
+  const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: '迁移后文档', fingerprint: 'before' }
+  let activeTarget = staleTarget
+  let rejectRead = false
+  const port = {
+    onDisconnect: { addListener: () => {}, removeListener: () => {} }, onMessage: { addListener: (listener) => listeners.add(listener), removeListener: (listener) => listeners.delete(listener) },
+    postMessage: (message) => {
+      nativeMessages.push(message)
+      if (message.type === 'start') queueMicrotask(() => listeners.forEach((listener) => listener({ type: 'server_started', payload: { url: 'http://127.0.0.1:43123', runId: 'office-target-migration-run' } })))
+      if (message.type === 'transfer-browser-target') queueMicrotask(() => listeners.forEach((listener) => listener({ type: 'browser_target_transferred', requestId: message.requestId, payload: { runId: message.runId, browserTarget: message.browserTarget, browserTargets: message.browserTargets, unavailableBrowserTargets: message.unavailableBrowserTargets } })))
+    },
+  }
+  globalThis.chrome = {
+    action: { onClicked: { addListener: () => {} } }, runtime: { connectNative: () => port, lastError: undefined, onMessage: { addListener: (listener) => { runtimeListener = listener } }, sendMessage: async () => {} },
+    storage: { session: { get: async () => ({ harnessBrowserTargetSettings: { mode: 'pinned-tabs', pinnedTabs: resolvedBinding, primaryTabId: resolvedTarget.tabId } }), set: async () => {} } }, windows: { getLastFocused: async () => ({ id: 7 }), onFocusChanged: { addListener: () => {} } },
+    tabs: { query: async () => [{ id: activeTarget.tabId, windowId: activeTarget.windowId, url: activeTarget.url, title: '文档' }], get: async (tabId) => {
+      const target = tabId === resolvedTarget.tabId ? resolvedTarget : tabId === secondaryTarget.tabId ? secondaryTarget : staleTarget
+      return { id: target.tabId, windowId: target.windowId, url: target.url, title: '文档' }
+    }, sendMessage: async (tabId, message, options) => {
+      sent.push({ tabId, message, options })
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: true } }
+      return { ok: true, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [] } } }
+    }, onActivated: { addListener: () => {} }, onCreated: { addListener: () => {} }, onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    webNavigation: { getAllFrames: async () => rejectRead ? [] : [{ frameId: 0, url: activeTarget.url }, { frameId: 17, url: 'https://webedit.midea.com/edit/abc' }] }, sidePanel: { open: async () => {} },
+  }
+  globalThis.defineBackground = (setup) => setup()
+  const request = (requestId, browserTarget, browserTargets = undefined) => ({ type: 'connector_request', requestId, runId: 'office-target-migration-run', generation: 'g-1', browserTarget, ...(browserTargets === undefined ? {} : { browserTargets }), tool: 'light_document', action: 'read', offset: 0, limit: 1 })
+  try {
+    await import(`data:text/javascript,${encodeURIComponent(compiled)}#office-target-migration-${Date.now()}`)
+    await new Promise((resolve, reject) => { const opened = runtimeListener({ type: 'ensure-harness' }, {}, (response) => response.ok ? resolve() : reject(new Error(response.error))); if (opened !== true) reject(new Error('ensure-harness did not retain the response channel')) })
+    activeTarget = resolvedTarget
+    listeners.forEach((listener) => listener(request('direct-read-after-navigation', staleTarget)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(nativeMessages.filter((message) => message.type === 'transfer-browser-target').length, 1)
+    assert.equal(sent.at(-1).tabId, resolvedTarget.tabId)
+    const migrated = nativeMessages.filter((message) => message.type === 'connector_response').at(-1)
+    assert.equal(migrated.browserTarget.url, resolvedTarget.url)
+    assert.deepEqual(migrated.browserTargets, resolvedBinding, 'the resolved response preserves every pinned Browser Target')
+    assert.deepEqual(migrated.unavailableBrowserTargets, [])
+
+    listeners.forEach((listener) => listener(request('direct-read-after-migration', resolvedTarget, resolvedBinding)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(nativeMessages.filter((message) => message.type === 'transfer-browser-target').length, 1, 'a repeated direct read uses the migrated binding without list_work_tabs')
+    assert.equal(sent.at(-1).tabId, resolvedTarget.tabId)
+
+    rejectRead = true
+    listeners.forEach((listener) => listener(request('direct-read-after-resolved-failure', resolvedTarget, resolvedBinding)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const failed = nativeMessages.filter((message) => message.type === 'connector_response').at(-1)
+    assert.equal(failed.browserTarget.url, resolvedTarget.url)
+    assert.deepEqual(failed.browserTargets, resolvedBinding, 'a post-resolution failure keeps the same multi-target binding contract')
+    assert.deepEqual(failed.unavailableBrowserTargets, [])
+    assert.equal(failed.error.code, 'unsupported')
+  } finally { delete globalThis.chrome; delete globalThis.defineBackground }
+})

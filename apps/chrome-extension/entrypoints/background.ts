@@ -2190,7 +2190,7 @@ async function readOfficeContext(request: ConnectorRequest): Promise<Record<stri
   }
 }
 
-async function resolveOfficeBrowserTarget(request: ConnectorRequest): Promise<BrowserTargetBinding> {
+async function resolveOfficeBrowserTarget(request: (ConnectorRequest | RoutedOfficeRequest) & { browserTargets?: BrowserTarget[]; unavailableBrowserTargets?: UnavailableBrowserTarget[] }): Promise<BrowserTargetBinding> {
   // Tab-update candidate persistence and Connector dispatch can arrive in the
   // same event turn. Read settings only after that serialized update settles.
   await browserTargetRuntime.settled()
@@ -3145,6 +3145,14 @@ async function waitForTeamDocWritableFrame(tabId: number, timeoutMs = 30_000): P
 
 type RoutedOfficeRequest = OfficeDocumentRequest | OfficeSpreadsheetRequest | OfficePresentationRequest
 
+interface ResolvedOfficeRequest {
+  binding: BrowserTargetBinding
+  // Resolve/migrate before forwarding, then freeze the request snapshot that
+  // reaches the editor.  A stale inbound target must never be mixed with the
+  // newly resolved binding during an Office read or write.
+  request: RoutedOfficeRequest
+}
+
 function officeChannelFor(request: RoutedOfficeRequest): 'office-document/v1' | 'office-spreadsheet/v1' | 'office-presentation/v1' {
   if (request.tool === 'spreadsheet') return 'office-spreadsheet/v1'
   if (request.tool === 'presentation') return 'office-presentation/v1'
@@ -3209,6 +3217,14 @@ async function readOfficeRequest(request: RoutedOfficeRequest): Promise<Record<s
   } catch (error) { throw officeReadFailure(error) }
 }
 
+async function resolveRoutedOfficeRequest(request: RoutedOfficeRequest): Promise<ResolvedOfficeRequest> {
+  const binding = await resolveOfficeBrowserTarget(request)
+  return {
+    binding,
+    request: Object.freeze({ ...request, browserTarget: binding.browserTarget }) as RoutedOfficeRequest,
+  }
+}
+
 function respondToOfficeRequest(port: chrome.runtime.Port, request: RoutedOfficeRequest): void {
   // ADR-0006: reads may run concurrently, but writes against one Resource
   // Identity pass through a Write Fence. Office work must not enter the
@@ -3218,15 +3234,28 @@ function respondToOfficeRequest(port: chrome.runtime.Port, request: RoutedOffice
   // still fail closed across reconnects. Writes are serialized per resource
   // fingerprint, so two documents edit in parallel while the same document's
   // read-patch-readback cycles can never interleave.
+  const prepared = queueBrowserTargetRequest(async () => {
+    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
+    const resolved = await resolveRoutedOfficeRequest(request)
+    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
+    return resolved
+  })
+  let resolvedBinding: BrowserTargetBinding | undefined
   const execute = async () => {
+    const resolved = await prepared
+    resolvedBinding = resolved.binding
+    const result = resolved.request.action === 'write' && resolved.request.resource
+      ? await queueResourceWrite(resolved.request.resource, () => readOfficeRequest(resolved.request))
+      : await readOfficeRequest(resolved.request)
     if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    const result = request.action === 'write' && request.resource ? await queueResourceWrite(request.resource, () => readOfficeRequest(request)) : await readOfficeRequest(request)
-    if (nativePort !== port) throw { code: 'cancelled', message: 'The Native connection became stale.' } satisfies OfficeReadFailure
-    return result
+    return { ...resolved.binding, result }
   }
   const respond = (settled: Promise<Record<string, unknown>>) => settled
-    .then((result) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, result }))
-    .catch((error: unknown) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: request.browserTarget, error: officeReadFailure(error) }))
+    .then(({ browserTarget, browserTargets, unavailableBrowserTargets, result }) => port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget, browserTargets, unavailableBrowserTargets, result }))
+    .catch((error: unknown) => {
+      const binding = resolvedBinding
+      port.postMessage({ type: CONNECTOR_RESPONSE, requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: binding?.browserTarget ?? request.browserTarget, ...(binding === undefined ? {} : { browserTargets: binding.browserTargets, unavailableBrowserTargets: binding.unavailableBrowserTargets }), error: officeReadFailure(error) })
+    })
   void respond(execute())
 }
 

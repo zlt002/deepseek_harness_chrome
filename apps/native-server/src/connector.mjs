@@ -811,6 +811,9 @@ function lightDocumentArgumentsHint(args) {
     if (args.operation === 'blocks_delete' && lightDocumentBatchItems('blocks_delete', args.payload) === null) {
       return 'light_document_write_preview blocks_delete accepts only payload { blocks: [{ id }] } with one to fifty distinct stable ids. It does not accept index, including { blocks: [{ index: 7 }] }; call light_document_read, then use its current ids.'
     }
+    if (lightDocumentOperationNeedsStableBlockLocator(args.operation) && !lightDocumentReplacementTargets(args.operation, args.payload)) {
+      return `light_document_write_preview ${args.operation} requires a stable id or index from the current light_document_read result for every replacement target. Do not use replace on a blank document; use blocks_insert for structured body content or selection_insert at a verified caret.`
+    }
     return 'light_document_write_preview requires a supported operation and the exact final payload.'
   }
   if (action === 'write') return 'light_document_write_commit requires the one-time challenge returned by preview.'
@@ -1035,12 +1038,48 @@ function lightDocumentPayloadHasLiteralEscapedNewline(value, { code = false, mar
   const childCode = code || blockType === 'codeblock' || blockType === 'pre'
   return Object.entries(value).some(([key, child]) => lightDocumentPayloadHasLiteralEscapedNewline(child, { code: childCode, markdown: key === 'markdown' }))
 }
+function lightDocumentStableBlockLocator(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const id = typeof value.id === 'string' && value.id.length > 0 && value.id.length <= 256
+  const index = Number.isInteger(value.index) && value.index >= 0 && value.index <= 100000
+  return id || index
+}
+function lightDocumentOperationNeedsStableBlockLocator(operation) {
+  return ['replace', 'delete', 'format', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit'].includes(operation)
+}
+function lightDocumentReplacementTargets(operation, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+  if (['replace', 'delete', 'format', 'blocks_replace'].includes(operation)) return lightDocumentStableBlockLocator(payload)
+  if (operation === 'blocks_batch_replace') {
+    return Array.isArray(payload.replacements) && payload.replacements.length >= 1 && payload.replacements.length <= 50
+      && payload.replacements.every(lightDocumentStableBlockLocator)
+  }
+  if (operation === 'blocks_batch_edit') {
+    const edits = Array.isArray(payload.edits) ? payload.edits : Array.isArray(payload.replacements) ? payload.replacements : []
+    const deletions = Array.isArray(payload.deletions) ? payload.deletions : []
+    const targets = [...edits, ...deletions]
+    return targets.length >= 1 && targets.length <= 50 && targets.every(lightDocumentStableBlockLocator)
+  }
+  return true
+}
+function lightDocumentIsSemanticEmpty(document) {
+  if (document?.emptyBody?.semantic === true) return true
+  if (document?.emptyBody?.semantic === false) return false
+  if (document?.blockCount !== 1 || document?.hasMore !== false || !Array.isArray(document?.blocks) || document.blocks.length !== 1) return false
+  const block = document.blocks[0]
+  const type = String(block?.type ?? block?.blockType ?? '').trim().toLowerCase()
+  if (type !== 'p' && type !== 'paragraph') return false
+  if (block?.truncated === true) return false
+  if (typeof block?.text === 'string') return block.text.trim() === ''
+  return block?.textLength === 0
+}
 function validLightDocumentOperationPayload(operation, payload) {
   if (lightDocumentPayloadHasLiteralEscapedNewline(payload)) return false
   if (operation === 'selection_insert' || operation === 'selection_replace' || operation === 'selection_content_replace') return selectionInsertFragments(payload) !== null
   if (operation === 'selection_blocks_replace') return selectionBlocksReplaceFragments(payload) !== null
   if (operation === 'selection_delete') return selectionDeleteFragments(payload) !== null
   if (operation === 'insert_drawing' || operation === 'blocks_insert') return lightDocumentInsertFragments(operation, payload) !== null
+  if (lightDocumentOperationNeedsStableBlockLocator(operation)) return lightDocumentReplacementTargets(operation, payload)
   return !['blocks_delete', 'blocks_format'].includes(operation) || lightDocumentBatchItems(operation, payload) !== null
 }
 function verifiedFragmentEvidence(request, result, requested) {
@@ -1753,6 +1792,7 @@ export class BrowserConnector {
     const currentUnavailable = pending.request.unavailableBrowserTargets ?? []
     const responseTargets = response.browserTargets ?? (response.browserTarget === undefined ? undefined : [response.browserTarget])
     const responseUnavailable = response.unavailableBrowserTargets ?? []
+    const confirmedBinding = this.runTargets.current()
     const legalTeamKnowledgeLeaseMigration = sameOpenIdentity
       && isTeamKnowledgeBatchRequest
       && pending.request.action === 'inspect_parent'
@@ -1761,7 +1801,17 @@ export class BrowserConnector {
       && Array.isArray(responseTargets) && responseTargets.length === 1
       && sameBrowserTarget(responseTargets[0], response.browserTarget)
       && sameUnavailableBrowserTargetList(responseUnavailable, currentUnavailable)
-    const sameOfficeIdentity = sameOpenIdentity && (legalTeamKnowledgeLeaseMigration || (sameBrowserTarget(response.browserTarget, currentTarget)
+    // The Extension may resolve a stale direct Office request by asking the
+    // Native Host to transfer this same Run before it reads the editor.  Do
+    // not weaken the normal response check: accept the new target only when
+    // the Native Host has already registered that exact binding for this Run.
+    const legalResolvedOfficeTargetMigration = sameOpenIdentity
+      && (isOfficeDocumentRequest || isSpreadsheetRequest || isPresentationRequest)
+      && confirmedBinding?.runId === pending.request.runId
+      && sameBrowserTarget(response.browserTarget, confirmedBinding.browserTarget)
+      && sameBrowserTargetList(responseTargets, confirmedBinding.browserTargets ?? [confirmedBinding.browserTarget])
+      && sameUnavailableBrowserTargetList(responseUnavailable, confirmedBinding.unavailableBrowserTargets ?? [])
+    const sameOfficeIdentity = sameOpenIdentity && (legalTeamKnowledgeLeaseMigration || legalResolvedOfficeTargetMigration || (sameBrowserTarget(response.browserTarget, currentTarget)
       && sameBrowserTargetList(responseTargets, currentTargets)
       && sameUnavailableBrowserTargetList(responseUnavailable, currentUnavailable)))
     if (isBrowserBoundRequest && sameOpenIdentity && !sameOfficeIdentity) {
@@ -1771,13 +1821,13 @@ export class BrowserConnector {
       return true
     }
     if ((isBrowserBoundRequest && !sameOfficeIdentity) || (!isBrowserBoundRequest && !sameOpenIdentity)) return false
-    if (legalTeamKnowledgeLeaseMigration && pending.request.harnessSessionId !== undefined) {
+    if ((legalTeamKnowledgeLeaseMigration || legalResolvedOfficeTargetMigration) && pending.request.harnessSessionId !== undefined) {
       const key = `${pending.request.runId}\u0000${pending.request.harnessSessionId}`
       const captured = this.capturedBrowserTargets.get(key)
       if (captured) this.capturedBrowserTargets.set(key, Object.freeze({
         ...captured,
         browserTarget: response.browserTarget,
-        browserTargets: [response.browserTarget],
+        browserTargets: responseTargets ?? [response.browserTarget],
         unavailableBrowserTargets: responseUnavailable,
       }))
     }
@@ -2624,8 +2674,11 @@ export class BrowserConnector {
       if (!validLightDocumentReadResult(resolved.result)) throw new Error('Browser Connector produced an invalid bounded light-document read')
       if (args.action === 'inspect_write') {
         const blockCount = Number.isInteger(resolved.result.document?.blockCount) ? resolved.result.document.blockCount : undefined
-        if (['replace', 'delete', 'format', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format'].includes(args.operation) && blockCount === 0) {
-          this.#toolError(response, message.id, 'This light document has no public replaceable block (blockCount 0). Call selection then selection_insert, or inspect_write with blocks_insert / insert_drawing to add body content.')
+        const isSemanticEmpty = lightDocumentIsSemanticEmpty(resolved.result.document)
+        if (['replace', 'delete', 'format', 'blocks_replace', 'blocks_batch_replace', 'blocks_batch_edit', 'blocks_delete', 'blocks_format'].includes(args.operation) && (blockCount === 0 || isSemanticEmpty)) {
+          this.#toolError(response, message.id, isSemanticEmpty
+            ? 'This light document is semantically blank (only an empty paragraph), so replace would create a challenge that cannot commit. Use inspect_write with blocks_insert for structured body content, or read the caret selection then use selection_insert.'
+            : 'This light document has no public replaceable block (blockCount 0). Call selection then selection_insert, or inspect_write with blocks_insert / insert_drawing to add body content.')
           return
         }
         const selection = resolved.result.document?.selection
@@ -2633,8 +2686,7 @@ export class BrowserConnector {
           ? args.payload.blocks.find((block) => String(block?.type ?? block?.blockType ?? '').toLowerCase() === 'h1')
           : null
         const emptyBody = resolved.result.document?.emptyBody
-        const semanticEmpty = emptyBody?.semantic === true && Number.isInteger(emptyBody.physicalBlockCount) && emptyBody.physicalBlockCount >= 0
-          && Number.isInteger(emptyBody.blankParagraphCount) && emptyBody.blankParagraphCount >= 0 && emptyBody.blankParagraphCount <= emptyBody.physicalBlockCount
+        const semanticEmpty = lightDocumentIsSemanticEmpty(resolved.result.document)
         const titleInitializationRequired = semanticEmpty && firstH1 !== null && firstH1 !== undefined
           && (() => {
             const title = resolved.result.document?.title
