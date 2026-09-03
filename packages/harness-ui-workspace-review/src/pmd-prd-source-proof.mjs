@@ -17,25 +17,32 @@ function frozenPrdPath(relativePath) {
   if (typeof relativePath !== 'string') throw new Error('PMD review proof requires a frozen PRD path')
   const match = FROZEN_PRD_PATH.exec(relativePath)
   if (match === null || !match[2].startsWith(`${match[1]}_`)) {
-    throw new Error('PMD review proof requires pmd-workspace/spec/<requirementId>/<requirementId>_*_PRD.md')
+    throw new Error('PMD review proof requires pmd-workspace/spec/<runRequirementId>/<runRequirementId>_*_PRD.md')
   }
-  return { requirementId: match[1], fileName: match[2] }
+  return { runRequirementId: match[1], fileName: match[2] }
 }
 
 async function regularFile(path, label) {
-  const details = await lstat(path)
+  let details
+  try { details = await lstat(path) }
+  catch (error) {
+    if (error?.code === 'ENOENT') throw new Error(`PMD review proof ${label} is missing; validate the PRD before opening review`)
+    throw error
+  }
   if (details.isSymbolicLink() || !details.isFile()) throw new Error(`PMD review proof ${label} must be a regular file`)
 }
 
 async function receiptFor(root, relativePath, fingerprint) {
-  const { requirementId, fileName } = frozenPrdPath(relativePath)
-  const manifestPath = resolve(root, 'pmd-workspace', 'spec', requirementId, 'manifest.json')
+  const { runRequirementId, fileName } = frozenPrdPath(relativePath)
+  const manifestPath = resolve(root, 'pmd-workspace', 'spec', runRequirementId, 'manifest.json')
   if (!within(root, manifestPath)) throw new Error('PMD review proof manifest escapes the workspace')
   await regularFile(manifestPath, 'manifest')
   let manifest
   try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')) } catch { throw new Error('PMD review proof manifest is invalid JSON') }
   if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)
-    || manifest.workflow !== 'pmd-prd' || manifest.requirementId !== requirementId) {
+    || manifest.workflow !== 'pmd-prd' || manifest.runRequirementId !== runRequirementId
+    || typeof manifest.businessRequirementId !== 'string' || manifest.businessRequirementId.trim() === ''
+  ) {
     throw new Error('PMD review proof manifest does not bind this pmd-prd requirement')
   }
   const receipt = manifest.reviewReceipt
@@ -45,7 +52,6 @@ async function receiptFor(root, relativePath, fingerprint) {
     || prd.path !== fileName || prd.fingerprint !== fingerprint) {
     throw new Error('PMD review proof receipt does not match the frozen PRD')
   }
-  return { requirementId, manifestPath }
 }
 
 async function fingerprint(root, relativePath) {
@@ -59,8 +65,8 @@ async function fingerprint(root, relativePath) {
 
 /**
  * Host-side proof for the only path allowed to opt into PRD rating telemetry.
- * The receipt is a frozen-file binding; the Host still reruns the authoritative
- * deterministic validator so a hand-written `source: "pmd-prd"` cannot mint it.
+ * The receipt is a frozen-file binding; the Host still reruns the mechanical
+ * identity check so a hand-written `source: "pmd-prd"` cannot mint it.
  */
 export async function verifyPmdPrdSourceProof({ cwd, relativePath, validatorPath }) {
   frozenPrdPath(relativePath)
@@ -78,5 +84,3 @@ export async function verifyPmdPrdSourceProof({ cwd, relativePath, validatorPath
   if (after.path !== before.path || after.value !== before.value) throw new Error('PMD frozen PRD changed during validation; regenerate the review receipt')
   return { fingerprint: after.value }
 }
-
-export const PMD_PRD_REVIEW_RECEIPT_KIND = RECEIPT_KIND

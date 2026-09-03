@@ -100,17 +100,47 @@ test('rejects expanded first selected-source prompts until real search evidence 
   )
 
   const latestUserGuard = createSelectedSourceDispatchGuard()
-  const latestUserEvents = [
+  const continuedPmdPrdEvents = [
+    userMessage('/pmd-prd  优化直通宝任务列表的UI和交互'),
+    userMessage('继续'),
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
+  assert.match(
+    latestUserGuard(exec('search_selected_remote_code', '请检索任务列表、筛选和分页的完整现状', continuedPmdPrdEvents)),
+    /请把 prompt 原样改为："优化直通宝任务列表的UI和交互"/,
+  )
+  assert.equal(
+    latestUserGuard(exec('search_selected_remote_code', '优化直通宝任务列表的UI和交互', continuedPmdPrdEvents)),
+    undefined,
+  )
+
+  const directFollowupEvents = [
+    userMessage('怎么出库啊'),
+    userMessage('重点说明出库失败的处理'),
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
+  const directFollowupGuard = createSelectedSourceDispatchGuard()
+  assert.match(
+    directFollowupGuard(exec('search_selected_remote_code', '怎么出库啊', directFollowupEvents)),
+    /请把 prompt 原样改为："重点说明出库失败的处理"/,
+  )
+  assert.equal(
+    directFollowupGuard(exec('search_selected_remote_code', '重点说明出库失败的处理', directFollowupEvents)),
+    undefined,
+  )
+
+  const pmdPrdDirectFollowupEvents = [
     userMessage('/pmd-prd  优化下客户管理功能'),
     userMessage('重点优化客户查询速度'),
     { type: 'turn/start', data: { turn: 2 } },
   ]
+  const pmdPrdDirectFollowupGuard = createSelectedSourceDispatchGuard()
   assert.match(
-    latestUserGuard(exec('search_selected_remote_code', '优化下客户管理功能', latestUserEvents)),
+    pmdPrdDirectFollowupGuard(exec('search_selected_remote_code', '优化下客户管理功能', pmdPrdDirectFollowupEvents)),
     /请把 prompt 原样改为："重点优化客户查询速度"/,
   )
   assert.equal(
-    latestUserGuard(exec('search_selected_remote_code', '重点优化客户查询速度', latestUserEvents)),
+    pmdPrdDirectFollowupGuard(exec('search_selected_remote_code', '重点优化客户查询速度', pmdPrdDirectFollowupEvents)),
     undefined,
   )
 
@@ -168,6 +198,55 @@ test('rejects expanded first selected-source prompts until real search evidence 
   assert.equal(
     followupGuard(exec('search_selected_knowledge', '根据 src/customer.ts 补查客户状态规则', settledEvents)),
     undefined,
+  )
+
+  const annotationFollowupGuard = createSelectedSourceDispatchGuard()
+  const annotationPrompt = '以下是用户针对先前 assistant 回复的批注，请结合处理:\n<message_annotations>\n{\n  "annotations": [{\n    "selected_text": "暂时不便提供稿子",\n    "comment": "1"\n  }]\n}\n</message_annotations>'
+  const annotationEvents = [
+    userMessage('/pmd-prd 优化直通宝任务列表的UI和交互'),
+    {
+      type: 'tool/call',
+      data: { callId: 'selected-source-annotation', name: 'search_selected_remote_code', arguments: '{}' },
+    },
+    {
+      type: 'tool/result',
+      data: {
+        message: {
+          content: [{ type: 'text', text: '已找到任务列表实现。', isError: false }],
+          source: { kind: 'tool', callId: 'selected-source-annotation' },
+        },
+      },
+    },
+    userMessage(annotationPrompt),
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
+  assert.equal(
+    annotationFollowupGuard(exec('search_selected_remote_code', '根据批注补查任务列表实现', annotationEvents)),
+    undefined,
+  )
+
+  const failedAnnotationGuard = createSelectedSourceDispatchGuard()
+  const failedAnnotationEvents = [
+    userMessage('/pmd-prd 优化直通宝任务列表的UI和交互'),
+    {
+      type: 'tool/call',
+      data: { callId: 'selected-source-annotation-failed', name: 'search_selected_remote_code', arguments: '{}' },
+    },
+    {
+      type: 'tool/result',
+      data: {
+        message: {
+          content: [{ type: 'text', text: '仓库检索失败', isError: true }],
+          source: { kind: 'tool', callId: 'selected-source-annotation-failed' },
+        },
+      },
+    },
+    userMessage('继续'),
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
+  assert.match(
+    failedAnnotationGuard(exec('search_selected_remote_code', '根据批注补查任务列表实现', failedAnnotationEvents)),
+    /请把 prompt 原样改为："优化直通宝任务列表的UI和交互"/,
   )
 })
 

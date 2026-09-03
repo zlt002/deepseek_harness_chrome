@@ -19,7 +19,7 @@ function parseArguments(argv) {
   const values = {}
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
-    if (argument === '--prd' || argument === '--manifest') {
+    if (argument === '--prd') {
       const value = argv[index + 1]
       if (value === undefined || value.startsWith('-')) throw new Error(`${argument} requires a path`)
       values[argument.slice(2)] = value; index += 1
@@ -35,49 +35,62 @@ async function regularFile(path, label) {
   if (details.isSymbolicLink() || !details.isFile()) throw new Error(`${label} must be a regular file`)
 }
 
-function expectedRequirement(prdPath, manifestPath) {
+function expectedPrdBinding(prdPath) {
   const directory = dirname(prdPath)
-  if (dirname(manifestPath) !== directory || basename(manifestPath) !== 'manifest.json') throw new Error('manifest.json must be beside the frozen PRD')
-  const requirementId = basename(directory)
+  const runRequirementId = basename(directory)
   const fileName = basename(prdPath)
-  if (!/^[A-Za-z0-9_-]{3,160}$/.test(requirementId) || !fileName.startsWith(`${requirementId}_`) || !fileName.endsWith('_PRD.md')) {
-    throw new Error('frozen PRD must use pmd-workspace/spec/<requirementId>/<requirementId>_*_PRD.md')
+  if (!/^[A-Za-z0-9_-]{3,160}$/.test(runRequirementId) || !fileName.startsWith(`${runRequirementId}_`) || !fileName.endsWith('_PRD.md')) {
+    throw new Error('frozen PRD must use pmd-workspace/spec/<runRequirementId>/<runRequirementId>_*_PRD.md')
   }
-  return { requirementId, fileName }
+  return { runRequirementId, fileName, manifestPath: resolve(directory, 'manifest.json') }
 }
 
-/** Validate then atomically bind the exact frozen PRD hash into its PMD manifest. */
-export async function issuePmdPrdReviewReceipt({ prdPath, manifestPath = resolve(dirname(prdPath), 'manifest.json'), now = new Date().toISOString() }) {
+function businessRequirementId(body) {
+  const match = /^# PRD: (.+?) - .+$/m.exec(body)
+  if (match === null || match[1].trim() === '') throw new Error('frozen PRD title must contain its business requirement ID')
+  return match[1].trim()
+}
+
+/** Validate the PRD file, then atomically create or refresh the hidden review binding. */
+export async function issuePmdPrdReviewReceipt({ prdPath, now = new Date().toISOString() }) {
   const prd = requiredPath(prdPath, 'prd')
-  const manifest = requiredPath(manifestPath, 'manifest')
-  const { requirementId, fileName } = expectedRequirement(prd, manifest)
-  await Promise.all([regularFile(prd, 'PRD'), regularFile(manifest, 'manifest')])
+  const { runRequirementId, fileName, manifestPath } = expectedPrdBinding(prd)
+  await regularFile(prd, 'PRD')
   const validation = await validateDeliverable({ prdPath: prd })
-  if (!validation.ok) throw new Error(`PMD frozen PRD contract failed: ${validation.errors.join('; ')}`)
+  if (!validation.ok) throw new Error(`PMD frozen PRD check failed: ${validation.errors.join('; ')}`)
+  const body = await readFile(prd, 'utf8')
+  const expected = { workflow: 'pmd-prd', runRequirementId, businessRequirementId: businessRequirementId(body) }
   let current
-  try { current = JSON.parse(await readFile(manifest, 'utf8')) } catch { throw new Error('manifest is invalid JSON') }
-  if (current === null || typeof current !== 'object' || Array.isArray(current) || current.workflow !== 'pmd-prd' || current.requirementId !== requirementId) {
+  try { current = JSON.parse(await readFile(manifestPath, 'utf8')) }
+  catch (error) {
+    if (error?.code === 'ENOENT') current = expected
+    else throw new Error('manifest is invalid JSON')
+  }
+  if (current === null || typeof current !== 'object' || Array.isArray(current)
+    || current.workflow !== 'pmd-prd' || current.runRequirementId !== runRequirementId) {
     throw new Error('manifest does not bind this pmd-prd requirement')
   }
-  const fingerprint = digest(await readFile(prd))
+  const fingerprint = digest(body)
   const receipt = { v: 1, kind: RECEIPT_KIND, prd: { path: fileName, fingerprint }, validatedAt: now }
-  const next = { ...current, reviewReceipt: receipt }
-  const temporary = `${manifest}.${process.pid}.${Date.now()}.tmp`
-  await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: (await lstat(manifest)).mode })
-  await rename(temporary, manifest)
-  const readback = JSON.parse(await readFile(manifest, 'utf8'))
+  const next = { ...expected, reviewReceipt: receipt }
+  const temporary = `${manifestPath}.${process.pid}.${Date.now()}.tmp`
+  let mode
+  try { mode = (await lstat(manifestPath)).mode } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, mode === undefined ? {} : { mode })
+  await rename(temporary, manifestPath)
+  const readback = JSON.parse(await readFile(manifestPath, 'utf8'))
   if (readback?.reviewReceipt?.prd?.fingerprint !== fingerprint) throw new Error('PMD review receipt readback failed')
-  return { path: fileName, fingerprint, manifestPath: manifest }
+  return { path: fileName, fingerprint, manifestPath }
 }
 
-function usage() { return 'Usage: issue-review-receipt.mjs --prd <frozen-prd-file> [--manifest <same-directory-manifest.json>]' }
+function usage() { return 'Usage: issue-review-receipt.mjs --prd <frozen-prd-file>' }
 
 async function main() {
   let args
   try { args = parseArguments(process.argv.slice(2)) } catch (error) { console.error(`ERROR: ${error.message}\n${usage()}`); process.exitCode = 2; return }
   if (args.help) { console.log(usage()); return }
   try {
-    const receipt = await issuePmdPrdReviewReceipt({ prdPath: args.prd, ...(args.manifest === undefined ? {} : { manifestPath: args.manifest }) })
+    const receipt = await issuePmdPrdReviewReceipt({ prdPath: args.prd })
     console.log(`PASS: PMD review receipt (${receipt.path})`)
   } catch (error) { console.error(`ERROR: ${error.message}`); process.exitCode = 1 }
 }

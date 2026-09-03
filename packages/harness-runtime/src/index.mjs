@@ -45,24 +45,43 @@ function userText(message) {
 
 function initialSelectedSourcePrompt(events) {
   let latestUser
+  let latestPmdPrd
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index]
     if (event?.type !== 'user/message') continue
     const text = userText(event.data)
     if (text === undefined) continue
     const pmdPrd = /^\/pmd-prd(?:\s+([\s\S]*))?$/.exec(text)
-    latestUser = { index, text: pmdPrd?.[1]?.trim() ? pmdPrd[1].trim() : text }
+    const user = { index, text: pmdPrd?.[1]?.trim() ? pmdPrd[1].trim() : text }
+    if (pmdPrd !== null) latestPmdPrd = user
+    latestUser = user
   }
+  // Once the current /pmd-prd run has real selected-source evidence, later
+  // user messages are process follow-ups and no longer need the first-search
+  // verbatim guard. Before then, a bare continuation still belongs to the
+  // original /pmd-prd request.
+  if (latestPmdPrd !== undefined && hasSettledSelectedSourceEvidence(events, latestPmdPrd.index)) return latestPmdPrd
+  const continuation = latestUser?.index > latestPmdPrd?.index && /^继续[。！!]?$/u.test(latestUser.text)
+  if (latestPmdPrd !== undefined && (continuation || latestUser === latestPmdPrd)) return latestPmdPrd
   return latestUser
 }
 
 function hasSettledSelectedSourceEvidence(events, afterIndex) {
   let wrapperStarted = false
+  const wrapperCalls = new Set()
   for (let index = afterIndex + 1; index < events.length; index += 1) {
     const event = events[index]
     if (event?.type === 'tool/call' && SELECTED_SOURCE_WRAPPERS.has(event.data?.name)) {
       wrapperStarted = true
+      if (typeof event.data.callId === 'string' && event.data.callId !== '') wrapperCalls.add(event.data.callId)
       continue
+    }
+    if (wrapperStarted && event?.type === 'tool/result') {
+      const message = event.data?.message
+      const source = message?.source
+      const callId = typeof source?.callId === 'string' ? source.callId : undefined
+      const failed = Array.isArray(message?.content) && message.content.some(block => block?.isError === true)
+      if (source?.kind === 'tool' && callId !== undefined && wrapperCalls.has(callId) && !failed) return true
     }
     if (!wrapperStarted || event?.type !== 'user/message' || event.data?.source?.kind !== 'subagent-settled') continue
     const summary = event.data.source.summary

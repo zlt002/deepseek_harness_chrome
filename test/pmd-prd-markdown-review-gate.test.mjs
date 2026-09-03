@@ -2,29 +2,23 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-test('PMD-PRD validates before opening left-side review, then writes only after the user chooses an empty light document', async () => {
-  const [skill, matrix, state] = await Promise.all([
-    readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8'),
-    readFile(new URL('../skills/pmd-prd/references/capability-matrix.md', import.meta.url), 'utf8'),
-    readFile(new URL('../skills/pmd-prd/references/process-state.md', import.meta.url), 'utf8'),
-  ])
-  assert.match(skill, /open_workspace_markdown_review/)
-  assert.match(skill, /只复用其中已有的“采纳、重写、局部优化、接受\/拒绝修改”/)
-  assert.match(skill, /在此之前不得进入阶段 6 或写远程/)
-  assert.match(skill, /重写或局部优化始终回到同一 `\/pmd-prd` 来源会话/)
-  assert.match(skill, /确认以当前编辑器看到的完整正文为准/)
-  assert.match(skill, /https:\/\/doc\.midea\.com\/docs/)
-  assert.match(skill, /当前会话最后一次采纳只保留这一条待执行指令/)
-  assert.match(skill, /直接替换右侧当前会话输入框中的草稿，不切换到来源会话/)
-  assert.match(skill, /用户自己在当前 Browser Target 选择或新建空白轻文档/)
-  assert.match(skill, /light_document_read → light_document_write_preview → light_document_write_commit → light_document_read/)
-  assert.match(skill, /第二次用户手动发送执行指令是对当下 Browser Target 的明确写入确认/)
-  assert.match(skill, /请选择或新建空白轻文档后再发送执行。/)
-  assert.match(matrix, /空白轻文档/)
-  assert.match(skill, /相对当前 Harness 会话 cwd 的冻结产物[\s\S]*\.md[\s\S]*路径/)
-  assert.match(matrix, /左侧“采纳”只准备执行/)
-  assert.match(state, /prd_review_accepted/)
-  assert.match(state, /prd_sync_pending/)
-  assert.match(state, /Markdown Review“采纳”/)
+test('PMD-PRD validates before review and writes only after explicit target selection', async () => {
+  const skill = await readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8')
+
+  assert.match(skill, /### 4\. 生成 PRD/)
+  assert.match(skill, /### 5\. 检查 PRD/)
+  assert.match(skill, /生成完成后先进入检查阶段，不立即签发审核凭据或打开 Markdown Review/)
+  assert.match(skill, /只有第四章功能改动点可综合用户输入、用户提供\/选定资料和代码查询/)
+  assert.match(skill, /代码只证明现状、关联影响和研发定位/)
+  assert.match(skill, /其他章节和字段不能从代码库或模型推断直接填充/)
+  assert.match(skill, /修改或删除项：写清改造前后对比及影响。[\s\S]*改造前情况及关联影响必须有[\s\S]*改造后的行为必须由用户[\s\S]*知识库、用户材料中的正式规则/)
+  assert.match(skill, /新增项：写清功能、入口、流程、规则和结果。[\s\S]*上述内容必须由用户[\s\S]*知识库、用户材料中的正式规则[\s\S]*研发定位必须来自代码库查询结果/)
+  assert.match(skill, /没有内容的章节或小节写“无”，需求基本信息未知字段留空/)
+  assert.match(skill, /禁止猜测、拼接不同信息得出未经确认的结论，或把建议写成事实/)
+  assert.match(skill, /检查通过[\s\S]*issue-review-receipt\.mjs[\s\S]*凭据签发成功后，才调用[\s\S]*open_workspace_markdown_review/)
+  assert.match(skill, /用户修改 PRD 后，必须重新执行本阶段的完整内容检查/)
+  assert.match(skill, /用户采纳 PRD 不代表允许立即写入在线文档/)
+  assert.match(skill, /用户明确选择目标文档并发送执行指令后/)
+  assert.match(skill, /light_document_read[\s\S]*light_document_write_preview[\s\S]*light_document_write_commit[\s\S]*light_document_read/)
   assert.doesNotMatch(skill, /team_knowledge_batch_preview|team_knowledge_batch_create|pmdReviewReceipt/)
 })
