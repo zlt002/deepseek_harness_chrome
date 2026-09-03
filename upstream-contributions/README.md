@@ -68,6 +68,11 @@ paths retain the Host opener and the Tool row's normal detail interaction.
 transforms run only on plain clipboard text before it enters the composer
 machine; without a registration the exact clipboard text is preserved.
 
+`0025` provides a root-scoped, generic trailing-action slot for each
+composer model option. The model label stays a separate selection button, and
+the optional trailing action area is visible only while that row is hovered or
+contains focus.
+
 Verify against the pinned upstream commit:
 
 ```sh

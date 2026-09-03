@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 test('Conversation shell is a product presentation plugin, not a second conversation controller', async () => {
-  const [manifest, hostSource, source, presentation, css, fullscreenControl, fullscreenStore, fullscreenCss, visibilityRow, visibilityStore, settings, overlayHostSeam, permissionLabelSeam] = await Promise.all([
+  const [manifest, hostSource, source, presentation, css, fullscreenControl, fullscreenStore, fullscreenCss, visibilityRow, visibilityStore, settings, overlayHostSeam, permissionLabelSeam, modelOptionSeam, multimodalToggle] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../src/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/index.ts', import.meta.url), 'utf8'),
@@ -17,6 +17,8 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     readFile(new URL('../src/presentation-settings.ts', import.meta.url), 'utf8'),
     readFile(new URL('../../../upstream-contributions/0013-composer-overlay-host-marker.patch', import.meta.url), 'utf8'),
     readFile(new URL('../../../upstream-contributions/0019-permission-label-registry.patch', import.meta.url), 'utf8'),
+    readFile(new URL('../../../upstream-contributions/0025-model-selection-option-trailing-slot.patch', import.meta.url), 'utf8'),
+    readFile(new URL('../src/client/CompanyGatewayMultimodalToggle.tsx', import.meta.url), 'utf8'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-conversation-shell/)
   assert.match(manifest, /@deepseek-ai\/dsh-client-ui-model-selection/)
@@ -57,6 +59,17 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(source, /modelDirectories/)
   assert.match(source, /companyGatewayFirst/)
   assert.match(source, /directory\.store\.update/)
+  assert.match(source, /model-selection\.option\.trailing/)
+  assert.match(source, /company-gateway-multimodal-toggle/)
+  assert.match(modelOptionSeam, /model-selection\.option\.trailing/)
+  assert.match(modelOptionSeam, /data-model-selection-option-trailing/)
+  assert.match(modelOptionSeam, /visibility: hidden/)
+  assert.match(modelOptionSeam, /optionTrailing/)
+  assert.match(multimodalToggle, /providerId !== COMPANY_GATEWAY_PROVIDER/)
+  assert.match(multimodalToggle, /onClick=\{stop\}/)
+  assert.match(multimodalToggle, /onMouseDown=\{stop\}/)
+  assert.match(multimodalToggle, /setFailure\(result\.error/)
+  assert.match(multimodalToggle, /role="alert"/)
   assert.match(source, /id: 'trajectory'/)
   assert.match(source, /id: 'conversation'/)
   assert.match(source, /conversation\.presentation/)
@@ -227,4 +240,24 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   }
   assert.doesNotMatch(css, /(?:^|\n)\.(?:header|tabs|viewArea|composerStack|overlayAnchor)\b/m)
   assert.doesNotMatch(`${source}\n${presentation}`, /createChatStore|ConversationController|defineStore|useSession\(/)
+})
+
+test('keeps the left composer controls intact while allowing the model name to shrink', async () => {
+  const css = await readFile(new URL('../src/client/ConversationPresentation.module.css', import.meta.url), 'utf8')
+
+  assert.match(
+    css,
+    /\.root\s+:global\(\[data-composer-card\]\s+\*:has\(>\s*\[data-slot='conversation\.input\.left'\]\s+\[data-browser-target-control\]\)\)\s*\{[\s\S]*?flex:\s*0 0 auto[\s\S]*?min-width:\s*max-content/,
+    'the left tool group containing Browser Target must not shrink or let its children overlap',
+  )
+  assert.match(
+    css,
+    /\.root\s+:global\(\[data-composer-card\]\s+\*:has\(>\s*\[data-slot='conversation\.input\.model'\]\s+\[data-composer-overlay-host\]\)\)\s*\{[\s\S]*?flex:\s*0 1 auto[\s\S]*?min-width:\s*0/,
+    'the trailing model group must be allowed to absorb narrow-width pressure',
+  )
+  assert.match(
+    css,
+    /\.root\s+:global\(\[data-composer-overlay-host\]\)\s*\{[\s\S]*?flex:\s*0 1 auto[\s\S]*?min-width:\s*0/,
+    'the model host must remain shrinkable inside the trailing group',
+  )
 })

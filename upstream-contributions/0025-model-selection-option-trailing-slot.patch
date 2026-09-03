@@ -1,0 +1,265 @@
+# Adds a generic, root-scoped trailing action area to each composer model
+# option. Product contributors own their actions; this seam only separates
+# an action from the model-selection button and hides it outside row hover.
+
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.tsx b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.tsx
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+@@ -21,7 +21,7 @@ import {
+   IconCheckOutline16, IconChevronDownOutline14, IconChevronRightOutline14,
+   IconWarningOutline16, Toast,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+-import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
++import type { PropsLocale, PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { ModelSelectInjected } from './slots.ts'
+ import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
+ import css from './ModelSelect.module.css'
+@@ -29,6 +29,29 @@ import css from './ModelSelect.module.css'
+ /** Which pane the dropdown shows: the two-row root or one drilled-in list. */
+ type Pane = 'root' | 'model' | 'effort'
+
++/** One exact model route rendered in the selector's trailing action area. */
++export interface ModelOptionTrailingOwnerProps {
++  /** Provider route that owns the model. */
++  providerId: string
++  /** Provider-owned model id. */
++  modelId: string
++}
++
++declare module '@deepseek-ai/dsh-client-ui-slots' {
++  interface SlotMap {
++    /**
++     * Optional trailing actions for an exact model option. The selector keeps
++     * model selection on its own button, so an action can stop propagation
++     * without selecting or closing the menu.
++     */
++    'model-selection.option.trailing': {
++      kind: 'list'
++      scope: 'root'
++      owner: ModelOptionTrailingOwnerProps
++    }
++  }
++}
++
+ /** One dynamic effort row; undefined means preserve the provider default. */
+ interface EffortChoice {
+   key: string
+@@ -44,8 +67,8 @@ interface EffortChoice {
+  * @returns the trigger and, while open, the two-level menu.
+  */
+ export function ModelSelect(
+-  { locked, available, directory, load, select, t }:
+-  ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>,
++  { locked, available, directory, load, select, t, renderSlot }:
++  ModelSelectInjected & { locked: boolean } & PropsLocale<'model'> & PropsRenderSlots<'model-selection.option.trailing'>,
+ ) {
+   const state = useSyncExternalStore(
+     fn => directory.subscribe(fn),
+@@ -302,27 +325,35 @@ export function ModelSelect(
+                       {group.models.map((model) => {
+                         const selected = state.current?.provider === group.id && state.current.model === model.id
+                         return (
+-                          <button
+-                            ref={itemRef()}
+-                            type="button"
++                          <div
+                             role="menuitemradio"
+                             aria-checked={selected}
+                             className={clsx(css.option, selected && css.selected)}
++                            data-model-selection-option
+                             key={model.id}
+                             title={model.name}
++                            onClick={() => { if (!busy) choose({ provider: group.id, model: model.id }) }}
+-                            disabled={busy}
+-                            onClick={() => { choose({ provider: group.id, model: model.id }) }}
+                           >
++                            <button
++                              ref={itemRef()}
++                              type="button"
++                              className={css.optionSelect}
++                              disabled={busy}
++                            >
+                             <span className={css.optionCopy}>
+                               <span className={css.modelName}>{model.name}</span>
+                               {model.description !== undefined && (
+                                 <span className={css.description}>{model.description}</span>
+                               )}
+                             </span>
++                            </button>
++                            <span className={css.optionTrailing} data-model-selection-option-trailing>
++                              {renderSlot('model-selection.option.trailing', { providerId: group.id, modelId: model.id })}
++                            </span>
+                             <span className={css.check}>
+                               {selected ? <IconCheckOutline16 /> : null}
+                             </span>
+-                          </button>
++                          </div>
+                         )
+                       })}
+                     </section>
+diff --git a/packages/client/ui-model-selection/src/client/index.ts b/packages/client/ui-model-selection/src/client/index.ts
+--- a/packages/client/ui-model-selection/src/client/index.ts
++++ b/packages/client/ui-model-selection/src/client/index.ts
+@@ -157,6 +157,9 @@ export function apply(ctx: ClientContext): void {
+     scope.slots.inject('conversation.input.model', () => scope.slots.register({
+       name: 'conversation.input.model',
+       locale: NS,
++      children: {
++        'model-selection.option.trailing': { kind: 'list', scope: 'root' },
++      },
+       inject: (sessionId): ModelSelectInjected => {
+         const directory = models.directoryFor(sessionId)
+         const available = sessions.subagentAddress(sessionId) === undefined
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.module.css b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.module.css
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.module.css
+@@ -158,18 +158,17 @@
+   gap: 8px;
+   width: 100%;
+   min-height: 38px;
+-  padding: 6px 8px;
++  padding: 0 8px;
+   border: none;
+   border-radius: 10px;
+   outline: none;
+   background: transparent;
+   color: inherit;
+   text-align: left;
+-  cursor: pointer;
+ }
+
+-.option:hover:not(:disabled),
+-.option:focus-visible {
++.option:hover,
++.option:focus-within {
+   background: var(--dsw-alias-interactive-bg-hover);
+ }
+
+@@ -179,11 +178,38 @@
+   background: transparent;
+ }
+
+-.option:disabled {
++.optionSelect {
++  display: flex;
++  align-items: center;
++  flex: 1;
++  min-width: 0;
++  min-height: 38px;
++  padding: 6px 0;
++  border: none;
++  outline: none;
++  background: transparent;
++  color: inherit;
++  text-align: left;
++  cursor: pointer;
++}
++
++.optionSelect:disabled {
+   color: var(--dsw-alias-label-dimmed);
+   cursor: default;
+ }
+
++.optionTrailing {
++  display: flex;
++  align-items: center;
++  flex: 0 0 auto;
++  visibility: hidden;
++}
++
++.option:hover .optionTrailing,
++.option:focus-within .optionTrailing {
++  visibility: visible;
++}
++
+ .optionCopy {
+   display: flex;
+   flex: 1;
+diff --git a/packages/client/ui-model-selection/tests/model-select.client.spec.tsx b/packages/client/ui-model-selection/tests/model-select.client.spec.tsx
+--- a/packages/client/ui-model-selection/tests/model-select.client.spec.tsx
++++ b/packages/client/ui-model-selection/tests/model-select.client.spec.tsx
+@@ -20,6 +20,8 @@ const t: ComponentProps<typeof ModelSelect>['t'] = (key, params) => {
+     : template.replace(/\{(\w+)\}/g, (match, name: string) => name in params ? String(params[name]) : match)
+ }
+
++const emptyTrailing: ComponentProps<typeof ModelSelect>['renderSlot'] = () => null
++
+ const reasoning = {
+   efforts: [
+     { id: 'off', name: 'Off' },
+@@ -61,6 +63,7 @@ describe('ModelSelect reasoning effort', () => {
+       load={vi.fn()}
+       select={select}
+       t={t}
++      renderSlot={emptyTrailing}
+     />)
+
+     const trigger = screen.getByRole('button', {
+@@ -102,6 +105,7 @@ describe('ModelSelect reasoning effort', () => {
+       load={vi.fn()}
+       select={vi.fn().mockResolvedValue(true)}
+       t={t}
++      renderSlot={emptyTrailing}
+     />)
+
+     fireEvent.click(screen.getByRole('button', {
+@@ -124,6 +128,7 @@ describe('ModelSelect reasoning effort', () => {
+       load={vi.fn()}
+       select={select}
+       t={t}
++      renderSlot={emptyTrailing}
+     />)
+
+     const trigger = screen.getByRole('button', { name: '选择模型' })
+@@ -156,6 +161,7 @@ describe('ModelSelect reasoning effort', () => {
+       load={vi.fn()}
+       select={select}
+       t={t}
++      renderSlot={emptyTrailing}
+     />)
+
+     fireEvent.click(screen.getByRole('button', { name: /选择模型|当前/ }))
+@@ -176,9 +182,43 @@ describe('ModelSelect reasoning effort', () => {
+       load={load}
+       select={vi.fn().mockResolvedValue(false)}
+       t={t}
++      renderSlot={emptyTrailing}
+     />)
+
+     expect(screen.queryByRole('button')).toBeNull()
+     expect(load).not.toHaveBeenCalled()
+   })
++
++  it('renders a trailing option action without selecting its model', () => {
++    const select = vi.fn().mockResolvedValue(true)
++    const action = vi.fn()
++    const directory = createSnapshotStore<ModelDirectoryState>(state({
++      groups: [{
++        id: 'provider',
++        name: 'Provider',
++        models: [{ id: 'model', name: 'Model' }],
++      }],
++      current: { provider: 'provider', model: 'model' },
++    }))
++    render(<ModelSelect
++      locked={false}
++      available
++      directory={directory}
++      load={vi.fn()}
++      select={select}
++      t={t}
++      renderSlot={(_key, owner) => <button type="button" onClick={event => {
++        event.stopPropagation()
++        action(owner)
++      }}>Action</button>}
++    />)
++
++    fireEvent.click(screen.getByRole('button', { name: /当前 Model/ }))
++    fireEvent.click(screen.getByRole('menuitem', { name: /模型/ }))
++    fireEvent.click(screen.getByRole('button', { name: 'Action' }))
++
++    expect(action).toHaveBeenCalledWith({ providerId: 'provider', modelId: 'model' })
++    expect(select).not.toHaveBeenCalled()
++    expect(screen.getByRole('menuitemradio', { name: /Model/ })).toBeTruthy()
++  })
+ })

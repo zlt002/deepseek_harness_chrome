@@ -118,6 +118,49 @@ test('company gateway restores editable model fields and merges them onto the re
   ])
 })
 
+test('company gateway discovery reuses the Host-saved key and preserves local model capabilities', async () => {
+  const calls = []
+  const api = {
+    llm: {
+      discoverModels: async payload => {
+        calls.push(payload)
+        return { result: { ok: true, value: { models: [
+          { id: 'vision-model', name: 'Remote name' },
+          { id: 'new-model', name: 'New model' },
+        ] } } }
+      },
+    },
+  }
+  const saved = [{ id: 'vision-model', name: 'Local name', input: ['text', 'image'], contextWindow: 128_000 }]
+
+  assert.deepEqual(await gatewayModule.discoverCompanyGatewayModels(api, saved, 'openai-completions'), {
+    models: [
+      { id: 'vision-model', name: 'Local name', input: ['text', 'image'], contextWindow: 128_000 },
+      { id: 'new-model', name: 'New model' },
+    ],
+  })
+  assert.deepEqual(calls, [{
+    settingsNs: 'llm-pi-ai',
+    provider: 'annto-company-gateway',
+    baseURL: 'https://anapi-uat.annto.com/api-sse-anthropic/v1',
+    api: 'openai-completions',
+  }])
+})
+
+test('saved keys stay write-only while opening the editor automatically refreshes the remote catalog', () => {
+  assert.match(accountAccessViewSource, /已安全保存；无需重新输入，仅替换时填写/)
+  assert.match(accountAccessViewSource, /discoverCompanyGatewayModels/)
+  assert.match(accountAccessViewSource, /\[editingGateway, credentialConfigured\]/)
+  assert.doesNotMatch(accountAccessViewSource, /setShowKey|\{showKey \? '隐藏' : '显示'\}/)
+})
+
+test('multimodal image support is directly editable on every model row', () => {
+  const row = modelCatalogSource.slice(modelCatalogSource.indexOf('<div className={css.modelCatalogRow}>'), modelCatalogSource.indexOf('{open ?'))
+  assert.match(row, /modelCheckInline/)
+  assert.match(row, /多模态/)
+  assert.match(row, /\['text', 'image'\]/)
+})
+
 test('saved company gateway models can reopen for editing without requiring a new key', async () => {
   const savedModels = [{ id: 'renamed-vision', name: '视觉模型', contextWindow: 131072, maxTokens: 98304, input: ['text', 'image'] }]
   const restored = gatewayModule.companyGatewayMetadataForEditing(savedModels, {

@@ -9,6 +9,8 @@ import { ProcessVisibilitySettingsRow } from './ProcessVisibilitySettingsRow.tsx
 import { ProcessVisibility } from './process-visibility.ts'
 import { CONVERSATION_PRESENTATION_SETTINGS_NAMESPACE, type ConversationPresentationSettings } from '../presentation-settings.ts'
 import { companyGatewayFirst } from './model-order.ts'
+import { installCompanyGatewayRefresh, refreshCompanyGatewayCatalog } from './company-gateway-refresh.ts'
+import { CompanyGatewayMultimodalToggle } from './CompanyGatewayMultimodalToggle.tsx'
 import { permissionLabel } from './permission-labels.ts'
 
 /**
@@ -72,13 +74,16 @@ export function apply(ctx: ClientContext): void {
   ctx.inject(['modelDirectories', 'sessions'], (scope: ClientContext) => {
     let activeSessionId: SessionId | undefined
     let stopDirectory: (() => void) | undefined
+    let restoreDirectoryLoad: (() => void) | undefined
     const attach = (): void => {
       const sessionId = scope.sessions.list.getSnapshot().current
       if (sessionId === activeSessionId) return
       stopDirectory?.()
+      restoreDirectoryLoad?.()
       activeSessionId = sessionId
       if (sessionId === undefined) return
       const directory = scope.modelDirectories.directoryFor(sessionId)
+      restoreDirectoryLoad = installCompanyGatewayRefresh(directory, () => refreshCompanyGatewayCatalog((scope.get('connection')!).api))
       const order = (): void => {
         const groups = directory.store.getSnapshot().groups
         const ordered = companyGatewayFirst(groups)
@@ -93,7 +98,17 @@ export function apply(ctx: ClientContext): void {
     scope.effect(() => () => {
       stopSessions()
       stopDirectory?.()
+      restoreDirectoryLoad?.()
     }, 'accrui-conversation-shell: company gateway model order')
+  })
+  ctx.inject(['slots', 'connection'], (scope: ClientContext) => {
+    const api = scope.get('connection')!.api
+    scope.slots.inject('model-selection.option.trailing', () => scope.slots.register({
+      name: 'model-selection.option.trailing',
+      id: 'company-gateway-multimodal-toggle',
+      order: 10,
+      inject: () => ({ api }),
+    }, CompanyGatewayMultimodalToggle))
   })
 }
 

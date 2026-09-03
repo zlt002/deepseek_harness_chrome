@@ -19,7 +19,8 @@ test('declares an out-of-tree account settings plugin without upstream source im
   assert.doesNotMatch(section, />重新检测<\/button>/)
   assert.doesNotMatch(section, /游客模式/)
   assert.match(section, /authenticated \? <strong className=\{css\.accountName\}>\{account\.displayName \?\? '公司账号'\}<\/strong> : null/)
-  assert.match(section, /验证 Key 并加载/)
+  assert.match(section, /刷新远程模型/)
+  assert.match(section, /已安全保存；无需重新输入，仅替换时填写/)
   assert.match(section, />退出<\/button>/)
   assert.doesNotMatch(section, /退出公司账号/)
   assert.match(section, /退出会清除 wb-uat\.annto\.com 与公司 API 的登录状态/)
@@ -91,13 +92,12 @@ test('account, gateway, and onboarding styles use the settings design tokens', a
   assert.match(css, /\.heading \{[^}]*align-items: center;/)
   assert.match(css, /\.accountName \{ font-size: 14px; line-height: 22px; font-weight: 500; \}/)
   assert.match(css, /\.modelCatalog \{[^}]*overflow-y: auto;[^}]*--dsh-scrollbar-thumb: var\(--dsw-alias-scrollbar-bg-l2\);/)
-  // Match the custom-provider catalog: ID and display name stay in one compact
-  // row, while the two numeric capacities remain in the disclosure and the
-  // image capability does not become a competing third field.
-  assert.match(css, /\.modelCatalogRow \{[^}]*display: grid;[^}]*grid-template-columns: minmax\(0, 1\.4fr\) minmax\(0, 1fr\) auto auto;/)
+  // ID, display name, and the always-visible multimodal switch share one row;
+  // only the two numeric capacities remain in the disclosure.
+  assert.match(css, /\.modelCatalogRow \{[^}]*display: grid;[^}]*grid-template-columns: minmax\(0, 1\.4fr\) minmax\(0, 1fr\) auto auto auto;/)
   assert.match(css, /\.modelAdvanced \{[^}]*display: grid;[^}]*grid-template-columns: repeat\(auto-fit, minmax\(160px, 1fr\)\);/)
-  assert.match(css, /\.modelCheck \{[^}]*grid-column: 1 \/ -1;/)
-  assert.match(css, /@media \(max-width: 480px\)[\s\S]*?\.modelCatalogRow \{ grid-template-columns: minmax\(0, 1\.4fr\) minmax\(0, 1fr\) auto auto; \}/)
+  assert.match(css, /\.modelCheckInline \{[^}]*display: inline-flex;/)
+  assert.match(css, /@media \(max-width: 480px\)[\s\S]*?\.modelCatalogRow \{ grid-template-columns: minmax\(0, 1\.4fr\) minmax\(0, 1fr\) auto auto auto; \}/)
   assert.doesNotMatch(css, /@media \(max-width: 480px\)[\s\S]*?\.modelCatalogRow \.modelInput:nth-child\(2\) \{ grid-column: 1; \}/)
   assert.doesNotMatch(css, /@media \(max-width: 480px\)[\s\S]*?\.modelDetailsButton \{ grid-column: 2; grid-row: 1 \/ span 2; \}/)
   assert.match(css, /@media \(max-width: 480px\)[\s\S]*?\.modelAdvanced \{ grid-template-columns: minmax\(0, 1fr\); \}/)

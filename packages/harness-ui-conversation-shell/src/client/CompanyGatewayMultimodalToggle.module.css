@@ -1,0 +1,40 @@
+.root {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.root:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--dsw-alias-state-business-primary);
+}
+
+.error {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 1;
+  max-width: 240px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-elevated);
+  box-shadow: var(--dsw-alias-shadow-level-2);
+  color: var(--dsw-alias-state-danger);
+  font-size: 12px;
+  line-height: 16px;
+}

@@ -115,7 +115,7 @@
 .modelCatalogHeading strong { color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; font-weight: 500; }
 .modelCatalogHeading span { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
 .modelCatalogEntry { border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 6px; }
-.modelCatalogRow { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
+.modelCatalogRow { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto auto; align-items: center; gap: 6px; }
 .modelDetailsButton { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 6px; color: var(--dsw-alias-label-tertiary); background: transparent; cursor: pointer; }
 .modelDetailsButton:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
 .modelDetailsButton:disabled { cursor: default; opacity: .4; }
@@ -123,9 +123,9 @@
 .modelAdvanced { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: end; gap: 8px; padding: 8px 4px 2px; }
 .modelField { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .modelFieldLabel { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
-.modelCheck { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; min-height: 32px; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; cursor: pointer; }
-.modelCheck input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--dsw-alias-button-primary-fill); cursor: pointer; }
-.modelCheck input:disabled { cursor: default; }
+.modelCheckInline { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; white-space: nowrap; cursor: pointer; }
+.modelCheckInline input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--dsw-alias-button-primary-fill); cursor: pointer; }
+.modelCheckInline input:disabled { cursor: default; }
 .addModelButton { align-self: flex-start; box-sizing: border-box; height: 28px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; }
 .addModelButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
 .addModelButton:disabled { opacity: .4; cursor: default; }
@@ -167,7 +167,7 @@
   .card, .gatewayProvider { padding: 12px; }
   .card dl div { gap: 8px; }
   .gatewayEditor { padding: 12px; }
-  .modelCatalogRow { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto; }
+  .modelCatalogRow { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto auto; }
   .modelAdvanced { grid-template-columns: minmax(0, 1fr); }
   .gatewayEditorActions .gatewayCancelButton, .gatewayEditorActions .gatewaySaveButton { flex: 1 1 0; }
 }

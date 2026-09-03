@@ -234,6 +234,20 @@
   min-width: 0;
 }
 
+/* InputBar's `.tools`/`.trailing` classes are upstream CSS-module details.
+   Address their flex seats through the stable slot anchors instead: the left
+   controls keep their intrinsic width, while the model seat absorbs any
+   remaining narrow-width pressure and lets its label ellipsis. */
+.root :global([data-composer-card] *:has(> [data-slot='conversation.input.left'] [data-browser-target-control])) {
+  flex: 0 0 auto;
+  min-width: max-content;
+}
+
+.root :global([data-composer-card] *:has(> [data-slot='conversation.input.model'] [data-composer-overlay-host])) {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .root :global([data-composer-card]:has([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu'])) {
   position: static;
 }

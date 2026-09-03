@@ -8,6 +8,7 @@ export const COMPANY_GATEWAY_OPENAI_BASE_URL = 'https://anapi-uat.annto.com/api-
 export const COMPANY_GATEWAY_KEY_PORTAL_URL = 'https://anapi-uat.annto.com/api-key-portal'
 
 type GatewayApi = Pick<IApiClient, 'settings' | 'credentials'>
+type GatewayDiscoveryApi = Pick<IApiClient, 'llm'>
 
 export function companyGatewayBaseUrl(protocol: CompanyGatewayProtocol): string {
   return protocol === 'anthropic-messages'
@@ -147,6 +148,31 @@ export function mergeCompanyGatewayModels(
       ? { ...model }
       : { ...model, ...previous, id: model.id }
   })
+}
+
+/**
+ * Ask the Host to discover the gateway's current OpenAI-compatible catalog.
+ * When apiKey is absent the Host resolves the already-saved credential; the
+ * browser never receives that secret. Saved capacity and modality edits win
+ * for model ids that the fresh directory still advertises.
+ */
+export async function discoverCompanyGatewayModels(
+  api: GatewayDiscoveryApi,
+  saved: readonly CompanyGatewayModel[],
+  protocol: CompanyGatewayProtocol,
+  apiKey?: string,
+): Promise<{ models?: CompanyGatewayModel[]; error?: string }> {
+  const response = await api.llm.discoverModels({
+    settingsNs: 'llm-pi-ai',
+    provider: COMPANY_GATEWAY_PROVIDER,
+    baseURL: companyGatewayBaseUrl(protocol),
+    api: protocol,
+    ...(apiKey === undefined ? {} : { apiKey }),
+  })
+  if (!response.result.ok) return { error: response.result.error.message }
+  const latest = response.result.value.models.map(model => ({ ...model }))
+  if (latest.length === 0) return { error: '公司网关没有返回可用模型。' }
+  return { models: mergeCompanyGatewayModels(saved, latest) }
 }
 
 /** Use the saved provider profile when reopening the editor, retaining live quota metadata when available. */

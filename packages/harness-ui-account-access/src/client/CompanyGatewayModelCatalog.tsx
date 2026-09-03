@@ -170,6 +170,10 @@ export function CompanyGatewayModelCatalog({ models, disabled, onChange, selecte
             disabled={disabled}
             onChange={event => { patch(index, { name: event.target.value === '' ? undefined : event.target.value }) }}
           />
+          <label className={css.modelCheckInline} title="允许该模型接收图片">
+            <input type="checkbox" checked={acceptsImage(model)} aria-label={`支持多模态图片 ${index + 1}`} disabled={disabled} onChange={event => { patch(index, { input: event.target.checked ? ['text', 'image'] : undefined }) }} />
+            <span>多模态</span>
+          </label>
           <button type="button" className={css.modelDetailsButton} aria-label={`模型详情 ${index + 1}`} aria-expanded={open} title="模型详情" disabled={disabled} onClick={() => { toggleExpanded(index) }}>
             <Chevron open={open} />
           </button>
@@ -180,10 +184,6 @@ export function CompanyGatewayModelCatalog({ models, disabled, onChange, selecte
         {open ? <div className={css.modelAdvanced}>
           {capacityField(model, index, 'contextWindow', '上下文窗口')}
           {capacityField(model, index, 'maxTokens', '最大输出 token')}
-          <label className={css.modelCheck}>
-            <input type="checkbox" checked={acceptsImage(model)} aria-label={`支持多模态图片 ${index + 1}`} disabled={disabled} onChange={event => { patch(index, { input: event.target.checked ? ['text', 'image'] : undefined }) }} />
-            <span>支持多模态图片</span>
-          </label>
         </div> : null}
       </div>
     })}

@@ -5,6 +5,7 @@ import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import {
   companyGatewayBaseUrl,
   companyGatewayApiKeyFailure,
+  discoverCompanyGatewayModels,
   companyGatewayMetadataForEditing,
   companyGatewayModelsFromNamespaces,
   companyGatewayModelsForSelection,
@@ -26,7 +27,7 @@ export interface AccountAccessInjected {
   command: (command: AccountAccessCommand) => void
   probeGateway?: (apiKey: string, protocol: CompanyGatewayProtocol) => string
   selectInitialModel?: (models: readonly CompanyGatewayModel[]) => Promise<string | undefined>
-  api: Pick<IApiClient, 'settings' | 'credentials'>
+  api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
 }
 
 type Props = PropsRuntime<'settings.section'> & InjectFace<AccountAccessInjected>
@@ -51,7 +52,6 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const useGatewayProbe = useCompanyGatewayProbe ?? useMissingGatewayProbe
   const probe = useGatewayProbe(snapshot => snapshot)
   const [keyDraft, setKeyDraft] = useState('')
-  const [showKey, setShowKey] = useState(false)
   const [request, setRequest] = useState<{ id: string; key: string; protocol: CompanyGatewayProtocol }>()
   const [probedGateway, setProbedGateway] = useState<CompanyGatewayMetadata>()
   const [restoredGateway, setRestoredGateway] = useState<CompanyGatewayMetadata>()
@@ -59,11 +59,12 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
   const [savedGatewayModels, setSavedGatewayModels] = useState<CompanyGatewayModel[]>([])
   const [selectedModel, setSelectedModel] = useState<string>()
   const [editingGateway, setEditingGateway] = useState(false)
-  const [gatewayBeforeEdit, setGatewayBeforeEdit] = useState<{ protocol: CompanyGatewayProtocol; key: string; showKey: boolean }>()
+  const [gatewayBeforeEdit, setGatewayBeforeEdit] = useState<{ protocol: CompanyGatewayProtocol; key: string }>()
   const [protocol, setProtocol] = useState<CompanyGatewayProtocol>('openai-completions')
   const [credentialConfigured, setCredentialConfigured] = useState(false)
   const [credentialWritable, setCredentialWritable] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [discovering, setDiscovering] = useState(false)
   const [notice, setNotice] = useState<string>()
   const [failure, setFailure] = useState<string>()
 
@@ -111,11 +112,9 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     setFailure(undefined)
   }, [probe, request, savedGatewayModels])
 
-  const keyHint = credentialConfigured ? '已配置；输入新 Key 可验证并替换' : '请输入公司网关 API Key'
+  const keyHint = credentialConfigured ? '已安全保存；无需重新输入，仅替换时填写' : '请输入公司网关 API Key'
   const quotaPercent = gateway?.quota.usagePercent
 
-  if (account === undefined) return <p className={css.status}>正在检查账号状态…</p>
-  const authenticated = account.status === 'authenticated'
   const probeKey = (): void => {
     const key = keyDraft.trim()
     const invalid = companyGatewayApiKeyFailure(key)
@@ -124,6 +123,31 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     setFailure(undefined); setNotice(undefined)
     setProbedGateway(undefined); setRestoredGateway(undefined); setProbedKey(undefined); setSelectedModel(undefined)
     setRequest({ id: probeGateway(key, protocol), key, protocol })
+  }
+  const refreshCatalog = async (): Promise<void> => {
+    const key = keyDraft.trim()
+    if (key.length === 0 && !credentialConfigured) { setFailure('请先输入 API Key。'); return }
+    if (key.length > 0) {
+      const invalid = companyGatewayApiKeyFailure(key)
+      if (invalid !== undefined) { setFailure(invalid); return }
+    }
+    setDiscovering(true); setFailure(undefined); setNotice(undefined)
+    try {
+      const currentModels = gateway?.models ?? savedGatewayModels
+      const result = await discoverCompanyGatewayModels(api, currentModels, protocol, key.length === 0 ? undefined : key)
+      if (result.error !== undefined || result.models === undefined) { setFailure(result.error ?? '刷新模型目录失败。'); return }
+      const base = gateway ?? companyGatewayMetadataForEditing(result.models, account?.gateway)
+      if (base === undefined) { setFailure('刷新模型目录失败。'); return }
+      const refreshed = { ...base, models: result.models, checkedAt: new Date().toISOString() }
+      if (probedGateway !== undefined) setProbedGateway(refreshed)
+      else setRestoredGateway(refreshed)
+      setSelectedModel(current => current !== undefined && result.models?.some(model => model.id === current) ? current : result.models?.[0]?.id)
+      setNotice(`已同步远程最新的 ${String(result.models.length)} 个模型；保存后对话列表生效。`)
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error))
+    } finally {
+      setDiscovering(false)
+    }
   }
   const save = async (): Promise<boolean> => {
     if (gateway === undefined) return false
@@ -151,17 +175,27 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
     }
   }
   const openGatewayEditor = (): void => {
-    setGatewayBeforeEdit({ protocol, key: keyDraft, showKey })
+    setGatewayBeforeEdit({ protocol, key: keyDraft })
     setFailure(undefined); setNotice(undefined); setEditingGateway(true)
   }
   const cancelGatewayEditor = (): void => {
     if (gatewayBeforeEdit !== undefined) {
       setProtocol(gatewayBeforeEdit.protocol)
       setKeyDraft(gatewayBeforeEdit.key)
-      setShowKey(gatewayBeforeEdit.showKey)
     }
     setRequest(undefined); setFailure(undefined); setNotice(undefined); setEditingGateway(false)
   }
+
+  useEffect(() => {
+    if (!editingGateway || !credentialConfigured || keyDraft.trim().length > 0) return
+    void refreshCatalog()
+  // Opening the editor is the explicit refresh gesture. Do not repeat after
+  // the refreshed draft itself changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingGateway, credentialConfigured])
+
+  if (account === undefined) return <p className={css.status}>正在检查账号状态…</p>
+  const authenticated = account.status === 'authenticated'
 
   return <section className={css.section}>
     <div className={css.heading}>
@@ -201,9 +235,10 @@ export function AccountAccessSection({ useAccountAccess, useCompanyGatewayProbe,
         <p className={css.notice}>填写方式与自定义提供方一致；公司地址固定，模型目录以密钥门户的最新结果为准。</p>
         <label className={css.gatewayField}><span>API 协议</span><select value={protocol} onChange={event => { setProtocol(event.target.value as CompanyGatewayProtocol); setProbedGateway(undefined); setRestoredGateway(undefined); setProbedKey(undefined); setRequest(undefined); setSelectedModel(undefined); setFailure(undefined) }}><option value="openai-completions">OpenAI URL</option><option value="anthropic-messages">Anthropic URL</option></select></label>
         <label className={css.gatewayField}><span>API 地址</span><input readOnly value={companyGatewayBaseUrl(protocol)} /></label>
-        <label className={css.gatewayField}><span>API Key</span><span className={css.keyRow}><input type={showKey ? 'text' : 'password'} value={keyDraft} placeholder={keyHint} disabled={!credentialWritable} onChange={event => { setKeyDraft(event.target.value); setProbedGateway(undefined); setRestoredGateway(undefined); setProbedKey(undefined); setRequest(undefined); setSelectedModel(undefined); setFailure(undefined); setNotice(undefined) }} /><button type="button" onClick={() => setShowKey(value => !value)}>{showKey ? '隐藏' : '显示'}</button></span></label>
+        <label className={css.gatewayField}><span>API Key</span><span className={css.keyRow}><input type="password" value={keyDraft} placeholder={keyHint} disabled={!credentialWritable} onChange={event => { setKeyDraft(event.target.value); setProbedGateway(undefined); setRestoredGateway(undefined); setProbedKey(undefined); setRequest(undefined); setSelectedModel(undefined); setFailure(undefined); setNotice(undefined) }} /></span></label>
         <div className={css.gatewayUtilityActions}>
-          <button type="button" className={css.gatewaySecondaryButton} disabled={probing || !credentialWritable || probeGateway === undefined} onClick={probeKey}>{probing ? '加载中…' : '验证 Key 并加载模型'}</button>
+          <button type="button" className={css.gatewaySecondaryButton} disabled={probing || discovering || (!credentialConfigured && keyDraft.trim().length === 0)} onClick={() => { void refreshCatalog() }}>{discovering ? '同步中…' : '刷新远程模型'}</button>
+          {keyDraft.trim().length === 0 ? null : <button type="button" className={css.gatewaySecondaryButton} disabled={probing || discovering || !credentialWritable || probeGateway === undefined} onClick={probeKey}>{probing ? '验证中…' : '验证并加载用量'}</button>}
           <button type="button" className={css.gatewaySecondaryButton} onClick={() => window.open(COMPANY_GATEWAY_KEY_PORTAL_URL, '_blank', 'noreferrer')}>打开密钥门户</button>
         </div>
         {gateway !== undefined ? <>
