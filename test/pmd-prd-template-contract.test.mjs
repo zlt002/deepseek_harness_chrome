@@ -49,7 +49,7 @@ test('skill makes concise product content and terminology provenance explicit', 
     '非功能性需求：只有用户确认，并且其输入或提供/选定资料有明确要求时才填写',
     '只有第四章功能改动点可综合用户输入、用户提供/选定资料和代码查询',
     '其他章节和字段不能从代码库或模型推断直接填充',
-    '模板标为必填的内容缺失时，先在澄清阶段向用户确认',
+    '模板标为必填的项必须取得真实信息并填写',
   ]) {
     assert.ok(`${skill}\n${template}`.includes(text), text)
   }
@@ -58,7 +58,7 @@ test('skill makes concise product content and terminology provenance explicit', 
   assert.match(template, /流程优先用“入口→关键操作→结果”一句话/)
   const nonFunctionalStart = template.lastIndexOf('<!--', template.indexOf('# 六、非功能性需求'))
   const nonFunctionalSection = template.slice(nonFunctionalStart, template.indexOf('# 七、配置与开关'))
-  assert.match(nonFunctionalSection, /各小节全部保留，没有相关要求时写“无”/)
+  assert.match(nonFunctionalSection, /各小节全部保留，确认不涉及时写“无”或“不涉及”/)
   assert.doesNotMatch(nonFunctionalSection, /超过 10 人天/)
   assert.match(template, /只写用户确认的异常；输入资料只能帮助准备候选内容，不能代替确认.*不从代码查询自动扩写/)
   assert.match(template, /只写用户确认的权限.*输入资料只能帮助准备候选内容，不能代替确认.*不从代码查询推断角色、范围或权限/)
@@ -72,24 +72,39 @@ test('normal business scenarios group large changes and render every change poin
   assert.match(template, /\| 需求点 \| 阐述 \| 原有实现 \| 目标改动点 \|/)
   assert.match(template, /新增项统一写“\/”/)
   assert.match(template, /类型”只写修改、新增或删除/)
+  assert.match(template, /四列内容都要根据实际内容使用短句、编号、小标题或列表组织/)
+  assert.match(template, /不能堆成一段文字，也不能机械套用固定字段清单/)
+  assert.match(template, /作为后续开发设计、接口文档和编码的需求输入，但不替代这些交付物/)
+  assert.match(template, /不能机械套用固定字段清单/)
+  assert.match(template, /“阐述”和“目标改动点”必须分别表达，不能直接复制/)
+  assert.match(template, /末尾单独写研发定位：只说明在哪里改、涉及什么入口/)
+  assert.match(template, /有前端页面时写菜单路径→页面\/功能区域，可补页面路由或前端文件/)
+  assert.match(template, /纯后端写接口名称或请求路径及对应后端文件/)
+  assert.match(template, /前后端均涉及则分别写前端入口和后端接口/)
+  assert.match(template, /不写代码行号、列号、代码片段、算法或详细实现方案/)
+  assert.doesNotMatch(template, /末尾单独写“研发定位：仓库相对路径；具体位置；怎么改；完成后的可见结果”/)
+  assert.doesNotMatch(template, /怎么改及完成后的可见结果/)
+  assert.doesNotMatch(template, /分别从两个视角结构化输出/)
+  assert.doesNotMatch(template, /甚至可以带上研发实现的大概编码路径/)
   assert.doesNotMatch(template, /^功能点说明：/m)
   assert.doesNotMatch(template, /^本次处理：/m)
   assert.doesNotMatch(template, /^原有情况：/m)
   assert.doesNotMatch(template, /^调整后：/m)
 })
 
-test('keeps every PRD section and writes 无 when the section has no content', async () => {
+test('keeps every PRD section, completes required items, and marks confirmed non-applicable items', async () => {
   const [skill, template] = await Promise.all([
     readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8'),
     readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8'),
   ])
 
-  assert.match(skill, /模板中的章节和小节全部保留.*没有内容时写“无”/)
-  assert.match(skill, /需求基本信息的未知字段仍按模板留空/)
-  assert.match(template, /模板章节和小节全部保留，没有内容时写“无”/)
-  assert.match(template, /无内容的章节、小节或表格位置用“无”表示/)
-  assert.match(template, /没有权限内容时保留本章并写“无”/)
-  assert.match(template, /各小节全部保留，没有相关要求时写“无”/)
+  assert.match(skill, /模板中的章节和小节全部保留.*必填项必须取得真实信息并填写，信息不足时继续澄清/)
+  assert.match(skill, /确认不涉及的项写“无”或“不涉及”/)
+  assert.match(skill, /需求基本信息只有选填字段未知时可以留空/)
+  assert.match(template, /模板标为必填的项必须取得真实信息并填写.*信息不足时先向用户澄清，不能用“无”代替/)
+  assert.match(template, /只有确认不涉及的项才写“无”或“不涉及”/)
+  assert.match(template, /确认不涉及权限时保留本章并写“无”或“不涉及”/)
+  assert.match(template, /各小节全部保留，确认不涉及时写“无”或“不涉及”/)
   assert.doesNotMatch(`${skill}\n${template}`, /非必填内容默认删除|其他情况删除整章|选填内容直接删除/)
 })
 
