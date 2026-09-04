@@ -6,23 +6,28 @@ import { join } from 'node:path'
 import { PrdEventTracker, normalizePrdTrackingEvent } from '../apps/native-server/src/prd-event-tracker.mjs'
 
 test('PRD telemetry accepts only bounded structured metadata', () => {
-  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:generated', eventType: 'review_generated', outcome: 'succeeded', occurredAt: '2026-08-31T07:59:00Z', sessionId: 'session-1', name: '需求_PRD.md' }), {
-    eventId: 'review:generated', eventType: 'prd_generated', outcome: 'success', occurredAt: '2026-08-31T07:59:00.000Z', sessionId: 'session-1', name: '需求_PRD.md',
+  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:generated', eventType: 'review_generated', outcome: 'succeeded', occurredAt: '2026-08-31T07:59:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', name: '需求_PRD.md' }), {
+    eventId: 'review:generated', eventType: 'prd_generated', outcome: 'success', occurredAt: '2026-08-31T07:59:00.000Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', name: '需求_PRD.md',
   })
   assert.equal(normalizePrdTrackingEvent({ eventId: 'review:failed', eventType: 'review_generated', outcome: 'failed', occurredAt: '2026-08-31T07:59:00Z', sessionId: 'session-1' }), undefined)
   assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:1', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'accept', status: 'queued', name: 'should-not-escape.md', rawInput: 'must not pass' }), {
     eventId: 'review:1', eventType: 'markdown_review_accept', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', status: 'queued',
   })
   assert.equal(normalizePrdTrackingEvent({ eventId: 'review:2', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite', status: 'queued' }), undefined)
-  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:1:rating:request-1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4 }), {
-    eventId: 'review:1:rating:request-1', eventType: 'prd_rating', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4,
+  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:1:rating:request-1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', generationEventId: 'review:1:generated', rating: 4 }), {
+    eventId: 'review:1:rating:request-1', eventType: 'prd_rating', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', generationEventId: 'review:1:generated', rating: 4,
   })
-  assert.equal(normalizePrdTrackingEvent({ eventId: 'review:1:rating:half', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4.5 })?.rating, 4.5)
-  assert.equal(normalizePrdTrackingEvent({ eventId: 'review:1:rating:minimum', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 0.5 })?.rating, 0.5)
+  assert.equal(normalizePrdTrackingEvent({ eventId: 'review:1:rating:half', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', generationEventId: 'review:1:generated', rating: 4.5 })?.rating, 4.5)
+  assert.equal(normalizePrdTrackingEvent({ eventId: 'review:1:rating:minimum', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', generationEventId: 'review:1:generated', rating: 0.5 })?.rating, 0.5)
   assert.equal(normalizePrdTrackingEvent({ eventId: 'review:1:rating:too-low', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 0.4 }), undefined)
   assert.equal(normalizePrdTrackingEvent({ eventId: 'review:1:rating:unsupported', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4.4 }), undefined)
   assert.equal(normalizePrdTrackingEvent({ eventId: 'review:1:rating:bad', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 0 }), undefined)
   assert.equal(normalizePrdTrackingEvent({ eventId: 'bad', eventType: 'document_published', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', runId: 'run-1', documentName: 'PRD' }), undefined)
+  assert.equal(normalizePrdTrackingEvent({ eventId: 'edit:1', eventType: 'prd_edit', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', editSource: 'ai_annotation', editOutcome: 'applied', mutationId: 'mutation-1', beforeFingerprint: 'fingerprint-1', afterFingerprint: 'fingerprint-2', comment: 'must-not-pass' }), undefined)
+  assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'edit:1', eventType: 'prd_edit', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', editSource: 'ai_annotation', editOutcome: 'applied', mutationId: 'mutation-1', beforeFingerprint: 'fingerprint-1', afterFingerprint: 'fingerprint-2' }), {
+    eventId: 'edit:1', eventType: 'prd_edit', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', editSource: 'ai_annotation', editOutcome: 'applied', mutationId: 'mutation-1', beforeFingerprint: 'fingerprint-1', afterFingerprint: 'fingerprint-2',
+  })
+  assert.equal(normalizePrdTrackingEvent({ eventId: 'edit:same', eventType: 'prd_edit', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', editSource: 'manual', editOutcome: 'applied', mutationId: 'mutation-1', beforeFingerprint: 'same', afterFingerprint: 'same' }), undefined)
 })
 
 test('PRD telemetry keeps a failed request in the durable outbox and retries it', async (t) => {

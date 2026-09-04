@@ -12,11 +12,11 @@ test('acknowledges only PRD events durably accepted by the tracker', async () =>
   const messages = []
   host.send = message => messages.push(message)
   await host.handle({ type: 'report-prd-event', requestId: 'event-rewrite', payload: { eventId: 'review:1', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite' } })
-  await host.handle({ type: 'report-prd-event', requestId: 'event-1', payload: { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4 } })
+  await host.handle({ type: 'report-prd-event', requestId: 'event-1', payload: { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', prdGenerationId: 'prd:1', rating: 4 } })
   await host.handle({ type: 'report-prd-event', requestId: 'event-invalid', payload: { eventId: 'invalid', eventType: 'review_action', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', action: 'rewrite', body: 'must not pass' } })
   assert.deepEqual(events, [
     { eventId: 'review:1', eventType: 'markdown_review_rewrite', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1' },
-    { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4 },
+    { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'success', occurredAt: '2026-08-31T08:00:00.000Z', sessionId: 'session-1', prdGenerationId: 'prd:1', generationEventId: 'review:1:generated', rating: 4 },
   ])
   assert.deepEqual(messages, [
     { type: 'prd_event_recorded', requestId: 'event-rewrite' },
@@ -30,7 +30,7 @@ test('reports tracker rejection or failure through the PRD event ACK', async () 
   const messages = []
   const rejected = new NativeHost({ prdEventTracker: { start() {}, stop() {}, setProductVersion() {}, async report() { return false } }, exit: () => {} })
   rejected.send = message => messages.push(message)
-  const payload = { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', rating: 4 }
+  const payload = { eventId: 'rating:1', eventType: 'prd_rating', outcome: 'succeeded', occurredAt: '2026-08-31T08:00:00Z', sessionId: 'session-1', generationEventId: 'review:1:generated', prdGenerationId: 'prd:1', rating: 4 }
   await rejected.handle({ type: 'report-prd-event', requestId: 'event-rejected', payload })
   const throwing = new NativeHost({ prdEventTracker: { start() {}, stop() {}, setProductVersion() {}, async report() { throw new Error('outbox unavailable') } }, exit: () => {} })
   throwing.send = message => messages.push(message)

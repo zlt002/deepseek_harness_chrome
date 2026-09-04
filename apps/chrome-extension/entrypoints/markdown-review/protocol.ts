@@ -161,6 +161,16 @@ export interface CommitWriteRequest {
   approval: string
   idempotencyKey: string
   content: string
+  /** Only opaque IDs and write identities cross this boundary; never content or annotations. */
+  prdEdit?: { source: 'manual' | 'ai_annotation'; mutationId: string }
+}
+
+export interface PrdEditRejectedRequest {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-prd-edit-rejected-request'
+  requestId: string
+  reviewId: string
+  mutationId: string
 }
 
 /** Rating is deliberately keyed by reviewId: its generated event is deterministic. */
@@ -172,7 +182,7 @@ export interface RatingRequest {
   rating: PrdRating
 }
 
-export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest | SessionActionRequest | ProposalsRequest | PrepareWriteRequest | CommitWriteRequest | RatingRequest
+export type MarkdownReviewPortRequest = SnapshotRequest | DeliverRequest | SessionActionRequest | ProposalsRequest | PrepareWriteRequest | CommitWriteRequest | RatingRequest | PrdEditRejectedRequest
 
 export interface SnapshotResponse {
   v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
@@ -281,6 +291,13 @@ export interface RatingResponse {
   rating?: PrdRating
   error?: MarkdownReviewError
 }
+export interface PrdEditRejectedResponse {
+  v: typeof MARKDOWN_REVIEW_PROTOCOL_VERSION
+  type: 'markdown-review-prd-edit-rejected-response'
+  requestId: string
+  ok: boolean
+  error?: MarkdownReviewError
+}
 
 /** Sent when background reuses a live Tab after Host refreshed its target. */
 export interface TargetUpdatedNotification {
@@ -290,7 +307,7 @@ export interface TargetUpdatedNotification {
   reviewId: string
 }
 
-export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | SessionActionResponse | ProposalsResponse | PrepareWriteResponse | CommitWriteResponse | RatingResponse | TargetUpdatedNotification
+export type MarkdownReviewPortResponse = SnapshotResponse | DeliverResponse | SessionActionResponse | ProposalsResponse | PrepareWriteResponse | CommitWriteResponse | RatingResponse | PrdEditRejectedResponse | TargetUpdatedNotification
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -396,9 +413,13 @@ export function isMarkdownReviewPortRequest(value: unknown): value is MarkdownRe
   if (value.type === 'markdown-review-prepare-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'expected', 'content'].includes(key))
     && isExpectedResourceIdentity(value.expected)
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
-  if (value.type === 'markdown-review-commit-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'approval', 'idempotencyKey', 'content'].includes(key))
+  if (value.type === 'markdown-review-commit-write-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'approval', 'idempotencyKey', 'content', 'prdEdit'].includes(key))
     && isMarkdownReviewId(value.approval) && isMarkdownReviewId(value.idempotencyKey)
     && boundedText(value.content, MAX_CONTENT_LENGTH, true)
+    && (value.prdEdit === undefined || (isRecord(value.prdEdit) && Object.keys(value.prdEdit).every(key => ['source', 'mutationId'].includes(key))
+      && (value.prdEdit.source === 'manual' || value.prdEdit.source === 'ai_annotation') && isMarkdownReviewId(value.prdEdit.mutationId)))
+  if (value.type === 'markdown-review-prd-edit-rejected-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'mutationId'].includes(key))
+    && isMarkdownReviewId(value.mutationId)
   if (value.type === 'markdown-review-rating-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'rating'].includes(key))
     && isPrdRating(value.rating)
   if (value.type === 'markdown-review-session-action-request') return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'reviewId', 'harnessSessionId', 'resourceId', 'displayPath', 'revision', 'fingerprint', 'action'].includes(key))
@@ -479,6 +500,10 @@ export function isMarkdownReviewPortResponse(value: unknown): value is MarkdownR
   if (value.type === 'markdown-review-snapshot-response') {
     return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'snapshot', 'error'].includes(key))
       && (value.ok ? isMarkdownReviewSnapshot(value.snapshot) && value.error === undefined : isMarkdownReviewError(value.error) && value.snapshot === undefined)
+  }
+  if (value.type === 'markdown-review-prd-edit-rejected-response') {
+    return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'error'].includes(key))
+      && (value.ok ? value.error === undefined : isMarkdownReviewError(value.error))
   }
   if (value.type === 'markdown-review-deliver-response') {
     return Object.keys(value).every((key) => ['v', 'type', 'requestId', 'ok', 'deliveryId', 'targetSessionId', 'targetSessionTitle', 'status', 'error'].includes(key))

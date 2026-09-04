@@ -219,6 +219,8 @@ interface MarkdownReviewRecord extends OpenMarkdownReview {
   sourceTabId?: number
   /** Latest rating; persisted with this review rather than creating another PRD. */
   rating?: PrdRating
+  /** Generated once per successful /pmd-prd output; survives a tab/service-worker reopen. */
+  prdGenerationId?: string
 }
 type PersistedMarkdownReview = Omit<MarkdownReviewRecord, 'capability' | 'v'>
 
@@ -4841,6 +4843,7 @@ async function persistMarkdownReview(record: MarkdownReviewRecord): Promise<void
       windowId: record.windowId,
       ...(record.sourceTabId === undefined ? {} : { sourceTabId: record.sourceTabId }),
       ...(record.pmdPrd === true ? { pmdPrd: true } : {}),
+      ...(record.prdGenerationId === undefined ? {} : { prdGenerationId: record.prdGenerationId }),
       ...(record.rating === undefined ? {} : { rating: record.rating }),
     }
     await storage.set({ [MARKDOWN_REVIEW_STORAGE_KEY]: reviews })
@@ -4874,7 +4877,7 @@ async function recoverMarkdownReview(reviewIdValue: string, tabId: number): Prom
   if (review.reviewId !== persisted.reviewId || review.harnessSessionId !== persisted.harnessSessionId || review.resourceId !== persisted.resourceId) return undefined
   const tab = await chrome.tabs.get(tabId)
   if (tab.id !== tabId || tab.windowId !== persisted.windowId) return undefined
-  const record = { ...review, tabId, windowId: tab.windowId, ...(Number.isSafeInteger(persisted.sourceTabId) ? { sourceTabId: persisted.sourceTabId } : {}), ...(persisted.pmdPrd === true ? { pmdPrd: true } : {}), ...(isPrdRating(persisted.rating) ? { rating: persisted.rating } : {}) } satisfies MarkdownReviewRecord
+  const record = { ...review, tabId, windowId: tab.windowId, ...(Number.isSafeInteger(persisted.sourceTabId) ? { sourceTabId: persisted.sourceTabId } : {}), ...(persisted.pmdPrd === true ? { pmdPrd: true } : {}), ...(reviewId(persisted.prdGenerationId) ? { prdGenerationId: persisted.prdGenerationId } : {}), ...(isPrdRating(persisted.rating) ? { rating: persisted.rating } : {}) } satisfies MarkdownReviewRecord
   markdownReviews.set(record.reviewId, record)
   markdownReviewKeys.set(markdownReviewKey(record.harnessSessionId, record.resourceId), record.reviewId)
   await persistMarkdownReview(record)
@@ -4933,7 +4936,7 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
     try {
       const tab = await chrome.tabs.get(existing.tabId)
       if (tab.id === existing.tabId && review.reviewId === existing.reviewId && isMarkdownReviewTabUrl(tab.url, existing.reviewId)) {
-        const updated = { ...existing, ...review, tabId: existing.tabId, windowId: tab.windowId } satisfies MarkdownReviewRecord
+        const updated = { ...existing, ...review, tabId: existing.tabId, windowId: tab.windowId, ...(existing.prdGenerationId === undefined && review.pmdPrd === true ? { prdGenerationId: `prd:${crypto.randomUUID()}` } : {}) } satisfies MarkdownReviewRecord
         markdownReviews.delete(existing.reviewId)
         markdownReviews.set(review.reviewId, updated)
         markdownReviewKeys.set(key, review.reviewId)
@@ -4958,7 +4961,7 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
   url.searchParams.set('reviewId', review.reviewId)
   const tab = await chrome.tabs.create({ windowId: window.id, active: true, url: url.toString() })
   if (tab.id === undefined) throw new Error('Chrome did not return the Markdown Review Tab identity.')
-  const record = { ...review, tabId: tab.id, windowId: tab.windowId, ...(sourceTabId === undefined ? {} : { sourceTabId }) } satisfies MarkdownReviewRecord
+  const record = { ...review, tabId: tab.id, windowId: tab.windowId, ...(sourceTabId === undefined ? {} : { sourceTabId }), ...(review.pmdPrd === true ? { prdGenerationId: `prd:${crypto.randomUUID()}` } : {}) } satisfies MarkdownReviewRecord
   markdownReviews.set(record.reviewId, record)
   markdownReviewKeys.set(key, record.reviewId)
   await persistMarkdownReview(record)
@@ -5066,6 +5069,9 @@ async function prepareMarkdownWrite(record: MarkdownReviewRecord, request: Prepa
 }
 
 async function commitMarkdownWrite(record: MarkdownReviewRecord, request: CommitWriteRequest): Promise<Record<string, unknown>> {
+  const beforeFingerprint = record.fingerprint
+  const edit = record.pmdPrd === true && record.prdGenerationId !== undefined ? request.prdEdit ?? { source: 'manual' as const, mutationId: request.idempotencyKey } : undefined
+  if (edit !== undefined) reportPrdEdit(record, edit.source, 'attempt', edit.mutationId)
   let payload: Record<string, unknown>
   try {
     payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_COMMIT_WRITE_PATH, {
@@ -5090,6 +5096,7 @@ async function commitMarkdownWrite(record: MarkdownReviewRecord, request: Commit
     if (resource === undefined || resource.resourceId !== record.resourceId || !reviewId(resource.revision) || !reviewId(resource.fingerprint)) throw new Error('Harness returned an invalid Markdown readback identity.')
     record.revision = resource.revision as string; record.fingerprint = resource.fingerprint as string
     await persistMarkdownReview(record)
+    if (edit !== undefined && beforeFingerprint !== record.fingerprint) reportPrdEdit(record, edit.source, 'applied', edit.mutationId, beforeFingerprint, record.fingerprint)
   }
   return payload
 }
@@ -5178,6 +5185,7 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Deli
   }
   const delivery = markdownReviewDelivery(response, request.annotation.id)
   if (delivery === undefined) throw new Error(response?.error ?? SIDE_PANEL_UNAVAILABLE_MESSAGE)
+  reportPrdEdit(record, 'ai_annotation', 'attempt', request.annotation.id)
   return delivery
 }
 
@@ -5257,28 +5265,43 @@ function prdReviewName(displayPath: string): string | undefined {
 }
 
 function reportPrdReviewGenerated(record: MarkdownReviewRecord): void {
-  if (record.pmdPrd !== true) return
+  if (record.pmdPrd !== true || record.prdGenerationId === undefined) return
   const name = prdReviewName(record.displayPath)
   void reportPrdEvent({
-        eventId: `review:${record.reviewId}:generated`,
+    eventId: `${record.prdGenerationId}:generated`,
         eventType: 'review_generated',
         outcome: 'succeeded',
-        occurredAt: new Date().toISOString(),
-        sessionId: record.harnessSessionId,
+    occurredAt: new Date().toISOString(),
+    sessionId: record.harnessSessionId,
+    prdGenerationId: record.prdGenerationId,
         ...(name === undefined ? {} : { name }),
   }).catch(() => { /* Telemetry must never change the review open result. */ })
 }
 
 async function reportPrdReviewRating(record: MarkdownReviewRecord, request: RatingRequest): Promise<void> {
+  if (record.prdGenerationId === undefined) throw new Error('PRD generation identity is unavailable; reopen the generated PRD.')
   await reportPrdEvent({
-        eventId: `review:${record.reviewId}:rating:${request.requestId}`,
+    eventId: `${record.prdGenerationId}:rating:${request.requestId}`,
         eventType: 'prd_rating',
         outcome: 'succeeded',
         occurredAt: new Date().toISOString(),
         sessionId: record.harnessSessionId,
-        generationEventId: `review:${record.reviewId}:generated`,
-        rating: request.rating,
+    generationEventId: `${record.prdGenerationId}:generated`,
+    prdGenerationId: record.prdGenerationId,
+    rating: request.rating,
   })
+}
+
+function reportPrdEdit(record: MarkdownReviewRecord, editSource: 'manual' | 'ai_annotation', editOutcome: 'attempt' | 'applied' | 'rejected', mutationId: string, beforeFingerprint?: string, afterFingerprint?: string): void {
+  if (record.pmdPrd !== true || record.prdGenerationId === undefined) return
+  void reportPrdEvent({
+    eventId: `${record.prdGenerationId}:edit:${editSource}:${mutationId}:${editOutcome}`,
+    eventType: 'prd_edit', outcome: 'succeeded', occurredAt: new Date().toISOString(),
+    sessionId: record.harnessSessionId, prdGenerationId: record.prdGenerationId,
+    editSource, editOutcome, mutationId,
+    ...(beforeFingerprint === undefined ? {} : { beforeFingerprint }),
+    ...(afterFingerprint === undefined ? {} : { afterFingerprint }),
+  }).catch(() => { /* Telemetry must never change the review result. */ })
 }
 
 export default defineBackground(() => {
@@ -5318,6 +5341,11 @@ export default defineBackground(() => {
         if (message.type === 'markdown-review-commit-write-request') {
           const result = await retryExpiredWorkspaceReviewCapability(record, () => commitMarkdownWrite(record, message))
           port.postMessage({ v: 1, type: 'markdown-review-commit-write-response', requestId: message.requestId, ok: true, result })
+          return
+        }
+        if (message.type === 'markdown-review-prd-edit-rejected-request') {
+          reportPrdEdit(record, 'ai_annotation', 'rejected', message.mutationId)
+          port.postMessage({ v: 1, type: 'markdown-review-prd-edit-rejected-response', requestId: message.requestId, ok: true })
           return
         }
         if (message.type === 'markdown-review-rating-request') {
