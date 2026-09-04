@@ -49,6 +49,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: deepseek_harness_chrome
+          ref: 40693c94d0adc8d45baa9528f114265213ee4368
           submodules: recursive
 
       - name: Set up Node.js
@@ -95,7 +96,7 @@ jobs:
         run: pnpm build:harness-product
 
       - name: Run TypeScript and complete test gates
-        if: ${{ inputs.fast_test_package != true }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.fast_test_package != true }}
         working-directory: deepseek_harness_chrome
         shell: pwsh
         run: |
@@ -136,7 +137,7 @@ jobs:
         run: >-
           node release/windows-lite/windows-release.mjs
           --harness-runtime release/windows-lite/harness-static-win32-x64
-          --version "${{ inputs.version || '1.1.96' }}"
+          --version "${{ inputs.version || '1.1.108' }}"
 
       - name: Accept locally built Windows candidate
         # Windows runner verified install, Chrome/Edge Native Messaging registration, ping/pong, upgrade, rollback, and user-data retention.
@@ -147,7 +148,7 @@ jobs:
         run: >-
           ./release/windows-lite/acceptance-windows.ps1
           -PackageDir release/accr-ui-windows-lite-x64
-          -ExpectedVersion "${{ inputs.version || '1.1.96' }}"
+          -ExpectedVersion "${{ inputs.version || '1.1.108' }}"
 
       - name: Write checksum
         working-directory: deepseek_harness_chrome
@@ -163,8 +164,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.96' }}-candidate
-          RELEASE_VERSION: ${{ inputs.version || '1.1.96' }}
+          RELEASE_TAG: windows-lite-v${{ inputs.version || '1.1.108' }}-candidate
+          RELEASE_VERSION: ${{ inputs.version || '1.1.108' }}
         run: |
           $repo = '${{ github.repository }}'
           $zip = 'release/accr-ui-windows-lite-x64.zip'
@@ -185,7 +186,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Unable to inspect draft candidate $env:RELEASE_TAG: $($candidateOutput | Out-String)" }
             $candidate = ($candidateOutput | Out-String) | ConvertFrom-Json
             if (-not $candidate.isDraft -or $candidate.isPrerelease) { throw "Candidate $env:RELEASE_TAG must remain a draft; published or prerelease candidates cannot be changed." }
-            if ($candidate.targetCommitish -ne '${{ github.sha }}') { throw "Draft candidate $env:RELEASE_TAG targets $($candidate.targetCommitish), not current commit ${{ github.sha }}." }
+            if ($candidate.targetCommitish -ne '40693c94d0adc8d45baa9528f114265213ee4368') { throw "Draft candidate $env:RELEASE_TAG targets $($candidate.targetCommitish), not source commit 40693c94d0adc8d45baa9528f114265213ee4368." }
           }
 
           $candidate = gh release view $env:RELEASE_TAG --repo $repo --json targetCommitish,isDraft,isPrerelease,assets 2>&1
@@ -193,7 +194,7 @@ jobs:
             Assert-DraftCandidate
           } elseif ((($candidate | Out-String) -match 'HTTP 404|release not found|Not Found')) {
             Invoke-GhRetry -Label 'Draft candidate creation' -Command {
-              gh release create $env:RELEASE_TAG --repo $repo --draft --target '${{ github.sha }}' --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" --notes "Draft candidate only. It did not complete full Windows install, upgrade, rollback, and reconnect validation."
+              gh release create $env:RELEASE_TAG --repo $repo --draft --target '40693c94d0adc8d45baa9528f114265213ee4368' --title "Harness UI Windows Lite $env:RELEASE_VERSION (candidate)" --notes "Draft candidate only. It did not complete full Windows install, upgrade, rollback, and reconnect validation."
             }
             Assert-DraftCandidate
           } else {
