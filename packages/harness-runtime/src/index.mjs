@@ -22,6 +22,7 @@ const SELECTED_SOURCE_PROGRESS_CLAIMS = [
   { toolName: 'search_selected_knowledge', pattern: /知识库正在后台(?:查询|检索)|我(?:先|正在|会)?在后台检索(?:这|已选)?(?:个|些)?知识库/ },
 ]
 const PROGRESS_GATE_SOURCE = Object.freeze({ kind: 'plugin', plugin: '@accrui/harness-runtime-mcp-scopes' })
+const MAX_SELECTED_SOURCE_SEARCHES_PER_TURN = 3
 
 function activeParentTurn(agent) {
   if (agent === undefined || !Array.isArray(agent.session?.events)) return undefined
@@ -32,8 +33,6 @@ function activeParentTurn(agent) {
   }
   return undefined
 }
-
-const MAX_SELECTED_SOURCE_SEARCHES_PER_TURN = 1
 
 function userText(message) {
   if (message?.source?.kind !== 'user' || !Array.isArray(message.content)) return undefined
@@ -52,7 +51,8 @@ function initialSelectedSourcePrompt(events) {
     const text = userText(event.data)
     if (text === undefined) continue
     const pmdPrd = /^\/pmd-prd(?:\s+([\s\S]*))?$/.exec(text)
-    const user = { index, text: pmdPrd?.[1]?.trim() ? pmdPrd[1].trim() : text }
+    const pmdPrdText = pmdPrd?.[1]?.trim()
+    const user = { index, text: pmdPrdText || text, pmdPrd: pmdPrdText !== undefined && pmdPrdText !== '' }
     if (pmdPrd !== null) latestPmdPrd = user
     latestUser = user
   }
@@ -61,7 +61,8 @@ function initialSelectedSourcePrompt(events) {
   // verbatim guard. Before then, a bare continuation still belongs to the
   // original /pmd-prd request.
   if (latestPmdPrd !== undefined && hasSettledSelectedSourceEvidence(events, latestPmdPrd.index)) return latestPmdPrd
-  const continuation = latestUser?.index > latestPmdPrd?.index && /^继续[。！!]?$/u.test(latestUser.text)
+  const continuation = latestUser?.index > latestPmdPrd?.index
+    && /^(?:继续|已选(?:了|好)?|已选择(?:了|好)?|选择好了)[。！!]?$/u.test(latestUser.text)
   if (latestPmdPrd !== undefined && (continuation || latestUser === latestPmdPrd)) return latestPmdPrd
   return latestUser
 }
@@ -94,6 +95,28 @@ function hasSettledSelectedSourceEvidence(events, afterIndex) {
   return false
 }
 
+function wrapperPrompt(arguments_) {
+  if (arguments_ !== null && typeof arguments_ === 'object') return arguments_.prompt
+  if (typeof arguments_ !== 'string') return undefined
+  try {
+    return JSON.parse(arguments_).prompt
+  } catch {
+    return undefined
+  }
+}
+
+function focusedFollowupReason(exec, previousPrompt) {
+  const prompt = wrapperPrompt(exec.arguments)
+  if (typeof prompt !== 'string' || prompt.trim() === '' || prompt === previousPrompt) {
+    return '上一次检索已结算，但本次 prompt 与上次相同或为空。只有明确的新证据缺口才能补查；请说明缺少或矛盾的返回内容，并提交聚焦后的 prompt。'
+  }
+  const description = exec.arguments !== null && typeof exec.arguments === 'object' ? exec.arguments.description : undefined
+  if (typeof description !== 'string' || !/(?:证据缺口|缺失|缺少|矛盾|未返回|待核实|evidence gap|missing|conflict|incomplete|not returned|verify)/iu.test(description)) {
+    return '上一次检索已结算。补查的 description 必须具体说明证据缺口（例如“初次结果缺少分页接口”或“两个结果的状态规则矛盾”），不能无理由重复检索。'
+  }
+  return undefined
+}
+
 function initialPromptGuardReason(exec) {
   const events = exec.agent?.session?.events
   if (!Array.isArray(events)) return undefined
@@ -102,17 +125,31 @@ function initialPromptGuardReason(exec) {
   const prompt = exec.arguments !== null && typeof exec.arguments === 'object'
     ? exec.arguments.prompt
     : undefined
+  if (initial.pmdPrd) {
+    if (typeof prompt !== 'string' || prompt.trim() === initial.text) {
+      return '这是 /pmd-prd 的首次检索，先基于用户需求整理检索 prompt，不能原样传递业务文本。prompt 必须覆盖“需求理解、现状或问题、相关功能与代码位置、影响范围”，且只使用用户已提供的信息。'
+    }
+    const requiredParts = [
+      ['需求理解', /需求(?:理解|概述|目标|问题)/u],
+      ['现状或问题', /(?:现状|问题)/u],
+      ['相关功能', /(?:功能|页面|模块|流程|组件|接口)/u],
+      ['代码位置', /(?:代码位置|文件位置|代码路径|实现位置|研发定位)/u],
+      ['影响范围', /影响范围/u],
+    ]
+    const missing = requiredParts.filter(([, pattern]) => !pattern.test(prompt)).map(([label]) => label)
+    if (missing.length === 0) return undefined
+    return `这是 /pmd-prd 的首次检索，prompt 缺少：${missing.join('、')}。请先理解用户需求，再用面向资料检索的结构化 prompt 重试；不能原样传递业务文本。`
+  }
   if (prompt === initial.text) return undefined
   return `这是首次检索，prompt 必须使用用户原始业务文本。请把 prompt 原样改为：${JSON.stringify(initial.text)} 后重试。`
 }
 
 /**
- * Admit one selected-source child per parent turn.
+ * Admit serial selected-source children per parent turn.
  * A guard is a product-owned, lifecycle-aware enforcement seam: unlike prompt
- * text, it rejects a second wrapper call after a child is published. The parent must
- * settle the first result before a later turn decides whether an independent
- * evidence gap warrants another child. Generic subagents stay blocked after
- * scope discovery.
+ * text, it rejects an overlapping wrapper call and admits a settled, focused
+ * follow-up only when its evidence gap is explicit. Generic subagents stay
+ * blocked after scope discovery.
  */
 export function createSelectedSourceDispatchGuard() {
   const states = new Map()
@@ -124,7 +161,16 @@ export function createSelectedSourceDispatchGuard() {
     const previous = states.get(parentId)
     const state = previous?.turn === turn
       ? previous
-      : { turn, selectedSourceScopeRead: false, childStarted: false, searchCount: 0, searchPending: false }
+      : {
+          turn,
+          selectedSourceScopeRead: false,
+          anyChildStarted: false,
+          currentSearchStarted: false,
+          searchCount: 0,
+          searchPending: false,
+          lastPrompt: undefined,
+          pendingPrompt: undefined,
+        }
     states.set(parentId, state)
     return state
   }
@@ -136,54 +182,70 @@ export function createSelectedSourceDispatchGuard() {
       state.selectedSourceScopeRead = true
       return undefined
     }
-    if (GENERIC_SUBAGENT_TOOLS.has(exec.name) && (state.selectedSourceScopeRead || state.childStarted || state.searchPending)) {
+    if (GENERIC_SUBAGENT_TOOLS.has(exec.name) && (state.selectedSourceScopeRead || state.anyChildStarted || state.searchPending)) {
       return '本次请求已读取所选远程范围；请直接调用对应的 selected-source 检索工具，不要再启动通用子代理。'
     }
     if (!SELECTED_SOURCE_WRAPPERS.has(exec.name)) return undefined
-    if (state.searchCount >= MAX_SELECTED_SOURCE_SEARCHES_PER_TURN || state.searchPending) {
-      return '本次父会话轮次已启动一个 selected-source 检索；请先等待该结果结算。只有结算后仍存在独立证据缺口时，才在后续父会话轮次追加一个聚焦检索。'
+    if (state.searchPending) {
+      return '本次父会话轮次已有 selected-source 检索尚未结算；请先等待结果返回，不能并发或排队发起下一次检索。'
+    }
+    if (state.searchCount >= MAX_SELECTED_SOURCE_SEARCHES_PER_TURN) {
+      return `本次父会话轮次已完成 ${MAX_SELECTED_SOURCE_SEARCHES_PER_TURN} 次 selected-source 检索；请在下一父会话轮次基于已有证据继续聚焦补查。`
+    }
+    if (state.searchCount > 0) {
+      const reason = focusedFollowupReason(exec, state.lastPrompt)
+      if (reason !== undefined) return reason
     }
     const promptGuardReason = initialPromptGuardReason(exec)
     if (promptGuardReason !== undefined) return promptGuardReason
     state.searchPending = true
+    state.currentSearchStarted = false
+    state.pendingPrompt = wrapperPrompt(exec.arguments)
     return undefined
   }
   guard.childStarted = (exec) => {
     const state = stateFor(exec)
-    if (state === undefined || !state.searchPending) return
-    state.searchPending = false
+    if (state === undefined || !state.searchPending || state.currentSearchStarted) return
     state.searchCount += 1
-    state.childStarted = true
+    state.anyChildStarted = true
+    state.currentSearchStarted = true
+    state.lastPrompt = state.pendingPrompt
   }
-  guard.dispatchFailed = (exec) => {
+  guard.dispatchSettled = (exec) => {
     const state = stateFor(exec)
-    if (state !== undefined) state.searchPending = false
+    if (state === undefined) return
+    state.searchPending = false
+    state.currentSearchStarted = false
+    state.pendingPrompt = undefined
   }
   guard.hasStartedChild = (agent, turn) => {
     const state = states.get(String(agent?.id))
-    return state?.turn === turn && state.childStarted === true
+    return state?.turn === turn && state.anyChildStarted === true
   }
   return guard
 }
 
 /**
- * Reserve a wrapper call before dispatch, then commit it only when the
- * parent-scoped lifecycle publishes a child. A tool error before publication
- * clears the reservation so the model can retry in the same parent turn.
+ * Reserve a wrapper call before dispatch, commit it only when the
+ * parent-scoped lifecycle publishes a child, then settle it from the actual
+ * dispatch result. Rejected calls never enter this seam and cannot consume a
+ * parent turn's follow-up budget.
  */
 export function installSelectedSourceDispatchTracking(ctx, guard) {
   return ctx.on('tools/execute', async (exec, next) => {
     if (!SELECTED_SOURCE_WRAPPERS.has(exec.name) || exec.agent === undefined) return next()
-    let childStarted = false
     const stop = exec.agent.ctx.on('subagent/start', () => {
-      childStarted = true
       guard.childStarted(exec)
     })
     try {
-      return await next()
+      const result = await next()
+      guard.dispatchSettled(exec)
+      return result
+    } catch (error) {
+      guard.dispatchSettled(exec)
+      throw error
     } finally {
       stop()
-      if (!childStarted) guard.dispatchFailed(exec)
     }
   })
 }
@@ -206,12 +268,16 @@ function latestAssistantTextInTurn(events, turn) {
   return latest
 }
 
-function progressGateMessage(toolName) {
+function progressGateMessage(toolName, events) {
   const source = toolName === 'search_selected_remote_code' ? '代码' : '知识库'
+  const pmdPrd = initialSelectedSourcePrompt(events)?.pmdPrd === true
+  const promptInstruction = pmdPrd
+    ? '这是显式 /pmd-prd 请求：先理解用户需求，再整理包含需求理解、现状或问题、相关功能与代码位置、影响范围的结构化 prompt，不能原样传递业务文本。'
+    : '普通非 /pmd-prd 检索的 prompt 仍需原样使用当前用户消息。'
   return Object.freeze({
     id: randomUUID(),
     role: 'user',
-    content: Object.freeze([Object.freeze({ type: 'text', text: `运行时校验失败：你刚才声称${source}正在后台查询，但本轮没有真实创建 selected-source 子代理。不要再输出进度说明；立即调用 ${toolName}，只传 description 和 prompt。首次 prompt 必须使用当前用户原始业务文本。只有收到子代理启动事件后，才能告诉用户后台查询已开始。` })]),
+    content: Object.freeze([Object.freeze({ type: 'text', text: `运行时校验失败：你刚才声称${source}正在后台查询，但本轮没有真实创建 selected-source 子代理。不要再输出进度说明；立即调用 ${toolName}，只传 description 和 prompt。${promptInstruction}只有收到子代理启动事件后，才能告诉用户后台查询已开始。` })]),
     source: PROGRESS_GATE_SOURCE,
   })
 }
@@ -229,7 +295,7 @@ export function installSelectedSourceProgressCompletionGate(ctx, guard) {
     const latestText = latestAssistantTextInTurn(events, turn)
     const claim = SELECTED_SOURCE_PROGRESS_CLAIMS.find((item) => item.pattern.test(latestText))
     if (claim === undefined || guard.hasStartedChild(agent, turn)) return
-    agent.steer(progressGateMessage(claim.toolName))
+    agent.steer(progressGateMessage(claim.toolName, events))
   })
 }
 

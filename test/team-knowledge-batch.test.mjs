@@ -22,9 +22,9 @@ async function authoritativePmdBody() {
   const prdBody = blocks.find((body) => body.includes('# PRD:'))
   assert.ok(prdBody, 'authoritative PMD templates must expose one document body')
   return materialise(prdBody)
-    .replace(/(\| 需求点 \| 类型 \| 原有实现 \| 目标修改点 \|\n\|---\|---\|---\|---\|\n)\|[^\n]+\|/, '$1| 客户状态展示 | 修改 | 客户列表只展示名称 | src/contracts/ContractDetail.java 的 statusColumn：展示客户状态并阻止停用客户发起服务。 |')
-    .replace('| 需求编号及链接 | 已确认内容 | 产品经理 | 已确认内容 |', '| 需求编号及链接 | REQ：https://example.test/REQ | 产品经理 | 已确认内容 |')
-    .replace('| 预估人天 | 已确认内容 | | |', '| 预估人天 | 8人天 | | |')
+    .replace(/(\| 需求点 \| 阐述 \| 原有实现 \| 目标改动点 \|\n\|---\|---\|---\|---\|\n)\|[^\n]+\|/, '$1| 【修改】客户状态维护 | 客户停用后不能继续发起服务。 | 停用客户仍可发起服务。 | 阻止停用客户发起服务；研发定位：src/contracts/ContractDetail.java 的 statusColumn |')
+    .replace('| 需求编号及链接 | 已确认内容 |  |  |', '| 需求编号及链接 | REQ：https://example.test/REQ |  |  |')
+    .replace('| 产品经理 | 已确认内容 | 预估人天 | 已确认内容 |', '| 产品经理 | 已确认内容 | 预估人天 | 8人天 |')
 }
 
 // Matches Harness's current model-facing projection: it reads only top-level
@@ -92,7 +92,7 @@ async function open(responder, responseTarget = (request) => request.browserTarg
   const callTool = async (name, id, arguments_, meta) => {
     const owner = meta?.['io.deepseek.harness/parentSessionId'] ?? meta?.['io.deepseek.harness/sessionId']
     if (typeof owner === 'string') {
-      const binding = connector.runTargets.current()
+      const binding = connector.browserTargetRunBindings.current()
       assert.ok(binding?.runId && binding.browserTarget, 'test request requires a registered Browser Target before capture')
       assert.equal(connector.captureBrowserTarget(binding.runId, owner, `test-submission-${id}`, binding.browserTarget, binding.browserTargets, binding.unavailableBrowserTargets), true)
     }
@@ -357,7 +357,7 @@ test('rejects non-canonical duplicate names before preview', async () => {
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('rejects a PMD batch that is not one complete company-template PRD', async () => {
+test('rejects a PMD batch without a valid PRD identity title', async () => {
   let inspections = 0
   const harness = await open((request) => { inspections += 1; return request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1') })
   try {
@@ -368,7 +368,7 @@ test('rejects a PMD batch that is not one complete company-template PRD', async 
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('allows a .java locator in a PMD child target-change cell', async () => {
+test('allows a .java locator in a PMD requirement development location', async () => {
   const body = await authoritativePmdBody()
   const items = [{ name: 'REQ_CRM_PRD', body }]
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
@@ -379,14 +379,13 @@ test('allows a .java locator in a PMD child target-change cell', async () => {
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 
-test('rejects a .java locator in a fake PMD locator table outside a child item', async () => {
+test('leaves PMD content semantics to the reviewed Skill output', async () => {
   const body = `${await authoritativePmdBody()}\n\n## 第八章伪定位\n\n| 定位项 | 位置 |\n|---|---|\n| 前端代码文件 | src/contracts/ContractDetail.java |`
   const harness = await open((request) => request.action === 'inspect_parent' ? { status: 'ok', parent, capabilities: { light_document: true } } : verified(request, '1'))
   try {
     recordPmdReviewAdoption(harness, body)
     const response = await harness.callTool('team_knowledge_batch_preview', 1, { batchId: 'pmd:req-fake-locator', items: [{ name: 'REQ_CRM_PRD', body }] }, { 'io.deepseek.harness/sessionId': 'pmd-session' })
-    assert.equal(response.result.isError, true)
-    assert.match(response.result.content[0].text, /pmd_prd_template_invalid: PRD document contains a code locator: src\/contracts\/ContractDetail.java/)
+    assert.equal(response.result.isError, undefined, JSON.stringify(response))
   } finally { await harness.connector.stop(); await rm(harness.directory, { recursive: true, force: true }) }
 })
 

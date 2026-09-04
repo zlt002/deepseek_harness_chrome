@@ -6,132 +6,181 @@ import test from 'node:test'
 import { issuePmdPrdReviewReceipt } from '../skills/pmd-prd/scripts/issue-review-receipt.mjs'
 import { validateBody, validatePmdBatch } from '../skills/pmd-prd/scripts/validate-deliverables.mjs'
 
-test('mechanical gate accepts structurally incomplete identity-valid PRD', () => {
-  assert.equal(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: '# PRD: REQ-100 - 客户状态维护\n\n内容尚未完成。' }).ok, true)
-})
+function completePrd({ requirementCell = '研发定位：菜单 客户管理 → 客户状态；页面路由 /customers；接口 PATCH /api/customers/status；文件 packages/customer/src/status.ts' } = {}) {
+  return `# PRD: REQ-100 - 客户状态维护
 
-test('mechanical gate rejects invalid filename, empty body, and duplicate/incomplete title', () => {
-  assert.match(validateBody({ prdName: 'draft.md', prdBody: '# PRD: REQ-100 - 客户状态维护' }).errors.join('\n'), /filename/)
-  assert.match(validateBody({ prdName: 'draft_PRD.md', prdBody: '' }).errors.join('\n'), /non-empty/)
-  assert.match(validateBody({ prdName: 'draft_PRD.md', prdBody: '# PRD: REQ-100 - 客户状态维护\n# PRD: REQ-101 - 另一份' }).errors.join('\n'), /exactly one complete title/)
-  assert.match(validateBody({ prdName: 'draft_PRD.md', prdBody: '# PRD: REQ-100 - 客户状态维护\n# PRD: incomplete' }).errors.join('\n'), /exactly one complete title/)
-})
+# 需求基本信息
+客户状态维护
 
-test('mechanical gate rejects unresolved content and code identifiers in terminology', () => {
-  const unresolved = '# PRD: REQ-100 - 客户状态维护\n\n产品经理：待补充，链接为占位，后续回填。'
-  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: unresolved }).errors.join('\n'), /unresolved content/)
-
-  const technicalTerms = `# PRD: REQ-100 - 客户状态维护
+# 修订记录
+V1.0
 
 # 一、术语与缩写
+无
 
-| 术语/缩写 | 全称 | 定义说明 |
+# 二、背景与目标
+## （一）描述/痛点
+用户无法统一维护客户状态。
+
+## （二）目标/价值
+用户确认可在客户管理中维护客户状态。
+
+## （三）风险控制
+无
+
+# 三、整体流程
+## （一）业务/功能流程图
+客户管理 → 修改状态 → 保存结果。
+
+# 四、功能性需求
+## （一）正常业务场景
+### 4.1 客户状态维护
+| 需求点 | 阐述 | 原有实现 | 目标改动点 |
+|---|---|---|---|
+| 【修改】客户状态维护 | 用户在客户管理维护状态。 | 当前只能查看状态。 | 保存后展示最新状态。${requirementCell} |
+
+### 边界场景
+无
+
+## （二）异常业务场景
+无
+
+# 五、角色权限
+无
+
+# 六、非功能性需求
+## （一）用户与业务规模
+无
+
+## （二）性能指标要求
+无
+
+## （三）安全要求
+无
+
+## （四）高可用要求
+无
+
+## （五）监控告警要求
+无
+
+# 七、配置与开关
+无
+
+# 八、测试关注点
+## （一）影响范围分析
+客户状态展示。
+
+## （二）异常场景关注点
+保存失败提示。
+
+## （三）性能压测要求
+无
+
+## （四）数据准备要求
+测试客户数据。
+
+## （五）验收清单
+| 对应需求点 | 验证操作 | 预期结果 |
 |---|---|---|
-| dispatchStatus | 调度状态 | 接口字段 |
-| 虚拟列表 | DynamicScroller | 页面组件 |
-| 原因字典 | REFUSAL_CAUSE | 原因字段 |`
-  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: technicalTerms }).errors.join('\n'), /code identifier in terminology/)
+| 【修改】客户状态维护 | 在客户管理修改状态并保存。 | 保存成功并展示最新状态。 |
+
+# 九、参考文档
+无
+`
+}
+
+test('mechanical gate rejects incomplete PRD and accepts the complete required structure', () => {
+  const incomplete = validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: '# PRD: REQ-100 - 客户状态维护\n\n内容尚未完成。' })
+  assert.equal(incomplete.ok, false)
+  assert.match(incomplete.errors.join('\n'), /required section/)
+  assert.equal(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: completePrd() }).ok, true)
 })
 
-test('skill makes concise product content and terminology provenance explicit', async () => {
+test('mechanical gate rejects invalid filename, title, unresolved content, terminology identifiers, and placeholders', () => {
+  assert.match(validateBody({ prdName: 'draft.md', prdBody: completePrd() }).errors.join('\n'), /filename/)
+  assert.match(validateBody({ prdName: 'draft_PRD.md', prdBody: '' }).errors.join('\n'), /non-empty/)
+  assert.match(validateBody({ prdName: 'draft_PRD.md', prdBody: '# PRD: REQ-100 - 客户状态维护\n# PRD: REQ-101 - 另一份' }).errors.join('\n'), /exactly one complete title/)
+  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: completePrd().replace('用户无法统一维护客户状态。', '产品经理待补充。') }).errors.join('\n'), /unresolved content/)
+  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: completePrd().replace('无\n\n# 二、背景与目标', '| dispatchStatus | 调度状态 | 接口字段 |\n\n# 二、背景与目标') }).errors.join('\n'), /code identifier in terminology/)
+  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: completePrd().replace('客户状态维护\n\n# 修订记录', '{客户状态维护}\n\n# 修订记录') }).errors.join('\n'), /template placeholders/)
+})
+
+test('mechanical gate requires a four-column requirement row, development locator, and acceptance test cases', () => {
+  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: completePrd({ requirementCell: '没有研发位置。' }) }).errors.join('\n'), /target column must include 研发定位/)
+  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: completePrd().replace('| 对应需求点 | 验证操作 | 预期结果 |', '| 验收内容 |') }).errors.join('\n'), /acceptance test-case table header/)
+  assert.match(validateBody({ prdName: 'run-prd-100_客户状态维护_PRD.md', prdBody: completePrd().replace('| 【修改】客户状态维护', '| 客户状态维护') }).errors.join('\n'), /【修改】/)
+})
+
+test('skill and template keep evidence, locator, boundary, and review rules aligned', async () => {
   const [skill, template] = await Promise.all([
     readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8'),
     readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8'),
   ])
+  const combined = `${skill}\n${template}`
   for (const text of [
-    '反复纠正',
-    '明确表示不理解',
-    '代码字段、变量、类名和组件名',
-    '最少必要信息',
-    '描述/痛点最多简要概括一两句',
-    '目标/价值只有用户已确认且输入资料明确有依据时才具体写',
-    '流程图优先用“入口→关键操作→结果”一句话',
-    '非功能性需求：只有用户确认，并且其输入或提供/选定资料有明确要求时才填写',
-    '只有第四章功能改动点可综合用户输入、用户提供/选定资料和代码查询',
-    '其他章节和字段不能从代码库或模型推断直接填充',
-    '模板标为必填的项必须取得真实信息并填写',
-  ]) {
-    assert.ok(`${skill}\n${template}`.includes(text), text)
-  }
-  assert.match(template, /## （一）描述\/痛点\n\n<!-- 最多用一两句话/)
-  assert.match(template, /## （二）目标\/价值\n\n<!-- 只有用户已确认，并且用户提供\/选定资料也明确写出/)
-  assert.match(template, /流程优先用“入口→关键操作→结果”一句话/)
-  const nonFunctionalStart = template.lastIndexOf('<!--', template.indexOf('# 六、非功能性需求'))
-  const nonFunctionalSection = template.slice(nonFunctionalStart, template.indexOf('# 七、配置与开关'))
-  assert.match(nonFunctionalSection, /各小节全部保留，确认不涉及时写“无”或“不涉及”/)
-  assert.doesNotMatch(nonFunctionalSection, /超过 10 人天/)
-  assert.match(template, /只写用户确认的异常；输入资料只能帮助准备候选内容，不能代替确认.*不从代码查询自动扩写/)
-  assert.match(template, /只写用户确认的权限.*输入资料只能帮助准备候选内容，不能代替确认.*不从代码查询推断角色、范围或权限/)
+    '用户当前对话直接提供或确认的内容均视为用户确认',
+    '其他章节和字段不从代码库、资料或模型推断直接填充',
+    '资料只能作为候选依据，不能代替确认',
+    '可写菜单路径、页面路由、接口和仓库相对文件级研发定位',
+    '不写变量、代码行号、列号、代码片段、算法或详细实现方案',
+    '研发定位必须经代码查询确认',
+    '本轮不使用远程资料',
+    '执行基础机械检查格式',
+  ]) assert.ok(combined.includes(text), text)
+  assert.match(template, /本小节保留。涉及资金、计费、结算、监管、审计、隐私或舆情等真实业务风险时填写/)
+  assert.match(template, /### 边界场景/)
+  assert.doesNotMatch(template, /超过 10 人天/)
+  assert.match(template, /类或函数名仅在消除歧义时补充；不写变量、代码行号、列号、代码片段、算法或详细实现方案/)
+  assert.match(template, /“目标改动点”同时保留产品视角和研发视角/)
+  assert.match(template, /从研发视角描述改哪里（具体说清楚功能位置，如：“订单管理→某某页面→某某按钮→双击时候”）、怎么改、要实现什么，可以附带要改动的大概编码路径/)
+  assert.match(template, /“阐述”面向产品经理，按实际内容用“使用场景、当前问题、目标结果”概括/)
+  assert.match(template, /“原有实现”按实际内容用“功能入口、现有流程\/规则、现有结果”说明改造前情况/)
+  assert.match(template, /可按实际内容使用 \*\*改哪个功能：\*\*、\*\*当前问题：\*\*、\*\*目标结果：\*\* 等小标题/)
+  assert.match(template, /结构化输出.*要改的功能位置.*流程.*规则和逻辑/)
+  assert.match(template, /先写“产品视角”，再写“研发视角”/)
+  assert.match(template, /研发视角按实际改动标注 `【前端】`、`【后端】`/)
+  assert.match(template, /有两项及以上改动时，使用 `\s*<br>1\. \.\.\.\s*<br>2\. \.\.\.` 编号列表逐项展示/)
+  assert.match(template, /每项分别写改动内容和研发定位，不能堆成一段/)
+  assert.match(template, /\*\*产品视角：\*\*\s*<br>[\s\S]*<br>\s*<br>\*\*研发视角：\*\*\s*<br>/)
+  assert.match(template, /\*\*研发视角：\*\*\s*<br>\{从研发视角描述改哪里[\s\S]*<br>\s*<br>\*\*【前端】\*\*\s*<br>/)
+  assert.match(template, /\*\*【前端】\*\*\s*<br>[\s\S]*\*\*改动内容：\*\*、\*\*功能位置：\*\* 和必要的 \*\*大概的编码路径：\*\*[\s\S]*\*\*【后端】\*\*\s*<br>/)
+  assert.match(template, /根据第四章的需求点编写验收用例/)
+  assert.match(template, /每个需求点至少一条，名称与第四章一致/)
+  assert.match(template, /写清怎么操作、应该看到什么结果；一条规则写一行/)
+  assert.match(template, /\| 对应需求点 \| 验证操作 \| 预期结果 \|/)
+  assert.doesNotMatch(template, /### 正常情况|### 异常情况|### 边界情况|### 权限情况|### 兼容情况/)
+  assert.match(template, /代码变量名和组件名不进入 PRD；类名或函数名仅在文件定位仍无法消除歧义时补充/)
+  assert.match(template, /需求基本信息只有选填字段未知时可以留空/)
+  assert.match(template, /澄清交互中.*不展示内部文件名.*最终 PRD 第四章可在必要时展示页面路由、接口和仓库相对文件定位/)
 })
 
-test('normal business scenarios group large changes and render every change point as a four-column table', async () => {
-  const template = await readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8')
-
-  assert.match(template, /功能分组 → 改动点/)
-  assert.match(template, /改动点较多时，先按同一业务功能或用户流程分组/)
-  assert.match(template, /\| 需求点 \| 阐述 \| 原有实现 \| 目标改动点 \|/)
-  assert.match(template, /新增项统一写“\/”/)
-  assert.match(template, /类型”只写修改、新增或删除/)
-  assert.match(template, /四列内容都要根据实际内容使用短句、编号、小标题或列表组织/)
-  assert.match(template, /不能堆成一段文字，也不能机械套用固定字段清单/)
-  assert.match(template, /作为后续开发设计、接口文档和编码的需求输入，但不替代这些交付物/)
-  assert.match(template, /不能机械套用固定字段清单/)
-  assert.match(template, /“阐述”和“目标改动点”必须分别表达，不能直接复制/)
-  assert.match(template, /末尾单独写研发定位：只说明在哪里改、涉及什么入口/)
-  assert.match(template, /有前端页面时写菜单路径→页面\/功能区域，可补页面路由或前端文件/)
-  assert.match(template, /纯后端写接口名称或请求路径及对应后端文件/)
-  assert.match(template, /前后端均涉及则分别写前端入口和后端接口/)
-  assert.match(template, /不写代码行号、列号、代码片段、算法或详细实现方案/)
-  assert.doesNotMatch(template, /末尾单独写“研发定位：仓库相对路径；具体位置；怎么改；完成后的可见结果”/)
-  assert.doesNotMatch(template, /怎么改及完成后的可见结果/)
-  assert.doesNotMatch(template, /分别从两个视角结构化输出/)
-  assert.doesNotMatch(template, /甚至可以带上研发实现的大概编码路径/)
-  assert.doesNotMatch(template, /^功能点说明：/m)
-  assert.doesNotMatch(template, /^本次处理：/m)
-  assert.doesNotMatch(template, /^原有情况：/m)
-  assert.doesNotMatch(template, /^调整后：/m)
+test('batch gate applies the complete PRD validation', () => {
+  assert.equal(validatePmdBatch({ batchId: 'pmd:run-1', items: [{ name: '客户状态维护_PRD', body: completePrd() }] }), null)
+  assert.match(validatePmdBatch({ batchId: 'pmd:run-1', items: [{ name: '客户状态维护_PRD', body: '# PRD: REQ-100 - 客户状态维护' }] }), /required section/)
+  assert.match(validatePmdBatch({ batchId: 'pmd:run-1', items: [{ name: '草稿', body: completePrd() }] }), /filename/)
 })
 
-test('keeps every PRD section, completes required items, and marks confirmed non-applicable items', async () => {
-  const [skill, template] = await Promise.all([
-    readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8'),
-    readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8'),
-  ])
-
-  assert.match(skill, /模板中的章节和小节全部保留.*必填项必须取得真实信息并填写，信息不足时继续澄清/)
-  assert.match(skill, /确认不涉及的项写“无”或“不涉及”/)
-  assert.match(skill, /需求基本信息只有选填字段未知时可以留空/)
-  assert.match(template, /模板标为必填的项必须取得真实信息并填写.*信息不足时先向用户澄清，不能用“无”代替/)
-  assert.match(template, /只有确认不涉及的项才写“无”或“不涉及”/)
-  assert.match(template, /确认不涉及权限时保留本章并写“无”或“不涉及”/)
-  assert.match(template, /各小节全部保留，确认不涉及时写“无”或“不涉及”/)
-  assert.doesNotMatch(`${skill}\n${template}`, /非必填内容默认删除|其他情况删除整章|选填内容直接删除/)
-})
-
-test('basic information requires confirmation while unsupported optional fields stay blank', async () => {
-  const template = await readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8')
-
-  assert.match(template, /必填：业务需求名称、需求编号及链接、所属系统、产品经理、预估人天/)
-  assert.match(template, /缺失时必须向用户确认，确认前不能生成最终 PRD/)
-  assert.match(template, /选填：优先级、评审纪要、所属功能模块/)
-  assert.match(template, /对应单元格留空/)
-  assert.match(template, /不猜测、不编造需求编号、链接、姓名、系统、模块和估算值/)
-  assert.match(template, /不要在表格下增加.*解释性备注/)
-})
-
-test('batch gate maps the public name and body fields into the identity check', () => {
-  assert.equal(validatePmdBatch({ batchId: 'pmd:run-1', items: [{ name: '客户状态维护_PRD', body: '# PRD: REQ-100 - 客户状态维护' }] }), null)
-  assert.match(validatePmdBatch({ batchId: 'pmd:run-1', items: [{ name: '草稿', body: '# PRD: REQ-100 - 客户状态维护' }] }), /filename/)
-})
-
-test('review receipt binds the frozen file and refreshes its fingerprint', async (t) => {
+test('review receipt accepts only a complete PRD in the exact project workspace structure', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'pmd-prd-review-')); t.after(() => rm(root, { recursive: true, force: true }))
   const directory = join(root, 'pmd-workspace', 'spec', 'run-prd-100'); const prdPath = join(directory, 'run-prd-100_客户状态维护_PRD.md')
-  await mkdir(directory, { recursive: true }); await writeFile(prdPath, '# PRD: REQ-100 - 客户状态维护\n\n不完整内容。')
-  const receipt = await issuePmdPrdReviewReceipt({ prdPath, now: '2026-09-03T00:00:00.000Z' })
+  await mkdir(directory, { recursive: true }); await writeFile(prdPath, completePrd())
+  const receipt = await issuePmdPrdReviewReceipt({ prdPath, workspaceRoot: root, now: '2026-09-03T00:00:00.000Z' })
   const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
   assert.equal(manifest.businessRequirementId, 'REQ-100'); assert.equal(manifest.reviewReceipt.prd.fingerprint, receipt.fingerprint)
-  await writeFile(prdPath, '# PRD: REQ-OTHER - 另一需求\n\n仍不完整。')
-  const refreshed = await issuePmdPrdReviewReceipt({ prdPath, now: '2026-09-03T00:01:00.000Z' })
+  await writeFile(prdPath, completePrd().replace('REQ-100', 'REQ-OTHER'))
+  const refreshed = await issuePmdPrdReviewReceipt({ prdPath, workspaceRoot: root, now: '2026-09-03T00:01:00.000Z' })
   assert.notEqual(refreshed.fingerprint, receipt.fingerprint)
+})
+
+test('review receipt rejects an unrelated root, a missing workspace segment, and an incomplete PRD', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pmd-prd-review-')); t.after(() => rm(root, { recursive: true, force: true }))
+  const validDirectory = join(root, 'pmd-workspace', 'spec', 'run-prd-100'); const validPath = join(validDirectory, 'run-prd-100_客户状态维护_PRD.md')
+  await mkdir(validDirectory, { recursive: true }); await writeFile(validPath, completePrd())
+  await assert.rejects(() => issuePmdPrdReviewReceipt({ prdPath: validPath, workspaceRoot: join(root, 'other-root') }), /pmd-workspace\/spec/)
+  const invalidDirectory = join(root, 'similar-pmd-workspace', 'spec', 'run-prd-100'); const invalidPath = join(invalidDirectory, 'run-prd-100_客户状态维护_PRD.md')
+  await mkdir(invalidDirectory, { recursive: true }); await writeFile(invalidPath, completePrd())
+  await assert.rejects(() => issuePmdPrdReviewReceipt({ prdPath: invalidPath, workspaceRoot: root }), /pmd-workspace\/spec/)
+  await writeFile(validPath, '# PRD: REQ-100 - 客户状态维护\n\n不完整内容。')
+  await assert.rejects(() => issuePmdPrdReviewReceipt({ prdPath: validPath, workspaceRoot: root }), /required section/)
 })

@@ -432,6 +432,29 @@ test('read_work_tab reads a roster page by 1-based index and rejects a raw tabId
     await connector.stop()
   }
 })
+test('read_work_tab preserves a typed Extension failure for a multi-target roster', async () => {
+  const first = { browser: 'chrome', windowId: 4, tabId: 12, url: 'https://docs.example.test/one' }
+  const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
+  const connector = new BrowserConnector({
+    requestExtension: (request) => {
+      queueMicrotask(() => connector.acceptExtensionResponse({
+        type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation,
+        browserTarget: request.browserTarget, browserTargets: request.browserTargets,
+        unavailableBrowserTargets: request.unavailableBrowserTargets,
+        error: { code: 'timeout', message: 'Visible-text capture exceeded 4s.' },
+      }))
+    },
+  })
+  connector.bindBrowserTarget('run-pinned-error', primary, [first, primary], [])
+  const endpoint = await connector.start()
+  try {
+    const body = await callTool(endpoint, 'read_work_tab', { tab: 1 })
+    assert.equal(body.result.isError, true)
+    assert.equal(body.result.content[0].text, '{"code":"timeout","message":"Visible-text capture exceeded 4s."}')
+  } finally {
+    await connector.stop()
+  }
+})
 test('office reads wait longer than the generic connector timeout so a cold WebEdit probe can finish', async () => {
   const primary = { browser: 'chrome', windowId: 4, tabId: 13, url: 'https://docs.example.test/two' }
   let officeTimeoutMs

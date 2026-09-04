@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto'
-import { lstat, readFile, rename, writeFile } from 'node:fs/promises'
+import { lstat, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { validateDeliverable } from './validate-deliverables.mjs'
@@ -35,11 +35,15 @@ async function regularFile(path, label) {
   if (details.isSymbolicLink() || !details.isFile()) throw new Error(`${label} must be a regular file`)
 }
 
-function expectedPrdBinding(prdPath) {
-  const directory = dirname(prdPath)
+async function expectedPrdBinding(prdPath, workspaceRoot) {
+  let root
+  try { root = await realpath(requiredPath(workspaceRoot, 'workspaceRoot')) }
+  catch { throw new Error('frozen PRD must use pmd-workspace/spec/<runRequirementId>/<runRequirementId>_*_PRD.md') }
+  const specRoot = resolve(root, 'pmd-workspace', 'spec')
+  const directory = await realpath(dirname(prdPath))
   const runRequirementId = basename(directory)
   const fileName = basename(prdPath)
-  if (!/^[A-Za-z0-9_-]{3,160}$/.test(runRequirementId) || !fileName.startsWith(`${runRequirementId}_`) || !fileName.endsWith('_PRD.md')) {
+  if (dirname(directory) !== specRoot || !/^[A-Za-z0-9_-]{3,160}$/.test(runRequirementId) || !fileName.startsWith(`${runRequirementId}_`) || !fileName.endsWith('_PRD.md')) {
     throw new Error('frozen PRD must use pmd-workspace/spec/<runRequirementId>/<runRequirementId>_*_PRD.md')
   }
   return { runRequirementId, fileName, manifestPath: resolve(directory, 'manifest.json') }
@@ -52,10 +56,10 @@ function businessRequirementId(body) {
 }
 
 /** Validate the PRD file, then atomically create or refresh the hidden review binding. */
-export async function issuePmdPrdReviewReceipt({ prdPath, now = new Date().toISOString() }) {
+export async function issuePmdPrdReviewReceipt({ prdPath, workspaceRoot = process.cwd(), now = new Date().toISOString() }) {
   const prd = requiredPath(prdPath, 'prd')
-  const { runRequirementId, fileName, manifestPath } = expectedPrdBinding(prd)
   await regularFile(prd, 'PRD')
+  const { runRequirementId, fileName, manifestPath } = await expectedPrdBinding(prd, workspaceRoot)
   const validation = await validateDeliverable({ prdPath: prd })
   if (!validation.ok) throw new Error(`PMD frozen PRD check failed: ${validation.errors.join('; ')}`)
   const body = await readFile(prd, 'utf8')

@@ -27,7 +27,7 @@ test('keeps public names deterministic and within Harness function-name limits',
   assert.equal(name, publicToolName('chrome', 'search/with spaces and a deliberately very long name that exceeds the limit'))
 })
 
-test('admits one selected-source child per parent turn and rejects generic delegation after scope discovery', () => {
+test('rejects concurrent selected-source children and generic delegation after scope discovery', () => {
   const guard = createSelectedSourceDispatchGuard()
   const exec = (name, turn) => ({
     name,
@@ -37,10 +37,10 @@ test('admits one selected-source child per parent turn and rejects generic deleg
   assert.equal(guard(exec('mcp__chrome__selected_source_scope', 1)), undefined)
   assert.match(guard(exec('subagent', 1)), /所选远程范围/)
   assert.equal(guard(exec('search_selected_remote_code', 1)), undefined)
-  assert.match(guard(exec('search_selected_remote_code', 1)), /已启动一个 selected-source 检索/)
-  assert.match(guard(exec('search_selected_knowledge', 1)), /先等待该结果结算/)
+  assert.match(guard(exec('search_selected_remote_code', 1)), /尚未结算/)
+  assert.match(guard(exec('search_selected_knowledge', 1)), /不能并发或排队/)
   assert.equal(guard(exec('search_selected_remote_code', 2)), undefined)
-  assert.match(guard(exec('search_selected_knowledge', 2)), /已启动一个 selected-source 检索/)
+  assert.match(guard(exec('search_selected_knowledge', 2)), /尚未结算/)
   assert.equal(guard(exec('search_selected_knowledge', 3)), undefined)
 
   const directSearchGuard = createSelectedSourceDispatchGuard()
@@ -48,7 +48,92 @@ test('admits one selected-source child per parent turn and rejects generic deleg
   assert.match(directSearchGuard(exec('subagent', 3)), /所选远程范围/)
 })
 
-test('rejects expanded first selected-source prompts until real search evidence settles', () => {
+test('admits a settled focused follow-up in the same parent turn, but rejects an unreasoned repeat', () => {
+  const guard = createSelectedSourceDispatchGuard()
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    {
+      type: 'tool/call',
+      data: {
+        callId: 'selected-source-1',
+        name: 'search_selected_remote_code',
+        arguments: { description: '初次检索任务列表', prompt: '检索任务列表当前实现' },
+      },
+    },
+  ]
+  const exec = (description, prompt) => ({
+    name: 'search_selected_remote_code',
+    arguments: { description, prompt },
+    agent: { id: 'parent-serial', session: { events } },
+  })
+
+  const first = exec('初次检索任务列表', '检索任务列表当前实现')
+  assert.equal(guard(first), undefined, 'the current tool/call event is not a prior search')
+  guard.childStarted(first)
+  guard.dispatchSettled(first)
+
+  assert.match(guard(exec('再次查询', '检索任务列表当前实现')), /prompt 与上次相同/)
+  assert.match(guard(exec('补查任务列表', '根据初次结果补查任务列表分页接口')), /证据缺口/)
+  assert.equal(
+    guard(exec('初次结果缺少分页接口', '根据初次结果补查任务列表分页接口')),
+    undefined,
+  )
+})
+
+test('bounds settled focused follow-ups per parent turn and accepts English evidence gaps', () => {
+  const guard = createSelectedSourceDispatchGuard()
+  const events = [{ type: 'turn/start', data: { turn: 1 } }]
+  for (let index = 1; index <= 3; index += 1) {
+    const search = {
+      name: 'search_selected_remote_code',
+      arguments: { description: `missing evidence ${index}`, prompt: `focused search ${index}` },
+      agent: { id: 'parent-bound', session: { events } },
+    }
+    assert.equal(guard(search), undefined)
+    guard.childStarted(search)
+    guard.dispatchSettled(search)
+  }
+  const exec = {
+    name: 'search_selected_remote_code',
+    arguments: { description: 'missing evidence 4', prompt: 'focused search 4' },
+    agent: { id: 'parent-bound', session: { events } },
+  }
+
+  assert.match(guard(exec), /已完成 3 次/)
+})
+
+test('does not mistake an earlier result event for settlement of the latest follow-up', () => {
+  const guard = createSelectedSourceDispatchGuard()
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'tool/call', data: { callId: 'first', name: 'search_selected_remote_code', arguments: { prompt: 'first' } } },
+    { type: 'tool/result', data: { message: { content: [{ type: 'text', text: 'first result', isError: false }], source: { kind: 'tool', callId: 'first' } } } },
+  ]
+  const first = {
+    name: 'search_selected_remote_code',
+    arguments: { description: 'initial', prompt: 'first' },
+    agent: { id: 'parent-latest-settlement', session: { events } },
+  }
+  assert.equal(guard(first), undefined)
+  guard.childStarted(first)
+  guard.dispatchSettled(first)
+  const second = {
+    name: 'search_selected_remote_code',
+    arguments: { description: 'missing second dependency', prompt: 'second' },
+    agent: { id: 'parent-latest-settlement', session: { events } },
+  }
+  assert.equal(guard(second), undefined)
+  guard.childStarted(second)
+  const third = {
+    name: 'search_selected_remote_code',
+    arguments: { description: 'missing third dependency', prompt: 'third' },
+    agent: { id: 'parent-latest-settlement', session: { events } },
+  }
+
+  assert.match(guard(third), /尚未结算/)
+})
+
+test('requires a /pmd-prd first search to use a requirement-aware prompt while preserving ordinary queries verbatim', () => {
   const guard = createSelectedSourceDispatchGuard()
   const userMessage = (text) => ({
     type: 'user/message',
@@ -67,24 +152,18 @@ test('rejects expanded first selected-source prompts until real search evidence 
     userMessage('/pmd-prd  优化下客户管理功能'),
     { type: 'turn/start', data: { turn: 1 } },
   ]
-  const expanded = '请检索客户列表、导入导出、权限、软删除等完整现状'
+  const pmdPrompt = '需求理解：优化客户管理功能。请检索并说明：当前功能入口、相关页面或组件与接口；现有流程和可证实的问题；直接关联的影响范围及稳定代码位置。仅返回资料能够证实的现状。'
 
-  assert.match(
-    guard(exec('search_selected_remote_code', expanded, initialEvents)),
-    /首次检索.*优化下客户管理功能/,
-  )
+  assert.match(guard(exec('search_selected_remote_code', '优化下客户管理功能', initialEvents)), /需求理解/)
   assert.equal(
-    guard(exec('search_selected_remote_code', '优化下客户管理功能', initialEvents)),
+    guard(exec('search_selected_remote_code', pmdPrompt, initialEvents)),
     undefined,
   )
 
   const knowledgeGuard = createSelectedSourceDispatchGuard()
-  assert.match(
-    knowledgeGuard(exec('search_selected_knowledge', expanded, initialEvents)),
-    /首次检索.*优化下客户管理功能/,
-  )
+  assert.match(knowledgeGuard(exec('search_selected_knowledge', '优化下客户管理功能', initialEvents)), /需求理解/)
   assert.equal(
-    knowledgeGuard(exec('search_selected_knowledge', '优化下客户管理功能', initialEvents)),
+    knowledgeGuard(exec('search_selected_knowledge', pmdPrompt, initialEvents)),
     undefined,
   )
 
@@ -105,12 +184,25 @@ test('rejects expanded first selected-source prompts until real search evidence 
     userMessage('继续'),
     { type: 'turn/start', data: { turn: 2 } },
   ]
+  const continuedPmdPrompt = '需求理解：优化直通宝任务列表的 UI 和交互。请检索并说明：任务列表当前入口、页面组件和接口；现有 UI 与交互；关联影响范围和稳定代码位置。仅返回资料能够证实的现状。'
+  assert.match(latestUserGuard(exec('search_selected_remote_code', '优化直通宝任务列表的UI和交互', continuedPmdPrdEvents)), /需求理解/)
+  assert.equal(
+    latestUserGuard(exec('search_selected_remote_code', continuedPmdPrompt, continuedPmdPrdEvents)),
+    undefined,
+  )
+
+  const scopeConfirmationGuard = createSelectedSourceDispatchGuard()
+  const scopeConfirmationEvents = [
+    userMessage('/pmd-prd  优化直通宝任务列表的UI和交互'),
+    userMessage('已选了'),
+    { type: 'turn/start', data: { turn: 2 } },
+  ]
   assert.match(
-    latestUserGuard(exec('search_selected_remote_code', '请检索任务列表、筛选和分页的完整现状', continuedPmdPrdEvents)),
-    /请把 prompt 原样改为："优化直通宝任务列表的UI和交互"/,
+    scopeConfirmationGuard(exec('search_selected_remote_code', '已选了', scopeConfirmationEvents)),
+    /需求理解/,
   )
   assert.equal(
-    latestUserGuard(exec('search_selected_remote_code', '优化直通宝任务列表的UI和交互', continuedPmdPrdEvents)),
+    scopeConfirmationGuard(exec('search_selected_remote_code', continuedPmdPrompt, scopeConfirmationEvents)),
     undefined,
   )
 
@@ -165,9 +257,9 @@ test('rejects expanded first selected-source prompts until real search evidence 
     },
     { type: 'turn/start', data: { turn: 2 } },
   ]
-  assert.match(
-    failedFollowupGuard(exec('search_selected_remote_code', expanded, failedEvents)),
-    /首次检索.*优化下客户管理功能/,
+  assert.equal(
+    failedFollowupGuard(exec('search_selected_remote_code', pmdPrompt, failedEvents)),
+    undefined,
   )
 
   const followupGuard = createSelectedSourceDispatchGuard()
@@ -244,9 +336,9 @@ test('rejects expanded first selected-source prompts until real search evidence 
     userMessage('继续'),
     { type: 'turn/start', data: { turn: 2 } },
   ]
-  assert.match(
-    failedAnnotationGuard(exec('search_selected_remote_code', '根据批注补查任务列表实现', failedAnnotationEvents)),
-    /请把 prompt 原样改为："优化直通宝任务列表的UI和交互"/,
+  assert.equal(
+    failedAnnotationGuard(exec('search_selected_remote_code', continuedPmdPrompt, failedAnnotationEvents)),
+    undefined,
   )
 })
 
@@ -284,7 +376,91 @@ test('releases a selected-source admission when dispatch fails before a child st
     agentCtx.emit('subagent/start', { runId: 'child-1' })
     return { isError: true }
   })
-  assert.match(guard(exec('search_selected_knowledge')), /已启动一个 selected-source 检索/)
+  assert.match(guard(exec('search_selected_knowledge')), /prompt 与上次相同或为空/)
+  stop()
+})
+
+test('does not reuse an earlier child start when a focused follow-up fails before dispatch', async () => {
+  const guard = createSelectedSourceDispatchGuard()
+  const listeners = new Map()
+  const context = () => ({
+    on(name, listener) {
+      const registered = listeners.get(name) ?? new Set()
+      registered.add(listener)
+      listeners.set(name, registered)
+      return () => registered.delete(listener)
+    },
+    emit(name, ...args) {
+      for (const listener of listeners.get(name) ?? []) listener(...args)
+    },
+  })
+  const rootCtx = context()
+  const agentCtx = context()
+  const agent = { id: 'parent-focused-retry', ctx: agentCtx, session: { events: [{ type: 'turn/start', data: { turn: 1 } }] } }
+  const exec = (description, prompt) => ({
+    name: 'search_selected_remote_code',
+    arguments: { description, prompt },
+    agent,
+  })
+  const [dispatch] = [async (call, body) => {
+    const [listener] = listeners.get('tools/execute') ?? []
+    return listener(call, body)
+  }]
+  const stop = installSelectedSourceDispatchTracking(rootCtx, guard)
+
+  const first = exec('初次检索', '检索任务列表')
+  assert.equal(guard(first), undefined)
+  await dispatch(first, async () => {
+    agentCtx.emit('subagent/start', { runId: 'child-1' })
+    return { isError: false }
+  })
+
+  const followup = exec('初次结果缺少分页接口', '补查分页接口')
+  assert.equal(guard(followup), undefined)
+  await dispatch(followup, async () => ({ isError: true }))
+  assert.equal(guard(followup), undefined, 'a pre-start failure can retry the same focused prompt')
+  stop()
+})
+
+test('steers an unstarted /pmd-prd search back to a structured prompt, not raw business text', async () => {
+  const guard = createSelectedSourceDispatchGuard()
+  let stopping
+  const ctx = {
+    on(name, listener) {
+      if (name === 'agent/turn-stopping') stopping = listener
+      return () => { stopping = undefined }
+    },
+  }
+  const steered = []
+  const agent = {
+    id: 'parent-pmd-progress-gate',
+    session: {
+      events: [
+        {
+          type: 'user/message',
+          data: {
+            content: [{ type: 'text', text: '/pmd-prd 优化直通宝任务列表的UI和交互' }],
+            source: { kind: 'user' },
+            role: 'user',
+          },
+        },
+        { type: 'turn/start', data: { turn: 1 } },
+        {
+          type: 'assistant/message',
+          data: { message: { content: [{ type: 'text', text: '代码正在后台查询。' }] } },
+        },
+      ],
+    },
+    steer(message) { steered.push(message) },
+  }
+
+  const stop = installSelectedSourceProgressCompletionGate(ctx, guard)
+  await stopping({ agent, turn: 1, signal: new AbortController().signal })
+
+  assert.equal(steered.length, 1)
+  assert.match(steered[0].content[0].text, /先理解用户需求/)
+  assert.match(steered[0].content[0].text, /结构化 prompt/)
+  assert.doesNotMatch(steered[0].content[0].text, /原始业务文本/)
   stop()
 })
 
@@ -320,13 +496,14 @@ test('keeps a turn open when it claims background code search without starting a
 
   assert.equal(steered.length, 1)
   assert.match(steered[0].content[0].text, /立即调用 search_selected_remote_code/)
+  assert.match(steered[0].content[0].text, /普通非 \/pmd-prd 检索/)
 
   await stopping({ agent, turn: 1, signal: new AbortController().signal })
   assert.equal(steered.length, 2, 'the turn must remain open until a real child starts')
 
-  events.push({ type: 'tool/call', data: { name: 'search_selected_remote_code' } })
   const search = { name: 'search_selected_remote_code', agent }
   assert.equal(guard(search), undefined)
+  events.push({ type: 'tool/call', data: { name: 'search_selected_remote_code' } })
   guard.childStarted(search)
   await stopping({ agent, turn: 1, signal: new AbortController().signal })
   assert.equal(steered.length, 2)

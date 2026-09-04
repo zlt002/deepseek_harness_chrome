@@ -17,7 +17,7 @@ async function runtime(options = {}) {
   }
   const canvas = {
     async getDocXml() { return xml },
-    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (options.rejectPatch) return { success: false }; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.regenerateIds) { let id = 0; xml = xml.replace(/\bid="[^"]*"/g, () => `id="rebuilt-${++id}"`) } if (options.tamperOutside) xml = xml.replace('>前置<', '>被篡改<'); if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
+    async patch({ xml: patch }) { if (state) state.patchCalls = (state.patchCalls ?? 0) + 1; if (options.rejectPatch) return { success: false }; if (!options.ignoreFormat || !/<strong\b|<em\b|<h[1-6]\b/i.test(patch)) { const before = xml; xml = `<apcanvas>${/^<replace sel="\/\/apcanvas">([\s\S]*)<\/replace>$/.exec(patch)?.[1] ?? ''}</apcanvas>`; if (options.regenerateIds) { let id = 0; xml = xml.replace(/\bid="[^"]*"/g, () => `id="rebuilt-${++id}"`) } if (options.flattenTableParagraphs) xml = xml.replace(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi, (_cell, attrs, body) => { const lines = [...body.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)].map((match) => match[1]); return lines.length > 1 ? `<td${attrs}><p id="">${lines.join(' ')}</p></td>` : _cell }); if (options.tamperOutside) xml = xml.replace('>前置<', '>被篡改<'); if (options.keepBlockId) { const escaped = String(options.keepBlockId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const original = new RegExp(`<(?:p|h[1-6]|li|blockquote|pre|codeBlock)\\b[^>]*\\bid=["']${escaped}["'][^>]*>[\\s\\S]*?<\\/(?:p|h[1-6]|li|blockquote|pre|codeBlock)>`, 'i').exec(before)?.[0]; if (original && !new RegExp(`\\bid=["']${escaped}["']`, 'i').test(xml)) xml = xml.replace('</apcanvas>', `${original}</apcanvas>`) } } if (state) state.xml = xml; return { success: true } },
     ...(options.selectionInfo ? { canvas: { getSelectionInfo: () => options.selectionInfo } } : {}),
   }
   const applySelection = (value) => {
@@ -183,6 +183,29 @@ test('empty body blocks_insert initializes an empty title only from its first h1
   assert.deepEqual(state.titleValues, ['演示 PRD：团队任务管理助手'])
   assert.doesNotMatch(state.titleValues[0], /<|>|\*|_|#/, 'title API receives plain readable text, not XML or Markdown')
   assert.match(state.xml, /<h1[^>]*>.*演示 PRD：团队任务管理助手/)
+})
+
+test('blocks_insert preserves table cell soft breaks as multiple paragraphs', async () => {
+  const state = {}
+  const call = await runtime({ state, initialXml: '<apcanvas><outlineTitle id="title">标题</outlineTitle></apcanvas>' })
+  const before = await call({ action: 'read' })
+  const result = await call({ action: 'write', operation: 'blocks_insert', resource: before.result.resource, payload: { blocks: [{ type: 'table', rows: [['头', '普通'], ['A<br>B', 'C\\n\\nD'], ['E\r\nF', 'G/nH']] }] } })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.match(state.xml, /<td><p id="">A<\/p><p id="">B<\/p><\/td>/)
+  assert.match(state.xml, /<td><p id="">C<\/p><p id=""><\/p><p id="">D<\/p><\/td>/)
+  const after = await call({ action: 'read' })
+  assert.match(after.result.document.blocks.find((block) => block.type === 'table').text, /A\nB/)
+  assert.match(after.result.document.blocks.find((block) => block.type === 'table').text, /C\nD/)
+  assert.match(after.result.document.blocks.find((block) => block.type === 'table').text, /G\/nH/)
+  assert.equal(result.result.observed.verifiedTableCells[0].matrix[1][1].length, 3)
+})
+
+test('blocks_insert rejects readback when WebEdit flattens table cell paragraphs', async () => {
+  const call = await runtime({ flattenTableParagraphs: true, initialXml: '<apcanvas><outlineTitle id="title">标题</outlineTitle></apcanvas>' })
+  const before = await call({ action: 'read' })
+  const result = await call({ action: 'write', operation: 'blocks_insert', resource: before.result.resource, payload: { blocks: [{ type: 'table', rows: [['表头'], ['第一行\\n第二行']] }] } })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'readback_mismatch')
 })
 
 test('a single blank paragraph is semantic-empty and initializes the first h1 as title', async () => {

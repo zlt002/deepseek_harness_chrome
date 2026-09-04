@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { decodeNativeFrames, encodeNativeFrame } from './protocol.mjs'
 import { BrowserConnector } from './connector.mjs'
+import { BrowserTargetRunBindings } from './browser-target-run-bindings.mjs'
 import { CONNECTOR_RESPONSE, sameBrowserTarget, validBrowserTarget, validBrowserTargetBinding } from './connector-protocol.mjs'
 import { validRuntimeIdentitySummary } from './runtime-identity-contract.mjs'
 import { HarnessWebProcess } from './harness-process.mjs'
@@ -104,17 +105,14 @@ process.on('unhandledRejection', (error) => {
  * to stderr so Chrome never sees an unframed byte.
  */
 export class NativeHost {
-  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string, env?: NodeJS.ProcessEnv }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void, reportPrdEvent: (event: object) => Promise<unknown> }) => BrowserConnector, prdEventTracker?: PrdEventTracker, userIdentityTracker?: UserIdentityTracker, exit?: (code: number) => void, runtimeIdentity?: object, nativeVersion?: string, updateCheck?: typeof checkUpdate, updatePrepare?: typeof prepareUpdate, updateLaunch?: typeof launchPreparedUpdate, updateStatusRead?: typeof readUpdateStatus, installRoot?: string, platform?: NodeJS.Platform, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
+  /** @param {{ processFactory?: (options: { mcpConnector: { url: string, token: string }, prototypeRecoveryPublicKey: string, prototypeRecoveryRunId: string, env?: NodeJS.ProcessEnv }) => HarnessWebProcess, connectorFactory?: (options: { requestExtension: (request: object) => void, reportPrdEvent: (event: object) => Promise<unknown>, browserTargetRunBindings: BrowserTargetRunBindings }) => BrowserConnector, browserTargetRunBindings?: BrowserTargetRunBindings, prdEventTracker?: PrdEventTracker, userIdentityTracker?: UserIdentityTracker, exit?: (code: number) => void, runtimeIdentity?: object, nativeVersion?: string, updateCheck?: typeof checkUpdate, updatePrepare?: typeof prepareUpdate, updateLaunch?: typeof launchPreparedUpdate, updateStatusRead?: typeof readUpdateStatus, installRoot?: string, platform?: NodeJS.Platform, prototypeRecoveryKeyPair?: { privateKey: import('node:crypto').KeyObject, publicKey: import('node:crypto').KeyObject } }} [options] */
   constructor(options = {}) {
     this.processFactory = options.processFactory ?? ((processOptions) => new HarnessWebProcess(processOptions))
     this.connectorFactory = options.connectorFactory ?? ((connectorOptions) => new BrowserConnector(connectorOptions))
     this.exit = options.exit ?? ((code) => process.exit(code))
     this.harness = undefined
     this.connector = undefined
-    this.browserTargets = new Map()
-    this.browserTargetSets = new Map()
-    this.unavailableBrowserTargets = new Map()
-    this.currentRunId = undefined
+    this.browserTargetRunBindings = options.browserTargetRunBindings ?? new BrowserTargetRunBindings()
     this.serverUrl = undefined
     this.startPromise = undefined
     this.closePromise = undefined
@@ -196,7 +194,7 @@ export class NativeHost {
       return
     }
     if (type === 'release-browser-target-capture') {
-      this.connector?.releaseCapturedBrowserTarget(message.sessionId, message.submissionId)
+      this.browserTargetRunBindings.release(message.sessionId, message.submissionId)
       return
     }
     if (type === 'sign-prototype-recovery') {
@@ -262,7 +260,9 @@ export class NativeHost {
 
   async startHarness(browserTarget, browserTargets, unavailableBrowserTargets, productVersion) {
     if (this.closed) return
-    const boundTarget = this.currentRunId === undefined ? undefined : this.browserTargets.get(this.currentRunId)
+    const currentBinding = this.browserTargetRunBindings.current()
+    const currentRunId = currentBinding?.runId
+    const boundTarget = currentBinding?.browserTarget
     if (validBrowserTarget(browserTarget) && validBrowserTarget(boundTarget) && !sameBrowserTarget(browserTarget, boundTarget)) {
       this.send({ type: 'error', error: 'Harness Run is already bound to a different Browser Target.' })
       return
@@ -271,13 +271,13 @@ export class NativeHost {
       this.send({ type: 'error', error: 'Browser Target binding must contain a trusted primary target and one or more unique selected targets.' })
       return
     }
-    if (this.currentRunId === undefined) this.#createRun(browserTarget, browserTargets, unavailableBrowserTargets)
+    if (currentRunId === undefined) this.#createRun(browserTarget, browserTargets, unavailableBrowserTargets)
     else if (validBrowserTarget(browserTarget) && boundTarget === undefined) {
       this.send({ type: 'error', error: 'Harness Run is unbound. Use transfer-browser-target to bind an explicit Browser Target.' })
       return
     }
     if (this.serverUrl !== undefined) {
-      this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token, ...(this.nativeVersion === undefined ? {} : { nativeVersion: this.nativeVersion }), ...(this.runtimeIdentity === undefined ? {} : { runtimeIdentity: this.runtimeIdentity }) } })
+      this.send({ type: 'server_started', payload: { url: this.serverUrl, runId: this.browserTargetRunBindings.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token, ...(this.nativeVersion === undefined ? {} : { nativeVersion: this.nativeVersion }), ...(this.runtimeIdentity === undefined ? {} : { runtimeIdentity: this.runtimeIdentity }) } })
       return
     }
     if (this.startPromise === undefined) {
@@ -287,7 +287,7 @@ export class NativeHost {
     }
     try {
       const url = await this.startPromise
-      this.send({ type: 'server_started', payload: { url, runId: this.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token, ...(this.nativeVersion === undefined ? {} : { nativeVersion: this.nativeVersion }), ...(this.runtimeIdentity === undefined ? {} : { runtimeIdentity: this.runtimeIdentity }) } })
+      this.send({ type: 'server_started', payload: { url, runId: this.browserTargetRunBindings.currentRunId, knowledgeProxyUrl: `${this.connector.url}/knowledge-proxy`, knowledgeProxyToken: this.connector.token, ...(this.nativeVersion === undefined ? {} : { nativeVersion: this.nativeVersion }), ...(this.runtimeIdentity === undefined ? {} : { runtimeIdentity: this.runtimeIdentity }) } })
     } catch (error) {
       this.send({ type: 'error', error: error instanceof Error ? error.message : String(error) })
     }
@@ -299,19 +299,23 @@ export class NativeHost {
       this.send({ type: 'browser_target_transfer_failed', requestId, error: 'transfer-browser-target requires a request id, Run id, and explicit Chrome Browser Target.' })
       return false
     }
-    if (runId !== this.currentRunId) {
+    if (runId !== this.browserTargetRunBindings.currentRunId) {
       this.send({ type: 'browser_target_transfer_failed', requestId, error: 'Browser Target transfer does not match the active Harness Run.' })
       return false
     }
-    this.browserTargets.set(runId, { ...browserTarget })
-    const targetSet = browserTargets ?? [browserTarget]
-    const unavailable = unavailableBrowserTargets ?? []
-    this.browserTargetSets.set(runId, targetSet.map((target) => ({ ...target })))
-    this.unavailableBrowserTargets.set(runId, unavailable.map((item) => ({ browserTarget: { ...item.browserTarget }, reason: item.reason })))
-    this.connector?.bindBrowserTarget(runId, browserTarget, targetSet, unavailable)
+    const transferred = this.connector === undefined
+      ? this.browserTargetRunBindings.transfer(runId, browserTarget, browserTargets, unavailableBrowserTargets).ok
+      : this.connector.bindBrowserTarget(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+    if (!transferred) {
+      this.send({ type: 'browser_target_transfer_failed', requestId, error: 'Browser Target transfer does not match the active Harness Run.' })
+      return false
+    }
+    const binding = this.browserTargetRunBindings.bindingFor(runId)
+    const targetSet = binding.browserTargets
+    const unavailable = binding.unavailableBrowserTargets
     const isMultiTarget = browserTargets !== undefined || unavailableBrowserTargets !== undefined
     this.send({ type: 'browser_target_transferred', requestId, payload: {
-      runId, browserTarget: { ...browserTarget },
+      runId, browserTarget: { ...binding.browserTarget },
       ...(isMultiTarget ? {
         browserTargets: targetSet.map((target) => ({ ...target })),
         unavailableBrowserTargets: unavailable.map((item) => ({ browserTarget: { ...item.browserTarget }, reason: item.reason })),
@@ -322,12 +326,12 @@ export class NativeHost {
 
   captureBrowserTarget(requestId, runId, sessionId, submissionId, browserTarget, browserTargets, unavailableBrowserTargets) {
     const fail = (error) => { this.send({ type: 'browser_target_capture_failed', requestId, error }); return false }
-    if (typeof requestId !== 'string' || requestId.length === 0 || typeof runId !== 'string' || runId !== this.currentRunId
+    if (typeof requestId !== 'string' || requestId.length === 0 || typeof runId !== 'string' || runId !== this.browserTargetRunBindings.currentRunId
       || typeof sessionId !== 'string' || typeof submissionId !== 'string'
       || !validBrowserTargetBinding(browserTarget, browserTargets, unavailableBrowserTargets)) {
       return fail('capture-browser-target requires the active Run, trusted Harness session, submission, and explicit Browser Target.')
     }
-    if (this.connector?.captureBrowserTarget(runId, sessionId, submissionId, browserTarget, browserTargets, unavailableBrowserTargets) !== true) {
+    if (this.browserTargetRunBindings.capture(runId, sessionId, submissionId, browserTarget, browserTargets, unavailableBrowserTargets) !== true) {
       return fail('Browser Target capture does not match the active Harness Run.')
     }
     this.send({ type: 'browser_target_captured', requestId })
@@ -336,7 +340,7 @@ export class NativeHost {
 
   signPrototypeRecovery(requestId, payload) {
     const fail = (error) => { this.send({ type: 'prototype_recovery_sign_failed', requestId, error }); return false }
-    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160 || this.currentRunId === undefined || this.serverUrl === undefined) return fail('Prototype recovery signing requires the active Native Harness Run.')
+    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160 || this.browserTargetRunBindings.currentRunId === undefined || this.serverUrl === undefined) return fail('Prototype recovery signing requires the active Native Harness Run.')
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 6) return fail('Prototype recovery signing payload is invalid.')
     const { projectId, expectedSessionId, referenceId, evidenceFingerprint, capabilityFingerprint, expectedRecoveryEpoch } = payload
     if (typeof projectId !== 'string' || !/^prototype-[a-z0-9-]{8,72}$/.test(projectId)
@@ -346,7 +350,7 @@ export class NativeHost {
       || typeof capabilityFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(capabilityFingerprint)
       || !Number.isSafeInteger(expectedRecoveryEpoch) || expectedRecoveryEpoch < 0) return fail('Prototype recovery signing payload is invalid.')
     const issuedAt = Date.now()
-    const assertion = { v: 1, purpose: 'prototype-studio-capability-recovery', runId: this.currentRunId, projectId, expectedSessionId, referenceId, evidenceFingerprint, capabilityFingerprint, expectedRecoveryEpoch, nonce: randomUUID(), issuedAt, expiresAt: issuedAt + 60_000 }
+    const assertion = { v: 1, purpose: 'prototype-studio-capability-recovery', runId: this.browserTargetRunBindings.currentRunId, projectId, expectedSessionId, referenceId, evidenceFingerprint, capabilityFingerprint, expectedRecoveryEpoch, nonce: randomUUID(), issuedAt, expiresAt: issuedAt + 60_000 }
     const bytes = Buffer.from(JSON.stringify([assertion.v, assertion.purpose, assertion.runId, assertion.projectId, assertion.expectedSessionId, assertion.referenceId, assertion.evidenceFingerprint, assertion.capabilityFingerprint, assertion.expectedRecoveryEpoch, assertion.nonce, assertion.issuedAt, assertion.expiresAt]))
     const signature = sign(null, bytes, this.prototypeRecoveryKeyPair.privateKey).toString('base64url')
     this.send({ type: 'prototype_recovery_signed', requestId, assertion, signature })
@@ -355,14 +359,14 @@ export class NativeHost {
 
   recordPmdPrdReviewAdoption(requestId, payload) {
     const fail = (error) => { this.send({ type: 'pmd_prd_review_adoption_failed', requestId, error }); return false }
-    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160 || this.currentRunId === undefined || this.connector === undefined) return fail('PRD adoption requires the active Native Harness Run.')
+    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 160 || this.browserTargetRunBindings.currentRunId === undefined || this.connector === undefined) return fail('PRD adoption requires the active Native Harness Run.')
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 7) return fail('PRD adoption payload is invalid.')
     const { harnessSessionId, reviewId, resourceId, displayPath, revision, fingerprint, contentHash } = payload
     if (![harnessSessionId, reviewId, resourceId, revision].every(value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value))
       || typeof displayPath !== 'string' || displayPath.length < 1 || displayPath.length > 2048
       || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(fingerprint)
       || typeof contentHash !== 'string' || !/^[a-f0-9]{64}$/i.test(contentHash)) return fail('PRD adoption payload is invalid.')
-    const recorded = this.connector.recordPmdPrdReviewAdoption({ runId: this.currentRunId, harnessSessionId, reviewId, resourceId, displayPath, revision, fingerprint, contentHash })
+    const recorded = this.connector.recordPmdPrdReviewAdoption({ runId: this.browserTargetRunBindings.currentRunId, harnessSessionId, reviewId, resourceId, displayPath, revision, fingerprint, contentHash })
     if (!recorded) return fail('PRD adoption does not match the active Native Harness Run.')
     this.send({ type: 'pmd_prd_review_adoption_recorded', requestId })
     return true
@@ -469,10 +473,7 @@ export class NativeHost {
       this.connector = undefined
       this.prdEventTracker.stop()
       this.userIdentityTracker.stop()
-      this.browserTargets.clear()
-      this.browserTargetSets.clear()
-      this.unavailableBrowserTargets.clear()
-      this.currentRunId = undefined
+      this.browserTargetRunBindings.clear()
       this.serverUrl = undefined
       this.exit(0)
     })()
@@ -490,17 +491,15 @@ export class NativeHost {
         this.connector = this.connectorFactory({
           requestExtension: (request) => this.send(request),
           reportPrdEvent: (event) => this.prdEventTracker.report(event),
+          browserTargetRunBindings: this.browserTargetRunBindings,
         })
-        if (this.currentRunId !== undefined) {
-          this.connector.registerRun(this.currentRunId, this.browserTargets.get(this.currentRunId), this.browserTargetSets.get(this.currentRunId), this.unavailableBrowserTargets.get(this.currentRunId))
-        }
       }
       const connector = await this.connector.start()
       if (this.harness === undefined) {
         this.harness = this.processFactory({
           mcpConnector: { url: `${connector.url}/mcp`, token: connector.token },
           prototypeRecoveryPublicKey: this.prototypeRecoveryPublicKey,
-          prototypeRecoveryRunId: this.currentRunId,
+          prototypeRecoveryRunId: this.browserTargetRunBindings.currentRunId,
           env: validProductVersion(productVersion)
             ? { ...process.env, ACCR_PRODUCT_VERSION: productVersion.trim() }
             : process.env,
@@ -514,10 +513,7 @@ export class NativeHost {
       this.harness = undefined
       await this.connector?.stop()
       this.connector = undefined
-      this.browserTargets.clear()
-      this.browserTargetSets.clear()
-      this.unavailableBrowserTargets.clear()
-      this.currentRunId = undefined
+      this.browserTargetRunBindings.clear()
       this.serverUrl = undefined
       throw error
     }
@@ -525,15 +521,7 @@ export class NativeHost {
 
   #createRun(browserTarget, browserTargets, unavailableBrowserTargets) {
     const runId = randomUUID()
-    this.currentRunId = runId
-    if (validBrowserTarget(browserTarget)) {
-      const targetSet = browserTargets ?? [browserTarget]
-      const unavailable = unavailableBrowserTargets ?? []
-      this.browserTargets.set(runId, { ...browserTarget })
-      this.browserTargetSets.set(runId, targetSet.map((target) => ({ ...target })))
-      this.unavailableBrowserTargets.set(runId, unavailable.map((item) => ({ browserTarget: { ...item.browserTarget }, reason: item.reason })))
-    }
-    this.connector?.registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+    this.browserTargetRunBindings.register(runId, browserTarget, browserTargets, unavailableBrowserTargets)
   }
 
   /** @param {unknown} message */

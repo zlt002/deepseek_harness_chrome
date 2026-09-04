@@ -13,18 +13,15 @@ function validPrd() {
   return `# PRD: REQ-PROOF-1 - 评分凭据
 
 # 需求基本信息
-
-| 业务需求名称 | 评分凭据 | 需求优先级 | P1 |
-|---|---|---|---|
-| 需求编号及链接 | REQ-PROOF-1：https://example.test/REQ-PROOF-1 |  |  |
-| 所属系统 | 客户管理系统 | 所属功能模块 | 客户列表 |
-| 产品经理 | 张三 | 预估人天 | 8人天 |
+评分凭据
 
 # 修订记录
 
-| 版本 | 日期 | 修订人 | 审核人 | 修订说明 | 变更分类（产品/业务） |
-|---|---|---|---|---|---|
-| V1.0 | 2026-09-03 | 张三 | 李四 | 首次提交 | 产品 |
+V1.0
+
+# 一、术语与缩写
+
+无
 
 # 二、背景与目标
 
@@ -36,37 +33,63 @@ function validPrd() {
 
 客服能识别停用客户，并避免无效服务。
 
+## （三）风险控制
+
+无
+
+# 三、整体流程
+
+## （一）业务/功能流程图
+
+客户列表 → 查看状态 → 发起服务。
+
 # 四、功能性需求
 
 ## （一）正常业务场景
 
-### A功能：客户状态展示
+### 4.1 客户状态展示
 
-功能点说明：客服在客户列表查看客户时，需要识别是否可以继续服务。
+| 需求点 | 阐述 | 原有实现 | 目标改动点 |
+|---|---|---|---|
+| 【修改】客户状态展示 | 客服需要识别是否可以继续服务。 | 客户列表只展示名称和等级。 | 展示启用或停用状态，发起服务前校验状态。研发定位：客户管理 → 客户列表；页面路由 /customers；文件 src/customer/CustomerList.vue。 |
 
-本次处理：修改
+### 边界场景
 
-原有情况：客户列表只展示名称和等级。
-
-调整后：客户列表展示启用或停用状态，并在发起服务前校验状态。
-
-业务规则：停用客户不能发起服务；无权修改状态的人员只能查看。
-
-##### 输入/输出规则
-
-输入为客户列表查询；输出包含状态。
-
-- 研发定位：src/customer/CustomerList.vue 的 statusColumn；展示客户状态；完成后客服可识别停用客户。
+无
 
 ## （二）异常业务场景
 
-- 状态读取失败时提示用户刷新重试，刷新后恢复展示。
+无
 
 # 五、角色权限
 
-| 角色 | 功能/页面 | 权限范围 | 数据范围 | 备注 |
-|---|---|---|---|---|
-| 客服 | 客户列表 | 查看状态、不可修改 | 本人负责客户 | 不适用（无权限变更）。 |
+无
+
+# 六、非功能性需求
+
+## （一）用户与业务规模
+
+无
+
+## （二）性能指标要求
+
+无
+
+## （三）安全要求
+
+无
+
+## （四）高可用要求
+
+无
+
+## （五）监控告警要求
+
+无
+
+# 七、配置与开关
+
+无
 
 # 八、测试关注点
 
@@ -78,22 +101,23 @@ function validPrd() {
 
 验证状态读取失败后的提示和恢复结果。
 
+## （三）性能压测要求
+
+无
+
+## （四）数据准备要求
+
+测试客户数据。
+
 ## （五）验收清单
 
-### 正常情况
-- [ ] 展示客户状态。
+| 对应需求点 | 验证操作 | 预期结果 |
+|---|---|---|
+| 【修改】客户状态展示 | 在客户列表查看停用客户并发起服务。 | 可见停用状态，发起服务前被拦截。 |
 
-### 异常情况
-- [ ] 失败时提示重试。
+# 九、参考文档
 
-### 边界情况
-- [ ] 无相关边界风险，已确认原因。
-
-### 权限情况
-- [ ] 客服只能查看状态。
-
-### 兼容情况
-- [ ] 服务发起入口可用。
+无
 `
 }
 
@@ -122,22 +146,23 @@ test('requires a current automatic receipt and accepts a valid PRD after it is r
     verifyPmdPrdSourceProof({ cwd: root, relativePath, validatorPath }),
     /manifest is missing/,
   )
-  const receipt = await issuePmdPrdReviewReceipt({ prdPath: join(root, relativePath), now: '2026-09-03T00:00:00.000Z' })
+  const receipt = await issuePmdPrdReviewReceipt({ prdPath: join(root, relativePath), workspaceRoot: root, now: '2026-09-03T00:00:00.000Z' })
   assert.deepEqual(await verifyPmdPrdSourceProof({ cwd: root, relativePath, validatorPath }), { fingerprint: receipt.fingerprint })
   await writeFile(join(root, relativePath), validPrd().replace('# PRD: REQ-PROOF-1 -', '# PRD: REQ-PROOF-2 -'))
   await assert.rejects(
     verifyPmdPrdSourceProof({ cwd: root, relativePath, validatorPath }),
     /receipt does not match/,
   )
-  const refreshed = await issuePmdPrdReviewReceipt({ prdPath: join(root, relativePath), now: '2026-09-03T00:01:00.000Z' })
+  const refreshed = await issuePmdPrdReviewReceipt({ prdPath: join(root, relativePath), workspaceRoot: root, now: '2026-09-03T00:01:00.000Z' })
   assert.notEqual(refreshed.fingerprint, receipt.fingerprint)
   assert.deepEqual(await verifyPmdPrdSourceProof({ cwd: root, relativePath, validatorPath }), { fingerprint: refreshed.fingerprint })
 })
 
-test('source proof accepts identity-valid content without asserting template semantics', async (t) => {
+test('source proof refuses an incomplete PRD before it can obtain a receipt', async (t) => {
   const { root, relativePath } = await fixture(t)
   await writeFile(join(root, relativePath), '# PRD: REQ-PROOF-1 - 评分凭据\n\n结构尚未完成。')
-  await issuePmdPrdReviewReceipt({ prdPath: join(root, relativePath), now: '2026-09-03T00:02:00.000Z' })
-  const result = await verifyPmdPrdSourceProof({ cwd: root, relativePath, validatorPath })
-  assert.match(result.fingerprint, /^[a-f0-9]{64}$/)
+  await assert.rejects(
+    issuePmdPrdReviewReceipt({ prdPath: join(root, relativePath), workspaceRoot: root, now: '2026-09-03T00:02:00.000Z' }),
+    /PMD frozen PRD check failed: PRD is missing or misorders required section/,
+  )
 })

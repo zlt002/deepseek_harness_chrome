@@ -567,14 +567,14 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
   const target = { browser: 'chrome', windowId: 4, tabId: 22, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/110?id=110' }
   const resource = { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: null, fingerprint: 'before' }
   const drawingPayload = { mermaid: 'flowchart TD\n开始 --> 结束', position: 'end' }
-  const blocksPayload = { position: 'end', blocks: [{ type: 'h1', text: '演示 PRD：团队任务管理助手' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '说明书']] }] }
+  const blocksPayload = { position: 'end', blocks: [{ type: 'h1', text: '演示 PRD：团队任务管理助手' }, { type: 'table', rows: [['负责人', '交付物'], ['张三', '第一行\\n第二行']] }] }
   let writes = 0
   const connector = new BrowserConnector({ officeDocumentWriteStore: writeStore(), requestExtension: (request) => queueMicrotask(() => {
     if (request.action !== 'write') return connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'ok', resource, document: { blockCount: 1, offset: 0, limit: 1, hasMore: false, blocks: [{ index: 0, id: null, type: 'p', text: '', textLength: 0, truncated: false }], emptyBody: { semantic: true, physicalBlockCount: 1, blankParagraphCount: 1 }, title: { supported: true, text: '', textLength: 0, truncated: false } } } })
     writes += 1
-    const fragments = request.operation === 'insert_drawing' ? ['flowchart', 'TD', '开始', '结束'] : ['演示', 'PRD', '团队任务管理助手', '负责人', '交付物', '张三', '说明书']
+    const fragments = request.operation === 'insert_drawing' ? ['flowchart', 'TD', '开始', '结束'] : ['演示', 'PRD', '团队任务管理助手', '负责人', '交付物', '张三', '第一行', '第二行']
     const initializedTitle = request.operation === 'blocks_insert' ? { initialized: true, text: '演示 PRD：团队任务管理助手' } : undefined
-    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, ...(initializedTitle ? { documentName: initializedTitle.text } : {}), fingerprint: `after-${request.operation}` }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: fragments, fragmentEvidence: fragments.map((fragment) => ({ fragment, blockIds: ['inserted'] })), observedBlocks: [{ id: 'inserted', type: request.operation === 'insert_drawing' ? 'codeblock' : 'h1', text: fragments.join(' ') }], ...(initializedTitle ? { title: initializedTitle } : {}) } } })
+    connector.acceptExtensionResponse({ type: 'connector_response', requestId: request.requestId, runId: request.runId, generation: request.generation, browserTarget: target, result: { status: 'verified_write', resource: { ...resource, ...(initializedTitle ? { documentName: initializedTitle.text } : {}), fingerprint: `after-${request.operation}` }, requested: { operation: request.operation, payload: request.payload }, observed: { verified: true, verifiedFragments: fragments, fragmentEvidence: fragments.map((fragment) => ({ fragment, blockIds: ['inserted'] })), observedBlocks: [{ id: 'inserted', type: request.operation === 'insert_drawing' ? 'codeblock' : 'h1', text: fragments.join(' ') }], ...(request.operation === 'blocks_insert' ? { verifiedTableCells: [{ matrix: [[['负责人'], ['交付物']], [['张三'], ['第一行', '第二行']]], count: 1 }] } : {}), ...(initializedTitle ? { title: initializedTitle } : {}) } } })
   }) })
   connector.bindBrowserTarget('light-doc-insert-run', target); const endpoint = await connector.start()
   const write = async (operation, payload, identity, id) => {
@@ -593,7 +593,9 @@ test('blocks_insert and insert_drawing obtain a challenge on empty documents and
     const escapedNewline = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'p', text: '第一行\\n第二行' }] } }, 6)
     assert.equal(escapedNewline.error.code, -32602)
     assert.match(escapedNewline.error.message, /literal \\n/)
-    const codeBlock = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'codeblock', text: 'const escaped = "\\n"' }] } }, 7)
+    const tableEscapedNewline = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'table', rows: [['表头'], ['第一行\\n第二行']] }] } }, 7)
+    assert.equal(typeof tableEscapedNewline.result.structuredContent.challenge, 'string')
+    const codeBlock = await call(endpoint, 'light_document_write_preview', { operation: 'blocks_insert', payload: { blocks: [{ type: 'codeblock', text: 'const escaped = "\\n"' }] } }, 8)
     assert.equal(typeof codeBlock.result.structuredContent.challenge, 'string')
   } finally { await connector.stop() }
 })

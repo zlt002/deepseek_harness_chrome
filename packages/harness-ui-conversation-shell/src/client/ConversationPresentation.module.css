@@ -269,6 +269,16 @@
   height: auto;
 }
 
+/* A sidebar composer is already the narrowest useful context. Let its model
+   sheet use the identical card-width formula, so both horizontal edges align
+   with the input instead of leaving an arbitrary compact menu on the right. */
+:global([data-sidebar-presentation='compact']) :global([data-composer-overlay-host] > [data-composer-overlay-surface][role='menu']) {
+  width: min(
+    var(--dsh-composer-card-max-width),
+    calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance))
+  );
+}
+
 /* e327 keeps the new-session permission picker color-first: a 28px shield
    says safe/write/full at a glance and the tooltip supplies its full label. */
 .root[data-phase='hero'] :global([data-permission]) {

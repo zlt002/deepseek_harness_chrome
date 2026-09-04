@@ -73,6 +73,45 @@ test('Knowledge transport preserves partial SSE answers when the upstream stream
   assert.deepEqual(result.result, { status: 'partial', answer: '第一段', sources: [] })
 })
 
+test('Knowledge retrieval combines a knowledge selection and repository ids through repo_keys', async () => {
+  const { createKnowledgeTransport } = await transportModule()
+  let request
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"answer","delta":"代码事实"}\n\ndata: {"type":"done","citations":[]}\n\ndata: [DONE]\n\n'))
+      controller.close()
+    },
+  })
+  const transport = createKnowledgeTransport({
+    baseUrl: 'https://anapi-uat.annto.com/api-sse-kd',
+    fetch: async (input, init) => {
+      request = { input: String(input), body: JSON.parse(init.body) }
+      return new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+    },
+    cookies: async () => [],
+  })
+
+  const result = await transport.query({
+    kind: 'knowledge', question: '任务列表怎么实现', scope: { domainSystems: { logistics: ['task'] }, repositoryIds: ['H5_frontend'] }, signal: new AbortController().signal,
+  })
+
+  assert.equal(request.input, 'https://anapi-uat.annto.com/api-sse-kd/api/rag/retrieval')
+  assert.deepEqual(request.body.repo_keys, ['H5_frontend'])
+  assert.deepEqual(request.body.domain_system_config, { logistics: { self: false, systems: ['task'] } })
+  assert.deepEqual(result.result, { status: 'complete', answer: '代码事实', sources: [] })
+})
+
+test('Knowledge retrieval rejects a code-only selection so it uses the remote-code route', async () => {
+  const { createKnowledgeTransport } = await transportModule()
+  const transport = createKnowledgeTransport({
+    baseUrl: 'https://anapi-uat.annto.com/api-sse-kd', fetch: async () => { throw new Error('must not fetch') }, cookies: async () => [],
+  })
+
+  await assert.rejects(transport.query({
+    kind: 'knowledge', question: '任务列表怎么实现', scope: { domainSystems: {}, repositoryIds: ['H5_frontend'] }, signal: new AbortController().signal,
+  }), { message: '当前会话没有选择知识范围。只有代码库时请使用远程代码检索。' })
+})
+
 test('Knowledge transport classifies query auth failures and login redirects without treating HTML as an answer', async () => {
   const { createKnowledgeTransport } = await transportModule()
   const scope = { domainSystems: { domain: ['system'] }, repositoryIds: [] }

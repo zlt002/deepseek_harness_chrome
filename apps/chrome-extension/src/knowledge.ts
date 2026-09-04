@@ -128,8 +128,9 @@ export async function executeKnowledgeQuery(
   signal: AbortSignal,
 ): Promise<{ result: KnowledgeResult; sessionId?: string }> {
   const body = kind === 'knowledge'
-    ? { question, domain_system_config: Object.fromEntries(Object.entries(scope.domainSystems).map(([domainId, systems]) => [domainId, { self: false, systems }])), forceRetrieval: true, include_third_party: false, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
+    ? { question, domain_system_config: Object.fromEntries(Object.entries(scope.domainSystems).map(([domainId, systems]) => [domainId, { self: false, systems }])), forceRetrieval: true, include_third_party: false, stream: true, ...(scope.repositoryIds.length === 0 ? {} : { repo_keys: scope.repositoryIds }), ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
     : { question, repo_keys: scope.repositoryIds, stream: true, ...(priorSessionId === undefined ? {} : { session_id: priorSessionId }) }
+  if (kind === 'knowledge' && Object.keys(scope.domainSystems).length === 0) throw new Error('knowledge_scope_requires_knowledge')
   if (kind === 'code' && scope.repositoryIds.length === 0) throw new Error('knowledge_scope_requires_repository')
   const response = await fetch(`${KNOWLEDGE_BASE_URL}/api/rag/${kind === 'knowledge' ? 'retrieval' : 'repo-search'}`, {
     method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(body), signal,

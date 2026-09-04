@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { TeamDocRecordStore } from './team-doc-record-store.mjs'
@@ -20,10 +20,31 @@ import {
   validConnectorResponseEnvelope,
   validUnavailableBrowserTarget,
 } from './connector-protocol.mjs'
-import { RunTargetRegistry } from './run-target-registry.mjs'
+import { BrowserTargetRunBindings } from './browser-target-run-bindings.mjs'
 import { atomicWrite, fingerprint as htmlFingerprint, previewEdits, readWorkspace, validEdits } from './html-workbench.mjs'
 
 export { isRetryableKnowledgeTransport, knowledgeErrorChain, knowledgeHttpsFetch } from './knowledge-transport.mjs'
+
+async function loadPmdPrdContract() {
+  const candidates = [
+    new URL('../../../skills/pmd-prd/scripts/validate-deliverables.mjs', import.meta.url),
+    new URL('../../skills/pmd-prd/scripts/validate-deliverables.mjs', import.meta.url),
+    new URL('../skills/pmd-prd/scripts/validate-deliverables.mjs', import.meta.url),
+  ]
+  let missing
+  for (const moduleUrl of candidates) {
+    try {
+      const contract = await import(moduleUrl.href)
+      return { contract }
+    } catch (error) {
+      if (error?.code !== 'ERR_MODULE_NOT_FOUND' && error?.code !== 'ENOENT') throw error
+      missing = error
+    }
+  }
+  throw missing ?? new Error('PMD PRD contract is unavailable')
+}
+
+const PMD_PRD_CONTRACT = await loadPmdPrdContract()
 
 const REQUEST_TIMEOUT_MS = 15_000
 // A cold WebEdit read first sweeps iframes for up to 8s, then the in-frame
@@ -948,7 +969,8 @@ function lightDocumentStructuredBlockValid(item) {
 }
 function lightDocumentStructuredBlockText(item) {
   if (Array.isArray(item?.items)) return item.items.filter((line) => typeof line === 'string').join('\n')
-  if (Array.isArray(item?.rows)) return item.rows.flat().filter((cell) => typeof cell === 'string').join('\n')
+  if (Array.isArray(item?.rows)) return item.rows.flat().filter((cell) => typeof cell === 'string')
+    .flatMap((cell) => cell.replace(/<br\s*\/?\s*>/gi, '\n').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n').split('\n')).join('\n')
   if (typeof item?.text === 'string') return item.text
   if (typeof item?.markdown === 'string') return item.markdown
   if (typeof item?.html === 'string') return item.html.replace(/<[^>]*>/g, ' ')
@@ -1026,17 +1048,28 @@ function selectionDeleteFragments(payload) {
 function selectionPreviewBlocksValid(blocks) {
   return Array.isArray(blocks) && blocks.length <= 50 && blocks.every(lightDocumentStructuredBlockValid)
 }
-function lightDocumentPayloadHasLiteralEscapedNewline(value, { code = false, markdown = false } = {}) {
+function markdownOutsideFences(markdown) {
+  const visible = []
+  let fence = null
+  for (const line of markdown.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').split('\n')) {
+    const token = line.match(/^\s*(`{3,}|~{3,})/)?.[1]
+    if (token) { fence = fence === null ? token[0] : fence === token[0] ? null : fence; continue }
+    if (fence === null) visible.push(line)
+  }
+  return visible.join('\n')
+}
+function lightDocumentPayloadHasLiteralEscapedNewline(value, { code = false, markdown = false, table = false } = {}) {
   if (typeof value === 'string') {
     if (code) return false
     const visible = markdown ? markdownOutsideFences(value) : value.replace(/<pre\b[\s\S]*?<\/pre>/gi, '').replace(/<code\b[\s\S]*?<\/code>/gi, '')
-    return /\\n/.test(visible)
+    return !table && /\\n/.test(visible)
   }
-  if (Array.isArray(value)) return value.some((item) => lightDocumentPayloadHasLiteralEscapedNewline(item, { code, markdown }))
+  if (Array.isArray(value)) return value.some((item) => lightDocumentPayloadHasLiteralEscapedNewline(item, { code, markdown, table }))
   if (!value || typeof value !== 'object') return false
   const blockType = String(value.type ?? value.blockType ?? '').toLowerCase()
   const childCode = code || blockType === 'codeblock' || blockType === 'pre'
-  return Object.entries(value).some(([key, child]) => lightDocumentPayloadHasLiteralEscapedNewline(child, { code: childCode, markdown: key === 'markdown' }))
+  const childTable = table || blockType === 'table'
+  return Object.entries(value).some(([key, child]) => lightDocumentPayloadHasLiteralEscapedNewline(child, { code: childCode, markdown: key === 'markdown', table: childTable }))
 }
 function lightDocumentStableBlockLocator(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -1088,6 +1121,27 @@ function verifiedFragmentEvidence(request, result, requested) {
   if (canonicalJson(observed.verifiedFragments) !== canonicalJson(requested.fragments) || observed.fragmentEvidence.length !== requested.fragments.length || observed.observedBlocks.length < 1) return false
   return observed.fragmentEvidence.every((evidence, index) => evidence && evidence.fragment === requested.fragments[index] && Array.isArray(evidence.blockIds) && evidence.blockIds.length > 0)
 }
+function verifiedInsertedTableCells(request, result) {
+  const tables = (request.payload?.blocks ?? []).filter((block) => String(block?.type ?? block?.blockType ?? '').toLowerCase() === 'table')
+  if (!tables.length) return true
+  const normalizeLine = (line) => String(line).replace(/\s+/g, ' ').trim()
+  const expected = new Map()
+  for (const table of tables) {
+    const matrix = table.rows.map((row) => row.map((cell) => String(cell).replace(/<br\s*\/?\s*>/gi, '\n').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n').split('\n').map(normalizeLine)))
+    const key = canonicalJson(matrix)
+    expected.set(key, (expected.get(key) ?? 0) + 1)
+  }
+  const observed = result.observed?.verifiedTableCells
+  if (!Array.isArray(observed) || observed.length !== expected.size) return false
+  const actual = new Map()
+  for (const entry of observed) {
+    if (!entry || !Array.isArray(entry.matrix) || !Number.isInteger(entry.count) || entry.count < 1) return false
+    const key = canonicalJson(entry.matrix)
+    if (actual.has(key)) return false
+    actual.set(key, entry.count)
+  }
+  return [...expected].every(([key, count]) => actual.get(key) === count)
+}
 function verifiedLightDocumentWriteMatches(result, request) {
   const matchesRequest = validLightDocumentWriteResult(result) && result.requested?.operation === request.operation
     && canonicalJson(result.requested?.payload) === canonicalJson(request.payload)
@@ -1116,6 +1170,7 @@ function verifiedLightDocumentWriteMatches(result, request) {
   if (request.operation === 'insert_drawing' || request.operation === 'blocks_insert') {
     const requested = lightDocumentInsertFragments(request.operation, request.payload)
     if (!verifiedFragmentEvidence(request, result, requested)) return false
+    if (request.operation === 'blocks_insert' && !verifiedInsertedTableCells(request, result)) return false
     if (request.operation !== 'insert_drawing' || requested.position !== 'after_selection') return true
     const insertion = result.observed?.insertion
     return insertion?.position === 'after_selection' && Array.isArray(insertion.selectedTagIds) && insertion.selectedTagIds.length > 0
@@ -1198,172 +1253,8 @@ function validPmdPrdReviewAdoption(value) {
 function teamKnowledgeBatchFingerprint(items) {
   return hash(JSON.stringify(items.map((item) => ({ name: item.name, contentHash: teamKnowledgeContentHash('light_document', item.name, item.body) }))))
 }
-const PMD_PRD_MARKERS = [
-  '# PRD:',
-  '## 需求基本信息',
-  '## 修订记录',
-  '# 二、背景与目标',
-  '# 四、功能性需求',
-  '## （一）正常业务场景',
-  '## （二）异常业务场景',
-  '# 五、角色权限',
-  '# 八、测试关注点',
-  '## （三）验收清单',
-  '### 正常情况',
-  '### 异常情况',
-  '### 边界情况',
-  '### 权限情况',
-  '### 兼容情况',
-]
-function markdownOutsideFences(body) {
-  let fence = null
-  return body.split('\n').flatMap((line) => {
-    const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1]?.[0]
-    if (marker) { fence = fence === null ? marker : fence === marker ? null : fence; return [] }
-    return fence === null ? [line] : []
-  }).join('\n')
-}
-function orderedMarkdownMarkersMissing(body, markers) {
-  let offset = 0
-  for (const marker of markers) {
-    const index = body.indexOf(marker, offset)
-    if (index < 0) return marker
-    offset = index + marker.length
-  }
-  return null
-}
-function pmdEstimatedPersonDays(lines) {
-  const row = lines.map(line => line.trim().startsWith('|') && line.trim().endsWith('|') ? line.trim().slice(1, -1).split('|').map(cell => cell.trim()) : null).find(cells => cells?.[0] === '预估人天')
-  const match = row?.[1]?.match(/^(\d+(?:\.\d+)?)\s*人天$/)
-  return match ? Number(match[1]) : null
-}
-function pmdBasicInformationFailure(visiblePrd) {
-  const rows = visiblePrd.split('\n').map(pmdTableRow)
-  const required = [['业务需求名称', 0, 1], ['所属系统', 2, 3], ['需求编号及链接', 0, 1], ['产品经理', 2, 3], ['预估人天', 0, 1]]
-  for (const [label, labelIndex, valueIndex] of required) {
-    const row = rows.find(cells => cells?.includes(label))
-    if (!row || row[labelIndex] !== label || !row[valueIndex]?.trim()) return `PRD basic information is missing: ${label}`
-  }
-  const revision = rows.find(cells => cells?.[0] === 'V1.0')
-  if (!revision || revision.length !== 6 || revision.some(cell => !cell.trim())) return 'PRD revision record must be complete'
-  const requirement = rows.find(cells => cells?.[0] === '需求编号及链接')?.[1] ?? ''
-  if (requirement && !/https?:\/\/\S+/.test(requirement)) return 'PRD basic information must include a confirmed requirement link'
-  const estimate = rows.find(cells => cells?.[0] === '预估人天')?.[1] ?? ''
-  if (estimate && !/^\d+(?:\.\d+)?\s*人天$/.test(estimate)) return 'PRD 预估人天 must be a confirmed numeric person-day value'
-  return null
-}
-function pmdTableRow(line) {
-  const trimmed = line.trim()
-  return trimmed.startsWith('|') && trimmed.endsWith('|') ? trimmed.slice(1, -1).split('|').map(cell => cell.trim()) : null
-}
-function pmdTableRows(lines, header) {
-  const headerIndex = lines.findIndex(line => {
-    const row = pmdTableRow(line)
-    return row?.length === header.length && row.every((cell, index) => cell === header[index])
-  })
-  const separator = pmdTableRow(lines[headerIndex + 1] ?? '')
-  if (headerIndex < 0 || !separator || separator.length !== header.length || !separator.every(cell => /^:?-{3,}:?$/.test(cell))) return []
-  const rows = []
-  for (let index = headerIndex + 2; index < lines.length; index += 1) {
-    const row = pmdTableRow(lines[index])
-    if (!row) break
-    rows.push(row)
-  }
-  return rows
-}
-function pmdTargetChangeFailure(target) {
-  const text = target.replace(/<br\s*\/?>/gi, ' ').replace(/\s+/g, ' ').trim()
-  if (!text) return '目标修改点不能为空'
-  if (/^\[待确认\](?:（[^）]*）)?[。；]?$/.test(text) && !text.includes('影响')) return '目标修改点不能只有[待确认]，必须说明缺失信息对实施或测试的影响'
-  const plain = text.replace(/\[待确认\]（[^）]*）/g, '').replace(/[\s\d①②③④⑤⑥⑦⑧⑨⑩.,，。；:：、]/g, '')
-  if (plain.length < 8) return '目标修改点信息不足，需说明具体改动或完成效果'
-  if (/^(?:(?:优化|调整|修复)[\u4e00-\u9fff]{0,10}|(?:保持一致|正确展示)[\u4e00-\u9fff]{0,6})$/.test(plain)) return '目标修改点不能只是“优化、调整、修复、保持一致、正确展示”等空泛短句'
-  if (/(?:^|[^A-Za-z0-9_.\\/-])\/(?:[\w.-]+\/)+[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text) || /(?:^|[^A-Za-z0-9_.\\/-])[A-Za-z]:[\\/](?:[\w.-]+[\\/])*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/i.test(text)) return '目标修改点不得使用开发者本机绝对路径，需使用代码库完整相对路径'
-  const codeFile = /(?:^|[^A-Za-z0-9_.\\/-])((?:[\w.-]+\/)*)([\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml))\b/g
-  for (const match of text.matchAll(codeFile)) if (!match[1]) return `目标修改点中的代码文件必须使用带目录的代码库相对路径，不能只写文件名：${match[2]}`
-  if (!/(?:[\w.-]+\/)+[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/.test(text)) return '目标修改点必须包含完整相对路径'
-  return null
-}
-function pmdTextOutsideTargetChangeCells(lines) {
-  const result = []
-  for (let index = 0; index < lines.length; index += 1) {
-    const header = pmdTableRow(lines[index])
-    if (!header || header.length !== 4 || !header.every((cell, cellIndex) => cell === ['需求点', '类型', '原有实现', '目标修改点'][cellIndex]) || !pmdTableRow(lines[index + 1])) { result.push(lines[index]); continue }
-    result.push(lines[index], lines[index + 1]); index += 2
-    for (; index < lines.length; index += 1) {
-      const row = pmdTableRow(lines[index])
-      if (!row) { index -= 1; break }
-      result.push(`| ${row.slice(0, 3).join(' | ')} | [目标修改点] |`)
-    }
-  }
-  return result.join('\n')
-}
-function pmdDetailedFunctionalFailure(visiblePrd) {
-  const lines = visiblePrd.split('\n'); const normalStart = lines.findIndex(line => line.trim() === '## （一）正常业务场景')
-  const boundaryStart = lines.findIndex((line, index) => index > normalStart && line.trim() === '## 边界场景')
-  const abnormalStart = lines.findIndex((line, index) => index > normalStart && line.trim() === '## （二）异常业务场景')
-  if (normalStart < 0 || abnormalStart < 0 || (boundaryStart >= 0 && boundaryStart > abnormalStart)) return 'PRD functional requirements must keep 正常业务场景 → optional 边界场景 → 异常业务场景'
-  const normalEnd = boundaryStart >= 0 ? boundaryStart : abnormalStart
-  const normal = lines.slice(normalStart + 1, normalEnd)
-  if (normal.some(line => /^(?:##|###)\s+(?:改动总览与影响|页面与代码定位总览)$/.test(line.trim()))) return 'PRD must not add a change overview or locator overview'
-  const changes = normal.flatMap((line, index) => /^###\s+4\.(\d+)\s+改动点：\S/.test(line.trim()) ? [{ index, number: line.trim().match(/^###\s+4\.(\d+)/)?.[1] }] : [])
-  if (!changes.length) return 'PRD normal business scenarios must contain at least one ### 4.x 改动点： heading'
-  for (let index = 0; index < changes.length; index += 1) {
-    const change = changes[index]; const start = change.index; const end = changes[index + 1]?.index ?? normal.length
-    const children = normal.flatMap((line, childIndex) => childIndex > start && childIndex < end && /^####\s+4\.(\d+)\.\d+\s+\S+：\S/.test(line.trim()) ? [childIndex] : [])
-    if (!children.length) return `${normal[start].trim()} must contain at least one specific child item`
-    for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
-      const child = normal.slice(children[childIndex], children[childIndex + 1] ?? end).join('\n'); const heading = normal[children[childIndex]].trim()
-      if (heading.match(/^####\s+4\.(\d+)\./)?.[1] !== change.number) return `${heading} must be numbered under ${normal[start].trim()}`
-      if (child.split('\n').slice(1).some(line => /^#{5,}\s+/.test(line.trim()))) return `${heading} must not contain Markdown headings below the specific-item level`
-      if (child.split('\n').slice(1).some(line => { const row = pmdTableRow(line); return row?.length === 2 && row[0] === '定位项' && row[1] === '位置' })) return `${heading} must not contain legacy locator table`
-      const changeRows = pmdTableRows(child.split('\n'), ['需求点', '类型', '原有实现', '目标修改点'])
-      if (!changeRows.length) return `${heading} is missing required development change table: 需求点 / 类型 / 原有实现 / 目标修改点`
-      for (const row of changeRows) {
-        const [requirement, type, original, target] = row
-        if (row.length !== 4 || !requirement || !type || !original || !target) return `${heading} development change table must contain complete 需求点、类型、原有实现、目标修改点`
-        if (!['新增', '修改', '删除', '修复'].includes(type)) return `${heading} 类型 must be one of: 新增、修改、删除、修复`
-        if (type === '新增' && original !== '不适用（新增）') return `${heading} 新增 item 原有实现 must be 不适用（新增）`
-        if (type !== '新增' && (original === '不适用（新增）' || (original.includes('[待确认]') && !/（[^）]+）/.test(original)))) return `${heading} ${type} item 原有实现 must be confirmed or explain [待确认] impact`
-        const targetChangeFailure = pmdTargetChangeFailure(target)
-        if (targetChangeFailure) return `${heading} ${targetChangeFailure}`
-      }
-    }
-  }
-  const estimatedDays = pmdEstimatedPersonDays(lines)
-  if (boundaryStart < 0) return estimatedDays !== null && estimatedDays > 10 ? 'PRD boundary scenarios are required when estimated person-days exceed 10' : null
-  const boundary = lines.slice(boundaryStart + 1, abnormalStart).join('\n')
-  for (const systemBoundary of ['超时', '并发', '数据量极值']) {
-    const match = boundary.match(new RegExp(`^\\|\\s*${systemBoundary}\\s*\\|\\s*(.*?)\\s*\\|\\s*(.*?)\\s*\\|\\s*$`, 'm'))
-    if (!match || !match[1] || !match[2] || match[1].includes('[待确认]') || match[2].includes('[待确认]')) return `PRD boundary scenarios must define system behaviour for: ${systemBoundary}`
-  }
-  return null
-}
 function pmdBatchTemplateFailure(batchId, items) {
-  if (!batchId.startsWith('pmd:')) return null
-  if (items.length !== 1) return 'PMD delivery requires exactly one PRD document'
-  const [prd] = items
-  if (!prd.name.endsWith('_PRD')) return 'PMD document name must end with _PRD'
-  if (/\\n/.test(markdownOutsideFences(prd.body))) return `${prd.name} contains a literal \\n outside a fenced code block`
-  const missingPrd = orderedMarkdownMarkersMissing(prd.body, PMD_PRD_MARKERS)
-  if (missingPrd) return `PRD document is missing or reorders: ${missingPrd}`
-  for (const header of ['| 业务需求名称 |', '| 版本 | 日期 |', '| 角色 | 功能/页面 |']) if (!prd.body.includes(header)) return `PRD document is missing required table: ${header}`
-  const internalTerm = /\b(?:Evidence|Impact|Task|AC)\b|测试\s*seam|证据分类|代码影响地图|纵向任务|验收合同/
-  const visiblePrd = markdownOutsideFences(prd.body)
-  if (visiblePrd.includes('[待确认]')) return 'PRD document contains [待确认]; confirm required facts before freezing'
-  const basicInformationFailure = pmdBasicInformationFailure(visiblePrd)
-  if (basicInformationFailure) return basicInformationFailure
-  const functionalFailure = pmdDetailedFunctionalFailure(visiblePrd)
-  if (functionalFailure) return functionalFailure
-  const prdInternalTerm = visiblePrd.match(internalTerm)
-  if (prdInternalTerm) return `PRD document exposes an internal delivery term: ${prdInternalTerm[0]}`
-  const fieldLabel = visiblePrd.match(/\[(?:必填|选填|建议填写|涉及多系统交互时必填)\]|【选填】/)
-  if (fieldLabel) return `PRD document exposes a field label: ${fieldLabel[0]}`
-  if (/AccrUI\s*需求交接附录/.test(visiblePrd)) return 'PRD document appends a non-company-template handoff section'
-  const visibleLines = visiblePrd.split('\n'); const outsideTargetChangeCells = pmdTextOutsideTargetChangeCells(visibleLines)
-  const codeLocator = outsideTargetChangeCells.match(/(?:^|[\s`])(?:[\w.-]+\/)*[\w.-]+\.(?:vue|tsx?|jsx?|mjs|cjs|java|kts?|go|py|rb|php|cs|sql|xml|ya?ml)\b/im)
-  if (codeLocator) return `PRD document contains a code locator: ${codeLocator[0].trim()}`
-  return null
+  return PMD_PRD_CONTRACT.contract.validatePmdBatch({ batchId, items })
 }
 function teamKnowledgeVisibleText(value) {
   return value
@@ -1542,7 +1433,7 @@ async function readJson(request) {
  * crosses into Native Messaging.
  */
 export class BrowserConnector {
-  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, officeRequestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, reportPrdEvent?: (event: object) => Promise<unknown> | unknown, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore }} options */
+  /** @param {{ requestExtension: (request: object) => void, requestTimeoutMs?: number, officeRequestTimeoutMs?: number, teamKnowledgeWriteRequestTimeoutMs?: number, knowledgeRequestTimeoutMs?: number, knowledgeCatalogTimeoutMs?: number, onToolsListed?: () => void, fetch?: typeof fetch, reportPrdEvent?: (event: object) => Promise<unknown> | unknown, teamDocStore?: TeamDocRecordStore, teamKnowledgeBatchStore?: TeamKnowledgeBatchRecordStore, officeDocumentWriteStore?: OfficeDocumentWriteRecordStore, browserTargetRunBindings?: BrowserTargetRunBindings }} options */
   constructor(options) {
     this.requestExtension = options.requestExtension
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
@@ -1561,8 +1452,7 @@ export class BrowserConnector {
     this.url = undefined
     this.token = undefined
     this.generation = undefined
-    this.runTargets = new RunTargetRegistry()
-    this.capturedBrowserTargets = new Map()
+    this.browserTargetRunBindings = options.browserTargetRunBindings ?? new BrowserTargetRunBindings()
     this.browserCallBindings = new AsyncLocalStorage()
     this.pending = new Map()
     this.updateQuiescent = false
@@ -1647,8 +1537,7 @@ export class BrowserConnector {
     this.uncertainSelectionWrite = undefined
     this.teamKnowledgeBatchChallenges.clear()
     this.pmdPrdReviewAdoptions.clear()
-    this.runTargets.clear()
-    this.capturedBrowserTargets.clear()
+    this.browserTargetRunBindings.clear()
     const server = this.server
     this.server = undefined
     this.url = undefined
@@ -1660,61 +1549,57 @@ export class BrowserConnector {
 
   /** Register the Run selected by the Native Host, with or without browser capability. */
   registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets) {
-    const registered = this.runTargets.register(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+    const registered = this.browserTargetRunBindings.register(runId, browserTarget, browserTargets, unavailableBrowserTargets)
     if (!registered.ok) return false
-    if (registered.runChanged) {
-      this.officeDocumentChallenges.clear()
-      this.spreadsheetChallenges.clear()
-      this.spreadsheetWriteLocks.clear()
-      this.presentationChallenges.clear()
-      this.presentationWriteLocks.clear()
-      this.officeDocumentWrites.clear()
-      this.htmlWorkbenchChallenges.clear()
-      this.htmlWorkbenchWriteLocks.clear()
-      this.teamKnowledgeBatchChallenges.clear()
-      this.capturedBrowserTargets.clear()
-      this.uncertainSelectionWrite = undefined
-    }
-    if (registered.targetChanged) this.uncertainSelectionWrite = undefined
+    if (registered.runChanged || registered.targetChanged) this.#clearBrowserTargetOperationState()
     return true
   }
 
   /** Store one Browser Target that the trusted Extension confirmed for a Run. */
   bindBrowserTarget(runId, browserTarget, browserTargets, unavailableBrowserTargets) {
     if (!validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowserTargets)) return false
-    return this.registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+    const current = this.browserTargetRunBindings.current()
+    if (current === undefined || current.runId !== runId) return this.registerRun(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+    const transferred = this.browserTargetRunBindings.transfer(runId, browserTarget, browserTargets, unavailableBrowserTargets)
+    if (!transferred.ok) return false
+    if (transferred.targetChanged) this.#clearBrowserTargetOperationState()
+    return true
   }
 
   /** Keep a send-time target per Harness session without changing the active Connector Run. */
   captureBrowserTarget(runId, sessionId, submissionId, browserTarget, browserTargets, unavailableBrowserTargets) {
-    if (this.runTargets.currentRunId !== runId || !validHarnessSessionIdentity(sessionId) || !validHarnessSessionIdentity(submissionId)
-      || !validBrowserTargetSet(browserTarget, browserTargets, unavailableBrowserTargets)) return false
-    const key = `${runId}\u0000${sessionId}`
-    this.capturedBrowserTargets.set(key, Object.freeze({ submissionId, browserTarget, browserTargets: browserTargets ?? [browserTarget], unavailableBrowserTargets: unavailableBrowserTargets ?? [] }))
-    return true
+    return this.browserTargetRunBindings.capture(runId, sessionId, submissionId, browserTarget, browserTargets, unavailableBrowserTargets)
   }
 
   releaseCapturedBrowserTarget(sessionId, submissionId) {
-    if (!validHarnessSessionIdentity(sessionId) || !validHarnessSessionIdentity(submissionId) || this.runTargets.currentRunId === undefined) return false
-    const key = `${this.runTargets.currentRunId}\u0000${sessionId}`
-    const captured = this.capturedBrowserTargets.get(key)
-    if (!captured || captured.submissionId !== submissionId) return false
-    this.capturedBrowserTargets.delete(key)
-    return true
+    return this.browserTargetRunBindings.release(sessionId, submissionId)
+  }
+
+  #clearBrowserTargetOperationState() {
+    this.officeDocumentChallenges.clear()
+    this.spreadsheetChallenges.clear()
+    this.spreadsheetWriteLocks.clear()
+    this.presentationChallenges.clear()
+    this.presentationWriteLocks.clear()
+    this.officeDocumentWrites.clear()
+    this.htmlWorkbenchChallenges.clear()
+    this.htmlWorkbenchWriteLocks.clear()
+    this.teamKnowledgeBatchChallenges.clear()
+    this.uncertainSelectionWrite = undefined
   }
 
   #browserBinding(message) {
-    const fallback = this.runTargets.current()
+    const fallback = this.browserTargetRunBindings.current()
     const runId = fallback?.runId
     if (runId === undefined) throw new Error('No active Harness Run is available for Browser Target use.')
     const owner = browserTargetOwner(message)
-    const capturesExist = [...this.capturedBrowserTargets.keys()].some(key => key.startsWith(`${runId}\u0000`))
+    const capturesExist = this.browserTargetRunBindings.hasCaptures(runId)
     if (owner === undefined) {
       if (capturesExist) throw new Error('Browser Connector request lacks a Harness session identity, so its captured Browser Target cannot be selected.')
       if (!validBrowserTarget(fallback?.browserTarget)) throw new Error('No Browser Target is bound to this Run by the Extension.')
       return { ...fallback, harnessSessionId: undefined }
     }
-    const captured = this.capturedBrowserTargets.get(`${runId}\u0000${owner}`)
+    const captured = this.browserTargetRunBindings.bindingFor(runId, owner)
     if (captured === undefined) throw new Error('No Browser Target was captured for this Harness session; refusing to use another session’s page.')
     return { runId, browserTarget: captured.browserTarget, browserTargets: captured.browserTargets, unavailableBrowserTargets: captured.unavailableBrowserTargets, harnessSessionId: owner }
   }
@@ -1724,12 +1609,12 @@ export class BrowserConnector {
   }
 
   #currentBrowserBinding() {
-    return this.browserCallBindings.getStore() ?? this.runTargets.current()
+    return this.browserCallBindings.getStore() ?? this.browserTargetRunBindings.current()
   }
 
   /** Store the exact saved PRD accepted in the visual Markdown Review. */
   recordPmdPrdReviewAdoption(adoption) {
-    if (!validPmdPrdReviewAdoption(adoption) || this.runTargets.currentRunId !== adoption.runId) return false
+    if (!validPmdPrdReviewAdoption(adoption) || this.browserTargetRunBindings.currentRunId !== adoption.runId) return false
     const key = adoption.harnessSessionId
     if (!this.pmdPrdReviewAdoptions.has(key) && this.pmdPrdReviewAdoptions.size >= MAX_PMD_PRD_REVIEW_ADOPTIONS) {
       this.pmdPrdReviewAdoptions.delete(this.pmdPrdReviewAdoptions.keys().next().value)
@@ -1804,7 +1689,7 @@ export class BrowserConnector {
     const currentUnavailable = pending.request.unavailableBrowserTargets ?? []
     const responseTargets = response.browserTargets ?? (response.browserTarget === undefined ? undefined : [response.browserTarget])
     const responseUnavailable = response.unavailableBrowserTargets ?? []
-    const confirmedBinding = this.runTargets.current()
+    const confirmedBinding = this.browserTargetRunBindings.current()
     const legalTeamKnowledgeLeaseMigration = sameOpenIdentity
       && isTeamKnowledgeBatchRequest
       && pending.request.action === 'inspect_parent'
@@ -1834,14 +1719,9 @@ export class BrowserConnector {
     }
     if ((isBrowserBoundRequest && !sameOfficeIdentity) || (!isBrowserBoundRequest && !sameOpenIdentity)) return false
     if ((legalTeamKnowledgeLeaseMigration || legalResolvedOfficeTargetMigration) && pending.request.harnessSessionId !== undefined) {
-      const key = `${pending.request.runId}\u0000${pending.request.harnessSessionId}`
-      const captured = this.capturedBrowserTargets.get(key)
-      if (captured) this.capturedBrowserTargets.set(key, Object.freeze({
-        ...captured,
-        browserTarget: response.browserTarget,
-        browserTargets: responseTargets ?? [response.browserTarget],
-        unavailableBrowserTargets: responseUnavailable,
-      }))
+      const captured = this.browserTargetRunBindings.bindingFor(pending.request.runId, pending.request.harnessSessionId)
+      if (captured) this.browserTargetRunBindings.capture(pending.request.runId, pending.request.harnessSessionId, captured.submissionId,
+        response.browserTarget, responseTargets ?? [response.browserTarget], responseUnavailable)
     }
     clearTimeout(pending.timeout)
     this.pending.delete(response.requestId)
@@ -2001,7 +1881,7 @@ export class BrowserConnector {
         }
         if (batchAction === 'preview') {
           try {
-            this.#preflightPmdPrdPreview(args.batchId, this.runTargets.currentRunId, harnessIdentity(message), args.items)
+            this.#preflightPmdPrdPreview(args.batchId, this.browserTargetRunBindings.currentRunId, harnessIdentity(message), args.items)
           } catch (error) {
             this.#toolError(response, message.id, error instanceof Error ? error.message : 'Team Knowledge batch preview failed')
             return
@@ -2106,7 +1986,7 @@ export class BrowserConnector {
       this.#toolError(response, message.id, `${label} is available only inside the continuable ${kind === 'code_search' ? 'remote-code' : 'Knowledge'} subagent. From the parent session, call ${wrapper} with description and prompt.`)
       return
     }
-    const runId = this.runTargets.currentRunId
+    const runId = this.browserTargetRunBindings.currentRunId
     if (runId === undefined) {
       this.#toolError(response, message.id, 'No active Harness Run is available for Knowledge search.')
       return
@@ -2137,7 +2017,7 @@ export class BrowserConnector {
       this.#toolError(response, message.id, 'selected_source_scope requires a Harness session identity.')
       return
     }
-    const runId = this.runTargets.currentRunId
+    const runId = this.browserTargetRunBindings.currentRunId
     if (runId === undefined) {
       this.#toolError(response, message.id, 'No active Harness Run is available for selected-source scope.')
       return

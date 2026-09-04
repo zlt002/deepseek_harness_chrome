@@ -8,6 +8,7 @@ import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel 
 import { MARKDOWN_AI_ACK_TIMEOUT_MS } from '../markdown-review/delivery-timeouts'
 import { validateWorkspaceMarkdownFeedback, validateWorkspaceMarkdownReviewAction, type WorkspaceMarkdownFeedback, type WorkspaceMarkdownReviewAction } from './markdown-feedback-validator'
 import { NATIVE_UPDATE_HANDOFF_GRACE_MS, retryNativeConnection } from '../../src/native-reconnect-policy'
+import { acceptWorkspaceDesktopNotificationSnapshot, listenForWorkspaceNotificationVisibility, WorkspaceDesktopNotificationDelivery, workspaceIsForeground } from './workspace-desktop-notification-bridge'
 import './style.css'
 
 type HarnessStatus = 'starting' | 'ready' | 'error'
@@ -467,14 +468,22 @@ function App(): React.JSX.Element {
   const knowledgeCommandHandlerRef = useRef<(sessionId: string, scope: KnowledgeScope | undefined, options: KnowledgeScopeOptions, requestSequence: number) => Promise<void>>(async () => {})
   const accountCommandHandlerRef = useRef<(command: 'refresh' | 'login' | 'logout') => Promise<void>>(async () => {})
   const surface = useMemo(() => HarnessSurfaceFromLocation(), [])
+  const desktopNotificationDelivery = useMemo(() => new WorkspaceDesktopNotificationDelivery(async desktopNotification => {
+    const windowId = await currentBrowserWindowId()
+    if (windowId === undefined) return false
+    const tab = surface === 'fullscreen-tab' ? await currentExtensionTab() : undefined
+    const response = await chrome.runtime.sendMessage({ type: 'workspace-desktop-notification/v1', ...desktopNotification, foreground: false, surface, windowId, ...(tab?.id === undefined ? {} : { tabId: tab.id }) }) as { ok?: unknown; shown?: unknown } | undefined
+    return response?.ok === true && response?.shown === true
+  }), [surface])
   const handoffSessionId = useMemo(() => HarnessHandoffSessionFromLocation(), [])
   const handoffTabId = useMemo(() => HarnessHandoffTabFromLocation(), [])
   const handoffNonce = useMemo(() => new URLSearchParams(window.location.search).get('dshHarnessHandoffNonce') ?? undefined, [])
+  const notificationSessionRestore = useMemo(() => new URLSearchParams(window.location.search).get('dshHarnessNotificationRestore') === '1', [])
   // The loopback Harness UI is outside the extension origin. Pass the actual
   // installed extension version across the already trusted iframe URL instead
   // of hardcoding a release number in the product UI.
   const productVersion = useMemo(() => chrome.runtime.getManifest().version, [])
-  const hasLocationHandoff = surface === 'sidepanel' && handoffSessionId !== undefined && handoffTabId !== undefined
+  const hasLocationHandoff = surface === 'sidepanel' && handoffSessionId !== undefined && (handoffTabId !== undefined || notificationSessionRestore)
   const [sidePanelHandoff, setSidePanelHandoff] = useState<{ ready: boolean; sessionId?: string; tabId?: number; nonce?: string }>({ ready: surface === 'fullscreen-tab' || hasLocationHandoff, ...(handoffSessionId === undefined ? {} : { sessionId: handoffSessionId }), ...(handoffTabId === undefined ? {} : { tabId: handoffTabId }), ...(handoffNonce === undefined ? {} : { nonce: handoffNonce }) })
   // A handoff session restores an iframe once. The observed session is only
   // for side-panel actions; feeding it back into frameSrc would reload the
@@ -486,6 +495,8 @@ function App(): React.JSX.Element {
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
 
   useEffect(() => { frameReadyRef.current = false; workspaceReviewBridgeReadyRef.current = false }, [frameNonce])
+
+  useEffect(() => listenForWorkspaceNotificationVisibility(desktopNotificationDelivery), [desktopNotificationDelivery])
 
   useEffect(() => {
     if (surface !== 'sidepanel') return
@@ -930,6 +941,11 @@ function App(): React.JSX.Element {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== frameOrigin || !event.data || typeof event.data !== 'object') return
       const value = event.data as { type?: unknown; nonce?: unknown; sequence?: unknown; command?: unknown; sessionId?: unknown; submissionId?: unknown; browserTarget?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; candidate?: unknown; review?: unknown; requestId?: unknown; error?: unknown; deliveryId?: unknown; accepted?: unknown; targetSessionId?: unknown; targetSessionTitle?: unknown; status?: unknown; apiKey?: unknown; protocol?: unknown }
       if (value.nonce !== frameNonce) return
+      const desktopNotifications = acceptWorkspaceDesktopNotificationSnapshot(event, frameRef.current?.contentWindow, frameOrigin, frameNonce)
+      if (desktopNotifications !== undefined) {
+        void desktopNotificationDelivery.reconcile(desktopNotifications, workspaceIsForeground()).catch(() => {})
+        return
+      }
       if (value.type === 'prototype-studio-prompt-accepted/v1' && boundedString(value.deliveryId, 160)) {
         const pending = prototypePromptRef.current.get(value.deliveryId)
         if (pending === undefined) return
@@ -1058,6 +1074,10 @@ function App(): React.JSX.Element {
         })
         return
       }
+      if (value.type === 'session-handoff-applied/v1' && notificationSessionRestore && value.sessionId === sidePanelHandoff.sessionId && surface === 'sidepanel') {
+        void chrome.runtime.sendMessage({ type: 'restore-notification-sidepanel-path/v1' }).catch(() => {})
+        return
+      }
       if (value.type === 'browser-target-ready/v1') {
         frameReadyRef.current = true
         commandSequenceRef.current = 0
@@ -1108,7 +1128,7 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, hydrateActiveBrowserTargetLock, loadRecentPrototypes, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.tabId, surface])
+  }, [activeHarnessSessionId, connect, desktopNotificationDelivery, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, hydrateActiveBrowserTargetLock, loadRecentPrototypes, notificationSessionRestore, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.sessionId, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (

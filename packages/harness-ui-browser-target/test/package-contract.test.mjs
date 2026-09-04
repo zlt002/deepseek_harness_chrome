@@ -111,6 +111,53 @@ test('Browser Target DOM and surface geometry match the e327 reference', async (
   assert.match(control, /command: 'set-primary'/)
   assert.match(styles, /\.trigger\s*\{[^}]*position:\s*relative[^}]*width:\s*28px[^}]*border:\s*1px solid[^}]*border-radius:\s*50%/s)
   assert.match(styles, /\.badge\s*\{[^}]*top:\s*-5px[^}]*right:\s*-7px/s)
-  assert.match(styles, /\.panel\s*\{[^}]*left:\s*0[^}]*width:\s*100%[^}]*max-height:\s*min\(500px, calc\(100vh - 144px\)\)[^}]*overflow:\s*hidden/s)
+  assert.match(styles, /\.panel\s*\{[^}]*left:\s*0[^}]*width:\s*100%[^}]*max-height:\s*min\(500px, calc\(100vh - var\(--dsh-composer-height, 152px\) - 8px\)\)[^}]*overflow:\s*hidden/s)
   assert.match(styles, /\.tabList\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s)
+})
+
+test('keeps the Browser Target overlay header below the compact header and scrolls only its tab list', async () => {
+  const [control, styles] = await Promise.all([
+    source('src/client/BrowserTargetControl.tsx'),
+    source('src/client/ActiveTabDock.module.css'),
+  ])
+
+  assert.match(
+    styles,
+    /\.panel\s*\{[^}]*max-height:\s*min\(500px, calc\(100vh - var\(--dsh-composer-height, 152px\) - 8px\)\)/s,
+    'the upward panel must use the live composer-seat height so its top edge cannot leave the Harness viewport',
+  )
+  assert.match(control, /useBrowserTargetPanelMaxHeight/)
+  assert.match(control, /data-testid=["']compact-header["']/)
+  assert.match(control, /data-conversation-presentation/)
+  assert.match(control, /ResizeObserver/)
+  assert.match(control, /style=\{maxHeight === undefined \? undefined : \{ maxHeight \}\}/)
+  assert.match(styles, /\.panelHeader\s*\{[^}]*flex:\s*0 0 auto/s, 'the panel title must never shrink out of view')
+  assert.match(styles, /\.modes\s*\{[^}]*flex:\s*0 0 auto/s, 'the mode controls must remain visible while tabs scroll')
+  assert.match(styles, /\.tabList\s*\{[^}]*flex:\s*1 1 auto[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s)
+})
+
+test('keeps the Browser Target trigger circular when the composer row is narrow', async () => {
+  const styles = await source('src/client/ActiveTabDock.module.css')
+
+  assert.match(
+    styles,
+    /\.trigger\s*\{[^}]*flex:\s*none[^}]*min-width:\s*28px[^}]*width:\s*28px[^}]*height:\s*28px/s,
+    'the Browser Target trigger must not shrink below its 28px circular footprint',
+  )
+})
+
+test('hides prototype-only tab actions while preserving their command handlers', async () => {
+  const [control, styles] = await Promise.all([
+    source('src/client/BrowserTargetControl.tsx'),
+    source('src/client/ActiveTabDock.module.css'),
+  ])
+
+  assert.match(
+    styles,
+    /\.listActions\s*,\s*\.reference\s*,\s*\.referencePick\s*\{[^}]*display:\s*none/,
+    'prototype-only merge, HTML, and design-reference controls should not be visible in the target picker',
+  )
+  for (const command of ['capture-design-reference', 'capture-responsive-design-reference', 'capture-design-references', 'html-workbench-select']) {
+    assert.match(control, new RegExp(`command: '${command}'`), `keep the ${command} command path for existing callers`)
+  }
 })

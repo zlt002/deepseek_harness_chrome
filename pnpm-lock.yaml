@@ -105,6 +105,8 @@ importers:
         specifier: ^19.2.1
         version: 19.2.8(react@19.2.8)
 
+  packages/harness-ui-desktop-notifications: {}
+
   packages/harness-ui-document-intake: {}
 
   packages/harness-ui-file-url-paste: {}

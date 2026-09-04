@@ -66,6 +66,7 @@
     return { kind: 'webedit_light_document', origin: 'https://webedit.midea.com', documentName: title || null, fingerprint: await fingerprint(xml, title) }
   }
   const escapeXml = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const tableCellLines = (value) => String(value).replace(/<br\s*\/?\s*>/gi, '\n').replace(/\\n/g, '\n').replace(/\r\n?/g, '\n').split('\n')
   const escapeCdata = (value) => String(value || '').replace(/]]>/g, ']]]]><![CDATA[>')
   const topLevelNodes = (inner) => {
     const scan = String(inner || '').replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, (match) => ' '.repeat(match.length))
@@ -161,6 +162,58 @@
     }
     if (!rows.length || rows.some((cells) => cells.length !== rows[0].length)) return null
     return rows
+  }
+  const singleTableParagraphMatrix = (value) => {
+    const source = String(value ?? '')
+    if ((source.match(/<table\b/gi) ?? []).length !== 1) return null
+    const table = /<table\b[^>]*>([\s\S]*?)<\/table>/i.exec(source)
+    if (!table) return null
+    const rows = []; const rowPattern = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi; let row
+    while ((row = rowPattern.exec(table[1]))) {
+      const cells = []; const cellPattern = /<(td|th)\b([^>]*)>([\s\S]*?)<\/\1>/gi; let cell
+      while ((cell = cellPattern.exec(row[1]))) {
+        const colspan = Number(/\bcolspan=["']?(\d+)/i.exec(cell[2])?.[1] ?? 1)
+        const rowspan = Number(/\browspan=["']?(\d+)/i.exec(cell[2])?.[1] ?? 1)
+        if (colspan !== 1 || rowspan !== 1) return null
+        const paragraphs = []; const paragraphPattern = /<p\b[^>]*>([\s\S]*?)<\/p>/gi; let paragraph
+        while ((paragraph = paragraphPattern.exec(cell[3]))) paragraphs.push(normalizedSelectionText(decode(paragraph[1])))
+        const outsideParagraphs = cell[3].replace(/<p\b[^>]*>[\s\S]*?<\/p>/gi, '')
+        if (!paragraphs.length || normalizedSelectionText(decode(outsideParagraphs))) return null
+        cells.push(paragraphs)
+      }
+      if (!cells.length) return null
+      rows.push(cells)
+    }
+    if (!rows.length || rows.some((cells) => cells.length !== rows[0].length)) return null
+    return rows
+  }
+  const expectedTableParagraphMatrix = (rows) => rows.map((row) => row.map((cell) => tableCellLines(cell).map((line) => normalizedSelectionText(line))))
+  const verifyInsertedTableParagraphs = (beforeXml, afterXml, requestedBlocks) => {
+    const requestedTables = requestedBlocks.filter((item) => String(item?.type ?? item?.blockType ?? '').toLowerCase() === 'table')
+    if (!requestedTables.length) return { verifiedTableCells: [] }
+    const before = editableBlocks(beforeXml); const after = editableBlocks(afterXml)
+    if (!before || !after) return null
+    const tableCounts = (parsed) => {
+      const counts = new Map()
+      for (const block of parsed.list) {
+        if (block.tag.toLowerCase() !== 'table') continue
+        const matrix = singleTableParagraphMatrix(block.xml)
+        if (!matrix) continue
+        const key = JSON.stringify(matrix)
+        counts.set(key, (counts.get(key) ?? 0) + 1)
+      }
+      return counts
+    }
+    const beforeCounts = tableCounts(before); const afterCounts = tableCounts(after); const required = new Map()
+    for (const table of requestedTables) {
+      const matrix = expectedTableParagraphMatrix(table.rows)
+      const key = JSON.stringify(matrix)
+      required.set(key, { matrix, count: (required.get(key)?.count ?? 0) + 1 })
+    }
+    for (const [key, expectation] of required) {
+      if ((afterCounts.get(key) ?? 0) - (beforeCounts.get(key) ?? 0) < expectation.count) return null
+    }
+    return { verifiedTableCells: [...required.values()].map(({ matrix, count }) => ({ matrix, count })) }
   }
   const selectedContainingTable = (xml, snapshot) => {
     const selected = singleTableMatrix(snapshot?.content?.html)
@@ -355,7 +408,7 @@
     if (type === 'table') {
       const rows = Array.isArray(item.rows) ? item.rows : text ? text.split('\n').map((line) => line.split('|').map((cell) => cell.trim()).filter(Boolean)) : []
       if (rows.length < 1 || rows.length > 30 || !rows.every((row) => Array.isArray(row) && row.length >= 1 && row.length <= 12 && row.every((cell) => typeof cell === 'string' && cell.length <= 2_000))) return null
-      return `<table${id} borderStyle="solid">${rows.map((row, rowIndex) => `<tr>${row.map((cell) => `<td><p id="">${rowIndex === 0 ? `<strong>${escapeXml(cell)}</strong>` : escapeXml(cell)}</p></td>`).join('')}</tr>`).join('')}</table>`
+      return `<table${id} borderStyle="solid">${rows.map((row, rowIndex) => `<tr>${row.map((cell) => `<td>${tableCellLines(cell).map((line) => `<p id="">${rowIndex === 0 ? `<strong>${escapeXml(line)}</strong>` : escapeXml(line)}</p>`).join('')}</td>`).join('')}</tr>`).join('')}</table>`
     }
     if (type === 'codeblock' || type === 'codeBlock' || type === 'pre') {
       const language = String(item.language || (/\b(flowchart|sequenceDiagram|pie|graph|mindmap|gantt|classDiagram|erDiagram)\b/.test(text) ? 'mermaid' : 'plaintext')).toLowerCase()
@@ -1081,14 +1134,15 @@
       if (!xml || offset === null) return fail('invalid_range', input.operation === 'insert_drawing'
         ? 'insert_drawing requires Mermaid source and a start/end/before/after position, or after_selection with a matching stable selection fingerprint'
         : 'blocks_insert requires bounded h1-h6/p/blockquote/ul/ol/table/codeblock items and a start/end/before/after position')
-      const fragments = distinctiveFragments(input.operation === 'insert_drawing' ? input.payload?.mermaid : (input.payload?.blocks ?? []).map((item) => Array.isArray(item?.items) ? item.items.join('\n') : Array.isArray(item?.rows) ? item.rows.flat().join('\n') : item?.text ?? item?.markdown ?? item?.html ?? '').join('\n'))
+      const fragments = distinctiveFragments(input.operation === 'insert_drawing' ? input.payload?.mermaid : (input.payload?.blocks ?? []).map((item) => Array.isArray(item?.items) ? item.items.join('\n') : Array.isArray(item?.rows) ? item.rows.flatMap((row) => Array.isArray(row) ? row.flatMap((cell) => tableCellLines(cell)) : []).join('\n') : item?.text ?? item?.markdown ?? item?.html ?? '').join('\n'))
       if (!fragments.length) return fail('invalid_range', `${input.operation} requires distinctive readable content for XML readback`)
       const patched = await patchXml(current, baseXml, `${parsed.inner.slice(0, offset)}${xml}${parsed.inner.slice(offset)}`)
       if (!patched.ok) return initializedTitle
         ? fail('write_incomplete', `WebEdit initialized title "${initializedTitle}" but did not verify the body write; reread this same document before continuing`)
         : patched
       const observed = verifyInsertedFragments(baseXml, patched.xml, fragments)
-      if (!observed) return initializedTitle
+      const tableReadback = input.operation === 'blocks_insert' ? verifyInsertedTableParagraphs(baseXml, patched.xml, input.payload?.blocks ?? []) : { verifiedTableCells: [] }
+      if (!observed || !tableReadback) return initializedTitle
         ? fail('write_incomplete', `WebEdit initialized title "${initializedTitle}" but did not verify the body write; reread this same document before continuing`)
         : fail('readback_mismatch', `WebEdit ${input.operation} did not produce matching XML content and structural evidence`)
       const insertion = input.operation === 'insert_drawing' && input.payload?.position === 'after_selection' ? verifyDrawingAfterSelection(beforeXml, patched.xml, selection, fragments) : null
@@ -1101,7 +1155,7 @@
         } catch { titleAfter = null }
         if (titleAfter !== initializedTitle) return fail('readback_mismatch', `WebEdit wrote the body but could not verify initialized title "${initializedTitle}"; reread this same document before continuing`)
       }
-      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, ...(insertion ? { insertion } : {}), ...(initializedTitle ? { title: { initialized: true, text: initializedTitle } } : {}), verified: true } } }
+      return { ok: true, result: { status: 'verified_write', resource: await documentResource(patched.xml, current), requested: { operation: input.operation, payload: input.payload }, observed: { ...observed, ...tableReadback, ...(insertion ? { insertion } : {}), ...(initializedTitle ? { title: { initialized: true, text: initializedTitle } } : {}), verified: true } } }
     }
     if (input.operation === 'insert' || input.operation === 'selection_rich_replace' || input.operation === 'insert_image' || input.operation === 'paste_image' || input.operation === 'highlight_selection' || input.operation === 'export_pdf' || input.operation === 'export_docx') return fail('unsupported', `Light-document ${String(input.operation)} has no safe public readback and delivery contract`)
     if (input.operation === 'set_title') {

@@ -203,12 +203,15 @@ test('only explicit pmd-prd Reviews report generated/rating telemetry and restor
     for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'rating-1') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.deepEqual(background.responses.find(message => message.requestId === 'rating-1'), { v: 1, type: 'markdown-review-rating-response', requestId: 'rating-1', ok: true, rating: 0.5 })
     const generated = background.nativeMessages.find(message => message.type === 'report-prd-event' && message.payload.eventType === 'review_generated')
-    assert.equal(generated?.payload.eventId, 'review:review-1:generated')
+    assert.match(generated?.payload.eventId ?? '', /^prd:[0-9a-f-]{36}:generated$/)
+    assert.equal(generated?.payload.prdGenerationId, generated?.payload.eventId.slice(0, -':generated'.length))
     assert.equal(generated?.payload.name, 'README.md')
     const rating = background.nativeMessages.find(message => message.type === 'report-prd-event' && message.payload.eventType === 'prd_rating')
-    assert.deepEqual({ eventId: rating.payload.eventId, eventType: rating.payload.eventType, outcome: rating.payload.outcome, sessionId: rating.payload.sessionId, generationEventId: rating.payload.generationEventId, rating: rating.payload.rating }, {
-      eventId: 'review:review-1:rating:rating-1', eventType: 'prd_rating', outcome: 'succeeded', sessionId: 'session-1', generationEventId: 'review:review-1:generated', rating: 0.5,
+    assert.deepEqual({ eventType: rating.payload.eventType, outcome: rating.payload.outcome, sessionId: rating.payload.sessionId, prdGenerationId: rating.payload.prdGenerationId, rating: rating.payload.rating }, {
+      eventType: 'prd_rating', outcome: 'succeeded', sessionId: 'session-1', prdGenerationId: generated.payload.prdGenerationId, rating: 0.5,
     })
+    assert.equal(rating.payload.generationEventId, generated.payload.eventId)
+    assert.equal(rating.payload.eventId, `${generated.payload.prdGenerationId}:rating:rating-1`)
     background.portMessage({ v: 1, type: 'markdown-review-snapshot-request', requestId: 'rating-readback-1', reviewId: 'review-1' })
     for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'rating-readback-1') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(background.responses.find(message => message.requestId === 'rating-readback-1')?.snapshot?.rating, 0.5)
@@ -225,6 +228,49 @@ test('generated PRD telemetry reports only the basename of an absolute Markdown 
     assert.equal(generated?.payload.name, '需求_PRD.md')
     assert.doesNotMatch(generated?.payload.name ?? '', /Users|Documents|\//)
   } finally { background.cleanup() }
+})
+
+test('PRD edit telemetry records only opaque identities and counts an applied write only after its fingerprint changes', async () => {
+  const background = await loadBackground()
+  try {
+    await background.open(pmdPrdReview); background.connect()
+    background.portMessage({
+      v: 1, type: 'markdown-review-commit-write-request', requestId: 'manual-commit-1', reviewId: 'review-1', approval: 'approval-1', idempotencyKey: 'manual-write-1', content: '# Updated',
+      prdEdit: { source: 'manual', mutationId: 'manual-write-1' },
+    })
+    background.portMessage({ v: 1, type: 'markdown-review-prd-edit-rejected-request', requestId: 'ai-reject-1', reviewId: 'review-1', mutationId: 'annotation-1' })
+    for (let attempt = 0; attempt < 20 && background.nativeMessages.filter(message => message.type === 'report-prd-event' && message.payload.eventType === 'prd_edit').length < 3; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const edits = background.nativeMessages.filter(message => message.type === 'report-prd-event' && message.payload.eventType === 'prd_edit').map(message => message.payload)
+    assert.deepEqual(edits.map(event => [event.editSource, event.editOutcome, event.mutationId]), [
+      ['manual', 'attempt', 'manual-write-1'], ['ai_annotation', 'rejected', 'annotation-1'], ['manual', 'applied', 'manual-write-1'],
+    ])
+    const applied = edits.find(event => event.editOutcome === 'applied')
+    assert.deepEqual([applied.beforeFingerprint, applied.afterFingerprint], ['fingerprint-1', 'fingerprint-2'])
+    assert.equal('content' in applied, false)
+    assert.equal('comment' in applied, false)
+    assert.match(applied.eventId, /^prd:[0-9a-f-]{36}:edit:manual:manual-write-1:applied$/)
+  } finally { background.cleanup() }
+})
+
+test('PRD telemetry does not count a Verified Write as applied when its fingerprint is unchanged', async () => {
+  const background = await loadBackground()
+  const originalFetch = globalThis.fetch
+  try {
+    await background.open(pmdPrdReview); background.connect()
+    globalThis.fetch = async (url, init) => new URL(String(url)).pathname.endsWith('/commit-write')
+      ? new Response(JSON.stringify({ status: 'verified_write', resource: { resourceId: 'resource-1', displayPath: 'README.md', revision: 'rev-2', fingerprint: 'fingerprint-1' }, contentHash: 'fingerprint-1' }), { status: 200, headers: { 'content-type': 'application/json' } })
+      : originalFetch(url, init)
+    background.portMessage({
+      v: 1, type: 'markdown-review-commit-write-request', requestId: 'same-commit-1', reviewId: 'review-1', approval: 'approval-1', idempotencyKey: 'same-write-1', content: '# Same',
+      prdEdit: { source: 'manual', mutationId: 'same-write-1' },
+    })
+    for (let attempt = 0; attempt < 20 && background.responses.find(message => message.requestId === 'same-commit-1') === undefined; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
+    const edits = background.nativeMessages.filter(message => message.type === 'report-prd-event' && message.payload.eventType === 'prd_edit').map(message => message.payload)
+    assert.deepEqual(edits.map(event => event.editOutcome), ['attempt'])
+  } finally {
+    globalThis.fetch = originalFetch
+    background.cleanup()
+  }
 })
 
 test('does not retain a rating when Native rejects its durable PRD event', async () => {

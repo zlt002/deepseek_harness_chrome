@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconRefreshOutline16, Tooltip, useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { Catalog, Scope, ScopeOptions, ScopeSnapshot } from './bridge.ts'
 import { scopePanelCeiling, scopePanelMaxHeightPx } from './panel-geometry.js'
@@ -16,6 +16,19 @@ type PanelProps = PropsRuntime<'conversation.input.overlay'> & InjectFace<Knowle
 const emptyCatalog: Catalog = { domains: [], systems: [], repositories: [] }
 const scopeFor = (snapshot: ScopeSnapshot | undefined, sessionId: string) => snapshot?.sessionId === sessionId ? snapshot.scope : undefined
 const toggle = (values: readonly string[], id: string, checked: boolean) => checked ? [...new Set([...values, id])] : values.filter(value => value !== id)
+
+function IconCodeBrackets16() {
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M5.25 4L1.5 8L5.25 12M9.5 3L6.5 13M10.75 4L14.5 8L10.75 12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+}
+
+function IconBookOutline16() {
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M2.25 2.75H5.5C6.88 2.75 8 3.87 8 5.25V13.25C8 12.15 7.1 11.25 6 11.25H2.25V2.75Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+    <path d="M13.75 2.75H10.5C9.12 2.75 8 3.87 8 5.25V13.25C8 12.15 8.9 11.25 10 11.25H13.75V2.75Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+  </svg>
+}
 
 /** Preserve all chosen source names; the trigger truncates visually only when needed. */
 function selectedSourceLabel(ids: readonly string[], entries: ReadonlyArray<{ id: string; name: string }>): string | undefined {
@@ -89,10 +102,10 @@ export function KnowledgeScopeStrip({ session, useSession, useKnowledgeScope, re
       <span aria-hidden className={css.switchTrack}><span /></span><span className={css.srOnly}>启用知识查询</span>
     </button>{rememberOpen && <label className={css.remember}><input aria-label="记住知识库开关状态" type="checkbox" checked={remember} onChange={(event) => updateSwitch({ remember: event.target.checked })}/>是否记住</label>}</span>
     <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={selectedRepositories === undefined ? '选择代码库' : `选择代码库：${selectedRepositories}`} title={selectedRepositories} aria-expanded={repositoryOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={repositoryOverlay.toggle}>
-      <span aria-hidden>⌘</span><span className={css.scopeLabel}>{selectedRepositories ?? '选择代码库'}</span><span aria-hidden>⌃</span>
+      <span aria-hidden><IconCodeBrackets16 /></span><span className={css.scopeLabel}>{selectedRepositories ?? '选择代码库'}</span><span aria-hidden>⌃</span>
     </button>
     <button className={css.scopeTrigger} type="button" disabled={!enabled || !ready} aria-label={knowledge === undefined ? '选择知识范围' : `选择知识范围：${knowledge}`} title={knowledge} aria-expanded={knowledgeOverlay.open} data-composer-overlay-trigger onMouseDown={(event) => event.preventDefault()} onClick={knowledgeOverlay.toggle}>
-      <span aria-hidden>⌘</span><span className={css.scopeLabel}>{knowledge ?? '选择知识范围'}</span><span aria-hidden>⌃</span>
+      <span aria-hidden><IconBookOutline16 /></span><span className={css.scopeLabel}>{knowledge ?? '选择知识范围'}</span><span aria-hidden>⌃</span>
     </button>
   </div>{serviceState === 'ready' && snapshot?.notice ? <output className={css.notice} role="status">{snapshot.notice}</output> : null}{serviceState !== 'ready' && <output className={css.notice}>{serviceState === 'checking'
     ? '正在连接知识服务…'
@@ -151,14 +164,26 @@ function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, sectio
   const snapshotScopeKey = `${Object.entries(scope.domainSystems).map(([domainId, systemIds]) => `${domainId}:${systemIds.join(',')}`).join('|')}|${scope.repositoryIds.join(',')}`
   useEffect(() => { setDraftScope(scope) }, [snapshot?.sessionId, snapshotScopeKey])
   const update = (next: Scope) => { setDraftScope(next); request(id, next) }
+  const [refreshRequestSequence, setRefreshRequestSequence] = useState<number | undefined>(undefined)
+  const refreshing = refreshRequestSequence !== undefined
+  useEffect(() => {
+    if (refreshRequestSequence !== undefined && snapshot?.sessionId === id && (snapshot.requestSequence ?? 0) >= refreshRequestSequence) setRefreshRequestSequence(undefined)
+  }, [id, refreshRequestSequence, snapshot?.requestSequence, snapshot?.sessionId])
+  const refresh = () => {
+    if (refreshing) return
+    // "retry" already invalidates the extension's catalog cache before it rechecks
+    // the signed-in account and loads the authorized directory again.
+    setRefreshRequestSequence(request(id, undefined, { action: 'retry' }))
+  }
   const selectedCount = section === 'knowledge'
     ? Object.values(draftScope.domainSystems).flat().length
     : draftScope.repositoryIds.length
   const [expandedSystems, setExpandedSystems] = useState<Set<string>>(() => new Set())
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(() => new Set())
   const groups = useMemo(() => repositoryGroups(catalog), [catalog])
-  return <div ref={panelRef} className={css.panel} role="dialog" aria-label={section === 'knowledge' ? '知识范围' : '代码库范围'} style={maxHeight === undefined ? undefined : { maxHeight }}>
-    <div className={css.panelHeader}><strong>{section === 'knowledge' ? '知识范围' : '选择代码库'}</strong><span className={css.selectionSummary}>{selectedCount}{section === 'knowledge' ? ' 项已选' : ' 个已选'}<button className={css.clearButton} type="button" disabled={selectedCount === 0} aria-label={`清空${section === 'knowledge' ? '知识范围' : '代码库'}选择`} onClick={() => update(clearScopeSelection(draftScope, section))}>清空</button></span></div>
+  const label = section === 'knowledge' ? '知识库范围' : '代码库范围'
+  return <div ref={panelRef} className={css.panel} role="dialog" aria-label={label} style={maxHeight === undefined ? undefined : { maxHeight }}>
+    <div className={css.panelHeader}><strong>{section === 'knowledge' ? '知识范围' : '选择代码库'}</strong><span className={css.panelActions}>{refreshing && <span className={css.refreshStatus} role="status">正在刷新…</span>}<Tooltip label={refreshing ? `正在刷新${label}` : `刷新${label}`} side="bottom" delayMs={500}><button className={css.refreshButton} type="button" disabled={refreshing} aria-busy={refreshing} aria-label={refreshing ? `正在刷新${label}` : `刷新${label}`} onClick={refresh}><span className={refreshing ? css.refreshIconBusy : css.refreshIcon} aria-hidden><IconRefreshOutline16 size={16} /></span></button></Tooltip><span className={css.selectionSummary}>{selectedCount}{section === 'knowledge' ? ' 项已选' : ' 个已选'}<button className={css.clearButton} type="button" disabled={selectedCount === 0 || refreshing} aria-label={`清空${section === 'knowledge' ? '知识范围' : '代码库'}选择`} onClick={() => update(clearScopeSelection(draftScope, section))}>清空</button></span></span></div>
     {section === 'knowledge' ? <div className={css.section} aria-label="知识库范围">
       <p className={css.sectionHint}>勾选需要查询的知识库系统；选中子项会自动选中所属领域。</p>
       {catalog.domains.length === 0 ? <p className={css.sectionHint}>当前账号暂无可用领域和系统。</p> : null}
@@ -199,6 +224,7 @@ function KnowledgeScopePanelBody({ sessionId, useKnowledgeScope, request, sectio
         })}
       </div>)}</div>
     </div>}
+    {snapshot?.error !== undefined && <p className={css.error} role="alert">{snapshot.error}</p>}
   </div>
 }
 

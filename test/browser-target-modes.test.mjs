@@ -22,7 +22,7 @@ test('composer keeps the draft and surfaces Browser Target preparation failures'
   assert.ok(commit > preparationFailure, 'the draft is committed only after every submission guard succeeds')
 })
 
-async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, reload, teamDocProbeWaitMs = 0, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion, runtimeGetUrl, backgroundFetch, runtimeResponseTimeoutMs = 100 } = {}) {
+async function loadBackground({ settings, activeTab, tabsById = {}, sessionStorage, onStorageSet, transferNack = false, createdTab, waitForTransferAck, executeScript, sendTabMessage, getAllFrames, reload, teamDocProbeWaitMs = 0, officeProbeWaitMs, closeSidePanel, openSidePanel, setSidePanelOptions, manifestVersion, runtimeGetUrl, backgroundFetch, runtimeResponseTimeoutMs = 100 } = {}) {
   const source = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
   const compiled = await bundleTypescript(source, new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url))
   let runtimeListener
@@ -34,6 +34,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
   const nativeMessages = []
   const createdUrls = []
   const removedTabs = []
+  const activatedTabs = []
   const ports = []
   const connectNative = () => {
     const nativeMessageListeners = new Set()
@@ -115,13 +116,28 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
         await reload?.(tabId)
         for (const listener of completedNavigationListeners) listener({ tabId, frameId: 0 })
       },
+      update: async (tabId, properties) => {
+        const tab = tabsById[tabId] ?? (tabId === currentActiveTab.id ? currentActiveTab : undefined)
+        if (tab === undefined) throw new Error(`Unknown tab ${String(tabId)}`)
+        if (properties.active === true) {
+          activatedTabs.push(tabId)
+          currentActiveTab = tab
+          tab.active = true
+          tab.frozen = false
+          tab.discarded = false
+          tab.status = 'complete'
+          activatedListener?.({ tabId })
+        }
+        return tab
+      },
+      sendMessage: async (tabId, message, options) => sendTabMessage?.(tabId, message, options),
       onActivated: { addListener: (listener) => { activatedListener = listener } },
       onCreated: { addListener: (listener) => { createdListener = listener } },
       onUpdated: { addListener: (listener) => { updatedListener = listener } },
     },
     scripting: { executeScript: async (options) => executeScript?.(options) ?? [] },
     webNavigation: {
-      getAllFrames: async () => [],
+      getAllFrames: async (details) => getAllFrames?.(details) ?? [],
       onCompleted: {
         addListener: (listener) => completedNavigationListeners.add(listener),
         removeListener: (listener) => completedNavigationListeners.delete(listener),
@@ -135,12 +151,14 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
   }
   globalThis.defineBackground = (setup) => setup()
   globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS = teamDocProbeWaitMs
+  if (officeProbeWaitMs !== undefined) globalThis.__DSH_OFFICE_PROBE_WAIT_MS = officeProbeWaitMs
   await import(`data:text/javascript,${encodeURIComponent(compiled)}#${Date.now()}`)
   return {
     nativeMessages,
     sessionStorage: stored,
     createdUrls,
     removedTabs,
+    activatedTabs,
     sendRuntimeMessage: (message, sender = {}) => new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('runtime response timeout')), runtimeResponseTimeoutMs)
       const keepChannelOpen = runtimeListener(message, sender, (response) => {
@@ -169,6 +187,7 @@ async function loadBackground({ settings, activeTab, tabsById = {}, sessionStora
       delete globalThis.chrome
       delete globalThis.defineBackground
       delete globalThis.__DSH_TEAM_DOC_PROBE_WAIT_MS
+      delete globalThis.__DSH_OFFICE_PROBE_WAIT_MS
     },
   }
 }
@@ -541,8 +560,7 @@ test('follow-active-tab keeps the Browser Target frozen after the Run starts, ev
     const transferIndex = background.nativeMessages.findIndex((message) => message.type === 'transfer-browser-target' && message.browserTarget?.tabId === wb.id)
     const responseIndex = background.nativeMessages.findIndex((message) => message.type === 'connector_response' && message.requestId === 'wb-turn')
     assert.ok(transferIndex >= 0, 'a real Browser Connector request transfers its own captured target')
-    const secondTurn = background.nativeMessages[responseIndex]
-    assert.equal(secondTurn.result.pageIdentity.url, wb.url)
+    assert.equal(background.nativeMessages[responseIndex].result.pageIdentity.url, wb.url)
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-follow', submissionId: 'follow-1' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true })
     assert.deepEqual(await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'session-other', submissionId: 'follow-2' }, { url: 'chrome-extension://test/sidepanel.html' }), { ok: true })
     background.emitNative({
@@ -592,16 +610,19 @@ test('a pinned session captures its selected primary Browser Target before its f
   const pinnedTab = { id: 42, windowId: 7, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/801', title: 'Pinned document' }
   const otherTab = { id: 43, windowId: 7, url: 'https://docs.example.test/other', title: 'Other' }
   const pinnedTarget = { browser: 'chrome', windowId: 7, tabId: pinnedTab.id, url: pinnedTab.url }
+  const otherTarget = { browser: 'chrome', windowId: 7, tabId: otherTab.id, url: otherTab.url }
   const sender = { url: 'chrome-extension://test/sidepanel.html' }
   const background = await loadBackground({
-    settings: { mode: 'pinned-tabs', pinnedTabs: [pinnedTarget], primaryTabId: pinnedTab.id }, activeTab: otherTab, tabsById: { 42: pinnedTab, 43: otherTab },
+    settings: { mode: 'pinned-tabs', pinnedTabs: [pinnedTarget, otherTarget], primaryTabId: pinnedTab.id }, activeTab: otherTab, tabsById: { 42: pinnedTab, 43: otherTab },
   })
   try {
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     assert.deepEqual(await background.sendRuntimeMessage({
       type: 'lock-browser-target/v1', sessionId: 'pinned-session', submissionId: 'pinned-submission', browserTarget: pinnedTarget,
     }, sender), { ok: true, locked: true })
-    assert.equal(background.nativeMessages.some(message => message.type === 'capture-browser-target' && message.sessionId === 'pinned-session' && message.submissionId === 'pinned-submission' && message.browserTarget?.tabId === pinnedTab.id), true)
+    const capture = background.nativeMessages.find(message => message.type === 'capture-browser-target' && message.sessionId === 'pinned-session' && message.submissionId === 'pinned-submission')
+    assert.equal(capture?.browserTarget?.tabId, pinnedTab.id)
+    assert.deepEqual(capture?.browserTargets, [pinnedTarget, otherTarget])
     assert.equal(background.nativeMessages.some(message => message.type === 'transfer-browser-target'), false, 'capturing a pinned session must not operate its page yet')
 
     await background.activateTab(otherTab.id)
@@ -613,6 +634,44 @@ test('a pinned session captures its selected primary Browser Target before its f
     const response = background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'pinned-first-list')
     assert.equal(response.error, undefined)
     assert.equal(response.result.pageIdentity.url, pinnedTab.url)
+  } finally {
+    await background.cleanup()
+  }
+})
+
+test('a pinned submission locks the same tab after it navigates or moves windows', async () => {
+  const submitted = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://docs.example.test/original' }
+  const other = { browser: 'chrome', windowId: 7, tabId: 43, url: 'https://docs.example.test/other' }
+  const live = { browser: 'chrome', windowId: 8, tabId: 42, url: 'https://docs.example.test/navigated' }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const tabsById = {
+    42: { id: submitted.tabId, windowId: submitted.windowId, url: submitted.url, title: 'Original' },
+    43: { id: other.tabId, windowId: other.windowId, url: other.url, title: 'Other' },
+  }
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [submitted, other], primaryTabId: submitted.tabId },
+    activeTab: { id: other.tabId, windowId: other.windowId, url: other.url, title: 'Other' },
+    tabsById,
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    tabsById[submitted.tabId] = { id: submitted.tabId, windowId: live.windowId, url: live.url, title: 'Navigated' }
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'pinned-session', submissionId: 'pinned-navigation', browserTarget: submitted,
+    }, sender), { ok: true, locked: true })
+    const capture = background.nativeMessages.find(message => message.type === 'capture-browser-target' && message.submissionId === 'pinned-navigation')
+    assert.deepEqual(capture?.browserTarget, live)
+    assert.deepEqual(capture?.browserTargets, [live, other])
+    assert.deepEqual(capture?.unavailableBrowserTargets, [])
+
+    await background.sendRuntimeMessage({ type: 'unlock-browser-target/v1', sessionId: 'pinned-session', submissionId: 'pinned-navigation' }, sender)
+    delete tabsById[submitted.tabId]
+    assert.deepEqual(await background.sendRuntimeMessage({
+      type: 'lock-browser-target/v1', sessionId: 'pinned-session', submissionId: 'pinned-closed', browserTarget: live,
+    }, sender), {
+      ok: false,
+      error: 'The Browser Target selected when this prompt was submitted changed before it could be locked.',
+    })
   } finally {
     await background.cleanup()
   }
@@ -649,6 +708,32 @@ test('follow-active-tab permits concurrent sessions on the same frozen Browser T
     background.emitNative({ type: 'connector_request', requestId: 'after-last-unlock', runId: 'run-follow', generation: 'generation-a', browserTarget: targetA, tool: 'list_work_tabs' })
     for (let attempt = 0; attempt < 20 && !background.nativeMessages.some(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(background.nativeMessages.find(message => message.type === 'connector_response' && message.requestId === 'after-last-unlock').result.pageIdentity.url, b.url, 'follow mode returns only after the last owner releases')
+  } finally {
+    await background.cleanup()
+  }
+})
+
+test('stopping one session releases only its own Browser Target lock', async () => {
+  const a = { id: 42, windowId: 7, url: 'https://docs.example.test/a', title: 'A' }
+  const b = { id: 43, windowId: 7, url: 'https://docs.example.test/b', title: 'B' }
+  const targetA = { browser: 'chrome', windowId: 7, tabId: a.id, url: a.url }
+  const targetB = { browser: 'chrome', windowId: 7, tabId: b.id, url: b.url }
+  const sender = { url: 'chrome-extension://test/sidepanel.html' }
+  const background = await loadBackground({ settings: { mode: 'follow-active-tab', pinnedTabs: [] }, activeTab: a, tabsById: { 42: a, 43: b } })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-a', submissionId: 'submission-a', browserTarget: targetA }, sender), { ok: true, locked: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'lock-browser-target/v1', sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetB }, sender), { ok: true, locked: true })
+
+    const { BrowserTargetSessionRunLock, shouldReconcileSessionRunTarget } = await loadSessionRunLock()
+    const stopped = new BrowserTargetSessionRunLock('submission-a')
+    stopped.accept({ running: true, queue: [] })
+    assert.equal(shouldReconcileSessionRunTarget({ running: false, queue: [] }, stopped), true)
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'reconcile-browser-target-lock/v1', sessionId: 'session-a', submissionId: 'submission-a' }, sender), { ok: true })
+    assert.deepEqual(await background.sendRuntimeMessage({ type: 'get-active-browser-target-lock/v1' }, sender), {
+      ok: true,
+      lock: { sessionId: 'session-b', submissionId: 'submission-b', browserTarget: targetB },
+    })
   } finally {
     await background.cleanup()
   }
@@ -1522,7 +1607,7 @@ test('read_work_tab captures visible text immediately and reports a host-permiss
     await background.sendRuntimeMessage({ type: 'ensure-harness' })
     background.emitNative({
       type: 'connector_request', requestId: 'read-tab-2', runId: 'run-follow', generation: 'generation-read',
-      tool: 'read_work_tab', tab: 1, browserTarget: primary, browserTargets: [first, primary],
+      tool: 'read_work_tab', tab: 1, browserTarget: primary, browserTargets: [first, primary], unavailableBrowserTargets: [],
     })
     let response
     for (let attempt = 0; attempt < 20 && response === undefined; attempt += 1) {
@@ -1532,6 +1617,9 @@ test('read_work_tab captures visible text immediately and reports a host-permiss
     assert.equal(injections[0]?.injectImmediately, true)
     assert.equal(response.error.code, 'unsupported')
     assert.match(response.error.message, /host permission/i)
+    assert.deepEqual(response.browserTarget, primary)
+    assert.deepEqual(response.browserTargets, [first, primary])
+    assert.deepEqual(response.unavailableBrowserTargets, [])
   } finally {
     await background.cleanup()
   }
@@ -1572,6 +1660,94 @@ test('read_work_tab reads a non-primary pinned page without changing the write t
     assert.equal(response.result.content, 'visible text from first tab')
     assert.equal(response.result.isPrimary, false)
     assert.equal(injections[0]?.injectImmediately, true)
+  } finally {
+    await background.cleanup()
+  }
+})
+
+test('read_work_tab waits for a cold docOnline WebEdit iframe instead of returning its outer directory', async () => {
+  const documentTab = { browser: 'chrome', windowId: 7, tabId: 51, url: 'https://doc.midea.com/teamKnowledge/detail/docOnline/2079459209604050946' }
+  const primary = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/two' }
+  const frames = [
+    { frameId: 0, url: documentTab.url },
+    { frameId: 6, url: 'https://webedit.midea.com/weboffice/office/o/2079459209604050946' },
+  ]
+  let documentProbes = 0
+  const outerPageReads = []
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [documentTab, primary], primaryTabId: 52 },
+    activeTab: { id: 42, windowId: 7, url: 'https://docs.example.test/active', title: 'Active' },
+    tabsById: {
+      51: { id: 51, windowId: 7, url: documentTab.url, title: '团队任务管理' },
+      52: { id: 52, windowId: 7, url: primary.url, title: 'Pinned two' },
+    },
+    officeProbeWaitMs: 80,
+    getAllFrames: () => frames,
+    executeScript: async (options) => {
+      outerPageReads.push(options)
+      return [{ result: '团队知识目录' }]
+    },
+    sendTabMessage: async (_tabId, message, options) => {
+      assert.equal(options.frameId, 6)
+      if (message.action === 'probe' && message.type === 'office-document/v1') {
+        documentProbes += 1
+        return { ok: true, result: { status: 'probe', ready: documentProbes > 1 } }
+      }
+      if (message.action === 'probe') return { ok: true, result: { status: 'probe', ready: false } }
+      assert.deepEqual(message, { type: 'office-document/v1', action: 'read', offset: 0, limit: 80 })
+      return { ok: true, result: { status: 'ok', document: { blocks: [{ text: 'WebEdit 正文' }] } } }
+    },
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.emitNative({
+      type: 'connector_request', requestId: 'read-cold-doc', runId: 'run-follow', generation: 'generation-read',
+      tool: 'read_work_tab', tab: 1, browserTarget: primary, browserTargets: [documentTab, primary], unavailableBrowserTargets: [],
+    })
+    let response
+    for (let attempt = 0; attempt < 30 && response === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'read-cold-doc')
+    }
+    assert.equal(response.error, undefined, `expected WebEdit read, got ${JSON.stringify(response?.error)}`)
+    assert.equal(response.result.kind, 'webedit_light_document')
+    assert.equal(response.result.content, 'WebEdit 正文')
+    assert.equal(outerPageReads.length, 0, 'a docOnline page with a cold WebEdit iframe must not fall back to its outer directory')
+    assert.equal(documentProbes, 2, 'the real WebEdit read must retry after the initial quick identity probe misses')
+  } finally {
+    await background.cleanup()
+  }
+})
+
+test('read_work_tab wakes a sleeping checked page and restores the previously active tab', async () => {
+  const activeTab = { id: 42, windowId: 7, url: 'edge://extensions/', title: 'Extensions', active: true, frozen: false, discarded: false, status: 'complete' }
+  const first = { browser: 'chrome', windowId: 7, tabId: 51, url: 'https://docs.example.test/one' }
+  const primary = { browser: 'chrome', windowId: 7, tabId: 52, url: 'https://docs.example.test/two' }
+  const tabsById = {
+    42: activeTab,
+    51: { id: 51, windowId: 7, url: first.url, title: 'Sleeping one', active: false, frozen: true, discarded: false, status: 'complete' },
+    52: { id: 52, windowId: 7, url: primary.url, title: 'Pinned two', active: false, frozen: false, discarded: false, status: 'complete' },
+  }
+  const background = await loadBackground({
+    settings: { mode: 'pinned-tabs', pinnedTabs: [first, primary], primaryTabId: 52 },
+    activeTab,
+    tabsById,
+    executeScript: async () => [{ result: 'visible text from awakened tab' }],
+  })
+  try {
+    await background.sendRuntimeMessage({ type: 'ensure-harness' })
+    background.emitNative({
+      type: 'connector_request', requestId: 'read-sleeping-tab', runId: 'run-follow', generation: 'generation-read',
+      tool: 'read_work_tab', tab: 1, browserTarget: primary, browserTargets: [first, primary], unavailableBrowserTargets: [],
+    })
+    let response
+    for (let attempt = 0; attempt < 20 && response === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      response = background.nativeMessages.find((message) => message.type === 'connector_response' && message.requestId === 'read-sleeping-tab')
+    }
+    assert.equal(response.error, undefined)
+    assert.equal(response.result.content, 'visible text from awakened tab')
+    assert.deepEqual(background.activatedTabs, [first.tabId, activeTab.id])
   } finally {
     await background.cleanup()
   }

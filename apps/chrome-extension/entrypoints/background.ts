@@ -25,6 +25,7 @@ import {
 import type { BrowserTargetSettings } from './background/browser-target-state'
 import { BrowserTargetRuntime } from './background/browser-target-runtime'
 import { preserveFullscreenBrowserTarget } from './background/fullscreen-target-handoff'
+import { WorkspaceDesktopNotifications, validWorkspaceDesktopNotification } from './background/workspace-desktop-notifications'
 import type { BrowserTargetBinding, BrowserTargetTab } from './background/browser-target-runtime'
 import {
   isLightDocumentResourceIdentity,
@@ -167,6 +168,7 @@ function migrateLegacyKnowledgeScope(value: unknown): { enabled: boolean; scope:
 function validSessionIdentity(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value) }
 const SIDE_PANEL_HANDOFF_TTL_MS = 60_000
 const SIDE_PANEL_HANDOFF_STORAGE_KEY = 'harnessSidePanelHandoffsV1'
+const workspaceDesktopNotifications = new WorkspaceDesktopNotifications(chrome, chrome.storage?.session)
 type SidePanelHandoff = { sessionId: string; tabId: number; nonce: string; expiresAt: number }
 const pendingSidePanelHandoffs = new Map<number, SidePanelHandoff>()
 function validHandoffNonce(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9._:-]{32,160}$/.test(value) }
@@ -219,6 +221,8 @@ interface MarkdownReviewRecord extends OpenMarkdownReview {
   sourceTabId?: number
   /** Latest rating; persisted with this review rather than creating another PRD. */
   rating?: PrdRating
+  /** Generated once per successful /pmd-prd output; survives a tab/service-worker reopen. */
+  prdGenerationId?: string
 }
 type PersistedMarkdownReview = Omit<MarkdownReviewRecord, 'capability' | 'v'>
 
@@ -443,9 +447,10 @@ function locksForRun(runId: string): Map<string, BrowserTargetRunLock> {
   return locks
 }
 
-function removeRunBrowserTargetLock(runId: string, submissionId: string): void {
+function removeRunBrowserTargetLock(runId: string, submissionId: string, expected?: BrowserTargetRunLock): void {
   const locks = runBrowserTargetLocks.get(runId)
   if (locks === undefined) return
+  if (expected !== undefined && locks.get(submissionId) !== expected) return
   locks.delete(submissionId)
   if (locks.size === 0) runBrowserTargetLocks.delete(runId)
 }
@@ -903,7 +908,7 @@ async function saveKnowledgeScope(sessionId: string, scope: KnowledgeScope, enab
     const previous = scopes[sessionId]
     const preference = await knowledgeEnabledPreference()
     const nextEnabled = enabled ?? previous?.enabled ?? (preference.remember ? preference.enabled : true)
-    scopes[sessionId] = { scope: normalizeScope(scope), enabled: nextEnabled }
+    scopes[sessionId] = { scope: normalizeScope(scope), enabled: nextEnabled, ...(previous?.notice === undefined ? {} : { notice: previous.notice }) }
     await chrome.storage.local.set({ [KNOWLEDGE_SCOPE_DEFAULT_STORAGE_KEY]: scopes[sessionId].scope })
     if (remember !== undefined) await chrome.storage.local.set({ [KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY]: { remember, enabled: nextEnabled } })
     else if (preference.remember && enabled !== undefined) await chrome.storage.local.set({ [KNOWLEDGE_ENABLED_PREFERENCE_STORAGE_KEY]: { remember: true, enabled: nextEnabled } })
@@ -2239,6 +2244,17 @@ async function resolveOfficeBrowserTarget(request: (ConnectorRequest | RoutedOff
 async function submittedBrowserTarget(browserTarget: BrowserTarget): Promise<BrowserTargetBinding> {
   const tab = await chrome.tabs.get(browserTarget.tabId).catch(() => undefined)
   const verified = tab === undefined ? undefined : targetFromActionTab(tab)
+  const settings = await readBrowserTargetSettings()
+  if (settings.mode === 'pinned-tabs') {
+    if (verified === undefined || !samePinnedTab(verified, browserTarget)) {
+      throw new Error('The Browser Target selected when this prompt was submitted changed before it could be locked.')
+    }
+    const binding = await pinnedBrowserTargets(settings)
+    if (!samePinnedTab(binding.browserTarget, browserTarget)) {
+      throw new Error('The primary pinned Browser Target changed before this prompt could be locked.')
+    }
+    return binding
+  }
   if (verified === undefined || !sameBrowserTarget(verified, browserTarget)) {
     throw new Error('The Browser Target selected when this prompt was submitted changed before it could be locked.')
   }
@@ -2318,7 +2334,7 @@ async function lockFollowBrowserTarget(sessionId: string, submissionId: string, 
     try {
       await browserTargetRuntime.settled()
       if (lock.canceled || cancelledBrowserTargetSubmissions.delete(submissionId)) {
-        removeRunBrowserTargetLock(runId, submissionId)
+        removeRunBrowserTargetLock(runId, submissionId, lock)
         releaseRunBrowserTargetCapture(sessionId, submissionId)
         resolve(false)
         return
@@ -2327,13 +2343,13 @@ async function lockFollowBrowserTarget(sessionId: string, submissionId: string, 
       if (nativePort !== port || currentNativeRunId !== runId) throw new Error('Harness Run changed before the Browser Target lock was confirmed.')
       await captureRunBrowserTarget(runId, sessionId, submissionId, lock.binding)
       if (lock.canceled || nativePort !== port || currentNativeRunId !== runId) {
-        removeRunBrowserTargetLock(runId, submissionId)
+        removeRunBrowserTargetLock(runId, submissionId, lock)
         releaseRunBrowserTargetCapture(sessionId, submissionId)
         resolve(false)
         return
       }
       lock.state = 'active'; resolve(true)
-    } catch (error) { removeRunBrowserTargetLock(runId, submissionId); reject(new Error(asError(error))) }
+    } catch (error) { removeRunBrowserTargetLock(runId, submissionId, lock); reject(new Error(asError(error))) }
   })()
   return promise
 }
@@ -2344,7 +2360,7 @@ function unlockFollowBrowserTarget(sessionId: string, submissionId: string): voi
     if (lock?.sessionId !== sessionId) continue
     lock.canceled = true
     if (lock.state === 'active') {
-      removeRunBrowserTargetLock(runId, submissionId)
+      removeRunBrowserTargetLock(runId, submissionId, lock)
       releaseRunBrowserTargetCapture(sessionId, submissionId)
     }
     return
@@ -2471,6 +2487,31 @@ async function readVisiblePageText(tabId: number): Promise<{ content: string; tr
   }
 }
 
+const WORK_TAB_WAKE_BUDGET_MS = 8_000
+
+async function withAwakeWorkTab<T>(tab: chrome.tabs.Tab, operation: () => Promise<T>): Promise<T> {
+  if (tab.id === undefined || (!tab.frozen && !tab.discarded)) return operation()
+  const [previousActiveTab] = await chrome.tabs.query({ active: true, windowId: tab.windowId })
+  const previousActiveTabId = previousActiveTab?.id
+  await chrome.tabs.update(tab.id, { active: true })
+  try {
+    const deadline = Date.now() + WORK_TAB_WAKE_BUDGET_MS
+    for (;;) {
+      const current = await chrome.tabs.get(tab.id)
+      if (!current.frozen && !current.discarded && current.status !== 'loading') break
+      if (Date.now() >= deadline) {
+        throw { code: 'timeout', message: 'The sleeping work tab did not become ready within 8s.' } satisfies OfficeReadFailure
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    return await operation()
+  } finally {
+    if (previousActiveTabId !== undefined && previousActiveTabId !== tab.id) {
+      await chrome.tabs.update(previousActiveTabId, { active: true }).catch(() => undefined)
+    }
+  }
+}
+
 async function readWorkTabContent(request: ReadWorkTabRequest): Promise<Record<string, unknown>> {
   const binding = await resolveOfficeBrowserTarget({
     type: CONNECTOR_REQUEST,
@@ -2485,33 +2526,50 @@ async function readWorkTabContent(request: ReadWorkTabRequest): Promise<Record<s
   })
   const live = await liveRosterPage(pageFromRoster(binding, request.tab))
   const tab = await chrome.tabs.get(live.tabId)
-  const pageIdentity = { title: tab.title ?? '', url: live.url }
-  const isPrimary = samePinnedTab(live, binding.browserTarget)
-  const identity = await probeDocumentIdentity(live.tabId)
-  const offset = request.offset ?? 0
-  const limit = request.limit ?? 80
-  if (identity?.kind === 'webedit_light_document' || identity?.kind === 'webedit_spreadsheet' || identity?.kind === 'webedit_presentation') {
-    const frames = webeditFramesOf(await chrome.webNavigation.getAllFrames({ tabId: live.tabId }) ?? [])
-    if (frames.length === 0) throw { code: 'unsupported', message: 'That work tab has no supported WebEdit iframe.' } satisfies OfficeReadFailure
-    const message = identity.kind === 'webedit_light_document'
-      ? { type: 'office-document/v1', action: 'read', offset, limit }
-      : identity.kind === 'webedit_spreadsheet'
-        ? { type: 'office-spreadsheet/v1', action: 'used_range' }
-        : { type: 'office-presentation/v1', action: 'get_context' }
-    const { reply, frame } = await sendToWebEditFrame(live.tabId, frames, message)
-    if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while reading that work tab.' }
-    const latest = await chrome.webNavigation.getAllFrames({ tabId: live.tabId }) ?? []
-    if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) {
-      throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while reading that work tab.' } satisfies OfficeReadFailure
+  return withAwakeWorkTab(tab, async () => {
+    const awakeLive = await liveRosterPage(live)
+    const awakeTab = await chrome.tabs.get(awakeLive.tabId)
+    const pageIdentity = { title: awakeTab.title ?? '', url: awakeLive.url }
+    const isPrimary = samePinnedTab(awakeLive, binding.browserTarget)
+    const identity = await probeDocumentIdentity(awakeLive.tabId)
+    const offset = request.offset ?? 0
+    const limit = request.limit ?? 80
+    const knownWebEditKind = identity?.kind === 'webedit_light_document' || identity?.kind === 'webedit_spreadsheet' || identity?.kind === 'webedit_presentation'
+      ? identity.kind
+      : undefined
+    // list_work_tabs deliberately uses a short, diagnostic-only identity probe
+    // so it never holds the roster open for editor hydration. A docOnline page
+    // can expose its WebEdit iframe before that 250ms probe is answered, though;
+    // for an explicit read, route that narrowly identified cold-start case into
+    // sendToWebEditFrame, which already waits, retries, and heals a missing
+    // content-script receiver. Do not apply this wait to ordinary web pages.
+    const docOnlineColdStart = knownWebEditKind === undefined && /\/teamKnowledge\/detail\/docOnline\//i.test(awakeLive.url)
+    const frames = knownWebEditKind !== undefined || docOnlineColdStart
+      ? webeditFramesOf(await chrome.webNavigation.getAllFrames({ tabId: awakeLive.tabId }) ?? [])
+      : []
+    const webEditKind = knownWebEditKind ?? (docOnlineColdStart && frames.length > 0 ? 'webedit_light_document' : undefined)
+    if (webEditKind !== undefined) {
+      if (frames.length === 0) throw { code: 'unsupported', message: 'That work tab has no supported WebEdit iframe.' } satisfies OfficeReadFailure
+      const message = webEditKind === 'webedit_light_document'
+        ? { type: 'office-document/v1', action: 'read', offset, limit }
+        : webEditKind === 'webedit_spreadsheet'
+          ? { type: 'office-spreadsheet/v1', action: 'used_range' }
+          : { type: 'office-presentation/v1', action: 'get_context' }
+      const { reply, frame } = await sendToWebEditFrame(awakeLive.tabId, frames, message)
+      if (reply?.ok !== true) throw reply?.error ?? { code: 'iframe_replaced', message: 'The WebEdit iframe was replaced while reading that work tab.' }
+      const latest = await chrome.webNavigation.getAllFrames({ tabId: awakeLive.tabId }) ?? []
+      if (!latest.some((candidate) => candidate.frameId === frame.frameId && candidate.url === frame.url)) {
+        throw { code: 'iframe_replaced', message: 'The WebEdit iframe changed while reading that work tab.' } satisfies OfficeReadFailure
+      }
+      const raw = reply.result as Record<string, unknown>
+      const extracted = webEditKind === 'webedit_light_document' ? textFromLightDocument(raw)
+        : webEditKind === 'webedit_spreadsheet' ? textFromSpreadsheet(raw) : textFromPresentation(raw)
+      const clipped = clipWorkTabContent(extracted)
+      return { status: 'ok', tab: request.tab, page: awakeLive, pageIdentity, kind: webEditKind, ...clipped, isPrimary }
     }
-    const raw = reply.result as Record<string, unknown>
-    const extracted = identity.kind === 'webedit_light_document' ? textFromLightDocument(raw)
-      : identity.kind === 'webedit_spreadsheet' ? textFromSpreadsheet(raw) : textFromPresentation(raw)
-    const clipped = clipWorkTabContent(extracted)
-    return { status: 'ok', tab: request.tab, page: live, pageIdentity, kind: identity.kind, ...clipped, isPrimary }
-  }
-  const clipped = await readVisiblePageText(live.tabId)
-  return { status: 'ok', tab: request.tab, page: live, pageIdentity, kind: 'web_page', ...clipped, isPrimary }
+    const clipped = await readVisiblePageText(awakeLive.tabId)
+    return { status: 'ok', tab: request.tab, page: awakeLive, pageIdentity, kind: 'web_page', ...clipped, isPrimary }
+  })
 }
 
 function respondToReadWorkTab(port: chrome.runtime.Port, request: ReadWorkTabRequest): void {
@@ -2555,6 +2613,8 @@ function respondToReadWorkTab(port: chrome.runtime.Port, request: ReadWorkTabReq
       runId: request.runId,
       generation: request.generation,
       browserTarget: request.browserTarget,
+      browserTargets: request.browserTargets,
+      unavailableBrowserTargets: request.unavailableBrowserTargets,
       error: officeReadFailure(error),
     })
   })
@@ -4841,6 +4901,7 @@ async function persistMarkdownReview(record: MarkdownReviewRecord): Promise<void
       windowId: record.windowId,
       ...(record.sourceTabId === undefined ? {} : { sourceTabId: record.sourceTabId }),
       ...(record.pmdPrd === true ? { pmdPrd: true } : {}),
+      ...(record.prdGenerationId === undefined ? {} : { prdGenerationId: record.prdGenerationId }),
       ...(record.rating === undefined ? {} : { rating: record.rating }),
     }
     await storage.set({ [MARKDOWN_REVIEW_STORAGE_KEY]: reviews })
@@ -4874,7 +4935,7 @@ async function recoverMarkdownReview(reviewIdValue: string, tabId: number): Prom
   if (review.reviewId !== persisted.reviewId || review.harnessSessionId !== persisted.harnessSessionId || review.resourceId !== persisted.resourceId) return undefined
   const tab = await chrome.tabs.get(tabId)
   if (tab.id !== tabId || tab.windowId !== persisted.windowId) return undefined
-  const record = { ...review, tabId, windowId: tab.windowId, ...(Number.isSafeInteger(persisted.sourceTabId) ? { sourceTabId: persisted.sourceTabId } : {}), ...(persisted.pmdPrd === true ? { pmdPrd: true } : {}), ...(isPrdRating(persisted.rating) ? { rating: persisted.rating } : {}) } satisfies MarkdownReviewRecord
+  const record = { ...review, tabId, windowId: tab.windowId, ...(Number.isSafeInteger(persisted.sourceTabId) ? { sourceTabId: persisted.sourceTabId } : {}), ...(persisted.pmdPrd === true ? { pmdPrd: true } : {}), ...(reviewId(persisted.prdGenerationId) ? { prdGenerationId: persisted.prdGenerationId } : {}), ...(isPrdRating(persisted.rating) ? { rating: persisted.rating } : {}) } satisfies MarkdownReviewRecord
   markdownReviews.set(record.reviewId, record)
   markdownReviewKeys.set(markdownReviewKey(record.harnessSessionId, record.resourceId), record.reviewId)
   await persistMarkdownReview(record)
@@ -4933,7 +4994,7 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
     try {
       const tab = await chrome.tabs.get(existing.tabId)
       if (tab.id === existing.tabId && review.reviewId === existing.reviewId && isMarkdownReviewTabUrl(tab.url, existing.reviewId)) {
-        const updated = { ...existing, ...review, tabId: existing.tabId, windowId: tab.windowId } satisfies MarkdownReviewRecord
+        const updated = { ...existing, ...review, tabId: existing.tabId, windowId: tab.windowId, ...(existing.prdGenerationId === undefined && review.pmdPrd === true ? { prdGenerationId: `prd:${crypto.randomUUID()}` } : {}) } satisfies MarkdownReviewRecord
         markdownReviews.delete(existing.reviewId)
         markdownReviews.set(review.reviewId, updated)
         markdownReviewKeys.set(key, review.reviewId)
@@ -4958,7 +5019,7 @@ async function openMarkdownReviewTab(review: OpenMarkdownReview): Promise<Markdo
   url.searchParams.set('reviewId', review.reviewId)
   const tab = await chrome.tabs.create({ windowId: window.id, active: true, url: url.toString() })
   if (tab.id === undefined) throw new Error('Chrome did not return the Markdown Review Tab identity.')
-  const record = { ...review, tabId: tab.id, windowId: tab.windowId, ...(sourceTabId === undefined ? {} : { sourceTabId }) } satisfies MarkdownReviewRecord
+  const record = { ...review, tabId: tab.id, windowId: tab.windowId, ...(sourceTabId === undefined ? {} : { sourceTabId }), ...(review.pmdPrd === true ? { prdGenerationId: `prd:${crypto.randomUUID()}` } : {}) } satisfies MarkdownReviewRecord
   markdownReviews.set(record.reviewId, record)
   markdownReviewKeys.set(key, record.reviewId)
   await persistMarkdownReview(record)
@@ -5066,6 +5127,9 @@ async function prepareMarkdownWrite(record: MarkdownReviewRecord, request: Prepa
 }
 
 async function commitMarkdownWrite(record: MarkdownReviewRecord, request: CommitWriteRequest): Promise<Record<string, unknown>> {
+  const beforeFingerprint = record.fingerprint
+  const edit = record.pmdPrd === true && record.prdGenerationId !== undefined ? request.prdEdit ?? { source: 'manual' as const, mutationId: request.idempotencyKey } : undefined
+  if (edit !== undefined) reportPrdEdit(record, edit.source, 'attempt', edit.mutationId)
   let payload: Record<string, unknown>
   try {
     payload = await workspaceReviewHostRequest(record, WORKSPACE_REVIEW_COMMIT_WRITE_PATH, {
@@ -5090,6 +5154,7 @@ async function commitMarkdownWrite(record: MarkdownReviewRecord, request: Commit
     if (resource === undefined || resource.resourceId !== record.resourceId || !reviewId(resource.revision) || !reviewId(resource.fingerprint)) throw new Error('Harness returned an invalid Markdown readback identity.')
     record.revision = resource.revision as string; record.fingerprint = resource.fingerprint as string
     await persistMarkdownReview(record)
+    if (edit !== undefined && beforeFingerprint !== record.fingerprint) reportPrdEdit(record, edit.source, 'applied', edit.mutationId, beforeFingerprint, record.fingerprint)
   }
   return payload
 }
@@ -5178,6 +5243,7 @@ async function deliverMarkdownReview(record: MarkdownReviewRecord, request: Deli
   }
   const delivery = markdownReviewDelivery(response, request.annotation.id)
   if (delivery === undefined) throw new Error(response?.error ?? SIDE_PANEL_UNAVAILABLE_MESSAGE)
+  reportPrdEdit(record, 'ai_annotation', 'attempt', request.annotation.id)
   return delivery
 }
 
@@ -5257,28 +5323,43 @@ function prdReviewName(displayPath: string): string | undefined {
 }
 
 function reportPrdReviewGenerated(record: MarkdownReviewRecord): void {
-  if (record.pmdPrd !== true) return
+  if (record.pmdPrd !== true || record.prdGenerationId === undefined) return
   const name = prdReviewName(record.displayPath)
   void reportPrdEvent({
-        eventId: `review:${record.reviewId}:generated`,
+        eventId: `${record.prdGenerationId}:generated`,
         eventType: 'review_generated',
         outcome: 'succeeded',
         occurredAt: new Date().toISOString(),
         sessionId: record.harnessSessionId,
+        prdGenerationId: record.prdGenerationId,
         ...(name === undefined ? {} : { name }),
   }).catch(() => { /* Telemetry must never change the review open result. */ })
 }
 
 async function reportPrdReviewRating(record: MarkdownReviewRecord, request: RatingRequest): Promise<void> {
+  if (record.prdGenerationId === undefined) throw new Error('PRD generation identity is unavailable; reopen the generated PRD.')
   await reportPrdEvent({
-        eventId: `review:${record.reviewId}:rating:${request.requestId}`,
+        eventId: `${record.prdGenerationId}:rating:${request.requestId}`,
         eventType: 'prd_rating',
         outcome: 'succeeded',
         occurredAt: new Date().toISOString(),
         sessionId: record.harnessSessionId,
-        generationEventId: `review:${record.reviewId}:generated`,
+        generationEventId: `${record.prdGenerationId}:generated`,
+        prdGenerationId: record.prdGenerationId,
         rating: request.rating,
   })
+}
+
+function reportPrdEdit(record: MarkdownReviewRecord, editSource: 'manual' | 'ai_annotation', editOutcome: 'attempt' | 'applied' | 'rejected', mutationId: string, beforeFingerprint?: string, afterFingerprint?: string): void {
+  if (record.pmdPrd !== true || record.prdGenerationId === undefined) return
+  void reportPrdEvent({
+    eventId: `${record.prdGenerationId}:edit:${editSource}:${mutationId}:${editOutcome}`,
+    eventType: 'prd_edit', outcome: 'succeeded', occurredAt: new Date().toISOString(),
+    sessionId: record.harnessSessionId, prdGenerationId: record.prdGenerationId,
+    editSource, editOutcome, mutationId,
+    ...(beforeFingerprint === undefined ? {} : { beforeFingerprint }),
+    ...(afterFingerprint === undefined ? {} : { afterFingerprint }),
+  }).catch(() => { /* Telemetry must never change the review result. */ })
 }
 
 export default defineBackground(() => {
@@ -5318,6 +5399,11 @@ export default defineBackground(() => {
         if (message.type === 'markdown-review-commit-write-request') {
           const result = await retryExpiredWorkspaceReviewCapability(record, () => commitMarkdownWrite(record, message))
           port.postMessage({ v: 1, type: 'markdown-review-commit-write-response', requestId: message.requestId, ok: true, result })
+          return
+        }
+        if (message.type === 'markdown-review-prd-edit-rejected-request') {
+          reportPrdEdit(record, 'ai_annotation', 'rejected', message.mutationId)
+          port.postMessage({ v: 1, type: 'markdown-review-prd-edit-rejected-response', requestId: message.requestId, ok: true })
           return
         }
         if (message.type === 'markdown-review-rating-request') {
@@ -5370,12 +5456,25 @@ export default defineBackground(() => {
       console.error('[deepseek-harness] Failed to open side panel:', error)
     })
   })
+  chrome.notifications?.onClicked.addListener((notificationId) => {
+    void workspaceDesktopNotifications.click(notificationId)
+  })
 
   chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     if (!message || typeof message !== 'object') {
       return false
     }
-    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; submissionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; candidate?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; candidateId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown; nonce?: unknown; pageUrl?: unknown; anchors?: unknown }
+    const request = message as { type?: unknown; surface?: unknown; windowId?: unknown; tabId?: unknown; settings?: unknown; runId?: unknown; browserTarget?: unknown; browserTargets?: unknown; sessionId?: unknown; submissionId?: unknown; scope?: unknown; enabled?: unknown; remember?: unknown; action?: unknown; candidate?: unknown; refresh?: unknown; review?: unknown; command?: unknown; requestId?: unknown; apiKey?: unknown; protocol?: unknown; projectId?: unknown; projectName?: unknown; confirmationProjectId?: unknown; referenceId?: unknown; candidateId?: unknown; prompt?: unknown; brief?: unknown; allowRevisionEviction?: unknown; designConfirmed?: unknown; designSpec?: unknown; selection?: unknown; targetRevisionId?: unknown; expectedCurrentRevisionId?: unknown; expectedRevisionId?: unknown; nonce?: unknown; pageUrl?: unknown; anchors?: unknown; eventId?: unknown; kind?: unknown; foreground?: unknown }
+    if (request.type === 'workspace-desktop-notification/v1') {
+      if (!isSidePanelSender(sender) || !validWorkspaceDesktopNotification(request)) { sendResponse({ ok: false }); return false }
+      void workspaceDesktopNotifications.notify(request).then(shown => sendResponse({ ok: true, shown })).catch(() => sendResponse({ ok: true, shown: false }))
+      return true
+    }
+    if (request.type === 'restore-notification-sidepanel-path/v1') {
+      if (!isSidePanelSender(sender)) { sendResponse({ ok: false }); return false }
+      void chrome.sidePanel?.setOptions({ path: 'sidepanel.html' }).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }))
+      return true
+    }
     if (request.type === 'open-markdown-review/v1') {
       if (!isSidePanelSender(sender) || !isOpenMarkdownReview(request.review)) {
         sendResponse({ ok: false, error: 'Invalid Markdown review handoff.' })
@@ -5654,16 +5753,20 @@ export default defineBackground(() => {
           if (!validScope(nextScope)) throw new Error('Invalid knowledge selection.')
           await saveKnowledgeScope(sessionId, nextScope, typeof request.enabled === 'boolean' ? request.enabled : undefined, typeof request.remember === 'boolean' ? request.remember : undefined)
         }
-        const record = await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest)
+        let record = await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest)
         const preference = await knowledgeEnabledPreference()
-        const savedScope = record?.scope
         try {
           const catalog = await knowledgeTransport.loadCatalog()
+          // Another selection can land while the remote catalog is loading; prune
+          // that latest record instead of writing the earlier snapshot back over it.
+          record = await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest)
+          const savedScope = record?.scope
           const scope = savedScope === undefined ? savedScope : pruneScope(savedScope, catalog)
+          if (scope !== undefined && savedScope !== undefined && scopeFingerprint(scope) !== scopeFingerprint(savedScope)) record = await saveKnowledgeScope(sessionId, scope)
           sendResponse({ ok: true, scope, enabled: record?.enabled ?? (preference.remember ? preference.enabled : true), remember: preference.remember, notice: record?.notice, serviceState: 'ready', catalog })
         } catch (error) {
           const text = asError(error)
-          sendResponse({ ok: false, scope: savedScope, enabled: record?.enabled, remember: preference.remember, notice: record?.notice, serviceState: knowledgeTransport.serviceState(error), error: text })
+          sendResponse({ ok: false, scope: record?.scope, enabled: record?.enabled, remember: preference.remember, notice: record?.notice, serviceState: knowledgeTransport.serviceState(error), error: text })
         }
       })().catch(async (error: unknown) => {
         const record = await resolveKnowledgeScopeRecord({ harnessSessionId: sessionId } as KnowledgeQueryRequest)
@@ -5978,7 +6081,7 @@ export default defineBackground(() => {
       for (const [runId, locks] of runBrowserTargetLocks) {
         const lock = locks.get(request.submissionId)
         if (lock?.sessionId === request.sessionId && lock.state === 'active') {
-          removeRunBrowserTargetLock(runId, request.submissionId)
+          removeRunBrowserTargetLock(runId, request.submissionId, lock)
           releaseRunBrowserTargetCapture(request.sessionId, request.submissionId)
         }
       }

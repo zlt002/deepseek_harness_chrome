@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT_MS = 5_000
 const MAX_OUTBOX_EVENTS = 1_000
 const MAX_ATTEMPTS = 12
 
-const EVENT_TYPES = new Set(['review_generated', 'review_action', 'prd_rating', 'document_published'])
+const EVENT_TYPES = new Set(['review_generated', 'review_action', 'prd_rating', 'prd_edit', 'document_published'])
 const REVIEW_ACTIONS = new Set(['rewrite', 'accept'])
 const OUTCOMES = new Set(['succeeded', 'failed', 'timeout'])
 const REVIEW_STATUSES = new Set(['draft_ready', 'queued', 'processing'])
@@ -51,6 +51,12 @@ export function normalizePrdTrackingEvent(value) {
   const action = text(value.action, 32)
   const status = text(value.status, 64)
   const generationEventId = text(value.generationEventId, 200)
+  const prdGenerationId = text(value.prdGenerationId, 160)
+  const editSource = text(value.editSource, 32)
+  const editOutcome = text(value.editOutcome, 32)
+  const mutationId = text(value.mutationId, 160)
+  const beforeFingerprint = text(value.beforeFingerprint, 160)
+  const afterFingerprint = text(value.afterFingerprint, 160)
   const rating = typeof value.rating === 'number' && [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5].includes(value.rating) ? value.rating : undefined
   const batchId = text(value.batchId, 100)
   const itemIndex = Number.isSafeInteger(value.itemIndex) && value.itemIndex >= 0 && value.itemIndex <= 100 ? value.itemIndex : undefined
@@ -62,10 +68,13 @@ export function normalizePrdTrackingEvent(value) {
     : rawEventType === 'review_action' && action === 'accept' ? 'markdown_review_accept'
       : rawEventType === 'document_published' ? 'online_document_verified_write' : rawEventType
   const outcome = rawOutcome === 'succeeded' ? 'success' : rawOutcome === 'failed' ? 'failure' : rawOutcome
-  if (!eventId || !eventType || !['prd_generated', 'markdown_review_rewrite', 'markdown_review_accept', 'prd_rating', 'online_document_verified_write'].includes(eventType) || !outcome || !['success', 'failure', 'timeout'].includes(outcome) || Number.isNaN(Date.parse(occurredAt))) return undefined
-  if ((eventType === 'prd_generated' || eventType === 'markdown_review_rewrite' || eventType === 'markdown_review_accept' || eventType === 'prd_rating') && !sessionId) return undefined
+  if (!eventId || !eventType || !['prd_generated', 'markdown_review_rewrite', 'markdown_review_accept', 'prd_rating', 'prd_edit', 'online_document_verified_write'].includes(eventType) || !outcome || !['success', 'failure', 'timeout'].includes(outcome) || Number.isNaN(Date.parse(occurredAt))) return undefined
+  if ((eventType === 'prd_generated' || eventType === 'markdown_review_rewrite' || eventType === 'markdown_review_accept' || eventType === 'prd_rating' || eventType === 'prd_edit') && !sessionId) return undefined
   if (eventType === 'prd_generated' && outcome !== 'success') return undefined
+  if ((eventType === 'prd_generated' || eventType === 'prd_rating' || eventType === 'prd_edit') && !prdGenerationId) return undefined
   if (eventType === 'prd_rating' && (outcome !== 'success' || generationEventId === undefined || rating === undefined)) return undefined
+  if (eventType === 'prd_edit' && (outcome !== 'success' || !['manual', 'ai_annotation'].includes(editSource ?? '') || !['attempt', 'applied', 'rejected'].includes(editOutcome ?? '') || !mutationId)) return undefined
+  if (eventType === 'prd_edit' && editOutcome === 'applied' && (!beforeFingerprint || !afterFingerprint || beforeFingerprint === afterFingerprint)) return undefined
   if (eventType === 'online_document_verified_write' && (outcome !== 'success' || !runId || !documentName || !documentCatalogId || !documentUrl)) return undefined
   const validStatus = status === undefined
     || (eventType === 'markdown_review_rewrite' && outcome === 'success' && status === 'draft_ready')
@@ -79,8 +88,14 @@ export function normalizePrdTrackingEvent(value) {
     ...(sessionId ? { sessionId } : {}),
     ...(runId ? { runId } : {}),
     ...(status ? { status } : {}),
+    ...((eventType === 'prd_generated' || eventType === 'prd_rating' || eventType === 'prd_edit') ? { prdGenerationId } : {}),
     ...(eventType === 'prd_generated' && documentName ? { name: documentName } : {}),
     ...(eventType === 'prd_rating' ? { generationEventId, rating } : {}),
+    ...(eventType === 'prd_edit' ? {
+      editSource, editOutcome, mutationId,
+      ...(beforeFingerprint === undefined ? {} : { beforeFingerprint }),
+      ...(afterFingerprint === undefined ? {} : { afterFingerprint }),
+    } : {}),
     ...(eventType === 'online_document_verified_write' ? {
       ...(generationEventId === undefined ? {} : { generationEventId }),
       name: documentName, catalogId: documentCatalogId, url: documentUrl,

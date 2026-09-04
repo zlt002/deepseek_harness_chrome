@@ -95,3 +95,15 @@ test('reconnecting Harness accepts the remounted knowledge scope command sequenc
   assert.match(sidepanel, /const connect = useCallback\(async \([^)]*\) => \{[\s\S]*knowledgeCommandSequenceRef\.current = 0[\s\S]*knowledgeRequestSequenceBySessionRef\.current\.clear\(\)[\s\S]*setStatus\('starting'\)[\s\S]*requestHarness\(\)/)
   assert.match(sidepanel, /value\.type === 'knowledge-scope-command\/v1'[\s\S]*value\.sequence <= knowledgeCommandSequenceRef\.current[\s\S]*knowledgeCommandSequenceRef\.current = value\.sequence/)
 })
+
+test('a scope refresh bypasses the catalog cache and persists only still-authorized selections', async () => {
+  const [background, scopePanel] = await Promise.all([
+    source('apps/chrome-extension/entrypoints/background.ts'),
+    source('packages/harness-ui-knowledge-scope/src/client/KnowledgeScope.tsx'),
+  ])
+
+  assert.match(scopePanel, /request\(id, undefined, \{ action: 'retry' \}\)/)
+  assert.match(background, /if \(request\.action === 'login' \|\| request\.action === 'retry'\)\s*\{\s*knowledgeTransport\.clearCatalog\(\)/)
+  assert.match(background, /const catalog = await knowledgeTransport\.loadCatalog\(\)\s*\/\/ Another selection can land[\s\S]*record = await resolveKnowledgeScopeRecord\(\{ harnessSessionId: sessionId \} as KnowledgeQueryRequest\)\s*const savedScope = record\?\.scope\s*const scope = savedScope === undefined \? savedScope : pruneScope\(savedScope, catalog\)\s*if \(scope !== undefined && savedScope !== undefined && scopeFingerprint\(scope\) !== scopeFingerprint\(savedScope\)\) record = await saveKnowledgeScope\(sessionId, scope\)/)
+  assert.match(background, /previous\?\.notice === undefined \? \{\} : \{ notice: previous\.notice \}/)
+})

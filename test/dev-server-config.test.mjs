@@ -39,6 +39,12 @@ test('WXT development config prebundles Markdown Review entry dependencies', asy
   }
 })
 
+test('WXT development config resolves superlock through WXT storage for named imports', async () => {
+  const wxtConfig = await readFile(wxtConfigUrl, 'utf8')
+
+  assert.match(wxtConfig, /include:\s*\[[\s\S]*['"]wxt > @wxt-dev\/storage > superlock['"][\s\S]*\]/)
+})
+
 test('WXT development keeps the local Prototype Studio startup guard in the loaded extension output', async () => {
   const wxtConfig = await readFile(wxtConfigUrl, 'utf8')
 

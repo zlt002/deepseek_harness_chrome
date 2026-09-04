@@ -201,7 +201,7 @@ test('Conversation shell is a product presentation plugin, not a second conversa
   assert.match(
     css,
     /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*width:\s*min\(240px, calc\(100vw - 32px\)\)/,
-    'the model menu must use the same compact width contract as permission menus',
+    'the model menu must retain its compact width outside the sidebar',
   )
   assert.match(
     css,
@@ -232,6 +232,11 @@ test('Conversation shell is a product presentation plugin, not a second conversa
     css,
     /\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*right:\s*max\(\s*var\(--dsh-composer-side-clearance\),\s*calc\(\(100% - var\(--dsh-composer-card-max-width\)\) \/ 2\)\s*\)/,
     'after anchoring to the composer seat, the model menu must preserve the input card right edge',
+  )
+  assert.match(
+    css,
+    /\[data-sidebar-presentation='compact'\][\s\S]*\[data-composer-overlay-host\] > \[data-composer-overlay-surface\]\[role='menu'\][\s\S]*width:\s*min\(\s*var\(--dsh-composer-card-max-width\),\s*calc\(100% - var\(--dsh-composer-side-clearance\) - var\(--dsh-composer-side-clearance\)\)\s*\)/,
+    'the sidebar model menu must use the same bounded width and side clearance as the composer card',
   )
   assert.match(overlayHostSeam, /data-composer-overlay-host=\{overlay\.available \|\| undefined\}/)
   for (const name of ['root', 'headerSeat', 'scrollBody', 'heroTitleSeat']) {

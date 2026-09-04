@@ -23,7 +23,8 @@ import { MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS } from './delivery-timeouts'
 import './style.css'
 
 type LocalAnnotation = MarkdownReviewAnnotation & VisualReviewAnnotation
-type PreparedWriteState = { preparation: PreparedWrite; content: string; idempotencyKey: string }
+type PrdEdit = { source: 'manual' | 'ai_annotation'; mutationId: string }
+type PreparedWriteState = { preparation: PreparedWrite; content: string; idempotencyKey: string; prdEdit: PrdEdit }
 type PendingRequest = { kind: 'snapshot'; discardLocalWork: boolean } | { kind: 'deliver'; annotationId: string } | { kind: 'session-action'; action: 'rewrite' | 'accept' } | { kind: 'rating'; rating: PrdRating } | { kind: 'proposals' } | { kind: 'prepare'; content: string; adoption?: true } | { kind: 'commit'; content: string; token: string; adoption?: true }
 
 const initialState: ReviewState = { status: 'initializing' }
@@ -104,6 +105,7 @@ function App(): React.JSX.Element {
   const annotationsRef = useRef<LocalAnnotation[]>([])
   const candidateReviewActiveRef = useRef(false)
   const activeCandidateSelectionIdRef = useRef<string | undefined>(undefined)
+  const acceptedAiMutationIdRef = useRef<string | undefined>(undefined)
   const preparedWriteRef = useRef<PreparedWriteState | undefined>(undefined)
   const commitRef = useRef<CommitAttempt | undefined>(undefined)
   const sidePanelWindowIdRef = useRef<number | undefined>(undefined)
@@ -407,7 +409,7 @@ function App(): React.JSX.Element {
             setCommitting(false); setSessionActionPending(undefined); dispatch({ type: 'port-disconnected' })
           }
         } else {
-          const nextPreparedWrite = { preparation: message.preparation, content: expected.content, idempotencyKey: requestId() }
+          const nextPreparedWrite = { preparation: message.preparation, content: expected.content, idempotencyKey: requestId(), prdEdit: acceptedAiMutationIdRef.current === undefined ? { source: 'manual' as const, mutationId: requestId() } : { source: 'ai_annotation' as const, mutationId: acceptedAiMutationIdRef.current } }
           preparedWriteRef.current = nextPreparedWrite
           setPreparedWrite(nextPreparedWrite)
         }
@@ -471,6 +473,7 @@ function App(): React.JSX.Element {
             showSaveNotice('草稿已保存，但仍有局部优化需要重新发送或放弃。')
           }
           setExternalUpdatePending(false)
+          acceptedAiMutationIdRef.current = undefined
           if (mayClearReview) {
             const verifiedNoticeToken = requestId()
             verifiedSaveNoticeTokenRef.current = verifiedNoticeToken
@@ -752,6 +755,7 @@ function App(): React.JSX.Element {
     candidateReviewActiveRef.current = false
     const selectionId = activeCandidateSelectionIdRef.current
     activeCandidateSelectionIdRef.current = undefined
+    acceptedAiMutationIdRef.current = selectionId
     if (selectionId !== undefined) setAnnotations((items) => {
       const next = items.map(item => item.id === selectionId ? { ...item, deliveryStatus: 'settled' as const, lastError: undefined } : item)
       annotationsRef.current = next
@@ -771,6 +775,7 @@ function App(): React.JSX.Element {
     candidateReviewActiveRef.current = false
     const selectionId = activeCandidateSelectionIdRef.current
     activeCandidateSelectionIdRef.current = undefined
+    if (selectionId !== undefined && reviewId !== undefined) post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-prd-edit-rejected-request', requestId: requestId(), reviewId, mutationId: selectionId })
     if (selectionId !== undefined) setAnnotations((items) => {
       const next = items.map(item => item.id === selectionId ? { ...item, deliveryStatus: 'settled' as const, lastError: undefined } : item)
       annotationsRef.current = next
@@ -813,7 +818,7 @@ function App(): React.JSX.Element {
     commitRef.current = attempt.active
     setCommitting(true)
     pendingRef.current.set(request, { kind: 'commit', content: attempt.active.content, token: attempt.active.token })
-    if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-commit-write-request', requestId: request, reviewId, approval: currentPreparedWrite.preparation.approval, idempotencyKey: attempt.active.idempotencyKey, content: attempt.active.content })) {
+    if (!post({ v: MARKDOWN_REVIEW_PROTOCOL_VERSION, type: 'markdown-review-commit-write-request', requestId: request, reviewId, approval: currentPreparedWrite.preparation.approval, idempotencyKey: attempt.active.idempotencyKey, content: attempt.active.content, prdEdit: currentPreparedWrite.prdEdit })) {
       pendingRef.current.delete(request)
       commitRef.current = settleCommit(commitRef.current, attempt.active.token)
       setCommitting(false)

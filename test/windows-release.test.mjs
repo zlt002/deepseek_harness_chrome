@@ -86,7 +86,7 @@ test('Windows ZIP writer loads the compression assemblies required by its portab
 test('Windows acceptance exercises the detached online-update handoff and waits for its persisted result', async () => {
   const acceptance = await readFile(new URL('../release/windows-lite/acceptance-windows.ps1', import.meta.url), 'utf8')
   const helper = await readFile(new URL('../release/windows-lite/release-update-handoff-smoke.mjs', import.meta.url), 'utf8')
-  const updater = await readFile(new URL('../apps/native-server/src/release-update/index.mjs', import.meta.url), 'utf8')
+  const updater = await readFile(new URL('../apps/native-server/src/release-update/handoff-launcher.mjs', import.meta.url), 'utf8')
   assert.match(acceptance, /function Invoke-ReleaseUpdateHandoff/)
   assert.match(acceptance, /release-update-handoff-smoke\.mjs/)
   assert.match(acceptance, /\.accrui-update-status\.json/)
@@ -356,8 +356,8 @@ test('buildWindowsRelease creates the AccrUI updater contract with the fixed ext
   assert.match(packagedReadme, /安装目录的 `profile`（`<InstallRoot>\\profile`）/)
   assert.doesNotMatch(packagedReadme, /%APPDATA%\\accr-ui-harness\\profile/)
   const packagedSkill = readZip(payloadZip, 'runtime/skills/pmd-prd/SKILL.md', 'utf8')
-  assert.match(packagedSkill, /Harness Workspace 是唯一用户界面/)
-  assert.match(packagedSkill, /pmd-workspace\/spec\/<requirementId>\/<requirementId>_\*_PRD\.md/)
+  assert.match(packagedSkill, /最终 PRD 不得出现 `\[待确认\]`/)
+  assert.match(packagedSkill, /pmd-workspace\/spec\/<内部编号>\/<内部编号>_\*_PRD\.md/)
   assert.doesNotMatch(packagedSkill, /clarification\.md/)
   assert.match(readZip(payloadZip, 'runtime/skills/product-prototype/SKILL.md', 'utf8'), /name:\s*product-prototype/)
   for (const [entry, expectedName] of [

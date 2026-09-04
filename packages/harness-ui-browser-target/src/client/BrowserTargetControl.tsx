@@ -1,7 +1,9 @@
-import { useMemo, useRef, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { useComposerOverlay } from '@deepseek-ai/dsh-client-ui-primitives'
 import { browserTargetTriggerTab, type BrowserTargetCommand, type BrowserTargetSnapshot, type BrowserTargetTab } from './active-tab-bridge.ts'
+import { browserTargetPanelCeiling, browserTargetPanelMaxHeightPx } from './panel-geometry.js'
 import css from './ActiveTabDock.module.css'
 
 export interface BrowserTargetInjected {
@@ -42,6 +44,43 @@ function TabIcon({ tab }: { tab: BrowserTargetTab }) {
   return <span className={css.faviconFallback} aria-hidden="true">{displayName(tab).slice(0, 1).toUpperCase()}</span>
 }
 
+/** Grow the chooser up to the compact header while the sidebar layout changes. */
+function useBrowserTargetPanelMaxHeight(panelRef: RefObject<HTMLElement>): number | undefined {
+  const [maxHeight, setMaxHeight] = useState<number | undefined>(undefined)
+  useLayoutEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    const fit = () => {
+      const header = document.querySelector<HTMLElement>('[data-testid="compact-header"]')
+      const presentation = panel.closest<HTMLElement>('[data-conversation-presentation]')
+      const ceiling = browserTargetPanelCeiling(
+        header?.getBoundingClientRect().bottom,
+        presentation?.getBoundingClientRect().top,
+      )
+      setMaxHeight(browserTargetPanelMaxHeightPx(panel.getBoundingClientRect().bottom, ceiling))
+    }
+    fit()
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(fit)
+    observer?.observe(panel)
+    observer?.observe(document.documentElement)
+    for (const target of [
+      document.querySelector('[data-testid="compact-header"]'),
+      panel.closest('[data-conversation-presentation]'),
+      panel.closest('[data-composer-seat]'),
+    ]) {
+      if (target instanceof Element) observer?.observe(target)
+    }
+    window.addEventListener('resize', fit)
+    window.addEventListener('scroll', fit, true)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', fit)
+      window.removeEventListener('scroll', fit, true)
+    }
+  }, [panelRef])
+  return maxHeight
+}
+
 /** Small action inside the composer tool row, matching the accepted e327 UI. */
 export function BrowserTargetControl({ useBrowserTarget, useBrowserTargetPanel, onBrowserTargetPanelChange }: ControlProps) {
   const snapshot = useBrowserTarget(value => value)
@@ -69,20 +108,17 @@ export function BrowserTargetControl({ useBrowserTarget, useBrowserTargetPanel, 
 function BrowserTargetPanelBody({ useBrowserTarget, onBrowserTargetCommand }: PanelProps) {
   const snapshot = useBrowserTarget(value => value)
   const panelRef = useRef<HTMLDivElement>(null)
+  const maxHeight = useBrowserTargetPanelMaxHeight(panelRef)
   const [referenceTabIds, setReferenceTabIds] = useState<number[]>([])
   const selectedIds = useMemo(() => new Set(snapshot?.settings.pinnedTabs.map(tab => tab.tabId) ?? []), [snapshot])
-  if (snapshot === undefined) return <div ref={panelRef} className={css.panel} role="dialog" aria-label="工作目标上下文"><div className={css.panelHeader}><strong>工作目标上下文</strong><button type="button" className={css.refresh} onClick={() => onBrowserTargetCommand({ command: 'refresh' })}>刷新</button></div><p className={css.empty}>正在读取当前窗口标签页…</p></div>
+  if (snapshot === undefined) return <div ref={panelRef} className={css.panel} role="dialog" aria-label="工作目标上下文" style={maxHeight === undefined ? undefined : { maxHeight }}><div className={css.panelHeader}><strong>工作目标上下文</strong><button type="button" className={css.refresh} onClick={() => onBrowserTargetCommand({ command: 'refresh' })}>刷新</button></div><p className={css.empty}>正在读取标签页…</p></div>
   const pinned = snapshot.settings.mode === 'pinned-tabs'
-  const count = selectionCount(snapshot)
   const captureBusy = snapshot.capturingDesignReferenceTabId !== undefined
   const referenceTabs = referenceTabIds.filter(tabId => snapshot.tabs.some(tab => tab.tabId === tabId)).slice(0, 3)
-  const captureProgress = snapshot.capturingDesignReferenceProgress
-  const capturingTab = captureBusy ? snapshot.tabs.find(tab => tab.tabId === snapshot.capturingDesignReferenceTabId) : undefined
-  return <div ref={panelRef} className={css.panel} role="dialog" aria-label="工作目标上下文">
+  return <div ref={panelRef} className={css.panel} role="dialog" aria-label="工作目标上下文" style={maxHeight === undefined ? undefined : { maxHeight }}>
     <div className={css.panelHeader}><strong>工作目标上下文</strong><button type="button" className={css.refresh} onClick={() => onBrowserTargetCommand({ command: 'refresh' })}>刷新</button></div>
     <div className={css.modes} role="radiogroup" aria-label="工作目标模式">{(Object.entries(MODE_LABELS) as Array<[BrowserTargetSnapshot['settings']['mode'], string]>).map(([mode, label]) => <button key={mode} type="button" role="radio" aria-checked={snapshot.settings.mode === mode} className={snapshot.settings.mode === mode ? css.modeActive : css.mode} onClick={() => onBrowserTargetCommand({ command: 'set-mode', mode })}>{label}</button>)}</div>
-    <div className={css.panelSubhead}><span>当前窗口标签页</span><span>{pinned ? `已选 ${count} 个` : MODE_LABELS[snapshot.settings.mode]}</span></div>
-    <section className={`${css.referenceGuide} ${captureBusy ? css.referenceGuideBusy : ''}`} aria-label="制作 AI 原型" role={captureBusy ? 'status' : undefined}><strong>{captureBusy ? `正在提取第 ${captureProgress?.current ?? 1}/${captureProgress?.total ?? 1} 项：${displayName(capturingTab)}` : '制作 AI 原型'}</strong><span>{captureBusy ? '正在读取样式并校验页面身份。多尺寸实测会在你明确点击后临时打开并自动关闭测试窗口。' : '无需先勾选，也无需设为主目标。普通提取不会切换、导航或调整你的浏览器，非当前可见页不会强行截图；“桌面/平板/手机实测”会临时打开 3 个测试窗口，分别读取真实布局后自动关闭。列表、详情、表单等不同页面可勾选“合并参考”。'}</span>{referenceTabs.length >= 2 && <button className={css.referenceMerge} type="button" disabled={captureBusy} onClick={() => onBrowserTargetCommand({ command: 'capture-design-references', tabIds: referenceTabs })}>合并提取设计规范（{referenceTabs.length} 页）</button>}</section>
+    {referenceTabs.length >= 2 && <div className={css.listActions}><button className={css.referenceMerge} type="button" disabled={captureBusy} onClick={() => onBrowserTargetCommand({ command: 'capture-design-references', tabIds: referenceTabs })}>合并提取设计规范（{referenceTabs.length} 页）</button></div>}
     <div className={css.tabList}>{(pinned ? [...snapshot.tabs, ...selectedTabs(snapshot).filter(tab => !snapshot.tabs.some(item => item.tabId === tab.tabId))] : snapshot.tabs).map(tab => {
       const selected = selectedIds.has(tab.tabId); const primary = snapshot.settings.primaryTabId === tab.tabId
       const capturingThisTab = snapshot.capturingDesignReferenceTabId === tab.tabId

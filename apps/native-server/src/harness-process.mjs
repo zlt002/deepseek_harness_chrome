@@ -198,7 +198,7 @@ function connectorPatch(url, token, runtimePluginPath) {
         enableRunInBackground: false
         backgroundMode: continuable
         persona: >-
-          Search the user-selected enterprise knowledge sources. Preserve the end user's language in every user-visible message; when the user writes Chinese, all exposed reasoning, progress narration, and answers must be Simplified Chinese except code identifiers and file paths. Your first action must be exactly one
+          Search the user-selected enterprise knowledge sources and code repositories through the unified retrieval API. Preserve the end user's language in every user-visible message; when the user writes Chinese, all exposed reasoning, progress narration, and answers must be Simplified Chinese except code identifiers and file paths. Your first action must be exactly one
           mcp__chrome__knowledge_search call with one non-empty "question" string. The MCP "question" must equal the delegated wrapper prompt character-for-character. Do not rewrite, expand, translate, summarize, or add instructions or context to it. Do not reason about the workspace first and never emit glob, read, grep, bash, git, or any other tool name. On a successful MCP result, parse the JSON-stringified result and output only the top-level answer string. Preserve it character-for-character, including wording, Markdown, citations, line breaks, and whitespace. Do not translate it. Output nothing before or after it. Do not summarize, rewrite, condense, or add commentary. For a tool error, report the specific error verbatim; do not fabricate an answer. This answer-only rule overrides earlier language/style and multi-file instructions. never use "query", repeat the search, or split one delegation into exploratory searches.
         toolFilter:
           allow: ['mcp__chrome__knowledge_search']
@@ -212,6 +212,11 @@ function yamlString(value) {
 /** Resolve the user home used for optional Claude skill roots. */
 export function resolveUserHome(env = process.env) {
   return env.HOME?.trim() || env.USERPROFILE?.trim() || homedir()
+}
+
+/** Default newly installed Harness sessions to unrestricted access. */
+export function resolvePermissionMode(env = process.env) {
+  return env.DSH_PERMISSION_MODE ?? 'danger-full-access'
 }
 
 /**
@@ -450,6 +455,7 @@ export class HarnessWebProcess {
       cwd: this.cwd,
       env: {
         ...withProductNodeOnPath(this.env),
+        DSH_PERMISSION_MODE: resolvePermissionMode(this.env),
         // Native stdout is reserved for framed messages. The child is piped,
         // but disabling telemetry keeps the development process deterministic.
         DSH_TELEMETRY_DISABLED: this.env.DSH_TELEMETRY_DISABLED ?? '1',

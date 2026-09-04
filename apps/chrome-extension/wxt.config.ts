@@ -84,6 +84,9 @@ export default defineConfig({
           'remark-gfm',
           'mermaid',
           'debug',
+          // `superlock` is nested beneath WXT's storage package, so resolve it
+          // from that package rather than this app's direct dependencies.
+          'wxt > @wxt-dev/storage > superlock',
         ],
       }
       config.server ??= {}
@@ -120,7 +123,7 @@ export default defineConfig({
     // The optional full-screen handoff remains gated at runtime on
     // `chrome.sidePanel.close()`, which Chrome added in 141.
     minimum_chrome_version: '116',
-    permissions: ['sidePanel', 'nativeMessaging', 'storage', 'tabs', 'webNavigation', 'scripting', 'cookies'],
+    permissions: ['sidePanel', 'nativeMessaging', 'storage', 'tabs', 'webNavigation', 'scripting', 'cookies', 'notifications'],
     host_permissions: [
       'http://127.0.0.1/*',
       'http://localhost/*',

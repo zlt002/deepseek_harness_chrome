@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
 import { launchPreparedUpdate } from '../apps/native-server/src/release-update/index.mjs'
+import { launchPreparedUpdate as launchPreparedUpdateFromHandoff } from '../apps/native-server/src/release-update/handoff-launcher.mjs'
 import { readUpdateStatus } from '../apps/native-server/src/release-update/update-status.mjs'
 
 async function waitFor(getValue, message = 'Timed out waiting for test setup.') {
@@ -17,6 +18,10 @@ async function waitFor(getValue, message = 'Timed out waiting for test setup.') 
   }
   throw new Error(message)
 }
+
+test('public release-update import re-exports the handoff launcher', () => {
+  assert.strictEqual(launchPreparedUpdate, launchPreparedUpdateFromHandoff)
+})
 
 test('detached updater writes a standalone script and waits for ready before handing cleanup to the installer', async () => {
   let invocation
