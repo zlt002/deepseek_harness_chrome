@@ -58,7 +58,7 @@ test('root orchestrates apps while product code stays outside the clean upstream
 
 test('Harness product checkout pins LF before applying portable patches', async () => {
   const attributes = await readFile(resolve(root, '.gitattributes'), 'utf8')
-  const script = await readFile(resolve(root, 'scripts/materialize-harness-product.mjs'), 'utf8')
+  const script = await readFile(resolve(root, 'scripts/build/materialize-harness-product.mjs'), 'utf8')
   const clone = script.indexOf("runVisible('git', ['clone'")
   const autocrlf = script.indexOf("runVisible('git', ['config', 'core.autocrlf', 'false']")
   const eol = script.indexOf("runVisible('git', ['config', 'core.eol', 'lf']")
@@ -73,10 +73,10 @@ test('Harness product checkout pins LF before applying portable patches', async 
 })
 
 test('product plugin manifest drives portable client builds and root quality commands', async () => {
-  const script = await readFile(resolve(root, 'scripts/build-harness-client-plugins.mjs'), 'utf8')
-  const nativeInstall = await readFile(resolve(root, 'scripts/register-native-host.mjs'), 'utf8')
-  const harnessProcess = await readFile(resolve(root, 'apps/native-server/src/harness-process.mjs'), 'utf8')
-  const commandRunner = await readFile(resolve(root, 'scripts/run-product-plugin-command.mjs'), 'utf8')
+  const script = await readFile(resolve(root, 'scripts/build/build-harness-client-plugins.mjs'), 'utf8')
+  const nativeInstall = await readFile(resolve(root, 'scripts/native/register-native-host.mjs'), 'utf8')
+  const harnessProcess = await readFile(resolve(root, 'apps/native-server/src/runtime/harness-process.mjs'), 'utf8')
+  const commandRunner = await readFile(resolve(root, 'scripts/checks/run-product-plugin-command.mjs'), 'utf8')
   const rootManifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
 
   assert.match(script, /node_modules', 'tsdown', 'dist', 'run\.mjs'/)
@@ -88,9 +88,9 @@ test('product plugin manifest drives portable client builds and root quality com
   assert.match(harnessProcess, /PRODUCT_UI_PLUGIN_PACKAGE_NAMES/)
   assert.match(commandRunner, /PRODUCT_PLUGIN_PACKAGE_NAMES/)
   assert.match(commandRunner, /PRODUCT_TYPECHECK_PLUGIN_PACKAGE_NAMES/)
-  assert.equal(rootManifest.scripts['typecheck:plugins'], 'node scripts/run-product-plugin-command.mjs typecheck')
-  assert.equal(rootManifest.scripts['test:plugins'], 'node scripts/run-product-plugin-command.mjs test')
-  assert.equal(rootManifest.scripts.pretest, 'node scripts/prepare-test-runtime.mjs')
+  assert.equal(rootManifest.scripts['typecheck:plugins'], 'node scripts/checks/run-product-plugin-command.mjs typecheck')
+  assert.equal(rootManifest.scripts['test:plugins'], 'node scripts/checks/run-product-plugin-command.mjs test')
+  assert.equal(rootManifest.scripts.pretest, 'node scripts/checks/prepare-test-runtime.mjs')
   assert.equal(rootManifest.scripts.test, 'node --test test/*.test.mjs && pnpm test:plugins')
 
   assert.deepEqual(PRODUCT_UI_PLUGIN_DIRECTORIES, [
@@ -144,12 +144,12 @@ test('Windows release workflow retains upstream, typecheck, and complete test ga
 
 test('product commands never silently fall back to the clean upstream checkout', async () => {
   for (const relativePath of [
-    'scripts/build-harness-client-plugins.mjs',
-    'scripts/sync-harness-assets.mjs',
-    'scripts/load-harness-client-bundle.mjs',
-    'scripts/register-native-host.mjs',
-    'scripts/restart-dev.mjs',
-    'apps/native-server/src/harness-process.mjs',
+    'scripts/build/build-harness-client-plugins.mjs',
+    'scripts/build/sync-harness-assets.mjs',
+    'scripts/build/load-harness-client-bundle.mjs',
+    'scripts/native/register-native-host.mjs',
+    'scripts/dev/restart-dev.mjs',
+    'apps/native-server/src/runtime/harness-process.mjs',
     'release/mac-lite/build-mac-production.mjs',
     'release/windows-lite/materialize-harness-runtime.mjs',
   ]) {
@@ -158,12 +158,12 @@ test('product commands never silently fall back to the clean upstream checkout',
   }
 
   for (const relativePath of [
-    'scripts/build-harness-client-plugins.mjs',
-    'scripts/sync-harness-assets.mjs',
-    'scripts/load-harness-client-bundle.mjs',
-    'scripts/register-native-host.mjs',
-    'scripts/restart-dev.mjs',
-    'apps/native-server/src/harness-process.mjs',
+    'scripts/build/build-harness-client-plugins.mjs',
+    'scripts/build/sync-harness-assets.mjs',
+    'scripts/build/load-harness-client-bundle.mjs',
+    'scripts/native/register-native-host.mjs',
+    'scripts/dev/restart-dev.mjs',
+    'apps/native-server/src/runtime/harness-process.mjs',
     'release/mac-lite/build-mac-production.mjs',
   ]) {
     const source = await readFile(resolve(root, relativePath), 'utf8')

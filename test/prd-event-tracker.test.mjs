@@ -3,7 +3,7 @@ import test from 'node:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PrdEventTracker, normalizePrdTrackingEvent } from '../apps/native-server/src/prd-event-tracker.mjs'
+import { PrdEventTracker, normalizePrdTrackingEvent } from '../apps/native-server/src/telemetry/prd-event-tracker.mjs'
 
 test('PRD telemetry accepts only bounded structured metadata', () => {
   assert.deepEqual(normalizePrdTrackingEvent({ eventId: 'review:generated', eventType: 'review_generated', outcome: 'succeeded', occurredAt: '2026-08-31T07:59:00Z', sessionId: 'session-1', prdGenerationId: 'prd:generation-1', name: '需求_PRD.md' }), {

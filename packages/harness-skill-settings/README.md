@@ -28,5 +28,5 @@ The browser `settings.section` slot itself is already public and sufficient. The
 
 1. Load this package as a Host plugin adapter and call `mountHostSkillSettings()` with the official registry/settings adapters.
 2. Add `claudeSkillRoots(homedir())` to `dsh-skill-filesystem.customSkillDirs` in the product Host profile.
-3. Add this package to `scripts/build-harness-client-plugins.mjs`, then add a client settings section using the public `settings.section` slot and the extended `skill.list` wire.
+3. Add this package to `scripts/build/build-harness-client-plugins.mjs`, then add a client settings section using the public `settings.section` slot and the extended `skill.list` wire.
 4. Add real-Harness tests for model catalog, `/skill`, disabled Skill re-enable, and cache refresh.

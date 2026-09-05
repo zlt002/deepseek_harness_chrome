@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { PRESENTATION_WRITE_ACTIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
+import { PRESENTATION_WRITE_ACTIONS } from '../apps/native-server/src/transport/connector-tool-catalog.mjs'
 
 async function skill(name) {
   return readFile(new URL(`../skills/${name}/SKILL.md`, import.meta.url), 'utf8')

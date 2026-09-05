@@ -24,7 +24,7 @@ product source files.
 
 The former Windows UI patch and the compressed `e327898` full-source overlay
 are no longer used. Their accepted behavior now lives in product-owned packages.
-`scripts/materialize-harness-product.mjs` always clones the clean official
+`scripts/build/materialize-harness-product.mjs` always clones the clean official
 revision and applies the ordered generic seams in `upstream-contributions/`.
 There is no legacy overlay environment switch or fallback build mode.
 
@@ -61,7 +61,7 @@ acceptance runs.
 Startup regression gates:
 
 - Before opening Chrome, verify the exact loaded extension identity with
-  `DEEPSEEK_HARNESS_EXTENSION_ID=<extension-id> node scripts/register-native-host.mjs --check`.
+  `DEEPSEEK_HARNESS_EXTENSION_ID=<extension-id> node scripts/native/register-native-host.mjs --check`.
   It must find the exact `chrome-extension://<extension-id>/` origin in the
   installed Chrome and Edge Native Messaging manifests.
 - Chain-slot product presentations must register through `slots.inject(...)`

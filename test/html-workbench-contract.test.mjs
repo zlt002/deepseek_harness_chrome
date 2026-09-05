@@ -6,7 +6,7 @@ test('HTML Workbench keeps file permission, DOM selection, approval, and same-ta
   const [background, connector, catalog] = await Promise.all([
     readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8'),
     readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8'),
-    readFile(new URL('../apps/native-server/src/connector-tool-catalog.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/native-server/src/transport/connector-tool-catalog.mjs', import.meta.url), 'utf8'),
   ])
   assert.match(background, /html-workbench-select\/v1/)
   assert.match(background, /file_access_permission_missing_or_page_unreadable/)

@@ -3,8 +3,8 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { createRuntimeIdentity, validRuntimeIdentity } from '../scripts/runtime-identity.mjs'
-import { sameRuntimeReleaseIdentity } from '../apps/native-server/src/runtime-identity-contract.mjs'
+import { createRuntimeIdentity, validRuntimeIdentity } from '../scripts/shared/runtime-identity.mjs'
+import { sameRuntimeReleaseIdentity } from '../apps/native-server/src/runtime/runtime-identity-contract.mjs'
 
 test('runtime identity binds the upstream product marker to copied assets', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-identity-'))

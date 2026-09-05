@@ -11,9 +11,10 @@ import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { materializeProductSkills } from '../../scripts/skills/materialize-product-skills.mjs'
 
 import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
-import { ACCRUI_NATIVE_HOST_NAME } from '../../apps/native-server/src/product-runtime-identity.mjs'
+import { ACCRUI_NATIVE_HOST_NAME } from '../../apps/native-server/src/runtime/product-runtime-identity.mjs'
 import { WINDOWS_NODE_REQUIREMENT_LABEL, windowsNodePowerShellPredicate } from './node-version-policy.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -597,7 +598,7 @@ export async function buildWindowsRelease({
       path.join(runtimeDir, 'product-plugins', directory),
     )
   }
-  await copyDereferenced(path.join(projectRoot, 'skills'), path.join(runtimeDir, 'skills'))
+  await materializeProductSkills(path.join(projectRoot, 'skills'), path.join(runtimeDir, 'skills'))
   await rm(path.join(runtimeDir, 'native-server'), { recursive: true, force: true })
   await copyDereferenced(path.join(runtimeSource, 'native-server'), path.join(runtimeDir, 'native-server'))
   await copyDereferenced(

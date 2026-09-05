@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { BrowserConnector, knowledgeErrorChain, isRetryableKnowledgeTransport, knowledgeHttpsFetch } from '../apps/native-server/src/connector.mjs'
-import { BROWSER_TOOL_NAMES, CONNECTOR_TOOLS } from '../apps/native-server/src/connector-tool-catalog.mjs'
-import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
+import { BROWSER_TOOL_NAMES, CONNECTOR_TOOLS } from '../apps/native-server/src/transport/connector-tool-catalog.mjs'
+import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office/office-document-write-record-store.mjs'
 
 async function callOfficeGetContext(endpoint, args = {}, id = 1) {
   const response = await fetch(`${endpoint.url}/mcp`, {

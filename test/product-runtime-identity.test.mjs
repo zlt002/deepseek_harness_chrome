@@ -7,11 +7,11 @@ import {
   ACCRUI_NATIVE_HOST_NAME,
   ACCRUI_PROFILE_DIRECTORY,
   nativeHostManifestFilename,
-} from '../apps/native-server/src/product-runtime-identity.mjs'
-import { listenerBelongsToProject, releaseOwnedListeners } from '../scripts/prepare-dev-port.mjs'
-import { resolveOfficeDocumentWriteStatePath } from '../apps/native-server/src/office-document-write-record-store.mjs'
-import { resolveTeamDocStatePath } from '../apps/native-server/src/team-doc-record-store.mjs'
-import { resolveTeamKnowledgeBatchStatePath } from '../apps/native-server/src/team-knowledge-batch-record-store.mjs'
+} from '../apps/native-server/src/runtime/product-runtime-identity.mjs'
+import { listenerBelongsToProject, releaseOwnedListeners } from '../scripts/dev/prepare-dev-port.mjs'
+import { resolveOfficeDocumentWriteStatePath } from '../apps/native-server/src/office/office-document-write-record-store.mjs'
+import { resolveTeamDocStatePath } from '../apps/native-server/src/knowledge/team-doc-record-store.mjs'
+import { resolveTeamKnowledgeBatchStatePath } from '../apps/native-server/src/knowledge/team-knowledge-batch-record-store.mjs'
 
 test('AccrUI runtime identity is distinct from generic DeepSeek Harness identities', () => {
   assert.equal(ACCRUI_NATIVE_HOST_NAME, 'com.accrui.harness.chrome')

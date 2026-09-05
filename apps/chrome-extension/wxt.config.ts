@@ -30,7 +30,7 @@ export default defineConfig({
       // WXT copies public assets serially. Copy the generated Harness tree in
       // a fresh process after the extension shell and manifest are ready.
       await execFileAsync(process.execPath, [
-        resolve(projectRoot, 'scripts/copy-dev-public.mjs'),
+        resolve(projectRoot, 'scripts/dev/copy-dev-public.mjs'),
         resolve(extensionRoot, 'public'),
         wxt.config.outDir,
       ])

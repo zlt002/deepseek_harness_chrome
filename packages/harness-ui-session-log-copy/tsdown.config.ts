@@ -1,4 +1,4 @@
-import { loadHarnessClientBundle } from '../../scripts/load-harness-client-bundle.mjs'
+import { loadHarnessClientBundle } from '../../scripts/build/load-harness-client-bundle.mjs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'

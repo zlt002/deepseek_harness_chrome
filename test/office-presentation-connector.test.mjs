@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
-import { CONNECTOR_TOOLS, PRESENTATION_WRITE_ACTIONS, PRESENTATION_WRITE_OPERATIONS, PRESENTATION_WRITE_PAYLOAD_FIELDS } from '../apps/native-server/src/connector-tool-catalog.mjs'
-import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
+import { CONNECTOR_TOOLS, PRESENTATION_WRITE_ACTIONS, PRESENTATION_WRITE_OPERATIONS, PRESENTATION_WRITE_PAYLOAD_FIELDS } from '../apps/native-server/src/transport/connector-tool-catalog.mjs'
+import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office/office-document-write-record-store.mjs'
 
 async function call(endpoint, name, arguments_, id = 1) {
   const response = await fetch(`${endpoint.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: arguments_ } }) })

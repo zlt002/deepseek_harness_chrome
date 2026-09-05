@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
+import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office/office-document-write-record-store.mjs'
 
 test('persists a body-free light-document write uncertainty fence', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-office-document-store-'))

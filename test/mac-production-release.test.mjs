@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { buildMacProductionPackage } from '../release/mac-lite/build-mac-production.mjs'
-import { decodeNativeFrames, encodeNativeFrame } from '../apps/native-server/src/protocol.mjs'
+import { decodeNativeFrames, encodeNativeFrame } from '../apps/native-server/src/transport/protocol.mjs'
 
 const PRODUCT_CLIENT_IDS = [
   '@accrui/harness-ui-agent-preset',

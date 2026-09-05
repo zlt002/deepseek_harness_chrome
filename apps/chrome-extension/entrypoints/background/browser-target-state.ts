@@ -1,8 +1,8 @@
 import {
   sameBrowserTarget,
   validBrowserTarget,
-} from '../../../native-server/src/connector-protocol.mjs'
-import type { BrowserTarget } from '../../../native-server/src/connector-protocol.mjs'
+} from '../../../native-server/src/transport/connector-protocol.mjs'
+import type { BrowserTarget } from '../../../native-server/src/transport/connector-protocol.mjs'
 
 export type BrowserTargetMode = 'follow-active-tab' | 'pinned-tabs' | 'none'
 

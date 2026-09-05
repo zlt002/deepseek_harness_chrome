@@ -76,12 +76,12 @@ test('materializer deploys a production closure, runs smoke, and only then write
       await deployFixture(options)
       const nestedVendor = path.join(options.deployDir, 'node_modules/.pnpm/fake/node_modules/@deepseek-ai/cosmokit')
       await mkdir(path.dirname(nestedVendor), { recursive: true })
-      await symlink(path.join(sourceDir, 'vendor/cosmokit'), nestedVendor, 'dir')
+      await symlink(path.join(sourceDir, 'vendor/cosmokit'), nestedVendor, process.platform === 'win32' ? 'junction' : 'dir')
       const linuxOnly = path.join(options.deployDir, 'node_modules/.pnpm/fake/node_modules/@deepseek-ai/node-addon-landlock-run-linux-arm64')
-      await symlink(path.join(sourceDir, 'native/landlock-run/packages/linux-arm64'), linuxOnly, 'dir')
+      await symlink(path.join(sourceDir, 'native/landlock-run/packages/linux-arm64'), linuxOnly, process.platform === 'win32' ? 'junction' : 'dir')
       const cliSelfLink = path.join(options.deployDir, 'node_modules/.pnpm/node_modules/@deepseek-ai/dsh')
       await mkdir(path.dirname(cliSelfLink), { recursive: true })
-      await symlink(path.join(sourceDir, 'apps/cli'), cliSelfLink, 'dir')
+      await symlink(path.join(sourceDir, 'apps/cli'), cliSelfLink, process.platform === 'win32' ? 'junction' : 'dir')
     },
     smoke(command, args, options) {
       smokeCalled = true

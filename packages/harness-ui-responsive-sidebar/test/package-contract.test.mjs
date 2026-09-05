@@ -9,8 +9,8 @@ test('responsive sidebar uses the public compact presentation seam without ownin
     readFile(new URL('../src/client/ResponsiveSidebarPresentation.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/client/ResponsiveSidebarPresentation.module.css', import.meta.url), 'utf8'),
     readFile(new URL('../../../apps/native-server/src/product-plugin-manifest.mjs', import.meta.url), 'utf8'),
-    readFile(new URL('../../../scripts/build-harness-client-plugins.mjs', import.meta.url), 'utf8'),
-    readFile(new URL('../../../scripts/register-native-host.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../../../scripts/build/build-harness-client-plugins.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../../../scripts/native/register-native-host.mjs', import.meta.url), 'utf8'),
   ])
   assert.match(manifest, /@accrui\/harness-ui-responsive-sidebar/)
   assert.match(source, /sidebar\.compact\.presentation/)

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
-import { SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
+import { SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/transport/connector-tool-catalog.mjs'
 
 async function runtimeWith(app) {
   const source = await readFile(new URL('../apps/chrome-extension/public/office-spreadsheet-runtime.js', import.meta.url), 'utf8')

@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
-import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
+import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office/office-document-write-record-store.mjs'
 
 function writeStore() { return new OfficeDocumentWriteRecordStore({ recordPath: join(tmpdir(), `dsh-light-document-${randomUUID()}.json`) }) }
 function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`; if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`; return JSON.stringify(value) }

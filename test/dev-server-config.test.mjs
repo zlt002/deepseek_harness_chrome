@@ -18,7 +18,7 @@ test('pnpm dev uses a dedicated port instead of the AccrUI dev server port', asy
     readFile(extensionPackageJsonUrl, 'utf8').then((contents) => JSON.parse(contents)),
   ])
 
-  assert.match(packageJson.scripts.dev, /node\s+scripts\/prepare-dev-port\.mjs/)
+  assert.match(packageJson.scripts.dev, /node\s+scripts\/dev\/prepare-dev-port\.mjs/)
   assert.match(packageJson.scripts.dev, /pnpm\s+--dir\s+apps\/chrome-extension\s+run\s+dev/)
   assert.match(extensionPackageJson.scripts.dev, /--port\s+3101/)
 })

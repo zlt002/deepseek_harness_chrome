@@ -5,15 +5,15 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
-import { TeamDocRecordStore } from '../apps/native-server/src/team-doc-record-store.mjs'
-import { TeamKnowledgeBatchRecordStore } from '../apps/native-server/src/team-knowledge-batch-record-store.mjs'
+import { TeamDocRecordStore } from '../apps/native-server/src/knowledge/team-doc-record-store.mjs'
+import { TeamKnowledgeBatchRecordStore } from '../apps/native-server/src/knowledge/team-knowledge-batch-record-store.mjs'
 
 const target = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://doc.midea.com/teamKnowledge/catalog/9' }
 const parent = { parentId: '9', bookId: '10', parentName: 'Root', parentType: 'directory', canRead: true, canCreate: true, fingerprint: 'parent-batch-v1' }
 const documents = [{ name: 'One', body: '# One\nsecret one' }, { name: 'Two', body: '# Two\nsecret two' }]
 
 async function authoritativePmdBody() {
-  const authority = await readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8')
+  const authority = (await readFile(new URL('../skills/pmd-prd/references/templates.md', import.meta.url), 'utf8')).replaceAll('\r\n', '\n')
   const blocks = [...authority.matchAll(/```markdown\s*\n([\s\S]*?)\n```/g)].map((match) => match[1])
   const materialise = (body) => body
     .replaceAll('{编号}', 'REQ')

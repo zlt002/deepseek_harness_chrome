@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
-const protocolUrl = new URL('../apps/native-server/src/connector-protocol.mjs', import.meta.url)
+const protocolUrl = new URL('../apps/native-server/src/transport/connector-protocol.mjs', import.meta.url)
 const backgroundUrl = new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url)
 
 test('Connector protocol is browser-safe and the Extension imports it instead of redefining the wire contract', async () => {
@@ -14,7 +14,7 @@ test('Connector protocol is browser-safe and the Extension imports it instead of
   ])
 
   assert.doesNotMatch(protocolSource, /from\s+['"]node:/)
-  assert.match(backgroundSource, /from ['"]\.\.\/\.\.\/native-server\/src\/connector-protocol\.mjs['"]/)
+  assert.match(backgroundSource, /from ['"]\.\.\/\.\.\/native-server\/src\/transport\/connector-protocol\.mjs['"]/)
 
   for (const localDefinition of [
     'CONNECTOR_REQUEST',

@@ -34,12 +34,15 @@ test('keeps oversized Markdown visible as a non-reviewable ordinary file', async
 
 test('Host review opener rejects absolute, traversal, non-Markdown, symlink, and oversized paths', async (t) => {
   const root = await fixture(t); const outside = await mkdtemp(join(tmpdir(), 'workspace-review-outside-')); t.after(() => rm(outside, { recursive: true, force: true }))
-  await writeFile(join(outside, 'outside.md'), 'private'); await symlink(join(outside, 'outside.md'), join(root, 'linked.md'))
+  await writeFile(join(outside, 'outside.md'), 'private')
+  const linkedPath = process.platform === 'win32' ? 'linked/outside.md' : 'linked.md'
+  if (process.platform === 'win32') await symlink(outside, join(root, 'linked'), 'junction')
+  else await symlink(join(outside, 'outside.md'), join(root, 'linked.md'))
   await writeFile(join(root, 'large.md'), Buffer.alloc(MAX_FILE_BYTES + 1))
   const runtime = new WorkspaceReviewRuntime()
   await assert.rejects(runtime.open('session', root, '/tmp/secret.md'), /relative slash-separated/)
   await assert.rejects(runtime.open('session', root, '../secret.md'), /invalid workspace segment/)
-  await assert.rejects(runtime.open('session', root, 'linked.md'), /symbolic links/)
+  await assert.rejects(runtime.open('session', root, linkedPath), /symbolic links/)
   await assert.rejects(runtime.open('session', root, 'plain.txt'), /only .md and .markdown/)
   await assert.rejects(runtime.open('session', root, 'large.md'), /exceeds/)
 })

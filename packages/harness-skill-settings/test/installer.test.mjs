@@ -105,7 +105,7 @@ test('refuses deletion outside a product-managed directory without following lin
   const outside = await mkdtemp(join(tmpdir(), 'accr-skill-outside-'))
   t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]))
   await writeFile(join(outside, 'SKILL.md'), skill('outside-skill'))
-  await symlink(outside, join(root, 'linked-skill'))
+  await symlink(outside, join(root, 'linked-skill'), process.platform === 'win32' ? 'junction' : 'dir')
   await writeFile(join(root, 'not-a-directory'), 'not a skill')
   await mkdir(join(root, 'bundled-skill'))
   await writeFile(join(root, 'bundled-skill', 'SKILL.md'), skill('bundled-skill'))
@@ -140,7 +140,7 @@ test('deletes only exact live user Skill directories in the supported global roo
   await writeFile(join(outside, 'SKILL.md'), skill('outside-skill'))
   await mkdir(join(home, '.dsh/skills/linked-skill'), { recursive: true })
   await rm(join(home, '.dsh/skills/linked-skill'), { recursive: true })
-  await symlink(outside, join(home, '.dsh/skills/linked-skill'))
+  await symlink(outside, join(home, '.dsh/skills/linked-skill'), process.platform === 'win32' ? 'junction' : 'dir')
   await writeFile(join(home, '.dsh/skills/file-skill'), 'not a directory')
   const rejected = [
     { name: 'project-skill', source: 'project-dsh', resourceBase: { kind: 'directory', path: join(home, 'project/.dsh/skills/project-skill') } },

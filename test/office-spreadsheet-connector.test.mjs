@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { BrowserConnector } from '../apps/native-server/src/connector.mjs'
-import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office-document-write-record-store.mjs'
-import { SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
+import { OfficeDocumentWriteRecordStore } from '../apps/native-server/src/office/office-document-write-record-store.mjs'
+import { SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/transport/connector-tool-catalog.mjs'
 
 async function call(endpoint, name, arguments_, id = 1) {
   const response = await fetch(`${endpoint.url}/mcp`, {

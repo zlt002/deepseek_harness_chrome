@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { sameBrowserTarget, sameConnectorCorrelation, validBrowserTarget, validBrowserTargetBinding, validConnectorResponseEnvelope } from '../apps/native-server/src/connector-protocol.mjs'
+import { sameBrowserTarget, sameConnectorCorrelation, validBrowserTarget, validBrowserTargetBinding, validConnectorResponseEnvelope } from '../apps/native-server/src/transport/connector-protocol.mjs'
 
 const target = { browser: 'chrome', windowId: 7, tabId: 42, url: 'https://docs.example.test/a' }
 

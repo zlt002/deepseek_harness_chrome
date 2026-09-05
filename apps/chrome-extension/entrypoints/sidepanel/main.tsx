@@ -6,7 +6,8 @@ import ReactDOM from 'react-dom/client'
 import { HarnessFrameSource, HarnessHandoffSessionFromLocation, HarnessHandoffTabFromLocation, HarnessSurfaceFromLocation, NormalizeActiveTabForBrowserTarget } from './harness-frame'
 import { openFullscreenTab as openFullscreenTabFromSidePanel, returnToSidePanel as returnToSidePanelFromFullscreen } from './fullscreen-handoff'
 import { MARKDOWN_AI_ACK_TIMEOUT_MS } from '../markdown-review/delivery-timeouts'
-import { validateWorkspaceMarkdownFeedback, validateWorkspaceMarkdownReviewAction, type WorkspaceMarkdownFeedback, type WorkspaceMarkdownReviewAction } from './markdown-feedback-validator'
+import { validateWorkspaceMarkdownFeedback, validateWorkspaceMarkdownReviewAction } from './markdown-feedback-validator'
+import { MarkdownReviewDelivery } from '../../../../packages/harness-ui-workspace-review/src/markdown-review-delivery'
 import { NATIVE_UPDATE_HANDOFF_GRACE_MS, retryNativeConnection } from '../../src/native-reconnect-policy'
 import { acceptWorkspaceDesktopNotificationSnapshot, listenForWorkspaceNotificationVisibility, WorkspaceDesktopNotificationDelivery, workspaceIsForeground } from './workspace-desktop-notification-bridge'
 import './style.css'
@@ -437,7 +438,6 @@ function App(): React.JSX.Element {
   const [lockedRunTargets, setLockedRunTargets] = useState<LockedRunTarget[]>([])
   const frameRef = useRef<HTMLIFrameElement>(null)
   const frameReadyRef = useRef(false)
-  const workspaceReviewBridgeReadyRef = useRef(false)
   const bridgeSequenceRef = useRef(0)
   const targetSettingsRef = useRef(targetSettings)
   const availableTabsRef = useRef(availableTabs)
@@ -458,8 +458,6 @@ function App(): React.JSX.Element {
   const accountLoginTimerRef = useRef<number | undefined>(undefined)
   const searchProgressSequenceRef = useRef(0)
   const reviewRehydrateRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
-  const reviewFeedbackRef = useRef(new Map<string, { feedback: WorkspaceMarkdownFeedback; sendResponse: (response?: unknown) => void; timeout: number }>())
-  const reviewActionRef = useRef(new Map<string, { action: WorkspaceMarkdownReviewAction; sendResponse: (response?: unknown) => void; timeout: number }>())
   const prototypePromptRef = useRef(new Map<string, { sendResponse: (response?: unknown) => void; timeout: number }>())
   const knowledgeLoginSessionRef = useRef<string | undefined>(undefined)
   const knowledgeLoginAttemptsRef = useRef(0)
@@ -493,8 +491,20 @@ function App(): React.JSX.Element {
   const frameNonce = useMemo(() => crypto.randomUUID(), [url])
   const frameSrc = useMemo(() => url === undefined ? undefined : HarnessFrameSource(url, { nonce: frameNonce, parentOrigin: window.location.origin, surface, productVersion, fullscreenTabSupported: chrome.sidePanel?.close !== undefined, ...(sidePanelHandoff.sessionId === undefined ? {} : { sessionId: sidePanelHandoff.sessionId }) }), [frameNonce, productVersion, sidePanelHandoff.sessionId, surface, url])
   const frameOrigin = useMemo(() => frameSrc === undefined ? undefined : new URL(frameSrc).origin, [frameSrc])
+  const reviewFrameRef = useRef({ frameNonce, frameOrigin })
+  reviewFrameRef.current = { frameNonce, frameOrigin }
+  const reviewDelivery = useMemo(() => new MarkdownReviewDelivery({
+    postMessage(message) {
+      const { frameNonce: nonce, frameOrigin: origin } = reviewFrameRef.current
+      if (origin !== undefined) frameRef.current?.contentWindow?.postMessage({ ...message, nonce }, origin)
+    },
+    setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+    clearTimeout: timer => window.clearTimeout(timer),
+    randomUUID: () => crypto.randomUUID(),
+    timeoutMs: MARKDOWN_AI_ACK_TIMEOUT_MS,
+  }), [])
 
-  useEffect(() => { frameReadyRef.current = false; workspaceReviewBridgeReadyRef.current = false }, [frameNonce])
+  useEffect(() => { frameReadyRef.current = false; reviewDelivery.resetReady() }, [frameNonce, reviewDelivery])
 
   useEffect(() => listenForWorkspaceNotificationVisibility(desktopNotificationDelivery), [desktopNotificationDelivery])
 
@@ -609,22 +619,6 @@ function App(): React.JSX.Element {
     })
   }, [frameNonce, frameOrigin])
 
-  const forwardPendingMarkdownReviewFeedback = useCallback(() => {
-    const target = frameRef.current?.contentWindow
-    if (!workspaceReviewBridgeReadyRef.current || frameOrigin === undefined || target === null || target === undefined) return
-    for (const pending of reviewFeedbackRef.current.values()) {
-      target.postMessage({ type: 'markdown-review-feedback/v1', nonce: frameNonce, feedback: pending.feedback }, frameOrigin)
-    }
-  }, [frameNonce, frameOrigin])
-
-  const forwardPendingMarkdownReviewActions = useCallback(() => {
-    const target = frameRef.current?.contentWindow
-    if (!workspaceReviewBridgeReadyRef.current || frameOrigin === undefined || target === null || target === undefined) return
-    for (const [requestId, pending] of reviewActionRef.current) {
-      target.postMessage({ type: 'markdown-review-session-action/v1', nonce: frameNonce, requestId, action: pending.action }, frameOrigin)
-    }
-  }, [frameNonce, frameOrigin])
-
   useEffect(() => {
     const accept = (epoch: unknown, sequence: unknown, tab: unknown): void => {
       if (typeof epoch !== 'string' || epoch.length === 0 || typeof sequence !== 'number' || !Number.isInteger(sequence) || !isActiveTab(tab)) return
@@ -690,15 +684,7 @@ function App(): React.JSX.Element {
           sendResponse({ ok: false, error: validation.error })
           return false
         }
-        const deliveryId = validation.feedback.id
-        const timeout = window.setTimeout(() => {
-          const pending = reviewFeedbackRef.current.get(deliveryId)
-          if (pending === undefined) return
-          reviewFeedbackRef.current.delete(deliveryId)
-          pending.sendResponse({ ok: false, error: 'Harness 未在 15 秒内确认 AI 请求；可以重试，同一批注不会重复发送。' })
-        }, MARKDOWN_AI_ACK_TIMEOUT_MS)
-        reviewFeedbackRef.current.set(deliveryId, { feedback: validation.feedback, sendResponse, timeout })
-        forwardPendingMarkdownReviewFeedback()
+        reviewDelivery.feedback(validation.feedback, sendResponse)
         return true
       }
       if (value.type === 'markdown-review-session-action-forward/v1') {
@@ -711,15 +697,7 @@ function App(): React.JSX.Element {
           sendResponse({ ok: false, error: validation.ok ? '侧边栏未打开或尚未准备好。请打开侧边栏后重试。' : validation.error })
           return false
         }
-        const requestId = crypto.randomUUID()
-        const timeout = window.setTimeout(() => {
-          const pending = reviewActionRef.current.get(requestId)
-          if (pending === undefined) return
-          reviewActionRef.current.delete(requestId)
-          pending.sendResponse({ ok: false, error: 'Harness 未在 15 秒内确认审阅动作。请重试。' })
-        }, MARKDOWN_AI_ACK_TIMEOUT_MS)
-        reviewActionRef.current.set(requestId, { action: validation.action, sendResponse, timeout })
-        forwardPendingMarkdownReviewActions()
+        reviewDelivery.action(validation.action, sendResponse)
         return true
       }
       if (value.type === 'active-tab-changed/v1') accept(value.epoch, value.sequence, value.tab)
@@ -742,7 +720,7 @@ function App(): React.JSX.Element {
     }
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)
-  }, [connect, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin])
+  }, [connect, reviewDelivery, frameNonce, frameOrigin])
 
   const projectBrowserTargetSnapshot = useCallback((capturingTabId: number | undefined) => {
     if (frameOrigin === undefined || !frameReadyRef.current) return
@@ -926,10 +904,7 @@ function App(): React.JSX.Element {
     if (accountLoginTimerRef.current !== undefined) window.clearTimeout(accountLoginTimerRef.current)
     for (const pending of reviewRehydrateRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed during Markdown review recovery.' }) }
     reviewRehydrateRef.current.clear()
-    for (const pending of reviewFeedbackRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed before accepting Markdown feedback.' }) }
-    reviewFeedbackRef.current.clear()
-    for (const pending of reviewActionRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: '侧边栏在确认审阅动作前已关闭。' }) }
-    reviewActionRef.current.clear()
+    reviewDelivery.close()
     for (const pending of prototypePromptRef.current.values()) { window.clearTimeout(pending.timeout); pending.sendResponse({ ok: false, error: 'The Harness Side Panel closed before accepting the prototype request.' }) }
     prototypePromptRef.current.clear()
   }, [])
@@ -960,34 +935,7 @@ function App(): React.JSX.Element {
         pending.sendResponse(value.accepted === true ? { ok: true } : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness 未接受 HTML 页面选择。' })
         return
       }
-      if (value.type === 'markdown-review-feedback-accepted/v1' && boundedString(value.deliveryId, 160)) {
-        const pending = reviewFeedbackRef.current.get(value.deliveryId)
-        if (pending === undefined) return
-        reviewFeedbackRef.current.delete(value.deliveryId)
-        window.clearTimeout(pending.timeout)
-        pending.sendResponse(value.accepted === true && boundedString(value.targetSessionId, 160) && boundedString(value.targetSessionTitle, 2_048) && (value.status === 'queued' || value.status === 'processing')
-          ? { ok: true, targetSessionId: value.targetSessionId, targetSessionTitle: value.targetSessionTitle, status: value.status }
-          : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness rejected the Markdown annotation.' })
-        return
-      }
-      if (value.type === 'markdown-review-session-action-accepted/v1' && boundedString(value.requestId, 160)) {
-        const pending = reviewActionRef.current.get(value.requestId)
-        if (pending === undefined) return
-        reviewActionRef.current.delete(value.requestId)
-        window.clearTimeout(pending.timeout)
-        const accepted = value.accepted === true && value.action === pending.action.action && boundedString(value.targetSessionId, 160) && boundedString(value.targetSessionTitle, 2_048)
-          && (value.status === 'draft_ready' || value.status === 'queued' || value.status === 'processing')
-        pending.sendResponse(accepted
-          ? { ok: true, action: value.action, targetSessionId: value.targetSessionId, targetSessionTitle: value.targetSessionTitle, status: value.status }
-          : { ok: false, error: boundedString(value.error, 4_000) ? value.error : 'Harness 未接受审阅动作。' })
-        return
-      }
-      if (value.type === 'workspace-review-bridge-ready/v1') {
-        workspaceReviewBridgeReadyRef.current = true
-        forwardPendingMarkdownReviewFeedback()
-        forwardPendingMarkdownReviewActions()
-        return
-      }
+      if (reviewDelivery.accept(value)) return
       if (value.type === 'markdown-review-rehydrate-response/v1' && boundedString(value.requestId, 160)) {
         const pending = reviewRehydrateRef.current.get(value.requestId)
         if (pending === undefined) return
@@ -1128,7 +1076,7 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('message', onFrameMessage)
     return () => window.removeEventListener('message', onFrameMessage)
-  }, [activeHarnessSessionId, connect, desktopNotificationDelivery, forwardPendingMarkdownReviewFeedback, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, hydrateActiveBrowserTargetLock, loadRecentPrototypes, notificationSessionRestore, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.sessionId, sidePanelHandoff.tabId, surface])
+  }, [activeHarnessSessionId, connect, desktopNotificationDelivery, reviewDelivery, frameNonce, frameOrigin, handleAccountAccessCommand, handleCompanyGatewayProbe, handleFrameCommand, handleKnowledgeScopeCommand, hydrateActiveBrowserTargetLock, loadRecentPrototypes, notificationSessionRestore, replaySearchProgress, sendBrowserTargetSnapshot, sidePanelHandoff.sessionId, sidePanelHandoff.tabId, surface])
 
   return <main className="shell">
     {status === 'ready' && url !== undefined ? (

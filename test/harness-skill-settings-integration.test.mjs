@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
-import { claudeSkillsPatch, productUiPatch, resolveSchemasteryUrl } from '../apps/native-server/src/harness-process.mjs'
+import { claudeSkillsPatch, productUiPatch, resolveSchemasteryUrl } from '../apps/native-server/src/runtime/harness-process.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const upstream = resolve(root, 'upstream/deepseek-harness')

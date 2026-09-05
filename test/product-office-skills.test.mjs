@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { claudeSkillsPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveProductSkillsRoot } from '../apps/native-server/src/harness-process.mjs'
+import { claudeSkillsPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveProductSkillsRoot } from '../apps/native-server/src/runtime/harness-process.mjs'
 import {
   loadProductOfficeSkill,
   parseProductOfficeSkillMarkdown,
@@ -83,5 +83,5 @@ test('the generated Native Host patch points the office provider at the product 
   const macBuilder = await readFile(new URL('../release/mac-lite/build-mac-production.mjs', import.meta.url), 'utf8')
   assert.match(macBuilder, /DSH_PRODUCT_SKILLS_ROOT="\$PACKAGE_DIR\/skills"/)
   assert.match(macBuilder, /product-office-skills\.mjs/)
-  assert.match(macBuilder, /copyWithoutSourceMaps\(path\.join\(PROJECT_ROOT, 'skills'\)/)
+  assert.match(macBuilder, /materializeProductSkills\(path\.join\(PROJECT_ROOT, 'skills'\)/)
 })

@@ -9,8 +9,8 @@
   "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
   "dsh": { "client": { "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-conversation"], "platform": "web" } },
   "scripts": {
-    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-desktop-notifications",
-    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-desktop-notifications",
+    "bundle": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-desktop-notifications",
+    "typecheck": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-desktop-notifications",
     "test": "node --test test/*.test.mjs"
   }
 }

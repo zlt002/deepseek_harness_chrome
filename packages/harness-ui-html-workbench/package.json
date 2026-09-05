@@ -8,5 +8,5 @@
   "exports": { ".": "./lib/index.js", "./client": "./lib/client.js", "./package.json": "./package.json" },
   "files": ["lib/index.js", "lib/client.js", "lib/client.js.map"],
   "dsh": { "client": { "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-conversation"], "platform": "web" } },
-  "scripts": { "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-html-workbench", "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-html-workbench", "test": "node --test test/*.test.mjs" }
+  "scripts": { "bundle": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-html-workbench", "typecheck": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-html-workbench", "test": "node --test test/*.test.mjs" }
 }

@@ -23,8 +23,8 @@
     }
   },
   "scripts": {
-    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-conversation-shell",
-    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-conversation-shell",
+    "bundle": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-conversation-shell",
+    "typecheck": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-conversation-shell",
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {

@@ -9,10 +9,10 @@ import {
   ACCRUI_INSTALL_DIRECTORY,
   ACCRUI_NATIVE_HOST_NAME,
   nativeHostManifestFilename,
-} from '../apps/native-server/src/product-runtime-identity.mjs'
+} from '../apps/native-server/src/runtime/product-runtime-identity.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const script = join(projectRoot, 'scripts/register-native-host.mjs')
+const script = join(projectRoot, 'scripts/native/register-native-host.mjs')
 const extensionId = 'abcdefghijklmnopabcdefghijklmnop'
 const devExtensionId = 'ponmlkjihgfedcbaponmlkjihgfedcba'
 

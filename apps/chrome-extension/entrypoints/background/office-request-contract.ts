@@ -1,5 +1,5 @@
-import { validBrowserTarget, validUnavailableBrowserTarget } from '../../../native-server/src/connector-protocol.mjs'
-import type { BrowserTarget, ConnectorCorrelation, UnavailableBrowserTarget } from '../../../native-server/src/connector-protocol.mjs'
+import { validBrowserTarget, validUnavailableBrowserTarget } from '../../../native-server/src/transport/connector-protocol.mjs'
+import type { BrowserTarget, ConnectorCorrelation, UnavailableBrowserTarget } from '../../../native-server/src/transport/connector-protocol.mjs'
 
 export interface BrowserSessionCorrelation extends ConnectorCorrelation {
   /** Trusted Native-side owner of a send-time Browser Target capture. */

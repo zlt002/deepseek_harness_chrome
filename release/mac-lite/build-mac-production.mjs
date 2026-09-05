@@ -11,9 +11,10 @@ import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/build/bundle-harness-runtime-plugin.mjs'
+import { materializeProductSkills } from '../../scripts/skills/materialize-product-skills.mjs'
 import { PRODUCT_UI_PLUGIN_DIRECTORIES } from '../../apps/native-server/src/product-plugin-manifest.mjs'
-import { ACCRUI_NATIVE_HOST_NAME } from '../../apps/native-server/src/product-runtime-identity.mjs'
+import { ACCRUI_NATIVE_HOST_NAME } from '../../apps/native-server/src/runtime/product-runtime-identity.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -815,7 +816,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
   await cp(harnessTrackingPluginPath, path.join(runtimeDir, 'native-server', 'harness-tracking.mjs'))
   await cp(defaultWorkspacePluginPath, path.join(runtimeDir, 'native-server', 'harness-default-workspace.mjs'))
   await cp(
-    path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'),
+    path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'knowledge', 'selected-source-routing-prompt.mjs'),
     path.join(runtimeDir, 'native-server', 'selected-source-routing-prompt.mjs'),
   )
   await cp(
@@ -823,7 +824,7 @@ export async function buildMacProductionPackage({ releaseDir = path.join(PROJECT
     path.join(runtimeDir, 'native-server', 'product-office-skills.mjs'),
   )
   await copyProductUiPackages(path.join(runtimeDir, 'product-plugins'))
-  await copyWithoutSourceMaps(path.join(PROJECT_ROOT, 'skills'), path.join(runtimeDir, 'skills'))
+  await materializeProductSkills(path.join(PROJECT_ROOT, 'skills'), path.join(runtimeDir, 'skills'))
   await copyMacNativeAssets(path.join(runtimeDir, 'native'))
   await mkdir(path.join(payloadDir, 'workspace'), { recursive: true })
   await mkdir(path.join(payloadDir, 'logs'), { recursive: true })

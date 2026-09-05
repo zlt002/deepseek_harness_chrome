@@ -2,7 +2,6 @@ packages:
   - '.'
   - 'apps/*'
   - 'packages/*'
-  - 'bundles/*'
 
 allowBuilds:
   esbuild: true

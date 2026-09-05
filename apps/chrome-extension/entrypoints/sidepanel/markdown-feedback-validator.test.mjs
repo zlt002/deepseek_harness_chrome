@@ -83,21 +83,19 @@ test('review actions bind a complete resource version and reject mixed fields', 
   assert.equal(validateWorkspaceMarkdownReviewAction({ ...action, action: 'accept', pmdReviewReceipt: 'a'.repeat(32) }).ok, false)
 })
 
-test('side panel returns the bounded Harness delivery error instead of replacing it', async () => {
+test('side panel delegates review delivery and keeps the outer timeout longer than ACK waiting', async () => {
   const [shell, review, workspaceReview, timeouts] = await Promise.all([
     readFile(new URL('./main.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../markdown-review/main.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../../../../packages/harness-ui-workspace-review/src/client/index.ts', import.meta.url), 'utf8'),
     readFile(new URL('../markdown-review/delivery-timeouts.ts', import.meta.url), 'utf8'),
   ])
-  assert.match(shell, /value\.type === 'markdown-review-feedback-accepted\/v1'/)
-  assert.match(shell, /boundedString\(value\.error, 4_000\) \? value\.error : 'Harness rejected the Markdown annotation\.'/)
+  assert.match(shell, /reviewDelivery\.feedback\(validation\.feedback, sendResponse\)/)
+  assert.match(shell, /reviewDelivery\.action\(validation\.action, sendResponse\)/)
+  assert.match(shell, /reviewDelivery\.accept\(value\)/)
   assert.match(shell, /MARKDOWN_AI_ACK_TIMEOUT_MS/)
   assert.match(review, /MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS/)
   assert.match(timeouts, /MARKDOWN_AI_ACK_TIMEOUT_MS = 15_000/)
   assert.match(timeouts, /MARKDOWN_REVIEW_DELIVERY_TIMEOUT_MS = 20_000/)
-  assert.match(shell, /workspaceReviewBridgeReadyRef/)
-  assert.match(shell, /forwardPendingMarkdownReviewFeedback/)
-  assert.match(shell, /value\.type === 'workspace-review-bridge-ready\/v1'[\s\S]*forwardPendingMarkdownReviewFeedback\(\)/)
   assert.match(workspaceReview, /type: 'workspace-review-bridge-ready\/v1'/)
 })

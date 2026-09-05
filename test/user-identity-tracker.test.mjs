@@ -3,7 +3,7 @@ import test from 'node:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { UserIdentityTracker, normalizeUserIdentityObservation } from '../apps/native-server/src/user-identity-tracker.mjs'
+import { UserIdentityTracker, normalizeUserIdentityObservation } from '../apps/native-server/src/telemetry/user-identity-tracker.mjs'
 
 test('user identity telemetry accepts only the two login identity fields and observation time', () => {
   assert.deepEqual(normalizeUserIdentityObservation({ userCode: 'zhanglt21', employeeId: '20680888', observedAt: '2026-09-01T08:00:00Z' }), {

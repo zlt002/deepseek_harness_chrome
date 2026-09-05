@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { decodeNativeFrames, encodeNativeFrame } from '../apps/native-server/src/protocol.mjs'
+import { decodeNativeFrames, encodeNativeFrame } from '../apps/native-server/src/transport/protocol.mjs'
 
 test('decodes fragmented and multiple native frames', () => {
   const input = Buffer.concat([

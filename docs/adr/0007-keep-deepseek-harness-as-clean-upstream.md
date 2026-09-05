@@ -39,7 +39,7 @@ commit and a clean submodule worktree.
   `pnpm typecheck:plugins`, `pnpm test` (including product package tests), the
   extension build, and release closure checks before it is accepted.
 - Native Messaging startup must first verify the exact loaded extension origin
-  with `scripts/register-native-host.mjs --check`.
+  with `scripts/native/register-native-host.mjs --check`.
 - Asset sync and Native Host registration emit runtime identities. The
   extension compares the loaded Native Host revision and product-plugin hash
   with its own Harness assets before reporting a verified runtime.

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { acquireHarnessProductBuildLock } from '../scripts/harness-product-build-lock.mjs'
+import { acquireHarnessProductBuildLock } from '../scripts/shared/harness-product-build-lock.mjs'
 
 test('prevents a concurrent Harness product build and releases cleanly', async t => {
   const root = await mkdtemp(join(tmpdir(), 'harness-product-lock-'))
@@ -26,7 +26,7 @@ test('reclaims a stale Harness product build lock', async t => {
 })
 
 test('fast refresh uses the same lock before touching the installed host', async () => {
-  const source = await readFile(new URL('../scripts/refresh-dev.mjs', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../scripts/dev/refresh-dev.mjs', import.meta.url), 'utf8')
   assert.match(source, /fast \? await acquireHarnessProductBuildLock\(generatedRoot\)/)
   assert.ok(source.indexOf('acquireHarnessProductBuildLock(generatedRoot)') < source.indexOf('await stopCurrentNativeHost()'))
   assert.ok(source.indexOf('fastBuildLock?.release()') < source.indexOf("console.log('4\/4 Restarting WXT"))

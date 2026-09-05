@@ -6,13 +6,13 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 
-// scripts/prepare-dev-port.mjs is a POSIX development helper which invokes
+// scripts/dev/prepare-dev-port.mjs is a POSIX development helper which invokes
 // lsof and kill. These process-level fakes are shell scripts, so they cannot
 // exercise that contract on Windows (where neither command is present).
 const testPosixPortGuard = process.platform === 'win32' ? test.skip : test
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const script = join(projectRoot, 'scripts/prepare-dev-port.mjs')
+const script = join(projectRoot, 'scripts/dev/prepare-dev-port.mjs')
 
 async function createFakeCommands() {
   const directory = await mkdtemp(join(tmpdir(), 'deepseek-harness-dev-port-'))

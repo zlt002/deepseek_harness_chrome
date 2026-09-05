@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { devServerCommand, extensionIdsFromManifest, extensionIdsFromManifests, harnessBuildSteps, isGracefulProcessTermination, processTree } from '../scripts/restart-dev.mjs'
-import { ACCRUI_CONNECTOR_TMP_PREFIX } from '../apps/native-server/src/product-runtime-identity.mjs'
+import { devServerCommand, extensionIdsFromManifest, extensionIdsFromManifests, harnessBuildSteps, isGracefulProcessTermination, processTree } from '../scripts/dev/restart-dev.mjs'
+import { ACCRUI_CONNECTOR_TMP_PREFIX } from '../apps/native-server/src/runtime/product-runtime-identity.mjs'
 
 test('fast refresh reuses its completed plugin and asset build when starting WXT', () => {
   assert.deepEqual(devServerCommand(true), { command: 'pnpm', args: ['--dir', 'apps/chrome-extension', 'run', 'dev'] })

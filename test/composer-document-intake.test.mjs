@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
-import { productUiPatch } from '../apps/native-server/src/harness-process.mjs'
+import { productUiPatch } from '../apps/native-server/src/runtime/harness-process.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const upstream = resolve(root, 'upstream/deepseek-harness')

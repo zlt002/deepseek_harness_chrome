@@ -22,8 +22,8 @@
     }
   },
   "scripts": {
-    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-document-intake",
-    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-document-intake",
+    "bundle": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-document-intake",
+    "typecheck": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-document-intake",
     "test": "node --test test/*.test.mjs"
   }
 }

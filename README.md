@@ -16,8 +16,12 @@ deepseek_harness_chrome/
 │   └── deepseek-harness/       固定版本的官方 Git submodule，不直接修改
 ├── upstream-contributions/     官方暂缺的通用、最小插件 seam
 ├── release/                    Mac/Windows 安装包构建
-├── scripts/                    构建、同步、安装和重启脚本
-└── test/                       跨层回归测试
+├── scripts/                    按 build/dev/native/checks/shared/skills 分类的工具
+├── skills/                     产品技能；_shared 保存 Office 公共源码
+├── test/                       跨层回归测试与 fixtures
+├── examples/                   演示文档、数据、工作区和历史验收资料
+├── output/                     本地诊断输出；仅复现脚本纳入版本管理
+└── docs/                       架构决策、开发规则和目录导航
 ```
 
 运行链路：
@@ -33,6 +37,9 @@ Chrome sidepanel
 根目录只负责编排，不保存重复的扩展或 Native Host 源码。不要修改
 `upstream/deepseek-harness`；产品功能放入 `packages/`，确实通用且官方缺少的插件 seam
 才放入 `upstream-contributions/`。
+
+完整目录职责与安装兼容约定见 [项目目录导航](docs/project-layout.md)。
+所有原有 `pnpm` 命令、插件名称、浏览器消息协议和安装后用户数据位置保持不变。
 
 ## 安装依赖与构建
 

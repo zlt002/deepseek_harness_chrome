@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { HarnessWebProcess, claudeSkillsPatch, defaultWorkspacePatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveDefaultWorkspacePlugin, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolvePermissionMode, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome, withProductNodeOnPath } from '../apps/native-server/src/harness-process.mjs'
+import { HarnessWebProcess, claudeSkillsPatch, defaultWorkspacePatch, effectiveSessionTrackingPatch, harnessArgs, loaderModuleSpecifier, prepareProductUiPackages, productUiPatch, PRODUCT_OFFICE_SKILL_NAMES, resolveDefaultWorkspacePlugin, resolveHarnessCwd, resolveHarnessCli, resolveHarnessRuntimePlugin, resolveHarnessTrackingPlugin, resolvePermissionMode, resolveProductOfficeSkillsPlugin, resolveProductSkillsRoot, resolveUserHome, withProductNodeOnPath } from '../apps/native-server/src/runtime/harness-process.mjs'
 import { mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -11,7 +11,7 @@ import { entryListSchema } from '../.generated/harness-product/vendor/include/li
 import SystemPrompt, { renderPrompt } from '../.generated/harness-product/packages/core/system-prompt/lib/index.js'
 import { createScope } from '../.generated/harness-product/packages/core/scope/lib/index.js'
 import * as Persona from '../.generated/harness-product/packages/preset/persona/lib/index.js'
-import * as SelectedSourceRoutingPrompt from '../apps/native-server/src/selected-source-routing-prompt.mjs'
+import * as SelectedSourceRoutingPrompt from '../apps/native-server/src/knowledge/selected-source-routing-prompt.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -295,7 +295,7 @@ test('mounts the focused pmd-prd workflow and its single template authority', as
 test('keeps pmd-prd query, review, and online write guidance in the skill', async () => {
   const [skill, source, connector] = await Promise.all([
     readFile(new URL('../skills/pmd-prd/SKILL.md', import.meta.url), 'utf8'),
-    readFile(new URL('../apps/native-server/src/harness-process.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../apps/native-server/src/runtime/harness-process.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8'),
   ])
   for (const artifact of ['pmd-workspace/spec', '内部编号', 'issue-review-receipt\\.mjs']) assert.match(skill, new RegExp(artifact))
@@ -333,7 +333,7 @@ test('keeps product questions in the skill and writing rules in the template aut
 })
 
 test('advertises distinct selected-source routes with isolated MCP tools', async () => {
-  const source = await readFile(new URL('../apps/native-server/src/harness-process.mjs', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../apps/native-server/src/runtime/harness-process.mjs', import.meta.url), 'utf8')
   assert.match(source, /deepseek-harness-selected-source-routing/)
   assert.match(source, /selected-source-routing-prompt\.mjs/)
   assert.match(source, /toolScopes:/)

@@ -9,6 +9,14 @@ packages/*/*.tsbuildinfo
 .generated/
 coverage/
 *.log
+__pycache__/
+*.pyc
+# User work and local diagnostics do not belong in the product source tree.
+/pmd-workspace/
+output/*
+!output/README.md
+!output/repro-*.mjs
+!output/repro-*.mts
 .dsh-uploads/
 apps/chrome-extension/public/assets/
 apps/chrome-extension/public/plugins/

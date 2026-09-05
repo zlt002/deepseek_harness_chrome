@@ -22,7 +22,7 @@ Harness Sidepanel / Fullscreen iframe
 - Native Host owns one local Harness process, one Connector, and the active Run
   binding. Connector state is isolated behind `RunTargetRegistry`.
 - Browser and Native peers share the runtime contract in
-  `apps/native-server/src/connector-protocol.mjs`; message names, correlation,
+  `apps/native-server/src/transport/connector-protocol.mjs`; message names, correlation,
   Browser Target identity, and response envelopes are not redefined by peers.
 - The large runtime entrypoints are now orchestration modules. Connector tool
   schemas live in `connector-tool-catalog.mjs`, Knowledge transport lives in

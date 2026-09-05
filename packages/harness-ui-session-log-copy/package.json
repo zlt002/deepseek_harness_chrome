@@ -25,8 +25,8 @@
     }
   },
   "scripts": {
-    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-session-log-copy",
-    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-session-log-copy",
+    "bundle": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-session-log-copy",
+    "typecheck": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-session-log-copy",
     "test": "node --test test/*.test.mjs"
   }
 }

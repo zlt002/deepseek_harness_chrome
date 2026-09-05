@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { access, readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { productUiPatch } from '../apps/native-server/src/harness-process.mjs'
+import { productUiPatch } from '../apps/native-server/src/runtime/harness-process.mjs'
 
 const publicFile = (path) => readFile(new URL(`../apps/chrome-extension/public/${path}`, import.meta.url), 'utf8')
 

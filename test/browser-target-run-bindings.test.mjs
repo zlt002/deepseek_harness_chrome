@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { BrowserTargetRunBindings } from '../apps/native-server/src/browser-target-run-bindings.mjs'
+import { BrowserTargetRunBindings } from '../apps/native-server/src/browser/browser-target-run-bindings.mjs'
 
 const first = { browser: 'chrome', windowId: 1, tabId: 2, url: 'https://example.test/first' }
 const second = { browser: 'chrome', windowId: 1, tabId: 3, url: 'https://example.test/second' }

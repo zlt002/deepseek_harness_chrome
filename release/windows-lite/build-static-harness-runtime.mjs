@@ -25,7 +25,7 @@ import {
   staticTypertPackages,
   staticWebRunner,
 } from '../mac-lite/build-mac-production.mjs'
-import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/bundle-harness-runtime-plugin.mjs'
+import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/build/bundle-harness-runtime-plugin.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -282,7 +282,7 @@ export async function buildWindowsStaticHarnessRuntime({
     await writeFile(path.join(harnessDir, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/dsh-root', private: true, type: 'module' }, null, 2)}\n`)
     await mkdir(path.join(staging, 'native-server'), { recursive: true })
     await cp(nativeServerPath, path.join(staging, 'native-server', 'runtime.mjs'))
-    await cp(path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'selected-source-routing-prompt.mjs'), path.join(staging, 'native-server', 'selected-source-routing-prompt.mjs'))
+    await cp(path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'knowledge', 'selected-source-routing-prompt.mjs'), path.join(staging, 'native-server', 'selected-source-routing-prompt.mjs'))
     await cp(path.join(PROJECT_ROOT, 'apps', 'native-server', 'src', 'product-office-skills.mjs'), path.join(staging, 'native-server', 'product-office-skills.mjs'))
     await bundleHarnessRuntimePlugin({ outfile: path.join(staging, 'native-server', 'harness-runtime.mjs'), projectRoot: PROJECT_ROOT })
     await bundleHarnessTrackingPlugin({ outfile: path.join(staging, 'native-server', 'harness-tracking.mjs'), projectRoot: PROJECT_ROOT })

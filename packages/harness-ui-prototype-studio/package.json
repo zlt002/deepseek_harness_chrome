@@ -22,8 +22,8 @@
     }
   },
   "scripts": {
-    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-prototype-studio",
-    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-prototype-studio",
+    "bundle": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-prototype-studio",
+    "typecheck": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-prototype-studio",
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {

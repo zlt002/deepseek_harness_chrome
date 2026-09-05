@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { effectiveSessionTrackingPatch } from '../apps/native-server/src/harness-process.mjs'
+import { effectiveSessionTrackingPatch } from '../apps/native-server/src/runtime/harness-process.mjs'
 import {
   DEFAULT_TRACKING_API_KEY,
   DEFAULT_TRACKING_ENDPOINT,
@@ -15,7 +15,7 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('Native Host always mounts AccrUI effective-session tracking to the company endpoint', async () => {
   const patch = effectiveSessionTrackingPatch({})
-  const processSource = await readFile(resolve(projectRoot, 'apps/native-server/src/harness-process.mjs'), 'utf8')
+  const processSource = await readFile(resolve(projectRoot, 'apps/native-server/src/runtime/harness-process.mjs'), 'utf8')
   assert.match(patch, /id: deepseek-harness-effective-session-tracking/)
   assert.match(patch, /packages\/harness-tracking\/src\/index\.mjs/)
   assert.match(processSource, /effectiveSessionTrackingPatch\(this\.env\)/)

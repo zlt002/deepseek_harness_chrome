@@ -1,5 +1,5 @@
-import { sameBrowserTarget } from '../../../native-server/src/connector-protocol.mjs'
-import type { BrowserTarget, UnavailableBrowserTarget } from '../../../native-server/src/connector-protocol.mjs'
+import { sameBrowserTarget } from '../../../native-server/src/transport/connector-protocol.mjs'
+import type { BrowserTarget, UnavailableBrowserTarget } from '../../../native-server/src/transport/connector-protocol.mjs'
 import { defaultBrowserTargetSettings, samePinnedTab, settingsFromUnknown } from './browser-target-state'
 import type { BrowserTargetSettings } from './browser-target-state'
 

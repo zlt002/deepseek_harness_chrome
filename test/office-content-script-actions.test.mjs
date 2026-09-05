@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { LIGHT_DOCUMENT_OPERATIONS, SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/connector-tool-catalog.mjs'
+import { LIGHT_DOCUMENT_OPERATIONS, SPREADSHEET_INSPECT_ACTIONS, SPREADSHEET_WRITE_OPERATIONS } from '../apps/native-server/src/transport/connector-tool-catalog.mjs'
 
 /**
  * Cross-layer contract: every spreadsheet/document action the MCP surface
@@ -102,7 +102,7 @@ test('the content script grants light-document writes a longer budget than reads
 
 test('presentation write previews use the slow mutation-inspection budget end to end', async () => {
   const contentSource = await readFile(new URL('../apps/chrome-extension/entrypoints/office-read.content.ts', import.meta.url), 'utf8')
-  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background.ts', import.meta.url), 'utf8')
+  const backgroundSource = await readFile(new URL('../apps/chrome-extension/entrypoints/background/office/frame-routing.ts', import.meta.url), 'utf8')
   const connectorSource = await readFile(new URL('../apps/native-server/src/connector.mjs', import.meta.url), 'utf8')
 
   assert.match(contentSource, /const officeRuntimeBudgetMs = \(action: unknown\): number =>/)

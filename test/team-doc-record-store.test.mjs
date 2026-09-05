@@ -4,7 +4,7 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { platform } from 'node:process'
-import { TeamDocRecordStore, resolveTeamDocStatePath } from '../apps/native-server/src/team-doc-record-store.mjs'
+import { TeamDocRecordStore, resolveTeamDocStatePath } from '../apps/native-server/src/knowledge/team-doc-record-store.mjs'
 
 test('uses only the AccrUI connector-state override in tests', () => {
   assert.equal(resolveTeamDocStatePath({ ACCRUI_CONNECTOR_STATE_DIR: '/private/test-state', DSH_CONNECTOR_STATE_DIR: '/other-product' }), join('/private/test-state', 'team-doc-delivery-records.json'))

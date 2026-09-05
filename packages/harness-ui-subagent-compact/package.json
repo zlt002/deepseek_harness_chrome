@@ -29,8 +29,8 @@
     }
   },
   "scripts": {
-    "bundle": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-subagent-compact",
-    "typecheck": "node ../../scripts/build-harness-client-plugins.mjs harness-ui-subagent-compact",
+    "bundle": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-subagent-compact",
+    "typecheck": "node ../../scripts/build/build-harness-client-plugins.mjs harness-ui-subagent-compact",
     "test": "node --test test/*.test.mjs"
   }
 }
