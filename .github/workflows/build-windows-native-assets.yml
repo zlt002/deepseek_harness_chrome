@@ -28,7 +28,7 @@ jobs:
       - name: Verify pinned upstream
         run: node scripts/checks/verify-upstream-clean.mjs
       - name: Install Windows Harness dependencies
-        run: node scripts/build/materialize-harness-product.mjs --install
+        run: pnpm materialize:harness-product -- --install
       - name: Export verified Windows x64 components
         run: >-
           node release/windows-lite/materialize-windows-native-assets.mjs
