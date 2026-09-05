@@ -155,7 +155,7 @@ pnpm build
 `payload/runtime/skills`，不要指望 Windows 静态 runtime 或用户 `~/.claude/skills`
 自动带上它。
 
-本机在已有 Windows runtime 闭包和扩展产物时，可只组装外层包：
+本机在已有完整 Windows runtime 闭包和扩展产物时，可只组装外层包：
 
 ```sh
 node release/windows-lite/windows-release.mjs \
@@ -163,9 +163,57 @@ node release/windows-lite/windows-release.mjs \
   --version 1.1.96
 ```
 
-没有 Windows x64 runtime 时，不要在 macOS 上跑
-`pnpm materialize:windows-harness-static-runtime`。可用测试夹具验证 ZIP 结构，
-或走 GitHub Actions 出正式包。组装成功后至少确认：
+没有完整 Windows runtime 且没有已验证的 Windows 原生组件目录时，不要在 macOS 上跑
+默认的 `pnpm materialize:windows-harness-static-runtime`。可用测试夹具验证 ZIP 结构，
+或走 GitHub Actions 出正式包；有下文的 `--native-assets` 输入时，Mac 可以重新生成
+完整 runtime 的 JavaScript 部分。
+
+## Mac 日常出包：复用 Windows 原生组件
+
+Windows Lite 的 `runtime/native` 里有 Windows 专用的 `.node` / `.exe` 文件。
+它们必须先在 Windows x64 产生；但 Harness JavaScript、Native Server、产品 UI 插件、
+浏览器扩展和 skill 都可以在 Mac 每次重新构建。
+
+首次或原生组件失效时，在 Windows x64 构建机运行：
+
+```sh
+pnpm build:harness-product
+pnpm materialize:windows-native-assets -- \
+  --source .generated/harness-product \
+  --out release/windows-lite/native-assets-win32-x64
+```
+
+也可以从新版 GitHub Actions 的 **Build Windows Lite** 运行详情下载
+`windows-lite-native-assets-win32-x64` artifact，并解压到 Mac 的
+`release/windows-lite/native-assets-win32-x64/`。这个 artifact 只用于本地组包，
+不是可直接交付给 Windows 用户的安装包。
+
+以后在 Mac 直接执行：
+
+```sh
+pnpm release:windows-lite:mac -- \
+  --native-assets release/windows-lite/native-assets-win32-x64 \
+  --version 1.1.96
+```
+
+该命令每次都会重新物化 Harness、重新构建产品插件与扩展、重新生成静态 Windows
+JavaScript closure，再组装 ZIP；它不会把上一次的 Harness、Native Server 或 UI
+产物当作新包内容。构建器始终写入 `win32-x64` 的原生解析路径，Mac 本机的原生依赖
+不会进入 Windows 包。
+
+原生组件目录带 Windows 产出标记、文件 SHA256、Harness 与产品的
+`package.json` / `pnpm-lock.yaml` 指纹和 Node ABI。以下情况会拒绝 Mac 组包，要求
+重新在 Windows x64 导出：目录缺失、文件被改动、Node ABI/Node 要求变化、原生组件布局
+变化，或任一 Harness/产品 `package.json`、lockfile 变化。当前第一版使用完整 lockfile
+指纹，因此即使只改了普通 JavaScript 依赖，也会保守地要求一次新的 Windows 原生组件导出；
+这保证不会把未知的新原生依赖静默带进包里。
+
+通常不需要 Windows 重新导出的修改：浏览器扩展、`apps/native-server` 的 JavaScript、
+`packages/` 下的产品插件、skill、Harness JavaScript/UI，以及未改 lockfile 的 Harness
+升级。仍然需要在真实 Windows Chrome/Edge 上完成安装、Native Messaging、升级和回滚
+验收后，才能交付或发布。
+
+组装成功后至少确认：
 
 ```sh
 unzip -Z1 release/accr-ui-windows-lite-x64/payload.zip | grep -E 'runtime/skills/(pmd-prd|pptx|xlsx|docx|pdf)/SKILL.md'
@@ -201,8 +249,9 @@ Windows 静态 runtime 由
 
 - 缓存未命中：通常约 5–8 分钟，主要时间用于从零物化和构建 Harness。
 - 缓存命中：通常约 1–2 分钟，只需组装 ZIP、写校验和并上传。
-- 修改扩展、Native Server、`packages/*`、打包脚本、Harness 补丁、submodule、
-  `package.json` 或锁文件都会使缓存失效，这是正常现象。
+- GitHub 的 release-ready 缓存仍会在修改扩展、Native Server、`packages/*`、打包脚本、
+  Harness 补丁、submodule、`package.json` 或锁文件后失效；这是 CI 的完整构建缓存，
+  不等同于 Mac 本地可复用的 Windows 原生组件目录。
 - 只改仓库根目录 `skills/` 不会让 release-ready 缓存失效；外层
   `Build AccrUI-compatible Windows package` 每次都会从当前 `skills/` 重新拷贝。
 

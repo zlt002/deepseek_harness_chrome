@@ -84,9 +84,10 @@ jobs:
         with:
           path: |
             deepseek_harness_chrome/release/windows-lite/harness-static-win32-x64
+            deepseek_harness_chrome/release/windows-lite/native-assets-win32-x64
             deepseek_harness_chrome/apps/chrome-extension/.output/chrome-mv3
             deepseek_harness_chrome/packages/*/lib
-          key: windows-lite-ready-v2-${{ hashFiles('deepseek_harness_chrome/apps/chrome-extension/**', 'deepseek_harness_chrome/apps/native-server/**', 'deepseek_harness_chrome/packages/**', 'deepseek_harness_chrome/release/windows-lite/build-static-harness-runtime.mjs', 'deepseek_harness_chrome/release/mac-lite/build-mac-production.mjs', 'deepseek_harness_chrome/scripts/*.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/package.json', 'deepseek_harness_chrome/pnpm-lock.yaml', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
+          key: windows-lite-ready-v3-${{ hashFiles('deepseek_harness_chrome/apps/chrome-extension/**', 'deepseek_harness_chrome/apps/native-server/**', 'deepseek_harness_chrome/packages/**', 'deepseek_harness_chrome/release/windows-lite/build-static-harness-runtime.mjs', 'deepseek_harness_chrome/release/windows-lite/windows-native-assets.mjs', 'deepseek_harness_chrome/release/mac-lite/build-mac-production.mjs', 'deepseek_harness_chrome/scripts/*.mjs', 'deepseek_harness_chrome/upstream-contributions/**/*.patch', 'deepseek_harness_chrome/package.json', 'deepseek_harness_chrome/pnpm-lock.yaml', 'deepseek_harness_chrome/.gitmodules') }}-${{ steps.upstream-hash.outputs.sha }}
 
       - name: Build materialized Harness product
         if: ${{ inputs.fast_test_package != true || steps.cache-harness-static-runtime.outputs.cache-hit != 'true' }}
@@ -110,6 +111,15 @@ jobs:
         shell: pwsh
         run: pnpm build
 
+      - name: Materialize reusable Windows native assets
+        if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
+        working-directory: deepseek_harness_chrome
+        shell: pwsh
+        run: >-
+          pnpm materialize:windows-native-assets --
+          --source .generated/harness-product
+          --out release/windows-lite/native-assets-win32-x64
+
       - name: Bundle static Windows Harness runtime
         if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
         working-directory: deepseek_harness_chrome
@@ -119,6 +129,15 @@ jobs:
           --source .generated/harness-product
           --out release/windows-lite/harness-static-win32-x64
           --revision ${{ steps.upstream-hash.outputs.sha }}
+          --native-assets release/windows-lite/native-assets-win32-x64
+
+      - name: Upload reusable Windows native assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-lite-native-assets-win32-x64
+          path: deepseek_harness_chrome/release/windows-lite/native-assets-win32-x64
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Save release-ready Windows inputs cache
         if: steps.cache-harness-static-runtime.outputs.cache-hit != 'true'
@@ -126,6 +145,7 @@ jobs:
         with:
           path: |
             deepseek_harness_chrome/release/windows-lite/harness-static-win32-x64
+            deepseek_harness_chrome/release/windows-lite/native-assets-win32-x64
             deepseek_harness_chrome/apps/chrome-extension/.output/chrome-mv3
             deepseek_harness_chrome/packages/*/lib
           key: ${{ steps.cache-harness-static-runtime.outputs.cache-primary-key }}

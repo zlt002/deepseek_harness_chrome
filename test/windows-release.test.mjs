@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile as execFileCallback, execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -26,11 +27,21 @@ import { EXPECTED_PRODUCT_CLIENT_IDS, verifyProductUiBoot } from '../release/win
 import {
   assertDirectoryPickerWorkerContract,
   assertWindowsAclRunnerContract,
-  buildWindowsStaticHarnessRuntime,
   bundleWindowsAclRunner,
   parseStaticRuntimeArgs,
   patchBundledWindowsAclRunnerPath,
 } from '../release/windows-lite/build-static-harness-runtime.mjs'
+import {
+  WINDOWS_NATIVE_ASSETS_FORMAT,
+  WINDOWS_NATIVE_ASSETS_MARKER,
+  assertWindowsNativeAssetsAvailable,
+  materializeWindowsNativeAssets,
+  parseWindowsNativeAssetsArgs,
+  resolveWindowsNativePackage,
+  validateWindowsNativeAssets,
+  windowsNativeAssetInputs,
+} from '../release/windows-lite/windows-native-assets.mjs'
+import { parseMacWindowsReleaseArgs } from '../release/windows-lite/build-with-native-assets.mjs'
 
 import {
   PRODUCT_UI_PLUGIN_PACKAGES,
@@ -285,6 +296,53 @@ async function createFixture() {
   await writeFixture(harnessRuntimeDir, 'native-server/harness-default-workspace.mjs', 'export {}\n')
   for (const relativePath of ['native/node-pty/prebuilds/win32-x64/pty.node', 'native/sharp/sharp.node', 'native/koffi/koffi.node', 'native/ripgrep/rg.exe']) await writeFixture(harnessRuntimeDir, relativePath, 'native')
   return { root, extensionDir, harnessRuntimeDir }
+}
+
+function x64PeFixtureBytes(label) {
+  const bytes = Buffer.alloc(96)
+  bytes.write('MZ', 0, 'ascii')
+  bytes.writeUInt32LE(64, 0x3c)
+  bytes.write('PE\0\0', 64, 'ascii')
+  bytes.writeUInt16LE(0x8664, 68)
+  bytes.write(label, 72, 'ascii')
+  return bytes
+}
+
+async function createNativeAssetsFixture({ lockfile = 'lockfileVersion: 9\n', productLockfile } = {}) {
+  const root = await mkdtemp(path.join(tmpdir(), 'windows-native-assets-'))
+  const sourceDir = path.join(root, 'harness')
+  const nativeAssetsDir = path.join(root, 'native-assets')
+  const productRoot = productLockfile === undefined ? undefined : path.join(root, 'product')
+  await writeFixture(sourceDir, 'package.json', JSON.stringify({ name: '@deepseek-ai/dsh', packageManager: 'pnpm@11.7.0' }))
+  await writeFixture(sourceDir, 'pnpm-lock.yaml', lockfile)
+  if (productRoot) {
+    await writeFixture(productRoot, 'package.json', JSON.stringify({ name: 'fixture-product', packageManager: 'pnpm@11.7.0' }))
+    await writeFixture(productRoot, 'pnpm-lock.yaml', productLockfile)
+  }
+  const paths = [
+    'node-pty/prebuilds/win32-x64/pty.node',
+    'sharp/sharp.node',
+    'koffi/koffi.node',
+    'node-addon-require-builtin/addon.node',
+    'ripgrep/rg.exe',
+  ]
+  const files = {}
+  for (const relative of paths) {
+    const bytes = x64PeFixtureBytes(relative)
+    await mkdir(path.join(nativeAssetsDir, 'native', path.dirname(relative)), { recursive: true })
+    await writeFile(path.join(nativeAssetsDir, 'native', relative), bytes)
+    files[relative] = createHash('sha256').update(bytes).digest('hex')
+  }
+  const inputs = await windowsNativeAssetInputs(sourceDir, productRoot ? { projectRoot: productRoot } : undefined)
+  const sortedFiles = Object.fromEntries(Object.entries(files).sort(([left], [right]) => left.localeCompare(right)))
+  await writeFile(path.join(nativeAssetsDir, WINDOWS_NATIVE_ASSETS_MARKER), `${JSON.stringify({
+    format: WINDOWS_NATIVE_ASSETS_FORMAT,
+    platform: 'win32',
+    arch: 'x64',
+    inputs,
+    files: sortedFiles,
+  }, null, 2)}\n`)
+  return { root, sourceDir, nativeAssetsDir, productRoot }
 }
 
 test('rejects a missing or incomplete Harness runtime instead of silently packaging a sibling checkout', async () => {
@@ -614,11 +672,81 @@ test('release CLI requires an explicit runtime input', () => {
   assert.throws(() => parseWindowsReleaseArgs(['--runtime', 'C:\\harness-runtime']), /Unknown argument/)
 })
 
-test('static Windows runtime uses a bundle, keeps native sidecars, and rejects non-Windows materialization', async () => {
-  assert.deepEqual(parseStaticRuntimeArgs(['--source', 'C:\\product', '--out', 'C:\\runtime', '--revision', 'abc']), {
-    sourceDir: 'C:\\product', outputDir: 'C:\\runtime', revision: 'abc',
+test('Windows native assets are Windows-only, line-ending stable, and fail closed when tampered or wrong-architecture', async (t) => {
+  const fixture = await createNativeAssetsFixture()
+  t.after(() => rm(fixture.root, { recursive: true, force: true }))
+  assert.deepEqual(parseWindowsNativeAssetsArgs(['--source', 'C:\\product', '--out', 'C:\\assets']), {
+    sourceDir: 'C:\\product', outputDir: 'C:\\assets',
   })
-  await assert.rejects(buildWindowsStaticHarnessRuntime({ platform: 'darwin', arch: 'arm64' }), /must build on Windows x64/)
+  assert.deepEqual(parseWindowsNativeAssetsArgs(['--', '--source', 'C:\\product', '--out', 'C:\\assets']), {
+    sourceDir: 'C:\\product', outputDir: 'C:\\assets',
+  })
+  await assert.rejects(assertWindowsNativeAssetsAvailable(path.join(fixture.root, 'missing-assets')), /missing windows-native-assets\.json/)
+  await assert.rejects(
+    materializeWindowsNativeAssets({ sourceDir: fixture.sourceDir, outputDir: path.join(fixture.root, 'new-assets'), platform: 'darwin', arch: 'arm64' }),
+    /must materialize on Windows x64/,
+  )
+  const validated = await validateWindowsNativeAssets({ nativeAssetsDir: fixture.nativeAssetsDir, sourceDir: fixture.sourceDir })
+  assert.equal(validated.nativeDir, path.join(fixture.nativeAssetsDir, 'native'))
+  const crlfFixture = await createNativeAssetsFixture({ lockfile: 'lockfileVersion: 9\r\n' })
+  t.after(() => rm(crlfFixture.root, { recursive: true, force: true }))
+  assert.equal((await windowsNativeAssetInputs(fixture.sourceDir)).fingerprint, (await windowsNativeAssetInputs(crlfFixture.sourceDir)).fingerprint)
+  const arm64 = x64PeFixtureBytes('arm64')
+  arm64.writeUInt16LE(0xaa64, 68)
+  await writeFile(path.join(fixture.nativeAssetsDir, 'native', 'ripgrep', 'rg.exe'), arm64)
+  await assert.rejects(validateWindowsNativeAssets({ nativeAssetsDir: fixture.nativeAssetsDir, sourceDir: fixture.sourceDir }), /not an x64 PE binary/)
+  await writeFile(path.join(fixture.nativeAssetsDir, 'native', 'ripgrep', 'rg.exe'), x64PeFixtureBytes('tampered'))
+  await assert.rejects(validateWindowsNativeAssets({ nativeAssetsDir: fixture.nativeAssetsDir, sourceDir: fixture.sourceDir }), /failed integrity verification/)
+})
+
+test('Windows native assets reject stale Harness or product dependency inputs but ignore ordinary JavaScript source edits', async (t) => {
+  const unchanged = await createNativeAssetsFixture()
+  t.after(() => rm(unchanged.root, { recursive: true, force: true }))
+  const before = await windowsNativeAssetInputs(unchanged.sourceDir)
+  await writeFixture(unchanged.sourceDir, 'apps/cli/lib/new-js-only-change.mjs', 'export const current = true\n')
+  assert.equal((await windowsNativeAssetInputs(unchanged.sourceDir)).fingerprint, before.fingerprint)
+
+  const staleHarness = await createNativeAssetsFixture()
+  t.after(() => rm(staleHarness.root, { recursive: true, force: true }))
+  await writeFile(path.join(staleHarness.sourceDir, 'pnpm-lock.yaml'), 'lockfileVersion: 10\n')
+  await assert.rejects(validateWindowsNativeAssets({ nativeAssetsDir: staleHarness.nativeAssetsDir, sourceDir: staleHarness.sourceDir }), /incompatible with this build: inputs/)
+
+  const staleProduct = await createNativeAssetsFixture({ productLockfile: 'lockfileVersion: 9\n' })
+  t.after(() => rm(staleProduct.root, { recursive: true, force: true }))
+  await writeFile(path.join(staleProduct.productRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 10\n')
+  await assert.rejects(
+    validateWindowsNativeAssets({ nativeAssetsDir: staleProduct.nativeAssetsDir, sourceDir: staleProduct.sourceDir, projectRoot: staleProduct.productRoot }),
+    /incompatible with this build: inputs/,
+  )
+
+  const staleAbi = await createNativeAssetsFixture()
+  t.after(() => rm(staleAbi.root, { recursive: true, force: true }))
+  const markerPath = path.join(staleAbi.nativeAssetsDir, WINDOWS_NATIVE_ASSETS_MARKER)
+  const marker = JSON.parse(await readFile(markerPath, 'utf8'))
+  marker.inputs.nodeAbi = 'stale'
+  await writeFile(markerPath, `${JSON.stringify(marker, null, 2)}\n`)
+  await assert.rejects(validateWindowsNativeAssets({ nativeAssetsDir: staleAbi.nativeAssetsDir, sourceDir: staleAbi.sourceDir }), /incompatible with this build: nodeAbi/)
+})
+
+test('Windows native asset export rejects an ambiguous pnpm native package instead of taking an arbitrary version', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ambiguous-windows-native-package-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  for (const version of ['node-pty@1.0.0', 'node-pty@2.0.0']) {
+    await mkdir(path.join(root, 'node_modules', '.pnpm', version, 'node_modules', 'node-pty'), { recursive: true })
+  }
+  await assert.rejects(resolveWindowsNativePackage(root, 'node-pty'), /Ambiguous Windows native package node-pty/)
+})
+
+test('static Windows runtime uses a bundle and accepts an explicit Windows native asset input on macOS', async () => {
+  assert.deepEqual(parseStaticRuntimeArgs(['--source', 'C:\\product', '--out', 'C:\\runtime', '--revision', 'abc', '--native-assets', 'C:\\assets']), {
+    sourceDir: 'C:\\product', outputDir: 'C:\\runtime', revision: 'abc', nativeAssetsDir: 'C:\\assets',
+  })
+  assert.deepEqual(parseMacWindowsReleaseArgs(['--', '--native-assets', 'C:\\assets', '--version', '1.1.96']), {
+    nativeAssetsDir: 'C:\\assets', version: '1.1.96',
+  })
+  assert.deepEqual(parseMacWindowsReleaseArgs(['--native-assets', 'C:\\assets', '--version', '1.1.96']), {
+    nativeAssetsDir: 'C:\\assets', version: '1.1.96',
+  })
   const banner = nativeResolverBanner('win32-x64')
   assert.match(banner, /node-pty\/prebuilds\/win32-x64\/pty\.node/)
   assert.match(banner, /win32-x64.*\[\^\\\\\/\]\+/s)
@@ -633,7 +761,8 @@ test('static Windows runtime uses a bundle, keeps native sidecars, and rejects n
     builderSource.indexOf("runPnpm(['build:harness-client-plugins']") < builderSource.indexOf('bundleWithHarnessEsbuild({'),
     'product plugins must build before the static server bundle',
   )
-  assert.match(builderSource, /path\.join\(koffi, 'win32_x64', 'koffi\.node'\)/)
+  assert.match(builderSource, /validateWindowsNativeAssets/)
+  assert.match(builderSource, /nativeTarget: 'win32-x64'/)
   assert.match(builderSource, /patchBundledWindowsAclRunnerPath\(bundlePath\)/)
   assert.match(builderSource, /bundleWindowsAclRunner\(/)
   assert.match(builderSource, /assertWindowsAclRunnerContract\(/)

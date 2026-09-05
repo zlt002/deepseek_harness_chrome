@@ -1,0 +1,43 @@
+name: Build Windows Native Assets
+
+on:
+  push:
+    branches:
+      - codex/windows-native-assets-*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-assets:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.7.0 --activate
+      - name: Verify pinned upstream
+        run: node scripts/checks/verify-upstream-clean.mjs
+      - name: Install Windows Harness dependencies
+        run: node scripts/build/materialize-harness-product.mjs --install
+      - name: Export verified Windows x64 components
+        run: >-
+          node release/windows-lite/materialize-windows-native-assets.mjs
+          --source .generated/harness-product
+          --out release/windows-lite/native-assets-win32-x64
+      - name: Upload reusable components
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-lite-native-assets-win32-x64
+          path: release/windows-lite/native-assets-win32-x64
+          if-no-files-found: error
+          retention-days: 90

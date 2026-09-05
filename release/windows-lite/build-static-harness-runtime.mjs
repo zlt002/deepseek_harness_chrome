@@ -6,6 +6,7 @@
  * Harness node_modules tree.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -26,6 +27,7 @@ import {
   staticWebRunner,
 } from '../mac-lite/build-mac-production.mjs'
 import { bundleHarnessDefaultWorkspacePlugin, bundleHarnessRuntimePlugin, bundleHarnessTrackingPlugin } from '../../scripts/build/bundle-harness-runtime-plugin.mjs'
+import { materializeWindowsNativeAssets, validateWindowsNativeAssets } from './windows-native-assets.mjs'
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..')
@@ -49,43 +51,6 @@ async function resetDirectory(target) {
   await mkdir(target, { recursive: true })
 }
 
-async function packagePath(harnessRoot, packageName) {
-  const virtualStore = path.join(harnessRoot, 'node_modules', '.pnpm')
-  const prefix = `${packageName.replace('/', '+')}@`
-  const candidates = (await readdir(virtualStore)).filter((entry) => entry.startsWith(prefix)).sort()
-  for (const candidate of candidates) {
-    const candidatePath = path.join(virtualStore, candidate, 'node_modules', ...packageName.split('/'))
-    if (existsSync(candidatePath)) return candidatePath
-  }
-  throw new Error(`Missing Windows native package: ${packageName}`)
-}
-
-async function onlyFile(directory, predicate, description) {
-  const files = (await readdir(directory)).filter(predicate)
-  if (files.length !== 1) throw new Error(`Expected one ${description} in ${directory}, found ${files.length}`)
-  return path.join(directory, files[0])
-}
-
-async function copyWindowsNativeAssets(harnessRoot, nativeDir) {
-  const sharp = await packagePath(harnessRoot, '@img/sharp-win32-x64')
-  const nodePty = await packagePath(harnessRoot, 'node-pty')
-  const koffi = await packagePath(harnessRoot, '@koromix/koffi-win32-x64')
-  const requireBuiltin = await packagePath(harnessRoot, 'node-addon-require-builtin-win32-x64-msvc')
-  const ripgrep = await packagePath(harnessRoot, '@vscode/ripgrep-win32-x64')
-
-  await mkdir(path.join(nativeDir, 'sharp'), { recursive: true })
-  const sharpLib = path.join(sharp, 'lib')
-  await cp(sharpLib, path.join(nativeDir, 'sharp'), { recursive: true, dereference: true })
-  await cp(await onlyFile(sharpLib, (name) => name.endsWith('.node'), 'Sharp addon'), path.join(nativeDir, 'sharp', 'sharp.node'))
-  await cp(path.join(nodePty, 'prebuilds', 'win32-x64'), path.join(nativeDir, 'node-pty', 'prebuilds', 'win32-x64'), { recursive: true, dereference: true })
-  await mkdir(path.join(nativeDir, 'koffi'), { recursive: true })
-  await cp(path.join(koffi, 'win32_x64', 'koffi.node'), path.join(nativeDir, 'koffi', 'koffi.node'))
-  await mkdir(path.join(nativeDir, 'node-addon-require-builtin'), { recursive: true })
-  await cp(await onlyFile(path.join(requireBuiltin, 'prebuilt'), (name) => name.endsWith('.node'), 'node-addon-require-builtin addon'), path.join(nativeDir, 'node-addon-require-builtin', 'addon.node'))
-  await mkdir(path.join(nativeDir, 'ripgrep'), { recursive: true })
-  await cp(path.join(ripgrep, 'bin', 'rg.exe'), path.join(nativeDir, 'ripgrep', 'rg.exe'))
-}
-
 async function sizeOf(root) {
   let bytes = 0
   async function visit(current) {
@@ -97,10 +62,6 @@ async function sizeOf(root) {
   }
   await visit(root)
   return bytes
-}
-
-function assertWindowsBuildHost({ platform = process.platform, arch = process.arch } = {}) {
-  if (platform !== 'win32' || arch !== 'x64') throw new Error(`Static Windows runtime must build on Windows x64; current host is ${platform}/${arch}.`)
 }
 
 /** Ensure the packaged child process cannot fall back to a Harness node_modules tree. */
@@ -185,10 +146,12 @@ export async function buildWindowsStaticHarnessRuntime({
   sourceDir = GENERATED_HARNESS_ROOT,
   outputDir = DEFAULT_OUTPUT_DIR,
   revision = 'unknown',
+  nativeAssetsDir,
   platform = process.platform,
   arch = process.arch,
+  nativeAssetPlatform = platform,
+  nativeAssetArch = arch,
 } = {}) {
-  assertWindowsBuildHost({ platform, arch })
   const harnessRoot = path.resolve(sourceDir)
   const required = [
     path.join(harnessRoot, '.harness-product.json'),
@@ -214,6 +177,18 @@ export async function buildWindowsStaticHarnessRuntime({
   const temporary = path.join(staging, '.build')
   await resetDirectory(staging)
   try {
+    // The JS closure is cross-built with an explicit win32-x64 resolver below.
+    // Only copying native sidecars needs a real Windows x64 host. Without an
+    // imported asset directory, retain the existing all-Windows behavior.
+    const nativeAssets = nativeAssetsDir
+      ? await validateWindowsNativeAssets({ nativeAssetsDir, sourceDir: harnessRoot })
+      : await materializeWindowsNativeAssets({
+        sourceDir: harnessRoot,
+        outputDir: path.join(staging, '.native-assets'),
+        platform: nativeAssetPlatform,
+        arch: nativeAssetArch,
+      })
+    const nativeAssetMarker = nativeAssets.marker
     const dumpHome = path.join(temporary, 'dump-home')
     const dump = run(process.execPath, ['apps/cli/lib/bin.js', '--profile', 'web', '--dump-default-config'], {
       cwd: harnessRoot,
@@ -287,11 +262,17 @@ export async function buildWindowsStaticHarnessRuntime({
     await bundleHarnessRuntimePlugin({ outfile: path.join(staging, 'native-server', 'harness-runtime.mjs'), projectRoot: PROJECT_ROOT })
     await bundleHarnessTrackingPlugin({ outfile: path.join(staging, 'native-server', 'harness-tracking.mjs'), projectRoot: PROJECT_ROOT })
     await bundleHarnessDefaultWorkspacePlugin({ outfile: path.join(staging, 'native-server', 'harness-default-workspace.mjs'), projectRoot: PROJECT_ROOT })
-    await copyWindowsNativeAssets(harnessRoot, path.join(staging, 'native'))
+    await cp(nativeAssets.nativeDir ?? path.join(nativeAssets.outputDir, 'native'), path.join(staging, 'native'), { recursive: true, dereference: true })
+    await rm(path.join(staging, '.native-assets'), { recursive: true, force: true })
     const marker = {
       format: 'deepseek-harness-windows-static-web-v1', platform: 'win32', arch: 'x64', revision,
       entrypoint: 'harness/apps/cli/lib/server.mjs', bundled: true, nodeModulesIncluded: false,
       dynamicPluginRepository: 'managed-web-profile', staticWebPluginCount: aliases.size,
+      nativeAssets: {
+        format: nativeAssetMarker.format,
+        inputsFingerprint: nativeAssetMarker.inputs.fingerprint,
+        filesFingerprint: createHash('sha256').update(JSON.stringify(nativeAssetMarker.files)).digest('hex'),
+      },
     }
     await writeFile(path.join(staging, 'harness-runtime.json'), `${JSON.stringify(marker, null, 2)}\n`)
     await rm(temporary, { recursive: true, force: true })
@@ -305,12 +286,13 @@ export async function buildWindowsStaticHarnessRuntime({
 
 export function parseStaticRuntimeArgs(argv) {
   const options = {}
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]
-    if (!['--source', '--out', '--revision'].includes(argument)) throw new Error(`Unknown argument: ${argument}`)
-    const value = argv[index + 1]
+  const args = argv[0] === '--' ? argv.slice(1) : argv
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]
+    if (!['--source', '--out', '--revision', '--native-assets'].includes(argument)) throw new Error(`Unknown argument: ${argument}`)
+    const value = args[index + 1]
     if (!value) throw new Error(`Missing value for ${argument}`)
-    options[{ '--source': 'sourceDir', '--out': 'outputDir', '--revision': 'revision' }[argument]] = value
+    options[{ '--source': 'sourceDir', '--out': 'outputDir', '--revision': 'revision', '--native-assets': 'nativeAssetsDir' }[argument]] = value
     index += 1
   }
   return options
